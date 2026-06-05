@@ -194,3 +194,12 @@ def run_grpo(
     metrics_log.close()
     if run is not None:
         run.finish()
+
+    # Auto-plot on finish (best-effort — never let a plotting hiccup fail a completed run).
+    try:
+        from monitordecorrelation.eval.plots import plot_run as _plot_run
+
+        for p in _plot_run(rollout_log_dir):
+            print(f"plot: {p}")
+    except Exception as e:  # noqa: BLE001
+        print(f"(auto-plot skipped: {e})")
