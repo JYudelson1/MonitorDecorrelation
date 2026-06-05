@@ -7,6 +7,8 @@ primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
 import json
 import random
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +24,17 @@ from monitordecorrelation.rl.grpo import compute_group_advantages
 from monitordecorrelation.types import MonitorResult, Rollout
 
 
+def _monitor_info(m: Monitor, role: str) -> dict:
+    """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later)."""
+    return {
+        "name": m.name,
+        "role": role,
+        "model_id": getattr(m, "model_id", None),
+        "behavior": getattr(m, "behavior", None),
+        "threshold": getattr(m, "threshold", None),
+    }
+
+
 def run_grpo(
     cfg: RunConfig,
     env: Env,
@@ -32,9 +45,11 @@ def run_grpo(
     max_tokens: int = 1024,
     monitor_workers: int = 16,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
+    run_info: dict | None = None,
 ) -> None:
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
-    per-rollout metadata to the saved rollout records (merged into each record's ``extra``)."""
+    per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
+    (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset)."""
     rng = random.Random(cfg.seed)
     tracker = MonitorTracker()
     all_monitors: list[Monitor] = [*train_against, *held_out]
@@ -51,6 +66,21 @@ def run_grpo(
 
     rollout_log_dir = Path("data/runs") / (cfg.logging.run_name or "smoke")
     rollout_log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Durable record of WHAT this run was: config + which monitor is which (train-against vs
+    # held-out, model ids, behavior). Without this the logs' cot_weak/cot_strong are undecodable.
+    info = {
+        "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "run_name": cfg.logging.run_name,
+        "policy": cfg.base_model,
+        "config": dataclasses.asdict(cfg),
+        "env": {"name": env.name, "behavior_name": getattr(env, "behavior_name", None)},
+        "train_against": [_monitor_info(m, "train_against") for m in train_against],
+        "held_out": [_monitor_info(m, "held_out") for m in held_out],
+        **(run_info or {}),
+    }
+    (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
+
     rollout_log = (rollout_log_dir / "rollouts.jsonl").open("w")
     # Always dump per-step metrics to disk too, so plots are viewable locally without a W&B server.
     metrics_log = (rollout_log_dir / "metrics.jsonl").open("w")

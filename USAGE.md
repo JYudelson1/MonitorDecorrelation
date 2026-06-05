@@ -29,6 +29,7 @@ uv run python scripts/plot_run.py --run myrun
 --lora-rank --lr (default = TM-estimated LoRA LR) --weak-monitor --strong-monitor`
 
 ## Run outputs (`data/runs/<run>/`)
+- `run_info.json` — full config + **which model each monitor was** (train-against vs held-out), policy, subset, LR. Decode the run here; `plot_run.py` reads it to label which monitor was trained against.
 - `metrics.jsonl` — one row per step (ground-truth rate, reward, per-monitor accuracy/AUROC, …). Feeds `plot_run.py`.
 - `rollouts.jsonl` — sampled rollouts with metadata (env oracle, per-monitor score/label, reward, advantage, `extra`). Fraction kept = `LoggingConfig.log_fraction`.
 - `ground_truth.png`, `monitors.png` — after `plot_run.py`.

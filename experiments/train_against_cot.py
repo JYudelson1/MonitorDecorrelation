@@ -37,7 +37,10 @@ def main() -> None:
     ap.add_argument("--penalty-coef", type=float, default=1.0)
     ap.add_argument("--lora-rank", type=int, default=16)
     ap.add_argument("--lr", type=float, default=None, help="override; default = estimated LoRA LR")
-    # On nlp: claude-3.5-haiku ~0.60 AUROC (weak, train-against), claude-sonnet-4.6 ~0.80 (strong, held-out).
+    # Which monitor to train against; the other is held out. Names stay tied to the MODEL
+    # (cot_weak=weak model, cot_strong=strong model) across both choices, so runs are comparable.
+    ap.add_argument("--train-target", choices=["weak", "strong"], default="weak")
+    # On nlp: claude-3.5-haiku ~0.60 AUROC (weak), claude-sonnet-4.6 ~0.80-0.94 (strong).
     ap.add_argument("--weak-monitor", default="anthropic/claude-3.5-haiku")
     ap.add_argument("--strong-monitor", default="anthropic/claude-sonnet-4.6")
     args = ap.parse_args()
@@ -61,12 +64,24 @@ def main() -> None:
     env = SycophancyQAEnv.from_subset(args.subset, n=512, seed=cfg.seed)
     backend = TinkerBackend(cfg.base_model, lora_rank=cfg.lora_rank, learning_rate=cfg.learning_rate)
 
-    # Train against the weak monitor; hold out the strong one to read cross-strength degradation.
+    # Names are tied to the model (not the role), so cot_weak/cot_strong mean the same thing whether
+    # we train against the weak or the strong one. --train-target picks which enters the gradient.
     # Behavior is passed through so the monitor's rubric targets the env's behavior, not hardcoded.
-    train_against = [CoTMonitor(name="cot_weak", model_id=args.weak_monitor, behavior=env.behavior_name)]
-    held_out = [CoTMonitor(name="cot_strong", model_id=args.strong_monitor, behavior=env.behavior_name)]
+    cot_weak = CoTMonitor(name="cot_weak", model_id=args.weak_monitor, behavior=env.behavior_name)
+    cot_strong = CoTMonitor(name="cot_strong", model_id=args.strong_monitor, behavior=env.behavior_name)
+    if args.train_target == "weak":
+        train_against, held_out = [cot_weak], [cot_strong]
+    else:
+        train_against, held_out = [cot_strong], [cot_weak]
+    print(f"train-against: {train_against[0].name} ({train_against[0].model_id})  |  "
+          f"held-out: {held_out[0].name} ({held_out[0].model_id})")
 
-    run_grpo(cfg, env, backend, train_against, held_out, max_tokens=args.max_tokens)
+    run_grpo(
+        cfg, env, backend, train_against, held_out,
+        max_tokens=args.max_tokens,
+        run_info={"experiment": "train_against_cot", "subset": args.subset, "lr": lr,
+                  "train_target": args.train_target},
+    )
     print("\ntrain_against_cot finished OK")
 
 
