@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.claude
+.env
+
+# Cached datasets + local logs + run artifacts
+data/**/*.jsonl
+data/runs/
+wandb/
+err.log
+
+# Old docs
+docs/Original Project Proposal.md
+docs/Joey Research Ideas.md
