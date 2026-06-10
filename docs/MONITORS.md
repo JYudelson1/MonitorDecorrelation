@@ -58,30 +58,81 @@ Concretely, for later:
 
 This is a "don't forget" flag, not a now-task — the sycophancy default is fine for the first runs.
 
-## ⚠️ The activations problem (top derisking item)
+## White-box probes need activations — two supported deployment modes
 
-White-box monitors (probes, activation oracles) need **residual-stream activations** from the policy.
-**Tinker's API does not expose them.** Surveyed this session:
+A probe needs **residual-stream activations**, and **tinker's API does not expose them** (`sample` →
+tokens+logprobs; `forward*` → loss outputs; no `hidden_state` field). There are **two legitimate ways
+to get activations, and we support both**. They measure *different* things — keep them distinct.
 
-- `sample()` → tokens + (optional) logprobs.
-- `forward()` / `forward_backward()` → loss outputs.
-- No `hidden_state` / `activation` field anywhere in `tinker.types`.
+### Mode A — frozen base model on the policy's text ("original-model probe score")
+Run the policy's generated text through a **frozen copy of the base model** (HF transformers, local)
+and read its activations. The probe was trained on this same frozen model. This is the
+[`whitebox/`](../src/monitordecorrelation/whitebox/) + `ProbeMonitor` + `eval_probes_on_run.py` path,
+done **post-hoc** over a run's saved `rollouts.jsonl`.
 
-So we cannot read internals straight from the tinker-hosted policy. Likely workaround:
+- ✅ **Well-validated in the literature** — it's the Atlas "original-model probe score" and the standard
+  deception-probe setup. Not a hack or a fallback.
+- ✅ **The natural fit for the tinker backend** — no weight download needed; you only need the
+  open-weight base model locally.
+- It measures the **obfuscated-policy** axis: does the model's *text* still read as deceptive to a
+  fixed probe? It **cannot** see the *obfuscated-activations* axis (the trained model's internals
+  moving) — by construction, because the model is frozen. That's fine; it's a real, distinct signal.
+- ⚠️ **Use the SAME base model as the RL policy.** Probing 8B-policy text with, say, a 0.6B model is
+  *off-model* and unreliable — the validity rests on the probe model matching the policy's base.
+  (Train the probe on the policy's base model; `eval_probes_on_run.py --policy-base` warns on mismatch.)
 
-1. Use `save_weights_for_sampler` / `save_state` to **pull the policy weights** (base + LoRA) at a
-   checkpoint.
-2. Run a **local forward pass** (e.g. HF transformers) on the same tokens to extract activations.
-3. Train / apply the probe on those local activations.
+### Mode B — current (trained) model's activations
+Read activations from the **live, mid-training policy** — captures both axes (obfuscated policy *and*
+obfuscated activations). This needs in-process model access, which the **`TransformersBackend`**
+provides (LoRA policy local). It's the path required to **train *against* a probe** (probe in the
+reward every step). With the tinker backend it would require a `download → attach LoRA → forward`
+round-trip per eval step (deferred; only worth it for the activations-decomposition study).
 
-**This must be verified before committing to any white-box experiment (Exp 1, combined matrix).**
-Open sub-questions:
-- Can we download base+LoRA weights and reconstruct the exact forward pass locally (tokenizer,
-  dtype, layer indexing all matching)?
-- Is `forward_backward_custom` an alternative path to get intermediate signals without a local copy?
-- Cost/latency of a local forward pass per eval batch.
+**Rule of thumb:** tinker backend → Mode A (frozen base, same size); local `TransformersBackend` →
+Mode B (live activations, enables train-against-probe).
 
-Until this is settled, all black-box monitor work (Exp 2) proceeds unblocked.
+## Training *against* a probe — the two mechanisms (which model feeds the probe?)
+
+When a probe enters the **reward** (penalty `−λ·probe_score` every step), the crux is *whose
+activations* the probe reads. This gives two genuinely different training pressures:
+
+```
+ (A) FROZEN-BASE probe penalty                (B) CURRENT-MODEL probe penalty
+     — text-level pressure                        — representation-level pressure
+
+   policy M  (LoRA, updating)                   policy M  (LoRA, updating)
+        │ generates text                              │ generates text
+        ▼                                             ▼
+  ┌───────────────┐  activations               ┌───────────────┐  activations
+  │ FROZEN base Mb│  (Mb never moves)          │  CURRENT  M   │  (Mb + live LoRA)
+  └───────┬───────┘                            └───────┬───────┘
+          ▼                                            ▼
+     probe (frozen) ─► score                      probe (frozen) ─► score
+          │ −λ·score → reward                          │ −λ·score → reward
+          ▼ gradient updates M                         ▼ gradient updates M
+
+  M can only evade by changing TEXT            M can evade by changing TEXT *or*
+  (Mb's representations are fixed)             by moving its OWN activations
+  → drives "obfuscated POLICY" only.          → drives "obfuscated policy" AND
+  Works on the tinker backend (no             "obfuscated ACTIVATIONS".
+  weight download — just run the text         Needs in-process model: the local
+  through a local same-size base).            TransformersBackend (or a
+                                              download→attach-LoRA→forward / step).
+```
+
+Both use a **frozen probe**; the difference is only which model's activations it sees. And it's the
+two modes from above, now in the *reward* instead of post-hoc.
+
+**The obfuscation decomposition (Atlas Eq. 3).** Run the *same* generations through both: the
+**frozen-base** score ("original-model probe score") and the **current-model** score ("trained-model
+probe score"). Their gap is the **representation change** — the signature of *obfuscated activations*.
+Mechanism (A) holds the base score fixed by construction, so it can never produce that gap;
+mechanism (B) can. So if the question is "can a policy learn to hide the behavior in its
+*representations* to fool a probe," only (B) tests it — (A) tests "can it hide in the *text*."
+
+> Status: mechanism (A) post-hoc is built (`eval_probes_on_run.py`); (A) and (B) **in the reward**
+> are the next wiring step (give the backend an `extract_activations` the reward loop calls). Diagrams
+> here are the spec for that.
 
 ## Conventions
 - Monitors are **frozen** by default (weights don't update during policy training). Updating-monitor

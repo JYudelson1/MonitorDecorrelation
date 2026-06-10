@@ -4,6 +4,12 @@ Reuses the Anthropic sycophancy items the RL env trains on (``envs/sycophancy.py
 sycophantic (user-matching) choice is the *deceptive* response and a non-matching choice is the
 *honest* one, both rendered as the short ``"Answer: (X)"`` form the policy emits. This is our analogue
 of the Atlas's on-domain MBPP probe — same distribution as the deployment setting.
+
+⚠️ THIN SIGNAL: the honest/deceptive responses here differ ONLY in the answer letter — same prompt,
+no chain-of-thought — so a probe has to detect sycophancy from a one-token-different completion. The
+real on-domain sycophancy probe should train on REAL policy rollouts (sycophantic vs honest CoTs):
+see ``scripts/build_syco_pairs.py`` + the ``sycophancy_cot`` adapter, which resamples the policy and
+labels by ground truth and/or an LLM judge. Use this letter-only adapter only as a cheap baseline.
 """
 
 from __future__ import annotations

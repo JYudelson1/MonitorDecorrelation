@@ -35,12 +35,22 @@ def main() -> None:
     ap.add_argument("--probe", required=True, help="dir saved by train_probe.py")
     ap.add_argument("--name", default="probe", help="column name in the degradation matrix")
     ap.add_argument("--model", default=None, help="override; default = probe meta's model_name")
+    ap.add_argument("--policy-base", default=None,
+                    help="the RL policy's base model; warns if the probe model differs (off-model probing is unreliable)")
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--max-per-step", type=int, default=None,
+                    help="cap rollouts scored per step (class-balanced) — local forward passes are slow")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="default: <run_dir>/probe_eval_<name>.jsonl")
     args = ap.parse_args()
 
     probe = LinearProbe.load(args.probe)
     model_name = args.model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
+    # Mode A (frozen-base probing) is only valid when the probe model matches the RL policy's base.
+    if args.policy_base and model_name != args.policy_base:
+        print(f"⚠️  OFF-MODEL: probe model {model_name!r} != policy base {args.policy_base!r}. "
+              "Frozen-base probing is unreliable across different models/sizes — retrain the probe "
+              "on the policy's base model. See docs/MONITORS.md.")
     model = WhiteBoxModel(model_name)
     monitor = ProbeMonitor(args.name, model, probe, batch_size=args.batch_size)
 
@@ -49,11 +59,24 @@ def main() -> None:
     for rollout, gt in pairs:
         by_step[rollout.meta.get("step", 0)].append((rollout, gt))
 
+    if args.max_per_step:
+        # Keep a class-balanced subset per step so AUROC stays meaningful and fast.
+        import random
+        rng = random.Random(args.seed)
+        cap = args.max_per_step
+        for step, items in by_step.items():
+            pos = [it for it in items if it[1]]
+            neg = [it for it in items if not it[1]]
+            k = min(len(pos), len(neg), cap // 2)
+            by_step[step] = (rng.sample(pos, k) if k else []) + (rng.sample(neg, k) if k else [])
+
     out_path = Path(args.out) if args.out else Path(args.rollouts).parent / f"probe_eval_{args.name}.jsonl"
     rows = []
     print(f"{'step':>5} {'auroc':>7} {'n':>5} {'mean_pos':>9} {'mean_neg':>9}")
     for step in sorted(by_step):
         items = by_step[step]
+        if not items:  # a balanced-subsampled step can be empty (single-class step)
+            continue
         rollouts = [r for r, _ in items]
         gt = [g for _, g in items]
         results = monitor.score_batch(rollouts)

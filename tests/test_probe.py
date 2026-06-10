@@ -120,11 +120,12 @@ def test_degradation_matrix(tmp_path=None):
     from monitordecorrelation.eval.degradation import build_matrix
 
     d = Path(tempfile.mkdtemp()) if tmp_path is None else tmp_path
-    # Fake a run dir: metrics.jsonl with one CoT monitor + a probe_eval file.
+    # Fake a run dir: metrics.jsonl with one CoT monitor (per-step auroc + a cum_auroc that must be
+    # IGNORED) + a probe_eval file.
     metrics = [
-        {"step": 0, "monitor/cot_weak/cum_auroc": 0.8},
-        {"step": 1, "monitor/cot_weak/cum_auroc": 0.7},
-        {"step": 2, "monitor/cot_weak/cum_auroc": 0.6},
+        {"step": 0, "monitor/cot_weak/auroc": 0.8, "monitor/cot_weak/cum_auroc": 0.99},
+        {"step": 1, "monitor/cot_weak/auroc": 0.7, "monitor/cot_weak/cum_auroc": 0.99},
+        {"step": 2, "monitor/cot_weak/auroc": 0.6, "monitor/cot_weak/cum_auroc": 0.99},
     ]
     (d / "metrics.jsonl").write_text("\n".join(json.dumps(m) for m in metrics) + "\n")
     probe_eval = [
@@ -132,12 +133,18 @@ def test_degradation_matrix(tmp_path=None):
     ]
     (d / "probe_eval_probe_ood.jsonl").write_text("\n".join(json.dumps(m) for m in probe_eval) + "\n")
 
-    result = build_matrix(d)
-    assert "cot_weak" in result["table"]["columns"]
-    assert "probe_ood" in result["table"]["columns"]
+    result = build_matrix(d, steps_of_rolling_average=1)  # raw per-step
+    cols = result["table"]["columns"]
+    assert "cot_weak" in cols and "probe_ood" in cols
+    # Used the per-step auroc (0.8,0.7,0.6), NOT the constant cum_auroc (0.99).
+    assert cols["cot_weak"] == [0.8, 0.7, 0.6], cols["cot_weak"]
     # Both detectors degrade monotonically -> strong positive correlation.
     assert result["correlation"]["cot_weak"]["probe_ood"] > 0.9
     assert (d / "degradation.csv").exists()
+
+    # Rolling average smooths: window 2 -> trailing means.
+    smoothed = build_matrix(d, steps_of_rolling_average=2)["table"]["columns"]["cot_weak"]
+    assert all(abs(a - b) < 1e-9 for a, b in zip(smoothed, [0.8, 0.75, 0.65])), smoothed
     print("degradation matrix OK")
 
 

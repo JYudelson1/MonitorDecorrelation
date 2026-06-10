@@ -86,3 +86,4 @@ def flatten_pairs(
 from monitordecorrelation.whitebox.datasets import doluschat as _doluschat  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import stubs as _stubs  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import sycophancy as _sycophancy  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import sycophancy_cot as _sycophancy_cot  # noqa: E402,F401

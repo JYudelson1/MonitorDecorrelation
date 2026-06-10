@@ -56,7 +56,8 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | --- | --- | --- |
 | `RLBackend` protocol | 🟢 | Defined + import-verified. See docs/INFRA.md. |
 | `TinkerBackend` | 🟢 | sample + importance_sampling fwd_bwd + optim_step + sampler refresh; runs live. |
-| `VerlBackend` (off-tinker policies) | ⬜ | Deferred escape hatch for DeepSeek-R1 distill policy. |
+| `TransformersBackend` (local, for white-box) | 🟢 | `backends/transformers_backend.py` — HF+PEFT LoRA policy in-process; same `sample`/`train_step` interface; importance-sampling GRPO loss hand-rolled. Validated: gradient flows, runs through `run_grpo` unchanged on Qwen3-0.6B/MPS. Enables train-AGAINST-probe (model local → activations available every step). Slow on MPS; model/device-agnostic for rented GPU. |
+| `VerlBackend` (off-tinker policies) | ⬜ | Superseded by `TransformersBackend` for the white-box use case. |
 | GRPO algorithm (`rl/grpo.py`) | 🟢 | group-relative advantages + Datum construction; alignment unit-tested. DR-GRPO via `normalize=False`. |
 | Rollout / sampling (`rl/rollout.py`) | 🟢 | tinker sampling + chat-template + CoT/answer split. |
 | Baseline eval (no-train measurement loop) | 🟢 | `experiments/eval_baseline.py`: real Qwen3-8B → oracle + monitor. Sycophancy rate ~0.75 on political subset. |
