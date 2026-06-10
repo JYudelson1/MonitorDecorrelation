@@ -78,8 +78,9 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | --- | --- | --- |
 | train-against-CoT (config) | 🟢 | `configs/train_against_cot.json`; full 40-step runs done last session (run_nlp40 / run_nlp40_strong). |
 | train-against-probe (original-model probing) | 🟢 | `configs/train_against_*probe*.json`; probe penalty in reward via tinker. Validated (0.6B mechanics test); valid same-model 4B run pending. |
-| Exp 1 — cross-method (CoT vs probe) | 🟡 | Plumbing built: `experiments/{train_probe,eval_probes_on_run}.py` (probe trains on base model, scored **post-hoc** over a run's `rollouts.jsonl`). Needs a real probe + saved run to produce numbers. No longer blocked (v1 uses base model, not tinker internals). |
-| Combined degradation matrix | ⬜ | After train_against_cot + probe. |
+| Exp 1 — cross-method (CoT vs probe) | 🟢 | Both probes trained on Qwen3.5-4B: **ood** (DolusChat deception, 0.978 in-dist / ~0.40 on sycophancy) and **iid** (sycophancy_cot via dual-prompt builder, 0.74 on sycophancy). iid/ood divergence shown. |
+| Combined degradation matrix | 🟡 | All 4 detectors exist (`configs/full_matrix.json`). Needs the N matched runs (train against each, identical else) → `build_degradation_matrix`. A rented-GPU job (local 4B probe-in-loop is slow). |
+| Datasets/probes durability | ⬜ | `data/probes/syco_cot_pairs.jsonl` (71 pairs, model-independent) + probes are local/gitignored. `LinearProbe.push_to_hub` exists; add a dataset push + run it so they're not regenerated. |
 
 ## Planned next — eval/train split + richer plots (design captured)
 
