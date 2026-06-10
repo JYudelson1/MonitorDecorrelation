@@ -24,7 +24,7 @@ class ProbeMonitor:
         *,
         threshold: float | None = None,
         behavior: str = "deception",
-        batch_size: int = 4,  # peak MPS/GPU memory tracks this, not the rollout count; 4 fits the 4B@4096
+        batch_size: int | None = None,  # None -> device-aware (see below)
         follow_up: tuple[str, str] | None = None,
     ) -> None:
         self.name = name
@@ -32,6 +32,11 @@ class ProbeMonitor:
         self.probe = probe
         self.behavior = behavior
         self.threshold = probe.threshold if threshold is None else threshold
+        # MPS has no flash-attention kernels, so it materializes the full [B, heads, T, T] attention
+        # tensor; at long T (4096-token CoT) even a chunk of 2 overflows a single Metal buffer. So
+        # default to 1-at-a-time on MPS. CUDA (flash attn, no materialization) can batch freely.
+        if batch_size is None:
+            batch_size = 1 if getattr(model, "device", None) == "mps" else 8
         self.batch_size = batch_size
         # Use the exact follow-up the probe was trained with (from its meta) unless overridden.
         fu = follow_up if follow_up is not None else probe.meta.get("follow_up")
