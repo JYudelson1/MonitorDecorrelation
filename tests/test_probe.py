@@ -114,38 +114,50 @@ def test_load_saved_rollouts_fixture():
     print("load_saved_rollouts OK")
 
 
-def test_degradation_matrix(tmp_path=None):
+def _fake_run(d: Path, train_against: str, aurocs: dict[str, list[float]]) -> Path:
+    """A minimal run dir: run_info.json (train target) + eval_metrics.jsonl with per-eval monitor auroc."""
     import json
 
-    from monitordecorrelation.eval.degradation import build_matrix
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run_info.json").write_text(json.dumps(
+        {"train_against": [{"name": train_against}],
+         "held_out": [{"name": m} for m in aurocs if m != train_against]}))
+    n = len(next(iter(aurocs.values())))
+    rows = [{"step": step, **{f"monitor/{m}/auroc": series[step] for m, series in aurocs.items()}}
+            for step in range(n)]
+    (d / "eval_metrics.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return d
 
-    d = Path(tempfile.mkdtemp()) if tmp_path is None else tmp_path
-    # Fake a run dir: metrics.jsonl with one CoT monitor (per-step auroc + a cum_auroc that must be
-    # IGNORED) + a probe_eval file.
-    metrics = [
-        {"step": 0, "monitor/cot_weak/auroc": 0.8, "monitor/cot_weak/cum_auroc": 0.99},
-        {"step": 1, "monitor/cot_weak/auroc": 0.7, "monitor/cot_weak/cum_auroc": 0.99},
-        {"step": 2, "monitor/cot_weak/auroc": 0.6, "monitor/cot_weak/cum_auroc": 0.99},
-    ]
-    (d / "metrics.jsonl").write_text("\n".join(json.dumps(m) for m in metrics) + "\n")
-    probe_eval = [
-        {"step": 0, "auroc": 0.9}, {"step": 1, "auroc": 0.85}, {"step": 2, "auroc": 0.7},
-    ]
-    (d / "probe_eval_probe_ood.jsonl").write_text("\n".join(json.dumps(m) for m in probe_eval) + "\n")
 
-    result = build_matrix(d, steps_of_rolling_average=1)  # raw per-step
-    cols = result["table"]["columns"]
-    assert "cot_weak" in cols and "probe_ood" in cols
-    # Used the per-step auroc (0.8,0.7,0.6), NOT the constant cum_auroc (0.99).
-    assert cols["cot_weak"] == [0.8, 0.7, 0.6], cols["cot_weak"]
-    # Both detectors degrade monotonically -> strong positive correlation.
-    assert result["correlation"]["cot_weak"]["probe_ood"] > 0.9
-    assert (d / "degradation.csv").exists()
+def test_degradation_matrix_cross_run(tmp_path=None):
+    """The matrix is CROSS-RUN: each run trains against a different monitor = one row."""
+    from monitordecorrelation.eval.degradation import build_degradation_matrix, run_trajectories
 
-    # Rolling average smooths: window 2 -> trailing means.
-    smoothed = build_matrix(d, steps_of_rolling_average=2)["table"]["columns"]["cot_weak"]
-    assert all(abs(a - b) < 1e-9 for a, b in zip(smoothed, [0.8, 0.75, 0.65])), smoothed
-    print("degradation matrix OK")
+    base = Path(tempfile.mkdtemp()) if tmp_path is None else tmp_path
+    # Run A trains against cot_weak: it degrades hard (0.9->0.4); held-out cot_strong stays flat.
+    runA = _fake_run(base / "runA", "cot_weak",
+                     {"cot_weak": [0.9, 0.7, 0.4], "cot_strong": [0.85, 0.85, 0.85]})
+    # Run B trains against cot_strong: it degrades; cot_weak co-degrades a little.
+    runB = _fake_run(base / "runB", "cot_strong",
+                     {"cot_weak": [0.8, 0.75, 0.7], "cot_strong": [0.9, 0.6, 0.3]})
+
+    # per-run trajectories use per-step auroc, not the constant cum_auroc
+    traj = run_trajectories(runA, rolling=1)
+    assert traj["cot_weak"] == {0: 0.9, 1: 0.7, 2: 0.4}, traj["cot_weak"]
+
+    out = base / "matrix"
+    res = build_degradation_matrix([runA, runB], edge=1, rolling=1, out_dir=out)
+    assert res["rows_train_against"] == ["cot_weak", "cot_strong"]
+    assert res["columns_monitors"] == ["cot_strong", "cot_weak"]
+    M = res["matrix"]
+    # diagonal (train target degrades itself) is large + positive
+    assert abs(M["cot_weak"]["cot_weak"] - (0.9 - 0.4)) < 1e-9
+    assert abs(M["cot_strong"]["cot_strong"] - (0.9 - 0.3)) < 1e-9
+    # off-diagonal: training cot_weak left cot_strong intact (~0); training cot_strong co-degraded cot_weak a bit
+    assert abs(M["cot_weak"]["cot_strong"]) < 1e-9
+    assert M["cot_strong"]["cot_weak"] > 0
+    assert (out / "degradation_matrix.csv").exists() and (out / "degradation_matrix.png").exists()
+    print("cross-run degradation matrix OK")
 
 
 def test_extract_activations_logic_offline():
@@ -187,7 +199,7 @@ def test_extract_activations_logic_offline():
             return _Enc(input_ids=ids, attention_mask=mask)
 
     class _StubModel:
-        def __call__(self, input_ids=None, attention_mask=None):
+        def __call__(self, input_ids=None, attention_mask=None, output_hidden_states=None):
             B, T = input_ids.shape
             # hidden state at each position = its token id, broadcast across d; distinct per layer
             base = input_ids.unsqueeze(-1).float().expand(B, T, D)

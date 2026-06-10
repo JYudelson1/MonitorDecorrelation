@@ -127,7 +127,9 @@ class WhiteBoxModel:
                     batch, return_tensors="pt", padding=True, add_special_tokens=False
                 ).to(self.device)
                 with torch.no_grad():
-                    out = self.model(**enc)
+                    # Request hidden states at call time too — some archs (e.g. Qwen3.5 with a nested
+                    # text config) don't propagate the load-time output_hidden_states flag.
+                    out = self.model(**enc, output_hidden_states=True)
                 # hidden_states: tuple length n_layers+1, each [B, T, d]; final real token = last col.
                 hs = torch.stack(out.hidden_states, dim=1)  # [B, L, T, d]
                 last = hs[:, :, -1, :]  # [B, L, d] (left padding -> last col is real)

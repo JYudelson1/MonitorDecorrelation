@@ -55,7 +55,8 @@ class RunConfig:
     # Optimization
     batch_size: int = 32
     n_steps: int = 100
-    eval_every: int = 10
+    eval_every: int = 10  # run the held-out eval phase every N train steps (+ step 0 + final)
+    eval_size: int = 32  # size of the FIXED held-out eval set (clean degradation curves)
     lora_rank: int = 16
     learning_rate: float = 1e-5
     seed: int = 0

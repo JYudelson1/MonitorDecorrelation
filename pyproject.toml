@@ -16,6 +16,17 @@ dependencies = [
     "peft>=0.19.1",
 ]
 
+# GPU-only acceleration kernels for the white-box forward passes (Qwen3.5 is a hybrid
+# linear-attention arch). CUDA-only — the `sys_platform == 'linux'` markers keep them off macOS so
+# `uv sync` never tries to build them locally. On a rented CUDA box: `uv sync --extra gpu`.
+# (pyproject has no "CUDA available" marker; linux is the practical proxy.)
+[project.optional-dependencies]
+gpu = [
+    "flash-attn>=2.5; sys_platform == 'linux'",
+    "flash-linear-attention; sys_platform == 'linux'",
+    "causal-conv1d; sys_platform == 'linux'",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

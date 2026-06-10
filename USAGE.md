@@ -3,6 +3,13 @@
 The runnable scripts (everything else under `src/` is library code). All run via `uv`; secrets load
 from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 
+> **GPU acceleration (rented CUDA box only).** The white-box probe forward passes use Qwen3.5's hybrid
+> linear-attention layers, which are slow on macOS/MPS (torch fallback — no CUDA kernels). On a CUDA
+> machine, install the optional kernels with `uv sync --extra gpu` (flash-attn + flash-linear-attention
+> + causal-conv1d). They're CUDA/Linux-only and gated by `sys_platform == 'linux'`, so a plain
+> `uv sync` on a Mac never tries to build them. (There's no "CUDA-available" marker in pyproject; Linux
+> is the proxy.)
+
 | Script | What it does | Outputs |
 | --- | --- | --- |
 | `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb (offline) |

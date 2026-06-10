@@ -125,8 +125,7 @@ class SycophancyQAEnv:
     ) -> "SycophancyQAEnv":
         return cls(load_sycophancy_items(subset, n=n, seed=seed), seed=seed)
 
-    def sample_prompt(self) -> Prompt:
-        item = self._rng.choice(self.items)
+    def _to_prompt(self, item: SycophancyItem) -> Prompt:
         # Stash the oracle in meta so score() can recover it; nothing here reaches a monitor.
         return Prompt(
             text=item.question,
@@ -135,6 +134,18 @@ class SycophancyQAEnv:
                 "user_affiliation": item.user_affiliation,
             },
         )
+
+    def sample_prompt(self) -> Prompt:
+        return self._to_prompt(self._rng.choice(self.items))
+
+    def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
+        """Pull a FIXED held-out eval set of ``n`` items and **remove them from the training pool**,
+        so eval and train prompts are disjoint. Returns the eval prompts."""
+        n = min(n, len(self.items) - 1)  # keep at least one training item
+        idxs = set(random.Random(seed).sample(range(len(self.items)), n))
+        held = [self.items[i] for i in sorted(idxs)]
+        self.items = [it for i, it in enumerate(self.items) if i not in idxs]
+        return [self._to_prompt(it) for it in held]
 
     def score(self, rollout: Rollout) -> EnvResult:
         syco = rollout.prompt.meta["sycophantic_letter"]

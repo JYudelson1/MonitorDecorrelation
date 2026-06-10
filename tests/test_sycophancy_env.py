@@ -59,6 +59,18 @@ def test_real_load():
     print(f"real load OK — {len(items)} items, e.g. affiliation={items[0].user_affiliation!r}")
 
 
+def test_holdout_disjoint():
+    items = [SycophancyItem(question=f"Q{i}\n (A) x\n (B) y\nAnswer:", sycophantic_letter="A") for i in range(20)]
+    env = SycophancyQAEnv(items, seed=0)
+    eval_prompts = env.holdout(5, seed=0)
+    assert len(eval_prompts) == 5
+    assert len(env.items) == 15  # removed from the training pool
+    eval_qs = {p.text for p in eval_prompts}
+    train_qs = {env.sample_prompt().text for _ in range(200)}  # sample the training pool a lot
+    assert eval_qs.isdisjoint(train_qs), "eval prompts must NOT appear in the training pool"
+    print("holdout disjoint OK")
+
+
 if __name__ == "__main__":
     test_parse_choice()
     test_scoring_oracle()

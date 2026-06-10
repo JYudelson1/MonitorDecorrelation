@@ -55,6 +55,8 @@ class ExperimentConfig(_Strict):
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
+    eval_every: int = Field(10, description="run the held-out eval phase every N steps (+ 0 + final)")
+    eval_size: int = Field(32, description="size of the fixed held-out eval set")
     max_tokens: int = 1024
     penalty_coef: float = 1.0
     lora_rank: int = 16

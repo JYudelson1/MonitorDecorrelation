@@ -18,7 +18,7 @@ from typing import Callable, Sequence
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
-from monitordecorrelation.eval.metrics import MonitorTracker
+from monitordecorrelation.eval.metrics import accuracy, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.rl.grpo import compute_group_advantages
 from monitordecorrelation.types import MonitorResult, Rollout
@@ -33,6 +33,31 @@ def _monitor_info(m: Monitor, role: str) -> dict:
         "behavior": getattr(m, "behavior", None),
         "threshold": getattr(m, "threshold", None),
     }
+
+
+def _score_monitors(
+    monitors: Sequence[Monitor], rollouts: list[Rollout], workers: int
+) -> dict[str, list[MonitorResult]]:
+    """{name: [MonitorResult]} — white-box probes use ``score_batch`` (one batched local forward);
+    API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe."""
+    out: dict[str, list[MonitorResult]] = {}
+    batched = [m for m in monitors if hasattr(m, "score_batch")]
+    threaded = [m for m in monitors if not hasattr(m, "score_batch")]
+    for m in batched:
+        out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
+    if threaded:
+        for m in threaded:
+            out[m.name] = [None] * len(rollouts)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {
+                ex.submit(m.score, rollouts[i]): (m.name, i)
+                for m in threaded
+                for i in range(len(rollouts))
+            }
+            for fut in futs:
+                name, i = futs[fut]
+                out[name][i] = fut.result()
+    return out
 
 
 def run_grpo(
@@ -51,7 +76,6 @@ def run_grpo(
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset)."""
     rng = random.Random(cfg.seed)
-    tracker = MonitorTracker()
     all_monitors: list[Monitor] = [*train_against, *held_out]
     run = None
     if cfg.logging.use_wandb:
@@ -82,87 +106,91 @@ def run_grpo(
     (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
 
     rollout_log = (rollout_log_dir / "rollouts.jsonl").open("w")
-    # Always dump per-step metrics to disk too, so plots are viewable locally without a W&B server.
+    # TRAIN metrics (per step, on the training rollouts) and EVAL metrics (periodic, on a FIXED
+    # held-out set) go to separate files + wandb namespaces. Degradation curves come from EVAL.
     metrics_log = (rollout_log_dir / "metrics.jsonl").open("w")
+    eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open("w")
+
+    # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
+    # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
+    if hasattr(env, "holdout"):
+        eval_prompts = env.holdout(cfg.eval_size, seed=cfg.seed)
+    else:
+        print("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
+        eval_prompts = [env.sample_prompt() for _ in range(cfg.eval_size)]
+
+    def run_eval(step: int) -> None:
+        """Sample the current policy on the fixed eval set; log every monitor's AUROC vs ground truth."""
+        ev = backend.sample(eval_prompts, num_samples=1, max_tokens=max_tokens, temperature=1.0)
+        ev_env = [env.score(r) for r in ev]
+        gt = [er.behavior_present for er in ev_env]
+        res = _score_monitors(all_monitors, ev, monitor_workers)
+        row: dict = {
+            "step": step,
+            "behavior_rate": mean(float(g) for g in gt),
+            "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
+        }
+        for m in all_monitors:
+            scores = [x.score for x in res[m.name]]
+            preds = [x.label for x in res[m.name]]
+            row[f"monitor/{m.name}/auroc"] = roc_auc(scores, gt)
+            row[f"monitor/{m.name}/accuracy"] = accuracy(preds, gt)
+            row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
+        eval_metrics_log.write(json.dumps(row) + "\n")
+        eval_metrics_log.flush()
+        if run is not None:
+            run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
+        aucs = " ".join(
+            f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}" for m in all_monitors
+        )
+        print(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} | {aucs}")
 
     for step in range(cfg.n_steps):
+        if step % cfg.eval_every == 0:
+            run_eval(step)  # held-out eval at step 0 and every eval_every
+
         prompts = [env.sample_prompt() for _ in range(cfg.batch_size)]
         rollouts = backend.sample(
             prompts, num_samples=cfg.group_size, max_tokens=max_tokens, temperature=1.0
         )
-
-        # Score env (oracle + task reward).
         env_results = [env.score(r) for r in rollouts]
-        gt = [er.behavior_present for er in env_results]
 
-        # Score every monitor on every rollout once, reused for the penalty AND the degradation
-        # metrics. White-box probes expose ``score_batch`` (one batched local forward — threading a
-        # single torch model is pointless/unsafe); API judges are scored per-rollout concurrently.
-        results_by_name: dict[str, list[MonitorResult]] = {}
-        batched = [m for m in all_monitors if hasattr(m, "score_batch")]
-        threaded = [m for m in all_monitors if not hasattr(m, "score_batch")]
-        for m in batched:
-            results_by_name[m.name] = list(m.score_batch(rollouts))
-        if threaded:
-            for m in threaded:
-                results_by_name[m.name] = [None] * len(rollouts)  # type: ignore[list-item]
-            with ThreadPoolExecutor(max_workers=monitor_workers) as ex:
-                futs = {
-                    ex.submit(m.score, rollouts[i]): (m.name, i)
-                    for m in threaded
-                    for i in range(len(rollouts))
-                }
-                for fut in futs:
-                    name, i = futs[fut]
-                    results_by_name[name][i] = fut.result()
+        # Only the TRAIN-AGAINST monitors are scored every step (they form the reward penalty).
+        # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
+        ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
         penalties = [
-            mean(results_by_name[m.name][i].score for m in train_against) if train_against else 0.0
+            mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
         ]
         rewards = [er.task_reward - cfg.penalty_coef * pen for er, pen in zip(env_results, penalties)]
-
         advantages = compute_group_advantages(
             rewards, cfg.group_size, normalize=(cfg.rl_algo == "grpo")
         )
         step_metrics = backend.train_step(rollouts, advantages)
 
-        # Rolling per-monitor accuracy + AUROC vs ground truth (train-against AND held-out).
-        monitor_metrics: dict[str, float] = {}
-        for m in all_monitors:
-            res = results_by_name[m.name]
-            monitor_metrics.update(
-                tracker.update(m.name, [x.score for x in res], [x.label for x in res], gt)
-            )
-
-        gt_rate = mean(float(g) for g in gt)
+        gt_rate = mean(float(er.behavior_present) for er in env_results)
         loss_keys = [k for k in step_metrics if "loss" in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
-        log = {
+        row = {
             "step": step,
-            "behavior_rate": gt_rate,  # PRIMARY
+            "behavior_rate": gt_rate,  # PRIMARY (training rollouts; eval has the held-out version)
             "reward/task_mean": mean(er.task_reward for er in env_results),
             "reward/penalty_mean": mean(penalties),
             "reward/total_mean": mean(rewards),
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
-            **{f"train/{k}": v for k, v in step_metrics.items()},
-            **monitor_metrics,
+            **{f"loss/{k}": v for k, v in step_metrics.items()},
+            **{f"monitor/{m.name}/mean_score": mean(x.score for x in ta_res[m.name]) for m in train_against},
         }
         if run is not None:
-            run.log(log)
-        metrics_log.write(json.dumps(log) + "\n")
+            run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
+        metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
-        mon_summary = " ".join(
-            f"{m.name}[acc={monitor_metrics[f'monitor/{m.name}/accuracy']:.2f},"
-            f"auc={monitor_metrics[f'monitor/{m.name}/auroc']:.2f}]"
-            for m in all_monitors
-        )
         print(
-            f"step {step}: gt_syco={gt_rate:.2f} task_r={log['reward/task_mean']:.2f} "
-            f"penalty={log['reward/penalty_mean']:.2f} loss={loss_val:.1f} | {mon_summary}"
+            f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
+            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f}"
         )
 
-        # Persist a sampled fraction of rollouts with per-rollout metadata: monitor scores/labels
-        # (computed anyway), env oracle, reward, advantage — plus any caller-supplied extras.
+        # Persist a sampled fraction of TRAINING rollouts (with train-against monitor scores).
         for i, (r, er) in enumerate(zip(rollouts, env_results)):
             if rng.random() >= cfg.logging.log_fraction:
                 continue
@@ -182,10 +210,10 @@ def run_grpo(
                         },
                         "monitors": {
                             m.name: {
-                                "score": results_by_name[m.name][i].score,
-                                "label": results_by_name[m.name][i].label,
+                                "score": ta_res[m.name][i].score,
+                                "label": ta_res[m.name][i].label,
                             }
-                            for m in all_monitors
+                            for m in train_against
                         },
                         "reward": rewards[i],
                         "advantage": advantages[i],
@@ -196,8 +224,11 @@ def run_grpo(
             )
         rollout_log.flush()
 
+    run_eval(cfg.n_steps)  # final held-out eval
+
     rollout_log.close()
     metrics_log.close()
+    eval_metrics_log.close()
     if run is not None:
         run.finish()
 

@@ -67,9 +67,10 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | Ground-truth rate tracking | 🟢 | **Primary metric**, logged every step. |
 | Per-monitor accuracy + AUROC tracker (`eval/metrics.py`) | 🟢 | per-step + cumulative, train-against AND held-out; unit-tested. |
 | Logging / local wandb | 🟢 | offline wandb + per-step `metrics.jsonl` + per-rollout jsonl (env + per-monitor score/label + reward + advantage + generic `extra`). |
-| Local plots (`experiments/plot_run.py`) | 🟢 | matplotlib PNGs from `metrics.jsonl` (no W&B server needed). |
+| Local plots (`scripts/plot_run.py`) | 🟢 | matplotlib PNGs from `metrics.jsonl`; auto-plots on finish (no W&B server needed). |
 | LoRA LR estimation (`hyperparams.py`) | 🟢 | re-exports TM's `tinker_cookbook.hyperparam_utils.get_lr` (no hardcoding). Qwen3-8B → 4.7e-4. |
-| Degradation matrix (`eval/degradation.py`) | 🟡 | `build_matrix(run_dir)` assembles per-step AUROC columns (CoT from `metrics.jsonl`, probes from `probe_eval_*.jsonl`) + a trajectory-correlation matrix; writes `degradation.{json,csv}`. Unit-tested on synthetic columns; needs a real run to populate. |
+| Degradation matrix (`eval/degradation.py`) | 🟢 | **CROSS-RUN** tool: `build_degradation_matrix([run dirs])` → `D[i][j]` = AUROC drop of detector j when training against i, + heatmap PNG. **NOT per-run** (one run = one row; never saved after a training run). Unit-tested; needs N matched runs (identical configs except `train_against`) to populate. |
+| **Held-out eval phase (train/ vs eval/ split)** | ⬜ | **Planned — see "Eval/train split" below.** Periodic eval on a FIXED held-out set; `train/` vs `eval/` metric+plot namespaces; config-controlled eval frequency. |
 | No-penalty + frozen-policy controls | ⬜ | baselines per EXPERIMENT_PLAN.md. |
 
 ## Experiments
@@ -79,6 +80,31 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | train-against-probe (original-model probing) | 🟢 | `configs/train_against_*probe*.json`; probe penalty in reward via tinker. Validated (0.6B mechanics test); valid same-model 4B run pending. |
 | Exp 1 — cross-method (CoT vs probe) | 🟡 | Plumbing built: `experiments/{train_probe,eval_probes_on_run}.py` (probe trains on base model, scored **post-hoc** over a run's `rollouts.jsonl`). Needs a real probe + saved run to produce numbers. No longer blocked (v1 uses base model, not tinker internals). |
 | Combined degradation matrix | ⬜ | After train_against_cot + probe. |
+
+## Planned next — eval/train split + richer plots (design captured)
+
+The current loop logs everything from the **training rollouts** per step (noisy, on-policy, changing
+batch). We want a proper **held-out eval** so degradation curves are trustworthy.
+
+**Eval/train split** (`cfg.eval_every`, currently unused, is the hook):
+- Every N steps, run a **fixed held-out eval set** of prompts through the current policy.
+- Two metric/plot namespaces:
+  - **`train/`** — per-step, on the training rollouts: train-against monitor score + **model reward**
+    / behavior rate (the optimization signal).
+  - **`eval/`** — on the **same fixed held-out set** every eval: **model performance/behavior rate**
+    *and* **every monitor's AUROC over training** measured on that held-out set (the clean
+    degradation curves — what the matrix should be built from).
+- Move the degradation-relevant stats from `train/` → `eval/`.
+- Probe at eval: original-model probing works on tinker now; **trained-model** probing at eval needs
+  the weight-download path (tinker) or the `TransformersBackend`.
+
+**Plots (two sets, per run):**
+- `data/runs/<run>/train/` — `ground_truth.png` (behavior rate + reward) + `monitors.png` (per-step,
+  training rollouts).
+- `data/runs/<run>/eval/` — `ground_truth.png` (held-out behavior) + `monitors.png` (held-out monitor
+  AUROC over training, on the fixed eval set).
+- `plot_run` emits both folders once eval data exists. **The degradation matrix is NOT here** — it's a
+  cross-run heatmap (`build_degradation_matrix`), built separately over a *set* of runs.
 
 ## Known issues / flags (don't forget)
 - **Monitor calibration:** the CoT judge over-flags real (subtle) rollouts — AUROCs near chance, penalty stuck ~0.6. Highest-value fix before trusting any degradation curve.

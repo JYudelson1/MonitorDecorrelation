@@ -1,8 +1,12 @@
-"""Render a run's metrics to PNGs (no W&B server needed).
+"""Render a run's metrics to PNGs (no W&B server needed). Auto-called at the end of every run.
 
-Used both by ``scripts/plot_run.py`` and automatically at the end of every ``run_grpo`` run. Reads
-``metrics.jsonl`` (+ ``run_info.json`` for monitor role labels) and writes ``ground_truth.png`` and
-``monitors.png`` into the run dir. matplotlib is imported lazily so importing this module is cheap.
+Two metric streams → two plot folders:
+  data/runs/<run>/train/  — from metrics.jsonl (per-step, training rollouts): behavior rate + reward,
+                            and the train-against monitor's penalty score.
+  data/runs/<run>/eval/   — from eval_metrics.jsonl (held-out eval set): held-out behavior rate, and
+                            every monitor's AUROC/accuracy over training (the clean degradation curves).
+
+The cross-run **degradation matrix** is NOT here — it spans multiple runs (see eval/degradation.py).
 """
 
 from __future__ import annotations
@@ -11,8 +15,7 @@ import json
 from pathlib import Path
 
 
-def _load(run_dir: Path) -> list[dict]:
-    path = run_dir / "metrics.jsonl"
+def _load(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.open() if line.strip()]
@@ -27,71 +30,103 @@ def _series(rows: list[dict], key: str) -> tuple[list, list]:
     return xs, ys
 
 
-def plot_run(run_dir: Path) -> list[Path]:
-    """Write ground_truth.png + monitors.png for the run at ``run_dir``. Returns the paths."""
+def _role_labels(run_dir: Path) -> dict[str, str]:
+    """name -> 'name = model [TRAIN-AGAINST/held-out]' from run_info.json (for legend clarity)."""
+    out: dict[str, str] = {}
+    info_path = run_dir / "run_info.json"
+    if not info_path.exists():
+        return out
+    info = json.loads(info_path.read_text())
+    for m in info.get("train_against", []):
+        out[m["name"]] = f"{m['name']} = {m.get('model_id')} [TRAIN-AGAINST]"
+    for m in info.get("held_out", []):
+        out[m["name"]] = f"{m['name']} = {m.get('model_id')} [held-out]"
+    return out
+
+
+def _monitor_names(rows: list[dict]) -> list[str]:
+    return sorted({k.split("/")[1] for r in rows for k in r if k.startswith("monitor/")})
+
+
+def plot_run(run_dir: str | Path) -> list[Path]:
+    """Write train/ and eval/ plot sets for the run. Returns the PNG paths."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     run_dir = Path(run_dir)
-    rows = _load(run_dir)
-    if not rows:
-        raise ValueError(f"no metrics in {run_dir}")
-    run = run_dir.name
-    monitor_names = sorted({k.split("/")[1] for r in rows for k in r if k.startswith("monitor/")})
-
-    # Decode monitor roles + models from run_info.json so labels say which was trained against.
-    role_label: dict[str, str] = {}
-    info_path = run_dir / "run_info.json"
-    if info_path.exists():
-        info = json.loads(info_path.read_text())
-        for m in info.get("train_against", []):
-            role_label[m["name"]] = f"{m['name']} = {m.get('model_id')} [TRAIN-AGAINST]"
-        for m in info.get("held_out", []):
-            role_label[m["name"]] = f"{m['name']} = {m.get('model_id')} [held-out]"
-
+    role_label = _role_labels(run_dir)
     out: list[Path] = []
 
-    # Plot 1: ground truth + reward
-    fig, ax = plt.subplots(figsize=(7, 4))
-    for key, label in [
-        ("behavior_rate", "ground-truth behavior rate"),
-        ("reward/penalty_mean", "train-monitor penalty"),
-    ]:
-        xs, ys = _series(rows, key)
-        ax.plot(xs, ys, marker="o", label=label)
-    ax.set_xlabel("step")
-    ax.set_ylabel("rate")
-    ax.set_title(f"{run}: ground truth (primary)")
-    ax.set_ylim(-0.05, 1.05)
-    ax.legend()
-    fig.tight_layout()
-    p1 = run_dir / "ground_truth.png"
-    fig.savefig(p1, dpi=120)
-    plt.close(fig)
-    out.append(p1)
-
-    # Plot 2: per-monitor accuracy + AUROC (per-step solid, cumulative dashed)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
-    for ax, metric in zip(axes, ["accuracy", "auroc"]):
-        for name in monitor_names:
-            lab = role_label.get(name, name)
-            xs, ys = _series(rows, f"monitor/{name}/{metric}")
-            ax.plot(xs, ys, marker="o", label=f"{lab} (per-step)")
-            xc, yc = _series(rows, f"monitor/{name}/cum_{metric}")
-            ax.plot(xc, yc, marker="x", linestyle="--", label=f"{name} (cumulative)")
-        ax.axhline(0.5, color="grey", lw=0.8, ls=":")
+    def ground_truth_fig(rows, series, title, path):
+        fig, ax = plt.subplots(figsize=(7, 4))
+        plotted = False
+        for key, label in series:
+            xs, ys = _series(rows, key)
+            if xs:
+                ax.plot(xs, ys, marker="o", label=label)
+                plotted = True
+        if not plotted:
+            plt.close(fig)
+            return
         ax.set_xlabel("step")
-        ax.set_ylabel(metric)
-        ax.set_title(f"monitor {metric} vs ground truth")
-        ax.set_ylim(-0.05, 1.05)
-        ax.legend(fontsize=8)
-    fig.suptitle(f"{run}: detector degradation curves")
-    fig.tight_layout()
-    p2 = run_dir / "monitors.png"
-    fig.savefig(p2, dpi=120)
-    plt.close(fig)
-    out.append(p2)
+        ax.set_ylabel("rate / reward")
+        ax.set_title(title)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        out.append(path)
+
+    def monitors_fig(rows, metrics, title, path):
+        names = _monitor_names(rows)
+        if not names:
+            return
+        fig, axes = plt.subplots(1, len(metrics), figsize=(6 * len(metrics), 4.5), squeeze=False)
+        any_data = False
+        for ax, metric in zip(axes[0], metrics):
+            for name in names:
+                xs, ys = _series(rows, f"monitor/{name}/{metric}")
+                if xs:
+                    ax.plot(xs, ys, marker="o", label=role_label.get(name, name))
+                    any_data = True
+            ax.axhline(0.5, color="grey", lw=0.8, ls=":")
+            ax.set_xlabel("step")
+            ax.set_ylabel(metric)
+            ax.set_title(metric)
+            ax.set_ylim(-0.05, 1.05)
+            ax.legend(fontsize=8)
+        if not any_data:
+            plt.close(fig)
+            return
+        fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        out.append(path)
+
+    # TRAIN plots (training rollouts)
+    train_rows = _load(run_dir / "metrics.jsonl")
+    if train_rows:
+        td = run_dir / "train"
+        td.mkdir(exist_ok=True)
+        ground_truth_fig(
+            train_rows,
+            [("behavior_rate", "behavior rate (train)"), ("reward/penalty_mean", "train-monitor penalty"),
+             ("reward/task_mean", "task reward")],
+            f"{run_dir.name} [train] — behavior + reward", td / "ground_truth.png")
+        monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
+                     td / "monitors.png")
+
+    # EVAL plots (held-out set — the degradation curves)
+    eval_rows = _load(run_dir / "eval_metrics.jsonl")
+    if eval_rows:
+        ed = run_dir / "eval"
+        ed.mkdir(exist_ok=True)
+        ground_truth_fig(eval_rows, [("behavior_rate", "behavior rate (held-out)")],
+                         f"{run_dir.name} [eval] — held-out behavior", ed / "ground_truth.png")
+        monitors_fig(eval_rows, ["auroc", "accuracy"], f"{run_dir.name} [eval] — held-out detector AUROC",
+                     ed / "monitors.png")
 
     return out
