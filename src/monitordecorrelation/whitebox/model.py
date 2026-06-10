@@ -130,10 +130,18 @@ class WhiteBoxModel:
                     # Request hidden states at call time too — some archs (e.g. Qwen3.5 with a nested
                     # text config) don't propagate the load-time output_hidden_states flag.
                     out = self.model(**enc, output_hidden_states=True)
-                # hidden_states: tuple length n_layers+1, each [B, T, d]; final real token = last col.
-                hs = torch.stack(out.hidden_states, dim=1)  # [B, L, T, d]
-                last = hs[:, :, -1, :]  # [B, L, d] (left padding -> last col is real)
+                # hidden_states: tuple length n_layers+1, each [B, T, d]. Select the final real token
+                # (last col, left padding) PER LAYER *before* stacking — stacking first would build the
+                # full [B, L, T, d] tensor (~16 GiB at T=4096), the OOM we hit. This keeps only [B, L, d].
+                last = torch.stack([h[:, -1, :] for h in out.hidden_states], dim=1)  # [B, L, d]
                 feats.append(last.to(torch.float32).cpu().numpy())
+                # Free the batch's activations before the next chunk so peak memory tracks batch_size,
+                # not the total number of rollouts (lets eval_size grow without OOM).
+                del enc, out, last
+                if self.device == "mps":
+                    torch.mps.empty_cache()
+                elif self.device == "cuda":
+                    torch.cuda.empty_cache()
         finally:
             self.tokenizer.padding_side = prev_side
         return np.concatenate(feats, axis=0)

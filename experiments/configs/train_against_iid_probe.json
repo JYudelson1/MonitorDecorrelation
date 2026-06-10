@@ -1,0 +1,23 @@
+{
+  "experiment": "train_against_iid_probe",
+  "run_name": "tap_iid_4b_40",
+  "description": "Train AGAINST the iid sycophancy probe (original-model probing: frozen Qwen3.5-4B scores the generated text each step, tinker backend). Hold out the 2 CoT monitors + the ood deception probe, measured on the held-out eval set every eval_every steps. The cross-method degradation question: does training against the sycophancy probe degrade the CoT monitors and/or the ood probe? max_tokens=4096 matches the probe's training distribution (it was fit on FINISHED rollouts) and lets the policy actually conclude its <think> block + emit a parseable answer; Qwen3.5-4B finishes ~44-51% at this budget (the practical ceiling — higher just pays for the long tail). Per-forward cost scales with sequence length, so this is slower per step than a truncated 1024 budget but avoids scoring the probe / rewarding the task on truncated, unparseable rollouts.",
+  "policy": "Qwen/Qwen3.5-4B",
+  "backend": "tinker",
+  "subset": "nlp",
+  "n_steps": 40,
+  "batch_size": 8,
+  "group_size": 8,
+  "max_tokens": 4096,
+  "eval_every": 10,
+  "eval_size": 32,
+  "penalty_coef": 1.0,
+  "monitors": [
+    {"kind": "probe", "name": "probe_iid", "role": "train_against",
+     "probe_path": "data/probes/Qwen3.5-4B/sycophancy_cot", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "probe", "name": "probe_ood", "role": "held_out",
+     "probe_path": "data/probes/Qwen3.5-4B/doluschat", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "cot", "name": "cot_weak", "role": "held_out", "model_id": "anthropic/claude-3.5-haiku"},
+    {"kind": "cot", "name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6"}
+  ]
+}

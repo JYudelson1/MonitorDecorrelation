@@ -24,7 +24,7 @@ class ProbeMonitor:
         *,
         threshold: float | None = None,
         behavior: str = "deception",
-        batch_size: int = 8,
+        batch_size: int = 4,  # peak MPS/GPU memory tracks this, not the rollout count; 4 fits the 4B@4096
         follow_up: tuple[str, str] | None = None,
     ) -> None:
         self.name = name

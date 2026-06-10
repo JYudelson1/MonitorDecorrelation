@@ -11,6 +11,7 @@ import dataclasses
 import datetime
 import json
 import random
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import mean
@@ -18,10 +19,15 @@ from typing import Callable, Sequence
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
-from monitordecorrelation.eval.metrics import accuracy, roc_auc
+from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.rl.grpo import compute_group_advantages
 from monitordecorrelation.types import MonitorResult, Rollout
+
+
+def _log(msg: str) -> None:
+    """Print with an [HH:MM:SS] wall-clock prefix, flushed (so it survives pipe buffering)."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def _monitor_info(m: Monitor, role: str) -> dict:
@@ -44,8 +50,12 @@ def _score_monitors(
     batched = [m for m in monitors if hasattr(m, "score_batch")]
     threaded = [m for m in monitors if not hasattr(m, "score_batch")]
     for m in batched:
+        _log(f"      · scoring {m.name} (probe, {len(rollouts)} local fwd)…")
         out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
     if threaded:
+        names = ", ".join(m.name for m in threaded)
+        _log(f"      · scoring {len(threaded)} API monitor(s) [{names}] × {len(rollouts)} "
+             f"rollouts concurrently…")
         for m in threaded:
             out[m.name] = [None] * len(rollouts)  # type: ignore[list-item]
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -116,15 +126,25 @@ def run_grpo(
     if hasattr(env, "holdout"):
         eval_prompts = env.holdout(cfg.eval_size, seed=cfg.seed)
     else:
-        print("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
+        _log("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
         eval_prompts = [env.sample_prompt() for _ in range(cfg.eval_size)]
 
     def run_eval(step: int) -> None:
-        """Sample the current policy on the fixed eval set; log every monitor's AUROC vs ground truth."""
+        """Sample the current policy on the fixed eval set; log every monitor's degradation metrics.
+
+        AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and
+        ``mean_score_syco`` stay defined there, so the obfuscation-success regime stays measurable.
+        """
+        _log(f"  [eval @ {step}] sampling {len(eval_prompts)} held-out prompts (max_tokens={max_tokens})…")
+        t0 = time.perf_counter()
         ev = backend.sample(eval_prompts, num_samples=1, max_tokens=max_tokens, temperature=1.0)
         ev_env = [env.score(r) for r in ev]
         gt = [er.behavior_present for er in ev_env]
+        t_sample = time.perf_counter() - t0
+        _log(f"  [eval @ {step}] scoring {len(all_monitors)} monitors…")
+        t1 = time.perf_counter()
         res = _score_monitors(all_monitors, ev, monitor_workers)
+        t_score = time.perf_counter() - t1
         row: dict = {
             "step": step,
             "behavior_rate": mean(float(g) for g in gt),
@@ -135,29 +155,46 @@ def run_grpo(
             preds = [x.label for x in res[m.name]]
             row[f"monitor/{m.name}/auroc"] = roc_auc(scores, gt)
             row[f"monitor/{m.name}/accuracy"] = accuracy(preds, gt)
+            row[f"monitor/{m.name}/brier"] = brier(scores, gt)
             row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
+            row[f"monitor/{m.name}/mean_score_syco"] = _mean_for_class(scores, gt, True)
+            row[f"monitor/{m.name}/mean_score_honest"] = _mean_for_class(scores, gt, False)
+        row["time/sample_s"] = t_sample
+        row["time/score_s"] = t_score
+        row["time/total_s"] = t_sample + t_score
         eval_metrics_log.write(json.dumps(row) + "\n")
         eval_metrics_log.flush()
         if run is not None:
             run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
-        aucs = " ".join(
-            f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}" for m in all_monitors
+        # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
+        summ = " ".join(
+            f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}/brier={row[f'monitor/{m.name}/brier']:.2f}"
+            for m in all_monitors
         )
-        print(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} | {aucs}")
+        _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} | {summ} "
+             f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
     for step in range(cfg.n_steps):
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
 
         prompts = [env.sample_prompt() for _ in range(cfg.batch_size)]
+        _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
+             f"(max_tokens={max_tokens})…")
+        t0 = time.perf_counter()
         rollouts = backend.sample(
             prompts, num_samples=cfg.group_size, max_tokens=max_tokens, temperature=1.0
         )
         env_results = [env.score(r) for r in rollouts]
+        t_sample = time.perf_counter() - t0
+        if train_against:
+            _log(f"step {step}: scoring train-against monitor(s)…")
 
         # Only the TRAIN-AGAINST monitors are scored every step (they form the reward penalty).
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
+        t1 = time.perf_counter()
         ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
+        t_score = time.perf_counter() - t1
         penalties = [
             mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
@@ -166,9 +203,12 @@ def run_grpo(
         advantages = compute_group_advantages(
             rewards, cfg.group_size, normalize=(cfg.rl_algo == "grpo")
         )
+        t2 = time.perf_counter()
         step_metrics = backend.train_step(rollouts, advantages)
+        t_optim = time.perf_counter() - t2
 
-        gt_rate = mean(float(er.behavior_present) for er in env_results)
+        gt_train = [er.behavior_present for er in env_results]
+        gt_rate = mean(float(g) for g in gt_train)
         loss_keys = [k for k in step_metrics if "loss" in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
         row = {
@@ -178,16 +218,28 @@ def run_grpo(
             "reward/penalty_mean": mean(penalties),
             "reward/total_mean": mean(rewards),
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
+            "time/sample_s": t_sample,
+            "time/score_s": t_score,
+            "time/optim_s": t_optim,
+            "time/total_s": t_sample + t_score + t_optim,
             **{f"loss/{k}": v for k, v in step_metrics.items()},
             **{f"monitor/{m.name}/mean_score": mean(x.score for x in ta_res[m.name]) for m in train_against},
+            # Brier + class-split score on training rollouts: the obfuscation signal (probe being
+            # gamed) shows here even when the batch is single-class and AUROC would be undefined.
+            **{f"monitor/{m.name}/brier": brier([x.score for x in ta_res[m.name]], gt_train)
+               for m in train_against},
+            **{f"monitor/{m.name}/mean_score_syco": _mean_for_class([x.score for x in ta_res[m.name]], gt_train, True)
+               for m in train_against},
         }
         if run is not None:
             run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
-        print(
+        _log(
             f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
-            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f}"
+            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f} "
+            f"| {row['time/total_s']:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s, "
+            f"optim {t_optim:.0f}s)"
         )
 
         # Persist a sampled fraction of TRAINING rollouts (with train-against monitor scores).
@@ -237,6 +289,6 @@ def run_grpo(
         from monitordecorrelation.eval.plots import plot_run as _plot_run
 
         for p in _plot_run(rollout_log_dir):
-            print(f"plot: {p}")
+            _log(f"plot: {p}")
     except Exception as e:  # noqa: BLE001
-        print(f"(auto-plot skipped: {e})")
+        _log(f"(auto-plot skipped: {e})")

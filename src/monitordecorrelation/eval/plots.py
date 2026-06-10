@@ -91,10 +91,11 @@ def plot_run(run_dir: str | Path) -> list[Path]:
                 if xs:
                     ax.plot(xs, ys, marker="o", label=role_label.get(name, name))
                     any_data = True
-            ax.axhline(0.5, color="grey", lw=0.8, ls=":")
+            # Reference line: 0.5 = chance for auroc/accuracy; 0.25 = the always-0.5 baseline for brier.
+            ax.axhline(0.25 if metric == "brier" else 0.5, color="grey", lw=0.8, ls=":")
             ax.set_xlabel("step")
             ax.set_ylabel(metric)
-            ax.set_title(metric)
+            ax.set_title(metric + ("  (lower=better)" if metric == "brier" else ""))
             ax.set_ylim(-0.05, 1.05)
             ax.legend(fontsize=8)
         if not any_data:
@@ -126,7 +127,9 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         ed.mkdir(exist_ok=True)
         ground_truth_fig(eval_rows, [("behavior_rate", "behavior rate (held-out)")],
                          f"{run_dir.name} [eval] — held-out behavior", ed / "ground_truth.png")
-        monitors_fig(eval_rows, ["auroc", "accuracy"], f"{run_dir.name} [eval] — held-out detector AUROC",
-                     ed / "monitors.png")
+        # AUROC is the headline; brier + mean_score_syco stay defined when AUROC goes NaN (single-class,
+        # i.e. the obfuscation-success regime), so they carry the degradation signal at the extremes.
+        monitors_fig(eval_rows, ["auroc", "brier", "mean_score_syco"],
+                     f"{run_dir.name} [eval] — held-out detector degradation", ed / "monitors.png")
 
     return out

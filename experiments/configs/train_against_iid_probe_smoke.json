@@ -1,0 +1,23 @@
+{
+  "experiment": "train_against_iid_probe_smoke",
+  "run_name": "tap_iid_4b_smoke",
+  "description": "SMOKE TEST of train_against_iid_probe: 5 train steps, eval EVERY step (eval_every=1), tiny batch/eval — just exercises the full plumbing end-to-end (probe penalty in reward, eval/train split, both probes + 2 CoT monitors scored on the held-out eval set, metrics/plots/run_info written) before committing to the multi-hour real run. NOT a result — numbers are noise at this scale. Same monitors/policy/backend as the real config; only the loop sizes shrink. Once this passes clean, run train_against_iid_probe.json.",
+  "policy": "Qwen/Qwen3.5-4B",
+  "backend": "tinker",
+  "subset": "nlp",
+  "n_steps": 5,
+  "batch_size": 4,
+  "group_size": 4,
+  "max_tokens": 4096,
+  "eval_every": 1,
+  "eval_size": 16,
+  "penalty_coef": 1.0,
+  "monitors": [
+    {"kind": "probe", "name": "probe_iid", "role": "train_against",
+     "probe_path": "data/probes/Qwen3.5-4B/sycophancy_cot", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "probe", "name": "probe_ood", "role": "held_out",
+     "probe_path": "data/probes/Qwen3.5-4B/doluschat", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "cot", "name": "cot_weak", "role": "held_out", "model_id": "anthropic/claude-3.5-haiku"},
+    {"kind": "cot", "name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6"}
+  ]
+}
