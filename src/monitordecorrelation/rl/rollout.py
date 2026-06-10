@@ -7,11 +7,44 @@ template (tinker has no built-in renderer), with Qwen3 thinking enabled so the C
 
 from __future__ import annotations
 
+import json
+
 import tinker
 
 from monitordecorrelation.types import Prompt, Rollout
 
 _THINK_CLOSE = "</think>"
+
+
+def load_saved_rollouts(path: str, *, keep_unparsed: bool = False) -> list[tuple[Rollout, bool]]:
+    """Reconstruct (rollout, ground_truth) pairs from a saved ``rollouts.jsonl``.
+
+    The saved schema (see ``rl/train.py``) stores ``question``/``cot``/``answer`` plus the env oracle
+    under ``env.behavior_present``. We rebuild a lightweight ``Rollout`` (no token ids/activations —
+    those aren't persisted) so any monitor that reads text fields can re-score the run post-hoc. The
+    saved ``step`` is stashed in ``Rollout.meta`` so callers can group by training step.
+
+    Unparsed rollouts (the env couldn't extract a choice) are dropped by default.
+    """
+    out: list[tuple[Rollout, bool]] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r["env"].get("unparsed") and not keep_unparsed:
+                continue
+            # tolerate pre-refactor rollouts that used the old "ground_truth_misbehavior" key
+            beh = r["env"].get("behavior_present", r["env"].get("ground_truth_misbehavior"))
+            rollout = Rollout(
+                prompt=Prompt(text=r["question"]),
+                cot=r.get("cot", ""),
+                output=r.get("answer", ""),
+                meta={"step": r.get("step")},
+            )
+            out.append((rollout, bool(beh)))
+    return out
 
 
 def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True) -> list[int]:

@@ -12,6 +12,7 @@ dependencies = [
     "wandb>=0.27.1",
     "matplotlib>=3.10.9",
     "tinker-cookbook>=0.4.1",
+    "scikit-learn>=1.9.0",
 ]
 
 [build-system]
@@ -20,3 +21,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/monitordecorrelation"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

@@ -1,0 +1,248 @@
+"""White-box probe tests.
+
+Offline-safe by default: the ``LinearProbe`` + dataset-registry + ``load_saved_rollouts`` +
+``degradation`` tests run with no network. The ``WhiteBoxModel`` / ``ProbeMonitor`` end-to-end tests
+need to download a tiny HF model; they skip cleanly when the model can't be loaded (no network).
+
+Run: uv run pytest tests/test_probe.py   (or: uv run python tests/test_probe.py)
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+from monitordecorrelation.rl.rollout import load_saved_rollouts
+from monitordecorrelation.whitebox.datasets import (
+    DATASET_LOADERS,
+    ContrastivePair,
+    flatten_pairs,
+    load_contrastive,
+)
+from monitordecorrelation.whitebox.probe import LinearProbe
+
+_FIXTURE = Path(__file__).parent / "fixtures" / "mini_rollouts.jsonl"
+
+
+def _separable_acts(n=80, n_layers=4, d=16, seed=0):
+    """Synthetic activations where one layer (2) carries the signal, others are noise."""
+    rng = np.random.default_rng(seed)
+    y = np.array([0, 1] * (n // 2))
+    acts = rng.normal(size=(n, n_layers, d)).astype(np.float32)
+    acts[:, 2, 0] += y * 4.0  # layer 2, dim 0 separates classes
+    return acts, y
+
+
+def test_probe_fit_score_separable():
+    acts, y = _separable_acts()
+    probe = LinearProbe().fit(acts, y)
+    auroc = probe.evaluate(acts, y)
+    assert auroc > 0.9, auroc
+    assert 2 in probe.kept_layers  # the signal layer must survive the CE filter
+    scores = probe.score(acts)
+    assert scores.shape == (len(y),)
+    print(f"probe fit/score OK (auroc={auroc:.3f}, kept={probe.kept_layers})")
+
+
+def test_probe_save_load_roundtrip():
+    acts, y = _separable_acts()
+    probe = LinearProbe().fit(acts, y)
+    probe.meta["datasets"] = ["synthetic"]
+    with tempfile.TemporaryDirectory() as d:
+        probe.save(d)
+        loaded = LinearProbe.load(d)
+        assert loaded.kept_layers == probe.kept_layers
+        np.testing.assert_allclose(loaded.score(acts), probe.score(acts), rtol=1e-6)
+        assert loaded.meta.get("datasets") == ["synthetic"]
+    print("probe save/load roundtrip OK")
+
+
+def test_probe_no_layer_below_ce_keeps_best():
+    """Pure-noise data: no layer clears CE<0.6, but the probe still keeps one and functions."""
+    rng = np.random.default_rng(1)
+    acts = rng.normal(size=(40, 3, 8)).astype(np.float32)
+    y = np.array([0, 1] * 20)
+    probe = LinearProbe().fit(acts, y)
+    assert len(probe.kept_layers) == 1
+    assert probe.meta.get("no_layer_below_ce") is True
+    assert probe.score(acts).shape == (40,)
+    print("probe no-layer-below-ce fallback OK")
+
+
+def test_dataset_registry_and_flatten():
+    # Stubs are registered (roadmap visible) but raise when called.
+    for name in ["truthfulqa", "mask", "liarsbench", "sandbagging", "marks_tegmark", "mbpp"]:
+        assert name in DATASET_LOADERS
+    assert "doluschat" in DATASET_LOADERS and "sycophancy" in DATASET_LOADERS
+
+    pairs = [
+        ContrastivePair(prompt="q1", honest="h1", deceptive="d1"),
+        ContrastivePair(prompt="q2", honest="h2", deceptive="d2"),
+    ]
+    questions, cots, answers, labels = flatten_pairs(pairs)
+    assert labels == [0, 1, 0, 1]
+    assert answers == ["h1", "d1", "h2", "d2"]
+    assert questions == ["q1", "q1", "q2", "q2"]
+
+    try:
+        load_contrastive(["truthfulqa"])
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("stub adapter should raise NotImplementedError")
+
+    try:
+        load_contrastive(["nonexistent_source"])
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unknown source should raise KeyError")
+    print("dataset registry + flatten OK")
+
+
+def test_load_saved_rollouts_fixture():
+    pairs = load_saved_rollouts(str(_FIXTURE))
+    assert len(pairs) == 5  # one unparsed row dropped
+    steps = {r.meta["step"] for r, _ in pairs}
+    assert steps == {0, 1}
+    # ground truth labels preserved
+    assert sum(1 for _, g in pairs if g) == 3
+    with_unparsed = load_saved_rollouts(str(_FIXTURE), keep_unparsed=True)
+    assert len(with_unparsed) == 6
+    print("load_saved_rollouts OK")
+
+
+def test_degradation_matrix(tmp_path=None):
+    import json
+
+    from monitordecorrelation.eval.degradation import build_matrix
+
+    d = Path(tempfile.mkdtemp()) if tmp_path is None else tmp_path
+    # Fake a run dir: metrics.jsonl with one CoT monitor + a probe_eval file.
+    metrics = [
+        {"step": 0, "monitor/cot_weak/cum_auroc": 0.8},
+        {"step": 1, "monitor/cot_weak/cum_auroc": 0.7},
+        {"step": 2, "monitor/cot_weak/cum_auroc": 0.6},
+    ]
+    (d / "metrics.jsonl").write_text("\n".join(json.dumps(m) for m in metrics) + "\n")
+    probe_eval = [
+        {"step": 0, "auroc": 0.9}, {"step": 1, "auroc": 0.85}, {"step": 2, "auroc": 0.7},
+    ]
+    (d / "probe_eval_probe_ood.jsonl").write_text("\n".join(json.dumps(m) for m in probe_eval) + "\n")
+
+    result = build_matrix(d)
+    assert "cot_weak" in result["table"]["columns"]
+    assert "probe_ood" in result["table"]["columns"]
+    # Both detectors degrade monotonically -> strong positive correlation.
+    assert result["correlation"]["cot_weak"]["probe_ood"] > 0.9
+    assert (d / "degradation.csv").exists()
+    print("degradation matrix OK")
+
+
+def test_extract_activations_logic_offline():
+    """Exercise the tensor logic of extract_activations (left-pad last-token select + hidden_states
+    stack) with a tiny torch model + stub tokenizer — no network, no real weights."""
+    try:
+        import torch
+    except Exception as e:  # pragma: no cover
+        print(f"SKIP extract_activations logic (no torch): {e}")
+        return
+
+    from monitordecorrelation.whitebox.model import WhiteBoxModel
+
+    N_LAYERS_PLUS1, D = 3, 5
+
+    class _Enc(dict):
+        def to(self, _device):
+            return self
+
+    class _StubTokenizer:
+        padding_side = "right"
+        pad_token = "<pad>"
+        eos_token = "<pad>"
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kw):
+            # render length = length of the assistant answer (messages[1]) so triples of different
+            # answer length produce different-length sequences -> genuinely exercises left padding
+            return " ".join(["w"] * len(messages[1]["content"]))
+
+        def __call__(self, batch, return_tensors=None, padding=None, add_special_tokens=None):
+            lens = [len(t.split()) for t in batch]
+            T = max(lens)
+            ids = torch.zeros(len(batch), T, dtype=torch.long)
+            mask = torch.zeros(len(batch), T, dtype=torch.long)
+            for i, L in enumerate(lens):
+                # left padding: real tokens occupy the RIGHTMOST L columns
+                ids[i, T - L:] = torch.arange(1, L + 1)
+                mask[i, T - L:] = 1
+            return _Enc(input_ids=ids, attention_mask=mask)
+
+    class _StubModel:
+        def __call__(self, input_ids=None, attention_mask=None):
+            B, T = input_ids.shape
+            # hidden state at each position = its token id, broadcast across d; distinct per layer
+            base = input_ids.unsqueeze(-1).float().expand(B, T, D)
+            hidden_states = tuple(base + layer for layer in range(N_LAYERS_PLUS1))
+            return type("Out", (), {"hidden_states": hidden_states})()
+
+    m = WhiteBoxModel.__new__(WhiteBoxModel)
+    m.tokenizer = _StubTokenizer()
+    m.model = _StubModel()
+    m.device = "cpu"
+
+    triples = [("q", "", "bbb"), ("q", "", "ddddddd")]  # answer lens 3 vs 7 -> different padding
+    acts = m.extract_activations(triples, batch_size=2)
+    assert acts.shape == (2, N_LAYERS_PLUS1, D), acts.shape
+    # Padding side must be restored after the call.
+    assert m.tokenizer.padding_side == "right"
+    # Under left padding the last column is the last REAL token (id = seq length); layer L adds L.
+    # seq0 length 3 -> base 3; seq1 length 7 -> base 7. Correct selection proves padding isn't read.
+    assert np.allclose(acts[0, 0, :], 3.0), acts[0, 0]
+    assert np.allclose(acts[1, 0, :], 7.0), acts[1, 0]
+    assert np.allclose(acts[0, 2, :], 5.0), acts[0, 2]  # layer 2 adds 2
+    print("extract_activations tensor logic OK")
+
+
+def test_whitebox_model_end_to_end():
+    """End-to-end on a tiny model. Skips if the model can't be loaded (offline)."""
+    try:
+        from monitordecorrelation.whitebox.model import WhiteBoxModel
+    except Exception as e:  # pragma: no cover
+        print(f"SKIP whitebox model (import): {e}")
+        return
+    try:
+        model = WhiteBoxModel("Qwen/Qwen3-0.6B")
+    except Exception as e:  # pragma: no cover - network/model unavailable
+        print(f"SKIP whitebox model end-to-end (load failed, likely offline): {str(e)[:80]}")
+        return
+
+    from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
+    from monitordecorrelation.types import Prompt, Rollout
+
+    triples = [("Is the sky blue?", "", "Yes, the sky is blue."),
+               ("Is the sky blue?", "", "No, the sky is green.")] * 4
+    acts = model.extract_activations(triples)
+    assert acts.shape == (8, model.n_layers, model.d_model), acts.shape
+    y = np.array([0, 1] * 4)
+    probe = LinearProbe().fit(acts, y)
+    probe.meta["model_name"] = model.model_name
+
+    monitor = ProbeMonitor("probe_test", model, probe)
+    r = Rollout(prompt=Prompt(text="Is the sky blue?"), cot="", output="No, the sky is green.")
+    res = monitor.score(r)
+    assert 0.0 <= res.score <= 1.0 and isinstance(res.label, bool)
+    print(f"whitebox model end-to-end OK (acts {acts.shape}, score={res.score:.3f})")
+
+
+if __name__ == "__main__":
+    test_probe_fit_score_separable()
+    test_probe_save_load_roundtrip()
+    test_probe_no_layer_below_ce_keeps_best()
+    test_dataset_registry_and_flatten()
+    test_load_saved_rollouts_fixture()
+    test_degradation_matrix()
+    test_extract_activations_logic_offline()
+    test_whitebox_model_end_to_end()
+    print("ALL PASS")

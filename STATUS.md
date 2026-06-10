@@ -37,8 +37,10 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | --- | --- | --- |
 | CoT monitor (black-box LLM judge) | 🟢 | `monitors/cot_monitor.py` (OpenRouter); discrimination tested live. weak/strong via `model_id`. |
 | Output monitor (black-box) | ⬜ | |
-| Linear probe (white-box) | ⬜ | **Blocked on activations path** (see below). |
-| Activation extraction from tinker policy | ⬜ | **Top derisk.** Likely pull weights → local forward pass. |
+| Linear probe (white-box) | 🟡 | `whitebox/{model,probe}.py` + `monitors/probe_monitor.py`. Per-layer LR, CE<0.6 filter, follow-up-token activations (Atlas §4.3). Logic unit-tested offline (`tests/test_probe.py`, incl. left-pad last-token select); held-out-AUROC run on a real model **pending HF/compute** (offline here). v1 uses the **original base model**, not the tinker policy. |
+| Contrastive-QA dataset registry | 🟡 | `whitebox/datasets/` — uniform `(prompt, honest, deceptive)` shape so a probe is generic over training data. Real adapters: `doluschat`, `sycophancy`; stubs registered: truthfulqa/mask/liarsbench/sandbagging/marks_tegmark/mbpp. Registry+flatten unit-tested; adapters need HF to fetch (untested live). |
+| ProbeMonitor (white-box `Monitor`) | 🟡 | `monitors/probe_monitor.py` — plugs into the seam; **post-hoc/batched only** (never in the RL loop in v1). `score`/`score_batch` tested via stub model; real-model path skips offline. |
+| Activation extraction from tinker policy | ⬜ | **v2 action item** (obfuscated-activations decomposition): pull LoRA weights via `tinker_cookbook.weights.*` → local forward pass. v1 deliberately sidesteps this by probing the base model on generated text. |
 
 ## Environments
 | Component | State | Notes |
@@ -64,14 +66,14 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | Logging / local wandb | 🟢 | offline wandb + per-step `metrics.jsonl` + per-rollout jsonl (env + per-monitor score/label + reward + advantage + generic `extra`). |
 | Local plots (`experiments/plot_run.py`) | 🟢 | matplotlib PNGs from `metrics.jsonl` (no W&B server needed). |
 | LoRA LR estimation (`hyperparams.py`) | 🟢 | re-exports TM's `tinker_cookbook.hyperparam_utils.get_lr` (no hardcoding). Qwen3-8B → 4.7e-4. |
-| Degradation matrix (`eval/degradation.py`) | ⬜ | pairwise D[i][j] across conditions — next, builds on the tracker. |
+| Degradation matrix (`eval/degradation.py`) | 🟡 | `build_matrix(run_dir)` assembles per-step AUROC columns (CoT from `metrics.jsonl`, probes from `probe_eval_*.jsonl`) + a trajectory-correlation matrix; writes `degradation.{json,csv}`. Unit-tested on synthetic columns; needs a real run to populate. |
 | No-penalty + frozen-policy controls | ⬜ | baselines per EXPERIMENT_PLAN.md. |
 
 ## Experiments
 | Component | State | Notes |
 | --- | --- | --- |
 | `train_against_cot` (train weak CoT, hold out strong) | 🟡 | `experiments/train_against_cot.py` — loop runs end-to-end; realistic defaults (16×8 ×40, auto-LR). Not yet run at full size / not a validated result. |
-| Exp 1 — cross-method (CoT vs probe) | ⬜ | Blocked on activations path. |
+| Exp 1 — cross-method (CoT vs probe) | 🟡 | Plumbing built: `experiments/{train_probe,eval_probes_on_run}.py` (probe trains on base model, scored **post-hoc** over a run's `rollouts.jsonl`). Needs a real probe + saved run to produce numbers. No longer blocked (v1 uses base model, not tinker internals). |
 | Combined degradation matrix | ⬜ | After train_against_cot + probe. |
 
 ## Known issues / flags (don't forget)

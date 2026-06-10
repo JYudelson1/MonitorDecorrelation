@@ -29,8 +29,7 @@ import tinker
 from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 from monitordecorrelation.eval.metrics import accuracy, roc_auc
 from monitordecorrelation.monitors.cot_monitor import CoTMonitor
-from monitordecorrelation.rl.rollout import sample_rollouts
-from monitordecorrelation.types import Prompt, Rollout
+from monitordecorrelation.rl.rollout import load_saved_rollouts, sample_rollouts
 
 load_dotenv(".env")
 
@@ -46,21 +45,6 @@ _DEFAULT_CANDIDATES = [
 
 def _slug(model_id: str) -> str:
     return model_id.split("/")[-1]
-
-
-def _load_rollouts(path: str) -> list[tuple[Rollout, bool]]:
-    """Reconstruct (rollout, ground_truth) pairs from a saved rollouts.jsonl, dropping unparsed."""
-    out = []
-    for line in open(path):
-        r = json.loads(line)
-        if r["env"].get("unparsed"):
-            continue
-        # tolerate pre-refactor rollouts that used the old "ground_truth_misbehavior" key
-        beh = r["env"].get("behavior_present", r["env"].get("ground_truth_misbehavior"))
-        out.append(
-            (Rollout(prompt=Prompt(text=r["question"]), cot=r["cot"], output=r["answer"]), bool(beh))
-        )
-    return out
 
 
 def main() -> None:
@@ -84,7 +68,7 @@ def main() -> None:
 
     # 1. get (rollout, ground_truth) pairs — either from disk or by sampling the policy
     if args.from_rollouts:
-        parsed = _load_rollouts(args.from_rollouts)
+        parsed = load_saved_rollouts(args.from_rollouts)
         n_unparsed = "?"
         source = args.from_rollouts
     else:
