@@ -61,7 +61,9 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | GRPO algorithm (`rl/grpo.py`) | 🟢 | group-relative advantages + Datum construction; alignment unit-tested. DR-GRPO via `normalize=False`. |
 | Rollout / sampling (`rl/rollout.py`) | 🟢 | tinker sampling + chat-template + CoT/answer split. |
 | Baseline eval (no-train measurement loop) | 🟢 | `experiments/eval_baseline.py`: real Qwen3-8B → oracle + monitor. Sycophancy rate ~0.75 on political subset. |
-| RL loop (`rl/train.py`) | 🟢 | reward = task − λ·penalty; GRPO; runs via `experiments/train_against_cot.py`. |
+| RL loop (`rl/train.py`) | 🟢 | reward = task − λ·penalty; GRPO; probes via `score_batch`. Runs via `experiments/run_experiment.py`. |
+| Generic config runner (`experiment_config.py` + `run_experiment.py`) | 🟢 | pydantic-validated JSON/YAML config; mixed CoT+probe monitors, train/held roles; bad configs rejected. Replaces the per-experiment scripts. Live-tested. |
+| `TransformersBackend` (local, trained-model probing) | 🟢 | listed above under Backends. |
 | Ground-truth rate tracking | 🟢 | **Primary metric**, logged every step. |
 | Per-monitor accuracy + AUROC tracker (`eval/metrics.py`) | 🟢 | per-step + cumulative, train-against AND held-out; unit-tested. |
 | Logging / local wandb | 🟢 | offline wandb + per-step `metrics.jsonl` + per-rollout jsonl (env + per-monitor score/label + reward + advantage + generic `extra`). |
@@ -73,7 +75,8 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 ## Experiments
 | Component | State | Notes |
 | --- | --- | --- |
-| `train_against_cot` (train weak CoT, hold out strong) | 🟡 | `experiments/train_against_cot.py` — loop runs end-to-end; realistic defaults (16×8 ×40, auto-LR). Not yet run at full size / not a validated result. |
+| train-against-CoT (config) | 🟢 | `configs/train_against_cot.json`; full 40-step runs done last session (run_nlp40 / run_nlp40_strong). |
+| train-against-probe (original-model probing) | 🟢 | `configs/train_against_*probe*.json`; probe penalty in reward via tinker. Validated (0.6B mechanics test); valid same-model 4B run pending. |
 | Exp 1 — cross-method (CoT vs probe) | 🟡 | Plumbing built: `experiments/{train_probe,eval_probes_on_run}.py` (probe trains on base model, scored **post-hoc** over a run's `rollouts.jsonl`). Needs a real probe + saved run to produce numbers. No longer blocked (v1 uses base model, not tinker internals). |
 | Combined degradation matrix | ⬜ | After train_against_cot + probe. |
 

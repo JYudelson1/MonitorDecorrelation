@@ -137,9 +137,15 @@ class WhiteBoxModel:
         return np.concatenate(feats, axis=0)
 
     @property
+    def _text_config(self):
+        # Newer archs (e.g. Qwen3.5) nest hidden_size/num_hidden_layers under a text sub-config.
+        cfg = self.model.config
+        return cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg
+
+    @property
     def n_layers(self) -> int:
-        return int(self.model.config.num_hidden_layers) + 1  # + embeddings
+        return int(self._text_config.num_hidden_layers) + 1  # + embeddings
 
     @property
     def d_model(self) -> int:
-        return int(self.model.config.hidden_size)
+        return int(self._text_config.hidden_size)

@@ -99,3 +99,28 @@ class LinearProbe:
             clf.classes_ = np.array([0, 1])
             probe._models[layer] = clf
         return probe
+
+    # --- HuggingFace Hub: push/pull a probe for reproducibility + sharing ---
+    def push_to_hub(
+        self, repo_id: str, *, private: bool = True, repo_type: str = "model", token: str | None = None
+    ) -> str:
+        """Upload this probe (npz + meta) to a HF repo. The meta records the base model, datasets, and
+        follow-up, so a pulled probe is self-describing. Needs `HF_TOKEN` (or pass `token`)."""
+        import tempfile
+
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=token)
+        api.create_repo(repo_id, private=private, repo_type=repo_type, exist_ok=True)
+        with tempfile.TemporaryDirectory() as d:
+            self.save(d)
+            api.upload_folder(folder_path=d, repo_id=repo_id, repo_type=repo_type)
+        return f"https://huggingface.co/{repo_id}"
+
+    @classmethod
+    def from_hub(cls, repo_id: str, *, repo_type: str = "model", token: str | None = None) -> "LinearProbe":
+        """Download + load a probe previously pushed with :meth:`push_to_hub`."""
+        from huggingface_hub import snapshot_download
+
+        local = snapshot_download(repo_id, repo_type=repo_type, token=token)
+        return cls.load(local)

@@ -1,0 +1,16 @@
+{
+  "experiment": "train_against_probe",
+  "run_name": "tap",
+  "policy": "Qwen/Qwen3.5-4B",
+  "backend": "tinker",
+  "subset": "nlp",
+  "n_steps": 40,
+  "batch_size": 8,
+  "group_size": 8,
+  "max_tokens": 1024,
+  "monitors": [
+    {"kind": "probe", "name": "probe_ood", "role": "train_against",
+     "probe_path": "data/probes/Qwen3.5-4B/doluschat", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "cot", "name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6"}
+  ]
+}

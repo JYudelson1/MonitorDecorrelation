@@ -1,0 +1,19 @@
+{
+  "experiment": "train_against_ood_probe",
+  "run_name": "tap_ood_4b",
+  "description": "Train AGAINST the ood deception probe (original-model probing: a frozen Qwen3.5-4B base scores the generated text each step, tinker backend, no weight download). Hold out the weak + strong CoT monitors to measure cross-method degradation: does training against the probe degrade the CoT monitors? (The iid sycophancy_cot probe will be added to held_out once that dataset/probe exists — see the open task.)",
+  "policy": "Qwen/Qwen3.5-4B",
+  "backend": "tinker",
+  "subset": "nlp",
+  "n_steps": 40,
+  "batch_size": 8,
+  "group_size": 8,
+  "max_tokens": 1024,
+  "penalty_coef": 1.0,
+  "monitors": [
+    {"kind": "probe", "name": "probe_ood", "role": "train_against",
+     "probe_path": "data/probes/Qwen3.5-4B/doluschat", "probe_model": "Qwen/Qwen3.5-4B"},
+    {"kind": "cot", "name": "cot_weak", "role": "held_out", "model_id": "anthropic/claude-3.5-haiku"},
+    {"kind": "cot", "name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6"}
+  ]
+}

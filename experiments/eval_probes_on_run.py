@@ -46,7 +46,7 @@ def main() -> None:
 
     probe = LinearProbe.load(args.probe)
     model_name = args.model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
-    # Mode A (frozen-base probing) is only valid when the probe model matches the RL policy's base.
+    # Original-model probing is only valid when the probe model matches the RL policy's base.
     if args.policy_base and model_name != args.policy_base:
         print(f"⚠️  OFF-MODEL: probe model {model_name!r} != policy base {args.policy_base!r}. "
               "Frozen-base probing is unreliable across different models/sizes — retrain the probe "

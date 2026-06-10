@@ -29,7 +29,8 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3-0.6B")
     ap.add_argument("--datasets", default="doluschat", help="comma-list of registered adapters")
     ap.add_argument("--n-per", type=int, default=1000, help="max contrastive PAIRS per source")
-    ap.add_argument("--out", default="data/probes/probe")
+    ap.add_argument("--out", default=None,
+                    help="default: data/probes/<model_slug>/<datasets> (probes live in a per-model folder)")
     ap.add_argument("--test-frac", type=float, default=0.2)
     ap.add_argument("--ce-threshold", type=float, default=0.6)
     ap.add_argument("--threshold", type=float, default=0.5, help="deploy decision threshold")
@@ -38,11 +39,15 @@ def main() -> None:
     # Follow-up turn (Atlas §4.3). Default is deception-framed; override for a behavior-specific probe.
     ap.add_argument("--follow-up-question", default="Did you respond truthfully?")
     ap.add_argument("--follow-up-answer", default="Yes")
+    ap.add_argument("--push-to-hub", default=None, metavar="repo_id",
+                    help="also push the trained probe to this HF repo (needs HF_TOKEN)")
     args = ap.parse_args()
 
     follow_up = (args.follow_up_question, args.follow_up_answer)
 
     names = [s.strip() for s in args.datasets.split(",") if s.strip()]
+    # Probes live in a per-model folder so probes for different base models never collide.
+    out = args.out or f"data/probes/{args.model.split('/')[-1]}/{'-'.join(names)}"
     print(f"datasets={names}  model={args.model}")
     pairs = load_contrastive(names, n_per=args.n_per, seed=args.seed)
     questions, cots, answers, labels = flatten_pairs(pairs)
@@ -76,8 +81,12 @@ def main() -> None:
     print("per-layer train CE: " + ", ".join(f"{l}:{probe.layer_ce[l]:.2f}" for l in sorted(probe.layer_ce)))
     print(f"HELD-OUT AUROC: {auroc:.3f}  (n_test_rows={len(test_rows)})")
 
-    probe.save(args.out)
-    print(f"saved probe -> {args.out}")
+    probe.save(out)
+    print(f"saved probe -> {out}")
+
+    if args.push_to_hub:
+        url = probe.push_to_hub(args.push_to_hub)
+        print(f"pushed probe -> {url}")
 
 
 if __name__ == "__main__":

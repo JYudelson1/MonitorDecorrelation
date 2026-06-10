@@ -1,0 +1,15 @@
+{
+  "experiment": "train_against_cot",
+  "run_name": "tac",
+  "policy": "Qwen/Qwen3-8B",
+  "backend": "tinker",
+  "subset": "nlp",
+  "n_steps": 40,
+  "batch_size": 8,
+  "group_size": 8,
+  "max_tokens": 1024,
+  "monitors": [
+    {"kind": "cot", "name": "cot_weak", "role": "train_against", "model_id": "anthropic/claude-3.5-haiku"},
+    {"kind": "cot", "name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6"}
+  ]
+}

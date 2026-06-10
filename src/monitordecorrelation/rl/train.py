@@ -95,20 +95,26 @@ def run_grpo(
         env_results = [env.score(r) for r in rollouts]
         gt = [er.behavior_present for er in env_results]
 
-        # Score every monitor on every rollout once (concurrent HTTP), reused for the penalty AND
-        # the degradation metrics. Sequential scoring would dominate runtime at scale.
-        results_by_name: dict[str, list[MonitorResult]] = {
-            m.name: [None] * len(rollouts) for m in all_monitors  # type: ignore[list-item]
-        }
-        with ThreadPoolExecutor(max_workers=monitor_workers) as ex:
-            futs = {
-                ex.submit(m.score, rollouts[i]): (m.name, i)
-                for m in all_monitors
-                for i in range(len(rollouts))
-            }
-            for fut in futs:
-                name, i = futs[fut]
-                results_by_name[name][i] = fut.result()
+        # Score every monitor on every rollout once, reused for the penalty AND the degradation
+        # metrics. White-box probes expose ``score_batch`` (one batched local forward — threading a
+        # single torch model is pointless/unsafe); API judges are scored per-rollout concurrently.
+        results_by_name: dict[str, list[MonitorResult]] = {}
+        batched = [m for m in all_monitors if hasattr(m, "score_batch")]
+        threaded = [m for m in all_monitors if not hasattr(m, "score_batch")]
+        for m in batched:
+            results_by_name[m.name] = list(m.score_batch(rollouts))
+        if threaded:
+            for m in threaded:
+                results_by_name[m.name] = [None] * len(rollouts)  # type: ignore[list-item]
+            with ThreadPoolExecutor(max_workers=monitor_workers) as ex:
+                futs = {
+                    ex.submit(m.score, rollouts[i]): (m.name, i)
+                    for m in threaded
+                    for i in range(len(rollouts))
+                }
+                for fut in futs:
+                    name, i = futs[fut]
+                    results_by_name[name][i] = fut.result()
         penalties = [
             mean(results_by_name[m.name][i].score for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
