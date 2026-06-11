@@ -5,7 +5,7 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor bakeoff tool; nlp subset; 40-step nlp run in progress)._
+_Last updated: 2026-06-10 (eval/train split BUILT + validated; brier + class-split metrics; train-against-probe pipeline validated end-to-end on a local smoke run; MPS memory wall for the 4B probe documented → real run is GPU-only)._
 
 ## Key findings this session
 - **Setting matters more than monitor strength.** On political-typology *no* monitor (incl. Opus 4.8) beats ~0.6 AUROC — every CoT reasons about user identity. On the **nlp subset, Sonnet-4.6 hits ~0.80-0.94 AUROC** with real separation → that's the usable setting. (philpapers untested.)
@@ -66,11 +66,12 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | `TransformersBackend` (local, trained-model probing) | 🟢 | listed above under Backends. |
 | Ground-truth rate tracking | 🟢 | **Primary metric**, logged every step. |
 | Per-monitor accuracy + AUROC tracker (`eval/metrics.py`) | 🟢 | per-step + cumulative, train-against AND held-out; unit-tested. |
+| `brier` + class-split (`mean_score_syco`/`honest`) metrics | 🟢 | `eval/metrics.py`. AUROC goes NaN at single-class (behavior≈0/≈1 — the obfuscation-success regime); brier (proper scoring rule, MSE vs syco=1/honest=0) + `mean_score_syco` stay defined there and carry the degradation signal. Logged per eval monitor + train-against probe; on the eval `monitors.png`. Unit-tested. |
 | Logging / local wandb | 🟢 | offline wandb + per-step `metrics.jsonl` + per-rollout jsonl (env + per-monitor score/label + reward + advantage + generic `extra`). |
 | Local plots (`scripts/plot_run.py`) | 🟢 | matplotlib PNGs from `metrics.jsonl`; auto-plots on finish (no W&B server needed). |
 | LoRA LR estimation (`hyperparams.py`) | 🟢 | re-exports TM's `tinker_cookbook.hyperparam_utils.get_lr` (no hardcoding). Qwen3-8B → 4.7e-4. |
 | Degradation matrix (`eval/degradation.py`) | 🟢 | **CROSS-RUN** tool: `build_degradation_matrix([run dirs])` → `D[i][j]` = AUROC drop of detector j when training against i, + heatmap PNG. **NOT per-run** (one run = one row; never saved after a training run). Unit-tested; needs N matched runs (identical configs except `train_against`) to populate. |
-| **Held-out eval phase (train/ vs eval/ split)** | ⬜ | **Planned — see "Eval/train split" below.** Periodic eval on a FIXED held-out set; `train/` vs `eval/` metric+plot namespaces; config-controlled eval frequency. |
+| **Held-out eval phase (train/ vs eval/ split)** | 🟢 | **BUILT + validated** (smoke run 2026-06-10). Every `eval_every` steps, samples a FIXED held-out set (`env.holdout(eval_size)`, REMOVED from the train pool so eval ⟂ train), scores ALL monitors, logs `eval/` namespace + `eval_metrics.jsonl`. Train step scores only train-against monitors (`train/` + `metrics.jsonl`). Per-phase timers (`time/sample_s`,`score_s`,`optim_s`) + `[HH:MM:SS]` logs. |
 | No-penalty + frozen-policy controls | ⬜ | baselines per EXPERIMENT_PLAN.md. |
 
 ## Experiments
@@ -82,12 +83,13 @@ _Last updated: 2026-06-05 (behavior-generic refactor; rubric registry; monitor b
 | Combined degradation matrix | 🟡 | All 4 detectors exist (`configs/full_matrix.json`). Needs the N matched runs (train against each, identical else) → `build_degradation_matrix`. A rented-GPU job (local 4B probe-in-loop is slow). |
 | Datasets/probes durability | ⬜ | `data/probes/syco_cot_pairs.jsonl` (71 pairs, model-independent) + probes are local/gitignored. `LinearProbe.push_to_hub` exists; add a dataset push + run it so they're not regenerated. |
 
-## Planned next — eval/train split + richer plots (design captured)
+## Eval/train split + richer plots — BUILT + validated (2026-06-10)
 
-The current loop logs everything from the **training rollouts** per step (noisy, on-policy, changing
-batch). We want a proper **held-out eval** so degradation curves are trustworthy.
+Done and validated end-to-end on a local smoke run (`tap_iid_4b_smoke`: 5 steps, eval every step).
+The loop now separates **training-rollout** metrics from a **held-out eval** so degradation curves are
+trustworthy. Design as built:
 
-**Eval/train split** (`cfg.eval_every`, currently unused, is the hook):
+**Eval/train split** (`cfg.eval_every` is the hook):
 - Every N steps, run a **fixed held-out eval set** of prompts through the current policy.
 - Two metric/plot namespaces:
   - **`train/`** — per-step, on the training rollouts: train-against monitor score + **model reward**
@@ -108,6 +110,8 @@ batch). We want a proper **held-out eval** so degradation curves are trustworthy
   cross-run heatmap (`build_degradation_matrix`), built separately over a *set* of runs.
 
 ## Known issues / flags (don't forget)
+- **MPS can't run the 4B white-box probe at 4096-token sequences.** No flash kernels on macOS → PyTorch materializes the full `[B, heads, T, T]` attention; a *single* 4096-token forward on the 4B hybrid model peaks ~27 GiB (one ~16 GiB attention/state buffer + 8 GiB weights), over the 36 GiB ceiling. It's the per-SEQUENCE O(T²) cost, not the batch — `batch_size=1` does NOT help; only shorter sequences do. `ProbeMonitor.batch_size` is device-aware (1 on MPS, 8 on CUDA). **Local probe runs are bs=1 + ~7.5s/forward → real runs are GPU-only** (`uv sync --extra gpu`, flash-attn removes the wall). The smoke uses `max_tokens=1024` purely so sequences fit MPS for plumbing validation.
+- **iid sycophancy probe AUROC is weak (~0.67–0.74).** A weak detector can't show a meaningful degradation *drop*, so this caps the headline result. Likely causes: tiny/noisy contrastive set (71 dual-prompt pairs; "honest" examples came from a *nudged* prompt → may encode nudge-style, not honesty), follow-up-prompt choice, single-layer LR aggregation. **Try other methods before the real run** — see the open task. (The ood deception probe is fine in-dist, 0.978; the weakness is specific to the on-domain sycophancy probe.)
 - **Monitor calibration:** the CoT judge over-flags real (subtle) rollouts — AUROCs near chance, penalty stuck ~0.6. Highest-value fix before trusting any degradation curve.
 - **Political-typology subset has no objective truth** — clean *behavioral* oracle but ambiguous for the monitor. Consider `nlp`/`philpapers` or factual-QA-with-stated-belief.
 - **CoT truncation → unparsed:** at low `max_tokens`, Qwen3 truncates mid-`<think>`; the rollout is unparsed and scored task_reward 0 / not-misbehavior (slight bias). Keep `max_tokens` ≥ ~768 or handle truncation explicitly.

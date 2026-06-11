@@ -9,6 +9,11 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 > + causal-conv1d). They're CUDA/Linux-only and gated by `sys_platform == 'linux'`, so a plain
 > `uv sync` on a Mac never tries to build them. (There's no "CUDA-available" marker in pyproject; Linux
 > is the proxy.)
+>
+> **Worse than slow — MPS OOMs the 4B probe at 4096-token sequences** (single-sequence O(T²) attention,
+> ~27 GiB peak). `batch_size=1` doesn't help; only shorter sequences do. So real probe runs are
+> **GPU-only** — full step-by-step in [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md). Local stays on the
+> smoke config (`max_tokens=1024`) for plumbing validation.
 
 | Script | What it does | Outputs |
 | --- | --- | --- |
