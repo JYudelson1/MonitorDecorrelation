@@ -21,24 +21,29 @@ DATASET_LOADERS: dict[str, ContrastiveLoader] = {}
 
 @dataclass
 class ContrastivePair:
-    """One context with a paired honest + deceptive assistant response.
+    """One honest + one deceptive assistant response, flattened to two class-balanced training rows.
 
-    ``prompt`` is the full user-visible context (system + user query, concatenated). ``honest`` and
-    ``deceptive`` are the two candidate assistant responses. Flattening yields two training rows that
-    differ only in the response and its label, which keeps probe data class-balanced by construction.
+    ``prompt`` is the user-visible context and ``honest``/``deceptive`` are the two responses. For
+    **same-prompt** sources (sycophancy, truthfulqa, …) both responses answer the same ``prompt``. For
+    **unpaired** sources (liarsbench, OA's diverse pools) honest and deceptive come from different
+    contexts; set ``deceptive_prompt`` (and/or ``honest_prompt``) so each response is read with ITS OWN
+    context — the probe is a binary classifier over individual response activations, so "pairing" only
+    serves class balance, but each activation must be extracted in the correct prompt.
     """
 
     prompt: str
     honest: str
     deceptive: str
+    honest_prompt: str | None = None  # defaults to ``prompt``
+    deceptive_prompt: str | None = None  # defaults to ``prompt``
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_rows(self) -> list[tuple[str, str, str, int]]:
         """-> [(question, cot, answer, label)]; honest=0, deceptive=1. cot is empty (we probe the
         response activations directly via the follow-up technique)."""
         return [
-            (self.prompt, "", self.honest, 0),
-            (self.prompt, "", self.deceptive, 1),
+            (self.honest_prompt or self.prompt, "", self.honest, 0),
+            (self.deceptive_prompt or self.prompt, "", self.deceptive, 1),
         ]
 
 
@@ -65,6 +70,39 @@ def load_contrastive(
     return pairs
 
 
+# Named ensemble recipes mirroring the Obfuscation Atlas probes (arXiv 2602.15515). A preset is just a
+# list of registered adapters that `load_contrastive` concatenates. `mask` is deferred from
+# `diverse_deception` until on-policy generation exists (it ships no completions — see stubs.py).
+PROBE_PRESETS: dict[str, list[str]] = {
+    "simple_deception": ["marks_tegmark"],  # true-fact vs false-fact statements
+    "diverse_deception": [
+        "marks_tegmark",
+        "doluschat",
+        "truthfulqa",
+        "liarsbench",
+        "sycophancy",
+        "sandbagging",
+    ],
+    "mbpp": ["mbpp"],  # on-domain code probe (human code = honest, hardcode = deceptive)
+}
+
+
+def resolve_datasets(datasets: list[str] | None, preset: str | None) -> list[str]:
+    """Resolve a `--datasets` list and/or a `--preset` name into a concrete adapter list (deduped,
+    order-preserving). Exactly one of the two should be given; both are merged if both are."""
+    out: list[str] = []
+    if preset is not None:
+        if preset not in PROBE_PRESETS:
+            raise KeyError(f"unknown preset {preset!r}; known: {sorted(PROBE_PRESETS)}")
+        out.extend(PROBE_PRESETS[preset])
+    if datasets:
+        out.extend(datasets)
+    if not out:
+        raise ValueError("no datasets: pass --datasets and/or --preset")
+    seen: set[str] = set()
+    return [d for d in out if not (d in seen or seen.add(d))]
+
+
 def flatten_pairs(
     pairs: list[ContrastivePair],
 ) -> tuple[list[str], list[str], list[str], list[int]]:
@@ -83,7 +121,13 @@ def flatten_pairs(
 
 
 # Import bundled adapters so they self-register on `import ...whitebox.datasets`.
-from monitordecorrelation.whitebox.datasets import doluschat as _doluschat  # noqa: E402,F401
+# (stubs first, so a real adapter for a name overrides nothing — the name is no longer in _TODO.)
 from monitordecorrelation.whitebox.datasets import stubs as _stubs  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import doluschat as _doluschat  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import sycophancy as _sycophancy  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import sycophancy_cot as _sycophancy_cot  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import truthfulqa as _truthfulqa  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import mbpp as _mbpp  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import sandbagging as _sandbagging  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import marks_tegmark as _marks_tegmark  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import liarsbench as _liarsbench  # noqa: E402,F401

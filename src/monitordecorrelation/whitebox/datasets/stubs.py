@@ -17,12 +17,7 @@ from __future__ import annotations
 from monitordecorrelation.whitebox.datasets import ContrastivePair, register
 
 _TODO = [
-    "truthfulqa",
-    "mask",
-    "liarsbench",
-    "sandbagging",
-    "marks_tegmark",
-    "mbpp",
+    "mask",  # env-only for now; the MASK *probe* needs on-policy generation (no shipped completions)
 ]
 
 

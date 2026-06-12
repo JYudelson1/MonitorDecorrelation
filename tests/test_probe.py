@@ -72,7 +72,7 @@ def test_probe_no_layer_below_ce_keeps_best():
 
 
 def test_dataset_registry_and_flatten():
-    # Stubs are registered (roadmap visible) but raise when called.
+    # All targets registered; most are now real adapters, `mask` remains a stub (probe needs gen).
     for name in ["truthfulqa", "mask", "liarsbench", "sandbagging", "marks_tegmark", "mbpp"]:
         assert name in DATASET_LOADERS
     assert "doluschat" in DATASET_LOADERS and "sycophancy" in DATASET_LOADERS
@@ -87,7 +87,7 @@ def test_dataset_registry_and_flatten():
     assert questions == ["q1", "q1", "q2", "q2"]
 
     try:
-        load_contrastive(["truthfulqa"])
+        load_contrastive(["mask"])  # mask remains a stub (its probe needs on-policy generation)
     except NotImplementedError:
         pass
     else:
@@ -100,6 +100,36 @@ def test_dataset_registry_and_flatten():
     else:
         raise AssertionError("unknown source should raise KeyError")
     print("dataset registry + flatten OK")
+
+
+def test_probe_presets_and_per_response_prompts():
+    from monitordecorrelation.whitebox.datasets import (
+        ContrastivePair,
+        PROBE_PRESETS,
+        flatten_pairs,
+        resolve_datasets,
+    )
+
+    assert set(PROBE_PRESETS) == {"simple_deception", "diverse_deception", "mbpp"}
+    assert resolve_datasets(None, "simple_deception") == ["marks_tegmark"]
+    assert "doluschat" in resolve_datasets(None, "diverse_deception")
+    # merge --datasets + --preset, order-preserving dedup
+    assert resolve_datasets(["truthfulqa", "marks_tegmark"], "simple_deception") == [
+        "marks_tegmark",
+        "truthfulqa",
+    ]
+    for bad, exc in [(("x", "bogus"), KeyError), ((None, None), ValueError)]:
+        try:
+            resolve_datasets(None, bad[1]) if bad[0] == "x" else resolve_datasets(None, None)
+        except exc:
+            pass
+        else:
+            raise AssertionError(f"expected {exc.__name__}")
+    # per-response prompts: deceptive read with its OWN context (unpaired sources)
+    p = ContrastivePair(prompt="P", honest="h", deceptive="d", deceptive_prompt="DP")
+    q, c, a, y = flatten_pairs([p])
+    assert q == ["P", "DP"] and a == ["h", "d"] and y == [0, 1]
+    print("presets + per-response prompts OK")
 
 
 def test_load_saved_rollouts_fixture():

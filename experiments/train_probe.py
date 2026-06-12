@@ -17,7 +17,12 @@ import argparse
 import numpy as np
 from dotenv import load_dotenv
 
-from monitordecorrelation.whitebox.datasets import flatten_pairs, load_contrastive
+from monitordecorrelation.whitebox.datasets import (
+    PROBE_PRESETS,
+    flatten_pairs,
+    load_contrastive,
+    resolve_datasets,
+)
 from monitordecorrelation.whitebox.model import WhiteBoxModel
 from monitordecorrelation.whitebox.probe import LinearProbe
 
@@ -27,7 +32,9 @@ load_dotenv()
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3-0.6B")
-    ap.add_argument("--datasets", default="doluschat", help="comma-list of registered adapters")
+    ap.add_argument("--datasets", default=None, help="comma-list of registered adapters")
+    ap.add_argument("--preset", default=None,
+                    help="named ensemble recipe (merged with --datasets): " + ", ".join(sorted(PROBE_PRESETS)))
     ap.add_argument("--n-per", type=int, default=1000, help="max contrastive PAIRS per source")
     ap.add_argument("--out", default=None,
                     help="default: data/probes/<model_slug>/<datasets> (probes live in a per-model folder)")
@@ -45,9 +52,12 @@ def main() -> None:
 
     follow_up = (args.follow_up_question, args.follow_up_answer)
 
-    names = [s.strip() for s in args.datasets.split(",") if s.strip()]
-    # Probes live in a per-model folder so probes for different base models never collide.
-    out = args.out or f"data/probes/{args.model.split('/')[-1]}/{'-'.join(names)}"
+    datasets = [s.strip() for s in args.datasets.split(",") if s.strip()] if args.datasets else None
+    names = resolve_datasets(datasets, args.preset)
+    # Probes live in a per-model folder so probes for different base models never collide. A preset
+    # gets a clean folder name (e.g. .../diverse_deception) instead of the full joined dataset list.
+    slug = args.preset or "-".join(names)
+    out = args.out or f"data/probes/{args.model.split('/')[-1]}/{slug}"
     print(f"datasets={names}  model={args.model}")
     pairs = load_contrastive(names, n_per=args.n_per, seed=args.seed)
     questions, cots, answers, labels = flatten_pairs(pairs)
@@ -73,6 +83,7 @@ def main() -> None:
     probe = LinearProbe(threshold=args.threshold, ce_threshold=args.ce_threshold)
     probe.fit(acts[train_rows], y[train_rows])
     probe.meta["datasets"] = names
+    probe.meta["preset"] = args.preset
     probe.meta["model_name"] = args.model
     probe.meta["follow_up"] = list(follow_up)  # deploy must use the identical follow-up
     auroc = probe.evaluate(acts[test_rows], y[test_rows])

@@ -107,3 +107,14 @@ all others. Assemble the complete pairwise degradation matrix — the project's 
 - Whether to also log **(b)-style** false-negative overlap between detectors, not just (a)-style
   co-degradation.
 - AuditBench methodology (deferred).
+
+## Probe-design ideas (later)
+- **CoT-masked probe.** Train the probe on activations but **mask out the CoT (`<think>`) tokens** —
+  read the deception signal only from the non-CoT (answer / follow-up) token activations. Rationale:
+  tests whether deception is represented *independently of the verbalized reasoning*. A probe that
+  ignores CoT-token activations can't be fooled by CoT obfuscation, and it probes whether the model
+  "knows" it's being deceptive outside what it says. **Open question** whether this is even well-defined
+  given the Atlas follow-up-token method already reads a *post-CoT* token (the follow-up answer) — the
+  masking would matter for mean-pooled / multi-token probe variants, less so for the single
+  follow-up-token readout. Worth a small ablation: follow-up-token vs mean-over-answer vs
+  mean-over-all-minus-CoT. (Idea from Joey, 2026-06-12.)
