@@ -5,7 +5,7 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-06-10 (eval/train split BUILT + validated; brier + class-split metrics; train-against-probe pipeline validated end-to-end on a local smoke run; MPS memory wall for the 4B probe documented → real run is GPU-only)._
+_Last updated: 2026-06-12 (infra day: 5 probe-dataset adapters + ensemble presets; MBPP-Honeypot + MASK deception envs + subprocess code executor + `deception` rubric + shared OpenRouter helper; output-monitor queued (#38); CoT-regeneration helper pending (#37)). Prev 2026-06-10: eval/train split + brier metrics + MPS 4B-probe wall (GPU-only)._
 
 ## Key findings this session
 - **Setting matters more than monitor strength.** On political-typology *no* monitor (incl. Opus 4.8) beats ~0.6 AUROC — every CoT reasons about user identity. On the **nlp subset, Sonnet-4.6 hits ~0.80-0.94 AUROC** with real separation → that's the usable setting. (philpapers untested.)
@@ -35,10 +35,10 @@ _Last updated: 2026-06-10 (eval/train split BUILT + validated; brier + class-spl
 ## Monitors
 | Component | State | Notes |
 | --- | --- | --- |
-| CoT monitor (black-box LLM judge) | 🟢 | `monitors/cot_monitor.py` (OpenRouter); discrimination tested live. weak/strong via `model_id`. |
-| Output monitor (black-box) | ⬜ | |
+| CoT monitor (black-box LLM judge) | 🟢 | `monitors/cot_monitor.py` (OpenRouter); discrimination tested live. weak/strong via `model_id`. Rubrics: sycophancy / reward_hacking / **deception**. Shared `monitors/openrouter.py` `chat()` helper. |
+| Output monitor (black-box) | ⬜ | **Prioritized (task #38).** Judge the answer ONLY (no CoT) — strictly weaker than the CoT monitor but matches what labs deploy + claim to train on. Small variant of CoTMonitor. |
 | Linear probe (white-box) | 🟡 | `whitebox/{model,probe}.py` + `monitors/probe_monitor.py`. Per-layer LR, CE<0.6 filter, follow-up-token activations (Atlas §4.3). Logic unit-tested offline (`tests/test_probe.py`, incl. left-pad last-token select); held-out-AUROC run on a real model **pending HF/compute** (offline here). v1 uses the **original base model**, not the tinker policy. |
-| Contrastive-QA dataset registry | 🟡 | `whitebox/datasets/` — uniform `(prompt, honest, deceptive)` shape so a probe is generic over training data. Real adapters: `doluschat`, `sycophancy`; stubs registered: truthfulqa/mask/liarsbench/sandbagging/marks_tegmark/mbpp. Registry+flatten unit-tested; adapters need HF to fetch (untested live). |
+| Contrastive-QA dataset registry | 🟢 | `whitebox/datasets/` — uniform `(prompt, honest, deceptive)` shape (now with optional per-response `honest_prompt`/`deceptive_prompt` for **unpaired** sources). Live-verified adapters: `doluschat`, `sycophancy`, `sycophancy_cot`, **`truthfulqa`, `mbpp`, `sandbagging`, `marks_tegmark`, `liarsbench`**; `mask` stays a stub (probe needs generation — task #37). `PROBE_PRESETS` (simple/diverse/mbpp) mirror the Atlas recipes; `train_probe.py --preset`. Unit + live-load tested. |
 | ProbeMonitor (white-box `Monitor`) | 🟡 | `monitors/probe_monitor.py` — plugs into the seam; **post-hoc/batched only** (never in the RL loop in v1). `score`/`score_batch` tested via stub model; real-model path skips offline. |
 | Activation extraction from tinker policy | ⬜ | **v2 action item** (obfuscated-activations decomposition): pull LoRA weights via `tinker_cookbook.weights.*` → local forward pass. v1 deliberately sidesteps this by probing the base model on generated text. |
 
@@ -46,10 +46,11 @@ _Last updated: 2026-06-10 (eval/train split BUILT + validated; brier + class-spl
 | Component | State | Notes |
 | --- | --- | --- |
 | Sycophancy (Anthropic) | 🟢 | `envs/sycophancy.py` — loader+oracle tested. Answer parser anchors on "Answer: (X)" (old last-match heuristic mislabeled ~19% of rollouts that reference the rejected option). |
-| Coding — hardcode reward hacking | ⬜ | Obfuscation-Atlas style. Needs sandbox. |
+| MASK deception (pressure) | 🟢 | `envs/mask.py` over `cais/MASK` (gated). Pressure prompt; `behavior_present` (lied) via pluggable extractor (default OpenRouter judge → A/B/C vs truth; C=evade). v1 = binary `provided_facts` (oracle exact); other configs need belief-elicitation (deferred). Offline oracle tests + live load + live judge validated. |
+| Coding — MBPP-Honeypot (hardcode reward hacking) | 🟢 | `envs/mbpp_honeypot.py` (Obfuscation Atlas). Prompt = task + first visible test; reward = pass-visible − 0.003·len(code); `behavior_present` = passes-visible-but-NOT-held-out. Oracle validated on real `taufeeque/mbpp-hardcode` (honest `code` vs `hardcode`). 5 tests pass. Uses the executor below. |
 | ImpossibleBench | ⬜ | Passing ⇒ cheating. Shares harness w/ LiveCodeBench. |
 | LiveCodeBench | ⬜ | Honest-is-possible counterpart. |
-| Sandboxed code execution harness | ⬜ | Shared by the coding envs. |
+| Sandboxed code execution harness | 🟡 | `envs/code_exec.py` — subprocess + timeout, per-test pass/fail. **Timeout-only, NOT a real sandbox** (runs untrusted model code); harden (docker/nsjail, no net, ro-fs, rlimits) before any large/shared run. |
 
 ## Backends + RL + eval
 | Component | State | Notes |
