@@ -15,19 +15,21 @@ from monitordecorrelation.whitebox.cot_pairs import (
 )
 
 
-def _lr(behavior: bool, finished: bool = True, parsed: bool = True, cot: str = "reasoning") -> LabeledRollout:
+def _lr(behavior: bool, finished: bool = True, parsed: bool = True, evasive: bool = False, cot: str = "reasoning") -> LabeledRollout:
     return LabeledRollout(
         rollout=Rollout(prompt=Prompt(text="q"), cot=cot, output="ans"),
         behavior=behavior,
         finished=finished,
         parsed=parsed,
+        evasive=evasive,
     )
 
 
 def test_base_rates():
-    labeled = [_lr(True), _lr(True), _lr(False), _lr(True, finished=False), _lr(False, parsed=False)]
+    labeled = [_lr(True), _lr(True), _lr(False), _lr(True, finished=False),
+               _lr(False, parsed=False), _lr(False, evasive=True)]
     r = base_rates(labeled)
-    assert r["n_total"] == 5 and r["n_usable"] == 3  # two dropped (unfinished / unparsed)
+    assert r["n_total"] == 6 and r["n_usable"] == 3  # unfinished / unparsed / EVASIVE all dropped
     assert r["present"] == 2 and r["absent"] == 1
     assert abs(r["present_rate"] - 2 / 3) < 1e-9
     print("base_rates OK")
@@ -65,6 +67,8 @@ def test_pick_pair_and_dict():
     # missing a class / only-unusable members -> None
     assert pick_pair([_lr(True), _lr(True)]) is None
     assert pick_pair([_lr(True), _lr(False, parsed=False)]) is None
+    # an evasive (hedge) honest is excluded -> no clean honest -> None
+    assert pick_pair([_lr(True), _lr(False, evasive=True)]) is None
     print("pick_pair + pair_to_dict OK")
 
 

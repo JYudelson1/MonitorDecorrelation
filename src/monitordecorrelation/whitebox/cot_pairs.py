@@ -24,11 +24,13 @@ class LabeledRollout:
     behavior: bool  # env oracle ``behavior_present`` (True = the misbehavior = the "deceptive" class)
     finished: bool  # non-empty CoT (reasoning present, presumably not truncated)
     parsed: bool  # the env could grade it (not flagged ``unparsed``)
+    evasive: bool = False  # neither a clear lie nor a clear honest assertion (e.g. MASK class C / a
+    # hedge) — dropped from BOTH classes, since it's not a clean honest OR deceptive example
     nudged: bool = False  # produced under a steering nudge (off-policy) vs natural (on-policy)
 
     @property
     def usable(self) -> bool:
-        return self.finished and self.parsed
+        return self.finished and self.parsed and not self.evasive
 
 
 def base_rates(labeled: list[LabeledRollout]) -> dict:

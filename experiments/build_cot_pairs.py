@@ -75,6 +75,9 @@ def label_rollouts(env, rolls, workers: int) -> list[LabeledRollout]:
             behavior=er.behavior_present,
             finished=bool(r.cot.strip()),
             parsed=not er.meta.get("unparsed", False),
+            # MASK: env.score sets meta["evasive"]=True for class C (no clear assertion / a hedge).
+            # Excluded from both classes so the honest class is genuine truth-assertions only.
+            evasive=bool(er.meta.get("evasive", False)),
         )
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
