@@ -89,12 +89,12 @@ def main() -> None:
     ap.add_argument("--n-prompts", type=int, default=100)
     ap.add_argument("--k", type=int, default=6, help="samples per prompt per pass")
     ap.add_argument("--max-tokens", type=int, default=2048)
-    ap.add_argument("--max-natural-rounds", type=int, default=2,
+    ap.add_argument("--max-natural-rounds", type=int, default=4,
                     help="extra NATURAL resampling rounds for still-unmatched prompts before nudging "
-                         "(on-policy budget: up to k*(1+rounds) samples/prompt; nudge is last resort)")
-    ap.add_argument("--natural-only", action="store_true",
-                    help="keep ONLY on-policy pairs — skip nudging entirely, drop prompts without a "
-                         "natural match (a clean 75%% beats a janky 100%%)")
+                         "(on-policy budget: up to k*(1+rounds) samples/prompt)")
+    ap.add_argument("--allow-nudge", action="store_true",
+                    help="as a LAST resort, nudge for a missing class (off-policy). DEFAULT is "
+                         "natural-only: drop prompts without an on-policy pair (a clean 75%% beats a janky 100%%)")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -152,11 +152,9 @@ def main() -> None:
         sample_label(need, None, False)
     m_natural = n - len(unmatched())
 
-    # Last resort: nudge each still-unmatched prompt for the SPECIFIC class it lacks (batched per class).
-    # Skipped under --natural-only (keep only on-policy pairs; drop the rest).
-    if args.natural_only:
-        print(f"  --natural-only: skipping nudge, dropping {len(unmatched())} prompts without a natural pair")
-    else:
+    # Last resort (only with --allow-nudge): nudge each still-unmatched prompt for the SPECIFIC class it
+    # lacks (batched per class). DEFAULT is natural-only: drop prompts without an on-policy pair.
+    if args.allow_nudge:
         need = unmatched()
         need_dec = [i for i in need if not any(l.usable and l.behavior for l in groups[i])]
         need_hon = [i for i in need if i not in need_dec]  # has deceptive, lacks honest
@@ -166,6 +164,9 @@ def main() -> None:
         if need_hon:
             print(f"  NUDGING {len(need_hon)} prompts for the honest class (off-policy) ...")
             sample_label(need_hon, _HONEST_NUDGE[args.env], True)
+    else:
+        print(f"  natural-only (default): dropping {len(unmatched())} prompts without an on-policy pair "
+              f"(pass --allow-nudge to fill them off-policy)")
 
     out = Path(args.out or f"data/probes/{args.env}_cot_pairs.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -187,10 +188,10 @@ def main() -> None:
 
     print(f"matched on first natural pass:    {pct(m_pass1)}")
     print(f"matched after natural escalation: {pct(m_natural)}")
-    if args.natural_only:
-        print(f"dropped (no natural pair):        {pct(n - len(pairs))}   (--natural-only)")
-    else:
+    if args.allow_nudge:
         print(f"NUDGE NEEDED (last resort):       {pct(n_nud)}   <- off-policy pairs")
+    else:
+        print(f"dropped (no on-policy pair):      {pct(n - len(pairs))}   (natural-only default)")
     print(f"kept {len(pairs)}/{n} pairs ({n_nat} natural, {n_nud} nudged) -> {out}")
 
 

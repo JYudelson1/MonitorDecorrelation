@@ -68,8 +68,40 @@ def test_pick_pair_and_dict():
     print("pick_pair + pair_to_dict OK")
 
 
+def test_cot_jsonl_fold_toggle():
+    """Same jsonl -> CoT (fold <think>) vs no-CoT (answer only) training sets."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from monitordecorrelation.whitebox.datasets.cot_jsonl import load_cot_jsonl
+
+    row = {
+        "prompt": "Q",
+        "honest_cot": "think H",
+        "honest_answer": "A",
+        "deceptive_cot": "think D",
+        "deceptive_answer": "B",
+        "via": "natural",
+    }
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "pairs.jsonl"
+        p.write_text(json.dumps(row) + "\n")
+
+        cot = load_cot_jsonl(p, fold_cot=True)[0]
+        assert "<think>think H</think>" in cot.honest and cot.honest.endswith("A")
+        assert "<think>think D</think>" in cot.deceptive
+        assert cot.meta["fold_cot"] is True and cot.meta["via"] == "natural"
+
+        nocot = load_cot_jsonl(p, fold_cot=False)[0]
+        assert nocot.honest == "A" and nocot.deceptive == "B"
+        assert "<think>" not in nocot.honest and nocot.meta["fold_cot"] is False
+    print("cot_jsonl fold toggle OK")
+
+
 if __name__ == "__main__":
     test_base_rates()
     test_decide_nudges()
     test_pick_pair_and_dict()
+    test_cot_jsonl_fold_toggle()
     print("ALL PASS")
