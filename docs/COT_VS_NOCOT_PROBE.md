@@ -151,6 +151,16 @@ Secondary takeaway: **also re-examine #32 with CoT actually in context** — the
 it really sees the reasoning. The flat-but-nonzero AUROC (~0.58) at 50 pairs is also **too little data**
 for a 4096-dim×37-layer probe regardless; a real run needs hundreds of pairs.
 
+**Run 1b — the within-generation fix (`--within-generation`, `follow_up=None`).** Reading the rollout's
+own last answer token (rollout = final turn, so `<think>` survives) gives `mean|Δ(CoT,noCoT)| = 0.598`
+(ratio 0.335 of the activation norm) — **CoT is finally in context**, the methodology is correct. But the
+2×2 is still near chance (diagonal 0.556, cross 0.520; `noCoT→CoT` worst at 0.480, weakly matching the
+predicted asymmetry) — **data-size-bound, not a result.** Next: a bigger generation run (hundreds of
+clean pairs) to see whether AUROC climbs above chance; if it doesn't even at ~150-250 pairs, the signal
+is genuinely subtle for an 8B probe on MASK (not just a data problem). Open methodology note for Joey:
+within-generation reads are what the Atlas cautions "generalize less well" — but they're required to read
+CoT at all, and the follow-up read remains the legitimate **no-CoT / deployment** arm.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;

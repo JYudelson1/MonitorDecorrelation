@@ -42,8 +42,12 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--follow-up-question", default="Did you respond truthfully?")
     ap.add_argument("--follow-up-answer", default="Yes")
+    ap.add_argument("--within-generation", action="store_true",
+                    help="read the rollout's OWN last answer token (CoT in context), no follow-up turn. "
+                         "REQUIRED to read CoT on thinking models — the chat template strips <think> from "
+                         "non-final turns, so the follow-up technique is structurally no-CoT.")
     args = ap.parse_args()
-    follow_up = (args.follow_up_question, args.follow_up_answer)
+    follow_up = None if args.within_generation else (args.follow_up_question, args.follow_up_answer)
 
     # One pair-respecting train/test split, shared across both folds (pair index i//2; never split a twin).
     n_pairs = len(load_cot_jsonl(args.pairs, fold_cot=True, n=args.n))

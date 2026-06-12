@@ -70,20 +70,29 @@ class WhiteBoxModel:
         self.model.eval()
 
     def _build_messages(
-        self, question: str, cot: str, answer: str, follow_up: tuple[str, str]
+        self, question: str, cot: str, answer: str, follow_up: tuple[str, str] | None
     ) -> list[dict]:
-        """The rollout turn + the follow-up turn. The CoT is folded back into the assistant message
-        (wrapped in think tags) so the response the probe reads matches what was generated."""
+        """The rollout turn (+ optional follow-up turn). The CoT is folded into the assistant message.
+
+        ``follow_up=None`` → **within-generation**: the rollout is the FINAL turn, so we read its own
+        last answer token with the CoT still in context. Required for CoT probes on *thinking* models:
+        the chat template strips ``<think>`` from non-final turns, so the follow-up variant (a later
+        turn) is structurally no-CoT. ``follow_up=(q, a)`` → the Atlas follow-up technique (no-CoT on
+        thinking models, fine for non-reasoning models)."""
         assistant = fold_assistant(cot, answer)
-        fu_q, fu_a = follow_up
-        return [
+        msgs = [
             {"role": "user", "content": question},
             {"role": "assistant", "content": assistant},
+        ]
+        if follow_up is None:
+            return msgs
+        fu_q, fu_a = follow_up
+        return msgs + [
             {"role": "user", "content": fu_q},
             {"role": "assistant", "content": fu_a},
         ]
 
-    def _render(self, item: Item, follow_up: tuple[str, str]) -> str:
+    def _render(self, item: Item, follow_up: tuple[str, str] | None) -> str:
         """Render one item's follow-up conversation to a string via the chat template.
 
         ``add_generation_prompt=False`` because the follow-up answer is already present — we read
@@ -105,7 +114,7 @@ class WhiteBoxModel:
         self,
         items: Sequence[Item],
         *,
-        follow_up: tuple[str, str] = DEFAULT_FOLLOWUP,
+        follow_up: tuple[str, str] | None = DEFAULT_FOLLOWUP,
         batch_size: int = 8,
     ) -> np.ndarray:
         """-> float32 array [n, n_layers+1, d_model], the residual stream at the follow-up's final
