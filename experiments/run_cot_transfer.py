@@ -66,6 +66,13 @@ def main() -> None:
         cache[fold] = (acts, y, tr, te)
         print(f"  extracted {_LABEL[fold]} activations: {acts.shape}")
 
+    # Diagnostic: how different ARE the CoT vs no-CoT activations at the follow-up token? Same row
+    # order (same pairs), so this is a per-response delta. ≈0 would mean the follow-up read is
+    # CoT-insensitive (→ no-CoT "transfers" trivially because the inputs barely differ).
+    dlt = float(np.abs(cache[True][0] - cache[False][0]).mean())
+    ref = float(np.abs(cache[True][0]).mean())
+    print(f"  mean|Δ(CoT,noCoT)| = {dlt:.4f}  vs  mean|act| = {ref:.4f}  (ratio {dlt / ref:.3f})")
+
     # Train a probe per train-fold; evaluate on each deploy-fold's test rows.
     results: dict[bool, dict[bool, float]] = {}
     for tf in (True, False):

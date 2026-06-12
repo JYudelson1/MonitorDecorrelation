@@ -117,6 +117,40 @@ the lit** — it's open. Adjacent, well-established results:
 **Net prior:** expect **meaningful but partial** degradation off-diagonal, with the follow-up technique
 as the main buffer. Treat clean transfer as a hypothesis to falsify, not assume.
 
+## ⚠️ Run 1 (2026-06-12): a BUG, not a result — the follow-up technique can't read CoT on thinking models
+
+First real run (Qwen3-8B, same-model, 50 clean MASK pairs, evasion-excluded). The 2×2 came back
+**perfectly flat** (every cell 0.578; with-hedges variant 0.521), and a diagnostic added to
+`run_cot_transfer.py` showed **`mean|Δ(CoT, noCoT)| = 0.0000`** — the CoT and no-CoT activations are
+*byte-identical*.
+
+**Root cause (verified):** Qwen's chat template **strips `<think>…</think>` from non-final assistant
+turns**. Our Atlas follow-up technique appends a follow-up turn *after* the rollout, making the rollout
+a non-final turn → its reasoning is deleted before the model processes it. So:
+- The CoT and no-CoT folds render to the *same* text → the 2×2 is measuring nothing.
+- **The follow-up technique is structurally no-CoT on a thinking model** — you cannot read the CoT at a
+  *later* turn, because the template (matching how the model actually maintains history) removes it.
+- **This likely explains the weak iid probe (task #32):** `sycophancy_cot` folds CoT identically, so it
+  was a *secretly no-CoT* probe reading thin answer-only text → ~0.74. (The DolusChat/answer-only probes
+  are unaffected — they have no CoT to strip.)
+
+OA didn't hit this: their policies are **non-reasoning** instruct models (no `<think>` at all).
+
+**Options (needs a Joey decision — a real methodology fork):**
+1. **Within-generation probing** (recommended for CoT): read activations at the **last token of the
+   rollout's own answer** (same turn, CoT in context), *not* a follow-up turn. This is the only way the
+   CoT is actually in context. Tradeoff: the Atlas found raw-generation reads "generalize less well"
+   than the follow-up — but for *reading CoT at all* it's required. Keep the follow-up read as the
+   no-CoT arm → a genuine CoT vs no-CoT contrast.
+2. **Manually preserve `<think>`** in the follow-up render (override the template's stripping). Hacky,
+   and arguably unfaithful — it's *not* how the model maintains its own history.
+3. **Reframe:** accept that the follow-up technique is inherently no-CoT on thinking models; the
+   "CoT probe" only exists via within-generation reads (option 1).
+
+Secondary takeaway: **also re-examine #32 with CoT actually in context** — the iid probe may be fine once
+it really sees the reasoning. The flat-but-nonzero AUROC (~0.58) at 50 pairs is also **too little data**
+for a 4096-dim×37-layer probe regardless; a real run needs hundreds of pairs.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;
