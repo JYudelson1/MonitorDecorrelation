@@ -109,6 +109,10 @@ all others. Assemble the complete pairwise degradation matrix — the project's 
 - AuditBench methodology (deferred).
 
 ## Probe-design ideas (later)
+- **No-CoT vs CoT probe transfer (designed).** Does a probe trained on *answer-only* data generalize to
+  *CoT-bearing* rollouts? This decides whether we need (expensive, quality-critical) CoT generation for
+  probe training at all. Clean 2×2 on MASK, full lit review + preregistered predictions in
+  [`COT_VS_NOCOT_PROBE.md`](COT_VS_NOCOT_PROBE.md). Prereq: the CoT-regeneration helper.
 - **CoT-masked probe.** Train the probe on activations but **mask out the CoT (`<think>`) tokens** —
   read the deception signal only from the non-CoT (answer / follow-up) token activations. Rationale:
   tests whether deception is represented *independently of the verbalized reasoning*. A probe that
