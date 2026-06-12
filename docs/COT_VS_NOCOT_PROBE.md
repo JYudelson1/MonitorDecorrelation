@@ -141,3 +141,9 @@ as the main buffer. Treat clean transfer as a hypothesis to falsify, not assume.
 - **Sequence length.** CoT transcripts are longer → on MPS the 4B probe forward is memory/latency-bound
   (see STATUS MPS wall). Validate methodology on a small model first; real numbers on GPU.
 - **Same model for train + deploy.** Off-MODEL probing is unreliable (docs/MONITORS.md).
+- **Which class is off-policy?** `build_cot_pairs.py` measures the natural base rate first. Smoke
+  (Qwen3-8B, MASK `provided_facts`, n=8): the model **resisted the pressure** — only ~12% natural lies,
+  so the **deceptive** class is the rare/nudged (off-distribution) one here, the *mirror* of sycophancy
+  (honest rare). The **nudged class carries the off-policy risk**; prefer a model/config that produces the
+  misbehavior naturally, or treat that class's transfer numbers with care. (Tiny sample — re-measure at
+  scale; a harder MASK config or a more pressure-susceptible policy may shift the balance.)
