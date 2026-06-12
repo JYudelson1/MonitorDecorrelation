@@ -24,6 +24,7 @@ class LabeledRollout:
     behavior: bool  # env oracle ``behavior_present`` (True = the misbehavior = the "deceptive" class)
     finished: bool  # non-empty CoT (reasoning present, presumably not truncated)
     parsed: bool  # the env could grade it (not flagged ``unparsed``)
+    nudged: bool = False  # produced under a steering nudge (off-policy) vs natural (on-policy)
 
     @property
     def usable(self) -> bool:
@@ -69,11 +70,13 @@ def pick_pair(group: list[LabeledRollout]) -> tuple[LabeledRollout, LabeledRollo
 def pair_to_dict(prompt_text: str, dec: LabeledRollout, hon: LabeledRollout) -> dict:
     """A CoT contrastive pair row (same shape as ``syco_cot_pairs.jsonl``). Storing cot + answer
     SEPARATELY is what lets the 2x2 derive a CoT probe (fold <think>) and a no-CoT probe (answer only)
-    from the same data."""
+    from the same data. ``via`` = "natural" if both sides are on-policy, else "nudged" (one class only
+    appeared under a steering nudge — the off-policy ones to treat with care)."""
     return {
         "prompt": prompt_text,
         "honest_cot": hon.rollout.cot,
         "honest_answer": hon.rollout.output,
         "deceptive_cot": dec.rollout.cot,
         "deceptive_answer": dec.rollout.output,
+        "via": "nudged" if (dec.nudged or hon.nudged) else "natural",
     }

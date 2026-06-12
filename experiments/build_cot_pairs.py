@@ -29,7 +29,6 @@ from monitordecorrelation.types import Prompt
 from monitordecorrelation.whitebox.cot_pairs import (
     LabeledRollout,
     base_rates,
-    decide_nudges,
     pair_to_dict,
     pick_pair,
 )
@@ -90,8 +89,12 @@ def main() -> None:
     ap.add_argument("--n-prompts", type=int, default=100)
     ap.add_argument("--k", type=int, default=6, help="samples per prompt per pass")
     ap.add_argument("--max-tokens", type=int, default=2048)
-    ap.add_argument("--min-class", type=float, default=0.2,
-                    help="nudge a class if its natural rate is below this (else use natural rollouts only)")
+    ap.add_argument("--max-natural-rounds", type=int, default=2,
+                    help="extra NATURAL resampling rounds for still-unmatched prompts before nudging "
+                         "(on-policy budget: up to k*(1+rounds) samples/prompt; nudge is last resort)")
+    ap.add_argument("--natural-only", action="store_true",
+                    help="keep ONLY on-policy pairs — skip nudging entirely, drop prompts without a "
+                         "natural match (a clean 75%% beats a janky 100%%)")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -113,53 +116,82 @@ def main() -> None:
             prompts.append(p)
     k = args.k
 
-    print(f"[{args.env}] {len(prompts)} prompts x k={k} — NATURAL pass on {args.policy} ...")
-    nat = sample_rollouts(client, tok, prompts, num_samples=k, max_tokens=args.max_tokens, temperature=1.0)
-    nat_lab = label_rollouts(env, nat, args.workers)
-    rates = base_rates(nat_lab)
-    print(
-        f"NATURAL: usable {rates['n_usable']}/{rates['n_total']} ({rates['usable_rate']:.0%}); "
-        f"behavior-present {rates['present_rate']:.0%}  (deceptive {rates['present']} / honest {rates['absent']})"
-    )
-    nudges = decide_nudges(rates, args.min_class)
-    print(f"nudge decision (min_class={args.min_class}): {nudges}")
+    n = len(prompts)
+    print(f"[{args.env}] {n} prompts | natural k={k} + up to {args.max_natural_rounds} escalation "
+          f"rounds, nudge last-resort — {args.policy} ...")
+    groups: dict[int, list[LabeledRollout]] = {i: [] for i in range(n)}
 
-    groups = [nat_lab[i * k : (i + 1) * k] for i in range(len(prompts))]
-
-    def fill(want_behavior: bool, nudge_text: str) -> None:
-        """Resample the prompts still missing the wanted class, WITH a steering nudge; append results."""
-        need = [
-            i for i, g in enumerate(groups)
-            if not any(l.usable and l.behavior == want_behavior for l in g)
-        ]
-        if not need:
+    def sample_label(idxs: list[int], nudge_text: str | None, nudged: bool) -> None:
+        """Sample k for prompts[idxs] (optionally nudged), label, and append to their groups."""
+        if not idxs:
             return
-        label = "deceptive" if want_behavior else "honest"
-        print(f"  nudging {len(need)} prompts for the {label} class ...")
-        npr = [Prompt(text=prompts[i].text + nudge_text, meta=prompts[i].meta) for i in need]
-        rolls = sample_rollouts(client, tok, npr, num_samples=k, max_tokens=args.max_tokens, temperature=1.0)
+        pr = [Prompt(text=prompts[i].text + (nudge_text or ""), meta=prompts[i].meta) for i in idxs]
+        rolls = sample_rollouts(client, tok, pr, num_samples=k, max_tokens=args.max_tokens, temperature=1.0)
         lab = label_rollouts(env, rolls, args.workers)
-        for j, i in enumerate(need):
-            groups[i] = groups[i] + lab[j * k : (j + 1) * k]  # natural first, nudged appended
+        for l in lab:
+            l.nudged = nudged
+        for j, i in enumerate(idxs):
+            groups[i] += lab[j * k : (j + 1) * k]  # natural rounds first -> pick_pair prefers on-policy
 
-    if nudges["need_honest"]:
-        fill(False, _HONEST_NUDGE[args.env])
-    if nudges["need_deceptive"]:
-        fill(True, _DECEPTIVE_NUDGE[args.env])
+    def unmatched() -> list[int]:
+        return [i for i in range(n) if pick_pair(groups[i]) is None]
 
-    pairs = []
-    for i, g in enumerate(groups):
-        picked = pick_pair(g)
-        if picked is not None:
-            dec, hon = picked
-            pairs.append(pair_to_dict(prompts[i].text, dec, hon))  # save BASE prompt (nudge stripped)
+    # Pass 1: natural, all prompts. Report the natural base rate.
+    sample_label(list(range(n)), None, False)
+    rates = base_rates([l for g in groups.values() for l in g])
+    print(f"NATURAL base rate: usable {rates['n_usable']}/{rates['n_total']} ({rates['usable_rate']:.0%}); "
+          f"behavior-present {rates['present_rate']:.0%} (deceptive {rates['present']} / honest {rates['absent']})")
+    m_pass1 = n - len(unmatched())
+
+    # Escalate NATURAL sampling for still-unmatched prompts (cheap on-policy before any nudge).
+    for r in range(args.max_natural_rounds):
+        need = unmatched()
+        if not need:
+            break
+        print(f"  natural escalation {r + 1}/{args.max_natural_rounds}: resampling {len(need)} unmatched ...")
+        sample_label(need, None, False)
+    m_natural = n - len(unmatched())
+
+    # Last resort: nudge each still-unmatched prompt for the SPECIFIC class it lacks (batched per class).
+    # Skipped under --natural-only (keep only on-policy pairs; drop the rest).
+    if args.natural_only:
+        print(f"  --natural-only: skipping nudge, dropping {len(unmatched())} prompts without a natural pair")
+    else:
+        need = unmatched()
+        need_dec = [i for i in need if not any(l.usable and l.behavior for l in groups[i])]
+        need_hon = [i for i in need if i not in need_dec]  # has deceptive, lacks honest
+        if need_dec:
+            print(f"  NUDGING {len(need_dec)} prompts for the deceptive class (off-policy) ...")
+            sample_label(need_dec, _DECEPTIVE_NUDGE[args.env], True)
+        if need_hon:
+            print(f"  NUDGING {len(need_hon)} prompts for the honest class (off-policy) ...")
+            sample_label(need_hon, _HONEST_NUDGE[args.env], True)
 
     out = Path(args.out or f"data/probes/{args.env}_cot_pairs.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
+    pairs, n_nat, n_nud = [], 0, 0
+    for i in range(n):
+        pp = pick_pair(groups[i])
+        if pp is None:
+            continue
+        d = pair_to_dict(prompts[i].text, *pp)  # save BASE prompt (nudge stripped)
+        pairs.append(d)
+        n_nud += d["via"] == "nudged"
+        n_nat += d["via"] == "natural"
     with out.open("w") as f:
         for pr in pairs:
             f.write(json.dumps(pr) + "\n")
-    print(f"kept {len(pairs)}/{len(prompts)} prompts with both classes -> {out}")
+
+    def pct(x: int) -> str:
+        return f"{x}/{n} ({x / n:.0%})" if n else "0/0"
+
+    print(f"matched on first natural pass:    {pct(m_pass1)}")
+    print(f"matched after natural escalation: {pct(m_natural)}")
+    if args.natural_only:
+        print(f"dropped (no natural pair):        {pct(n - len(pairs))}   (--natural-only)")
+    else:
+        print(f"NUDGE NEEDED (last resort):       {pct(n_nud)}   <- off-policy pairs")
+    print(f"kept {len(pairs)}/{n} pairs ({n_nat} natural, {n_nud} nudged) -> {out}")
 
 
 if __name__ == "__main__":

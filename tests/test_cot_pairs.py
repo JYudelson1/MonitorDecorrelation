@@ -53,7 +53,12 @@ def test_pick_pair_and_dict():
         "honest_answer": "ans",
         "deceptive_cot": "lie",
         "deceptive_answer": "ans",
+        "via": "natural",  # neither side nudged
     }
+    # a nudged side flips via -> "nudged"
+    dn = _lr(True, cot="lie")
+    dn.nudged = True
+    assert pair_to_dict("Q", dn, hon)["via"] == "nudged"
     # natural-first preference: an earlier usable honest beats a later one
     g = [_lr(True), _lr(False, cot="first"), _lr(False, cot="second")]
     assert pick_pair(g)[1].rollout.cot == "first"
