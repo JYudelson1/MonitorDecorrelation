@@ -29,6 +29,7 @@ class CoTMonitorSpec(_Strict):
     model_id: str  # OpenRouter model id (the judge)
     behavior: str = "sycophancy"
     threshold: float = 0.5
+    use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
 
 
 class ProbeMonitorSpec(_Strict):
@@ -91,7 +92,8 @@ def build_monitors(specs: list[MonitorSpec]) -> tuple[list, list]:
     by_role: dict[str, list] = {"train_against": [], "held_out": []}
     for s in specs:
         if s.kind == "cot":
-            mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior, threshold=s.threshold)
+            mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior, threshold=s.threshold,
+                             use_cot=s.use_cot)
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
