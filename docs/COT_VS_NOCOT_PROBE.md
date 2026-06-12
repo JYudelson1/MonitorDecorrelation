@@ -161,6 +161,29 @@ is genuinely subtle for an 8B probe on MASK (not just a data problem). Open meth
 within-generation reads are what the Atlas cautions "generalize less well" — but they're required to read
 CoT at all, and the follow-up read remains the legitimate **no-CoT / deployment** arm.
 
+## Run 2 (121 clean MASK pairs, Qwen3-8B, within-generation) — first signal
+
+```
+train \ deploy |   CoT   noCoT          matched (diag) mean: 0.604
+          CoT |  0.579   0.600          cross  (off-diag) mean: 0.612
+        noCoT |  0.623   0.629          transfer gap: -0.008   |Δ|/|act| = 0.326
+```
+
+**Preliminary reads (caveat: ~0.60 AUROC is weak; 36 test pairs → ±0.05/cell):**
+1. **There IS a learnable signal, and it scales with data:** ~0.55 (50 pairs) → ~0.60 (121 pairs). So the
+   near-chance at 50 was partly data-size, not a dead end.
+2. **No CoT/no-CoT transfer gap (-0.008).** CoT-trained and noCoT-trained probes are ~interchangeable —
+   each reads the other's format as well as its own. The activations genuinely differ (Δ ratio 0.33), yet
+   the *deception direction* at the answer's last token is **CoT-invariant**. → **supports "no-CoT
+   generalizes fine"**, the outcome that lets us skip bespoke CoT data (fewer new variables).
+3. The predicted asymmetry (CoT→noCoT easier) did NOT hold (0.600 vs 0.623) — but that's within noise.
+
+**Caveats / next:** (a) 0.60 is weak — "no gap" is less informative when everything's near chance; confirm
+at higher AUROC. (b) `provided_facts` caps at 274 prompts (~140 pairs); for more data pull other MASK
+configs or move to GPU + the diverse-deception set. (c) try a stronger probe (mass-mean / Apollo-style,
+more regularization) — the per-layer LR may be overfitting at 4096-dim. (d) re-test the iid sycophancy
+probe (#32) with `--within-generation` now that CoT is actually read.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;
