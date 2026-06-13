@@ -92,23 +92,49 @@ class WhiteBoxModel:
             {"role": "assistant", "content": fu_a},
         ]
 
-    def _render(self, item: Item, follow_up: tuple[str, str] | None) -> str:
-        """Render one item's follow-up conversation to a string via the chat template.
+    def _thinking_preserving_template(self) -> str | None:
+        """A copy of the model's chat template patched to KEEP `<think>` on assistant turns that have
+        it. Qwen's default strips reasoning from turns BEFORE the last user query, which deletes the
+        rollout's CoT once a follow-up turn is appended — so the follow-up technique is otherwise no-CoT
+        on thinking models. Returns None if the template isn't the known Qwen structure (graceful: no
+        preservation). Cached."""
+        cache = getattr(self, "_preserve_tmpl", "UNSET")
+        if cache != "UNSET":
+            return cache
+        result: str | None = None
+        tmpl = getattr(self.tokenizer, "chat_template", None)
+        if tmpl and "ns.last_query_index" in tmpl:
+            lines = tmpl.split("\n")
+            idx = next((i for i, l in enumerate(lines) if "loop.index0 > ns.last_query_index" in l), -1)
+            block = lines[idx : idx + 9] if idx >= 0 else []
+            keep = next((l for l in block if "<think>" in l), None)  # the keep-reasoning render line
+            plain = next((l for l in block if "<think>" not in l and "im_start" in l), None)  # content
+            if keep and plain:
+                new = ["        {%- if reasoning_content %}", keep,
+                       "        {%- else %}", plain, "        {%- endif %}"]
+                result = "\n".join(lines[:idx] + new + lines[idx + 9 :])
+        self._preserve_tmpl = result
+        return result
 
-        ``add_generation_prompt=False`` because the follow-up answer is already present — we read
-        activations over a complete conversation, we don't sample.
-        """
+    def _render(self, item: Item, follow_up: tuple[str, str] | None,
+                preserve_thinking: bool = False) -> str:
+        """Render one item's conversation to a string via the chat template.
+
+        ``add_generation_prompt=False`` because the response is already present — we read activations
+        over a complete conversation. ``preserve_thinking=True`` uses a patched template that keeps the
+        rollout's `<think>` even when a follow-up turn follows it (else Qwen strips it)."""
         q, cot, ans = _as_triple(item)
         messages = self._build_messages(q, cot, ans, follow_up)
+        kw = dict(tokenize=False, add_generation_prompt=False)
+        if preserve_thinking:
+            patched = self._thinking_preserving_template()
+            if patched is not None:
+                return self.tokenizer.apply_chat_template(messages, chat_template=patched, **kw)
         try:
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
-            )
+            return self.tokenizer.apply_chat_template(messages, enable_thinking=False, **kw)
         except TypeError:
             # tokenizers without the Qwen `enable_thinking` kwarg
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
+            return self.tokenizer.apply_chat_template(messages, **kw)
 
     def extract_activations(
         self,
@@ -116,15 +142,16 @@ class WhiteBoxModel:
         *,
         follow_up: tuple[str, str] | None = DEFAULT_FOLLOWUP,
         batch_size: int = 8,
+        preserve_thinking: bool = False,
     ) -> np.ndarray:
-        """-> float32 array [n, n_layers+1, d_model], the residual stream at the follow-up's final
-        real token, every layer (embeddings + each block). ``follow_up`` must match what the probe
-        was trained with (stored in the probe's meta)."""
+        """-> float32 array [n, n_layers+1, d_model], the residual stream at the final real token,
+        every layer. ``follow_up`` must match what the probe was trained with. ``preserve_thinking``
+        keeps the rollout's `<think>` in the follow-up render (else Qwen strips it → no-CoT)."""
         import torch
 
         if not items:
             return np.empty((0, self.n_layers, self.d_model), dtype=np.float32)
-        texts = [self._render(it, follow_up) for it in items]
+        texts = [self._render(it, follow_up, preserve_thinking) for it in items]
         feats: list[np.ndarray] = []
         # Left-pad so the final real token is always the last column -> simple to index.
         prev_side = self.tokenizer.padding_side

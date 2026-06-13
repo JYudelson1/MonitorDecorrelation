@@ -184,6 +184,35 @@ configs or move to GPU + the diverse-deception set. (c) try a stronger probe (ma
 more regularization) — the per-layer LR may be overfitting at 4096-dim. (d) re-test the iid sycophancy
 probe (#32) with `--within-generation` now that CoT is actually read.
 
+## Run 3 — three reads converge (the answer)
+
+To separate *signal* from *extraction method*, ran the MASK probe (121 clean pairs, Qwen3-8B) three ways:
+
+| read | CoT in context? | how | AUROC |
+| --- | --- | --- | --- |
+| follow-up, answer-only | no | Atlas default (`"Did you respond truthfully?/Yes"`) | 0.614 |
+| within-generation | yes | rollout's own answer token (`--within-generation`) | 0.604 |
+| **follow-up + CoT preserved** | **yes** | patched chat template (`--preserve-thinking`) | **0.605–0.615** |
+
+(The patched template is verified: it keeps `<think>` on non-final turns; Δ ratio jumps 0.33→0.55, i.e. the
+reasoning strongly shifts the follow-up activation — yet AUROC is unchanged.)
+
+**Conclusions (robust — 3 methods agree):**
+1. **CoT adds ~nothing to the MASK probe.** Reading the reasoning (either way) gives the same ~0.61 as
+   answer-only. The CoT massively changes the activations but *not the separability* — the lie signal is in
+   the **answer**, not the reasoning.
+2. **No CoT/no-CoT transfer gap (~0 across all runs).** CoT- and noCoT-trained probes are interchangeable
+   → **no-CoT generalizes perfectly** for this setting. (Supports skipping bespoke CoT data — fewer new
+   variables.)
+3. **The ~0.61 ceiling is signal-bound, not method/data/CoT.** Compare DolusChat (blatant pairs, same
+   method, comparable n) = 0.978. MASK is *subtle realistic* deception — a one-clause lie in otherwise
+   near-identical polished text — exactly the hard, intent-defined case the lit flags. The probe nails
+   blatant deception and struggles on subtle deception.
+
+**Caveats:** all at 121 pairs / ~0.61 AUROC, so "no gap" is read in a low-AUROC regime; a higher-signal
+setting (or more data) would test whether the gap stays zero when the probe is actually strong. Still, the
+no-CoT-generalizes result is consistent across reads, and the CoT-adds-nothing result is clean.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;

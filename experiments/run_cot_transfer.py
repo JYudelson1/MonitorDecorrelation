@@ -26,9 +26,11 @@ load_dotenv(".env")
 _LABEL = {True: "CoT", False: "noCoT"}
 
 
-def _acts(model: WhiteBoxModel, pairs, follow_up, batch_size):
+def _acts(model: WhiteBoxModel, pairs, follow_up, batch_size, preserve_thinking=False):
     q, c, a, y = flatten_pairs(pairs)  # rows interleaved [h0, d0, h1, d1, ...]
-    acts = model.extract_activations(list(zip(q, c, a)), follow_up=follow_up, batch_size=batch_size)
+    acts = model.extract_activations(
+        list(zip(q, c, a)), follow_up=follow_up, batch_size=batch_size, preserve_thinking=preserve_thinking
+    )
     return acts, np.asarray(y)
 
 
@@ -46,6 +48,9 @@ def main() -> None:
                     help="read the rollout's OWN last answer token (CoT in context), no follow-up turn. "
                          "REQUIRED to read CoT on thinking models — the chat template strips <think> from "
                          "non-final turns, so the follow-up technique is structurally no-CoT.")
+    ap.add_argument("--preserve-thinking", action="store_true",
+                    help="keep the rollout's <think> in the FOLLOW-UP render (patched chat template). "
+                         "Lets the follow-up technique read CoT — the cleanest CoT-vs-noCoT contrast.")
     args = ap.parse_args()
     follow_up = None if args.within_generation else (args.follow_up_question, args.follow_up_answer)
 
@@ -64,7 +69,7 @@ def main() -> None:
     cache = {}
     for fold in (True, False):
         pairs = load_cot_jsonl(args.pairs, fold_cot=fold, n=args.n)
-        acts, y = _acts(model, pairs, follow_up, batch_size)
+        acts, y = _acts(model, pairs, follow_up, batch_size, args.preserve_thinking)
         tr = [i for i in range(len(y)) if (i // 2) not in test_pairs]
         te = [i for i in range(len(y)) if (i // 2) in test_pairs]
         cache[fold] = (acts, y, tr, te)
