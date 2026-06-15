@@ -75,9 +75,12 @@ def load_contrastive(
 # `diverse_deception` until on-policy generation exists (it ships no completions — see stubs.py).
 PROBE_PRESETS: dict[str, list[str]] = {
     "simple_deception": ["marks_tegmark"],  # true-fact vs false-fact statements
+    # The Obfuscation Atlas "diverse deception" mix (easy/answer-only versions, no on-policy generation):
+    # true/false facts + DolusChat + MASK(propositions) + TruthfulQA + LiarsBench + Sycophancy + Sandbagging.
     "diverse_deception": [
-        "marks_tegmark",
+        "marks_tegmark",  # true/false facts (Marks & Tegmark)
         "doluschat",
+        "mask_statements",  # MASK propositions -> blatant true/false (the easy MASK probe)
         "truthfulqa",
         "liarsbench",
         "sycophancy",
