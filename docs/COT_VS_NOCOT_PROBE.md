@@ -249,6 +249,25 @@ lie oracle in any real run. Next: relabel with a strong judge, keep high-confide
 non-evasive) pairs, retrain → does AUROC climb? If yes, it was labels; if it stays ~0.61 with *clean*
 labels, *then* it's a hard signal.
 
+## Run 6 — RESOLVED: clean labels don't help → subtle deception is genuinely hard (not just judge noise)
+
+Regenerated with **sonnet as the lie oracle** (clean labels, 113 pairs ≈ haiku's 121), retrained:
+
+| labels | pairs | AUROC |
+| --- | --- | --- |
+| haiku | 121 | ~0.61 |
+| haiku∩sonnet agreement subset | 46 | 0.668 *(cherry-picked easy cases)* |
+| **sonnet (clean + full)** | 113 | **~0.60** (matched 0.581 / cross 0.609) |
+
+**Clean labels do NOT rescue the probe (~0.60 ≈ haiku's 0.61).** So the ~0.6 is **not primarily label
+noise.** Reconciliation: the judge *is* weak (77% agreement) — but fixing it doesn't help, because
+**label-difficulty and signal-difficulty are the same thing**: the subtle cases are hard for the judges
+*and* the probe. The 0.668 was a biased easy-subset; the fair clean number is ~0.60. So "subtle MASK
+deception is genuinely hard" is now **earned** — robust across labels (haiku/sonnet), 3 extraction
+methods, and clean-label retraining. (Caveat: 113 pairs is `provided_facts`-capped, so *data-size* isn't
+fully ruled out — but *labels* are.) Bonus: the no-CoT transfer gap stays ~0 on clean labels (-0.028),
+re-validating no-CoT-generalizes / CoT-adds-nothing.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;
