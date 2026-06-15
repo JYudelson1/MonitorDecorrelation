@@ -143,10 +143,12 @@ class WhiteBoxModel:
         follow_up: tuple[str, str] | None = DEFAULT_FOLLOWUP,
         batch_size: int = 8,
         preserve_thinking: bool = False,
+        progress: bool = False,
     ) -> np.ndarray:
         """-> float32 array [n, n_layers+1, d_model], the residual stream at the final real token,
         every layer. ``follow_up`` must match what the probe was trained with. ``preserve_thinking``
-        keeps the rollout's `<think>` in the follow-up render (else Qwen strips it → no-CoT)."""
+        keeps the rollout's `<think>` in the follow-up render (else Qwen strips it → no-CoT).
+        ``progress=True`` shows a tqdm bar (handy on slow MPS runs)."""
         import torch
 
         if not items:
@@ -156,8 +158,13 @@ class WhiteBoxModel:
         # Left-pad so the final real token is always the last column -> simple to index.
         prev_side = self.tokenizer.padding_side
         self.tokenizer.padding_side = "left"
+        starts = range(0, len(texts), batch_size)
+        if progress:
+            from tqdm.auto import tqdm
+
+            starts = tqdm(starts, desc="extract_activations", unit="batch", total=len(starts))
         try:
-            for start in range(0, len(texts), batch_size):
+            for start in starts:
                 batch = texts[start : start + batch_size]
                 enc = self.tokenizer(
                     batch, return_tensors="pt", padding=True, add_special_tokens=False

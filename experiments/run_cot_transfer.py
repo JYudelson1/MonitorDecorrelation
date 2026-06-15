@@ -29,7 +29,8 @@ _LABEL = {True: "CoT", False: "noCoT"}
 def _acts(model: WhiteBoxModel, pairs, follow_up, batch_size, preserve_thinking=False):
     q, c, a, y = flatten_pairs(pairs)  # rows interleaved [h0, d0, h1, d1, ...]
     acts = model.extract_activations(
-        list(zip(q, c, a)), follow_up=follow_up, batch_size=batch_size, preserve_thinking=preserve_thinking
+        list(zip(q, c, a)), follow_up=follow_up, batch_size=batch_size,
+        preserve_thinking=preserve_thinking, progress=True,
     )
     return acts, np.asarray(y)
 

@@ -24,7 +24,8 @@ load_dotenv(".env")
 
 def _acts(model, pairs, follow_up, bs):
     q, c, a, y = flatten_pairs(pairs)
-    return model.extract_activations(list(zip(q, c, a)), follow_up=follow_up, batch_size=bs), np.asarray(y)
+    acts = model.extract_activations(list(zip(q, c, a)), follow_up=follow_up, batch_size=bs, progress=True)
+    return acts, np.asarray(y)
 
 
 def main() -> None:
