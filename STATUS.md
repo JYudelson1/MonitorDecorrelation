@@ -5,7 +5,13 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-06-12 (infra day: 5 probe-dataset adapters + ensemble presets; MBPP-Honeypot + MASK deception envs + subprocess code executor + `deception` rubric + shared OpenRouter helper; output-monitor queued (#38); CoT-regeneration helper pending (#37)). Prev 2026-06-10: eval/train split + brier metrics + MPS 4B-probe wall (GPU-only)._
+_Last updated: 2026-06-15 (probe investigation: CoT-stripping bug found+fixed; no-CoT generalizes; subtle MASK deception genuinely hard (~0.6); blatant easy (DolusChat 0.978, mask_statements 0.89); judge quality checked (haiku 77%); diverse probe + transfer-eval built (full-size train PENDING). See docs/PROBES.md + COT_VS_NOCOT_PROBE.md). Prev 2026-06-12: 5 adapters + presets + MBPP/MASK envs + #37/#38. Prev 2026-06-10: eval/train split + brier + MPS 4B wall._
+
+## Key findings (probe investigation, 2026-06-15) — see docs/PROBES.md
+- **CoT-stripping bug:** Qwen's template strips `<think>` from non-final turns → the Atlas follow-up technique is structurally no-CoT on thinking models (the old iid probe was secretly no-CoT). Fixed: `--within-generation` + `--preserve-thinking` (patched template).
+- **No-CoT generalizes / CoT adds nothing** (MASK 2×2, ~0 transfer gap, robust) → use cheap answer-only data.
+- **Subtle MASK deception is genuinely hard (~0.6)** — robust across labels (haiku/sonnet 77% agree), 3 reads, clean-label retrain (sonnet→0.60), blatant-transfer (0.89→0.587). Blatant deception is easy (DolusChat 0.978). Caveat: provided_facts-capped ~113 pairs.
+- **MPS: long-CoT reads are GPU-bound** (4000-token sycophancy CoTs ≈ 62s/forward). Short answer-only reads are fine (bs=8).
 
 ## Key findings this session
 - **Setting matters more than monitor strength.** On political-typology *no* monitor (incl. Opus 4.8) beats ~0.6 AUROC — every CoT reasons about user identity. On the **nlp subset, Sonnet-4.6 hits ~0.80-0.94 AUROC** with real separation → that's the usable setting. (philpapers untested.)

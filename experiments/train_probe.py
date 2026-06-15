@@ -68,7 +68,7 @@ def main() -> None:
     model = WhiteBoxModel(args.model)
     print(f"device={model.device} dtype={model.dtype} n_layers={model.n_layers} d_model={model.d_model}")
     print(f"extracting activations (follow-up: {follow_up!r}) ...")
-    acts = model.extract_activations(triples, follow_up=follow_up, batch_size=args.batch_size)
+    acts = model.extract_activations(triples, follow_up=follow_up, batch_size=args.batch_size, progress=True)
 
     # Stratified, pair-respecting split: split by PAIR index so an honest/deceptive twin never
     # straddles train/test (would leak). Rows are interleaved [h0,d0,h1,d1,...] from flatten_pairs.

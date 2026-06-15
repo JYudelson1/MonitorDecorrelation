@@ -61,6 +61,27 @@ Two probing modes (see `docs/MONITORS.md`): **original-model** (frozen base on t
 backend, post-hoc or in-reward) and **trained-model** (live policy activations; local
 `TransformersBackend`). Probes must use the **same base model** as the policy (off-model is unreliable).
 
+## Probe-investigation scripts (2026-06-15 — see docs/PROBES.md)
+
+```bash
+# Build CoT contrastive pairs on-policy, generic over env (measures natural base rate, nudges only the
+# rare class as last resort; natural-only by default). --judge-model uses a stronger MASK lie-oracle.
+uv run python experiments/build_cot_pairs.py --env mask --policy Qwen/Qwen3-8B --n-prompts 300 --judge-model anthropic/claude-sonnet-4.6
+
+# CoT-vs-noCoT transfer 2x2 on a *_cot_pairs.jsonl. --within-generation / --preserve-thinking read CoT
+# (the follow-up default is no-CoT on thinking models — the CoT-stripping bug). Prints mean|Δ(CoT,noCoT)|.
+uv run python experiments/run_cot_transfer.py --pairs data/probes/mask_cot_pairs_qwen3-8b.jsonl --model Qwen/Qwen3-8B --within-generation
+
+# Transfer a saved probe to OOD targets (MASK subtle rollouts + MBPP reward-hacking) — the OA cross-domain test.
+uv run python experiments/run_probe_transfer.py --probe data/probes/Qwen3-8B/diverse_deception --model Qwen/Qwen3-8B
+
+# One-offs: check_mask_judge.py (haiku vs sonnet label agreement), run_mask_clean_probe.py (relabel+retrain),
+# run_mask_blatant_probe.py (train on MASK propositions, eval on subtle rollouts).
+```
+
+`train_probe.py` gains `--preset {simple_deception,diverse_deception,mbpp}` (OA recipes); the probe seam
+gains `extract_activations(progress=True, within-gen via follow_up=None, preserve_thinking=...)`.
+
 ## Run outputs (`data/runs/<run>/`)
 - `run_info.json` — full validated config + which model each monitor was (train-against vs held-out).
 - `metrics.jsonl` — one row per step (ground-truth rate, reward, per-monitor accuracy/AUROC). Feeds `plot_run.py`.
