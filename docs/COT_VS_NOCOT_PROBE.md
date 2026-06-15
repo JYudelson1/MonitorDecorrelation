@@ -234,6 +234,21 @@ blatant-transfer (0.587). Lit-consistent (truth directions are task/context-spec
 Takeaway: **subtle, realistic deception is a genuinely hard, distinct probing target** — not a shortcut
 away via blatant statements.
 
+## Run 5 — CORRECTION: the ~0.61 is confounded by LABEL NOISE (the judge), not proven "hard signal"
+
+The Run 1-4 "subtle deception is a hard signal" framing **overstated** what we'd shown. The subtle probe
+used **haiku-judge** labels; the blatant probe (0.89) used **synthetic ground-truth** labels — so the gap
+conflates signal difficulty with *label quality*. Re-judging the 121 pairs with a strong judge
+(`check_mask_judge.py`, sonnet-4.6): **only 77% label agreement** (deceptive 72%, honest 82%; ~18% of the
+"clear" responses sonnet calls *evasive*). ~23% label noise drags a probe's measured AUROC hard toward
+0.5 — a genuinely-good probe could read ~0.61 under that noise.
+
+**Honest status:** whether the subtle-MASK *signal* is learnable is **untested** — we need clean labels
+first. Also implies the **MASK env oracle (haiku) is too weak**; use a stronger judge (sonnet) for the
+lie oracle in any real run. Next: relabel with a strong judge, keep high-confidence (both judges agree,
+non-evasive) pairs, retrain → does AUROC climb? If yes, it was labels; if it stays ~0.61 with *clean*
+labels, *then* it's a hard signal.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;
