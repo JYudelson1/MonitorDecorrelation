@@ -131,3 +131,4 @@ from monitordecorrelation.whitebox.datasets import mbpp as _mbpp  # noqa: E402,F
 from monitordecorrelation.whitebox.datasets import sandbagging as _sandbagging  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import marks_tegmark as _marks_tegmark  # noqa: E402,F401
 from monitordecorrelation.whitebox.datasets import liarsbench as _liarsbench  # noqa: E402,F401
+from monitordecorrelation.whitebox.datasets import mask_statements as _mask_statements  # noqa: E402,F401
