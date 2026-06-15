@@ -213,6 +213,27 @@ reasoning strongly shifts the follow-up activation — yet AUROC is unchanged.)
 setting (or more data) would test whether the gap stays zero when the probe is actually strong. Still, the
 no-CoT-generalizes result is consistent across reads, and the CoT-adds-nothing result is clean.
 
+## Run 4 — blatant-falsehood probe does NOT transfer to subtle deception
+
+Idea (Joey): MASK's `proposition` + `formatted_ground_truth` give *blatant* true/false statements
+(Geometry-of-Truth style) — train a clean, separable probe on those (`mask_statements` adapter, 784
+pairs) and test whether it generalizes to the subtle on-policy rollouts.
+
+| probe | eval | AUROC |
+| --- | --- | --- |
+| blatant-trained | blatant held-out (in-dist) | **0.890** |
+| blatant-trained | subtle rollouts (cross-dist) | **0.587** |
+| subtle-trained | subtle rollouts | ~0.61 |
+
+**Result: it does NOT transfer.** The blatant probe is strong in-dist (0.89) but collapses to ~chance on
+the subtle lies (0.587), no better than training on subtle directly. **Blatant factual falsehood and
+subtle contextual deception are representationally distinct.** So the ~0.6 ceiling on subtle MASK
+deception is robust across *everything* tried: subtle-trained (0.61), 3 extraction methods (~0.61), and
+blatant-transfer (0.587). Lit-consistent (truth directions are task/context-specific:
+[arXiv:2506.08572](https://arxiv.org/abs/2506.08572); intent-defined deception is hardest: Kirch et al.).
+Takeaway: **subtle, realistic deception is a genuinely hard, distinct probing target** — not a shortcut
+away via blatant statements.
+
 ## Decision tree (what each outcome buys us)
 
 - **no-CoT generalizes well** (off-diagonal ≈ diagonal): train probes on cheap answer-only data;
