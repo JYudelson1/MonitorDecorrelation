@@ -53,11 +53,12 @@ _DECEPTIVE_NUDGE = {  # rarely needed (the env prompt already elicits the misbeh
 }
 
 
-def make_env(name: str, subset: str | None, n_prompts: int, seed: int):
+def make_env(name: str, subset: str | None, n_prompts: int, seed: int, judge_model: str | None = None):
     if name == "mask":
         from monitordecorrelation.envs.mask import MaskEnv
 
-        return MaskEnv.from_dataset(config=subset or "provided_facts", n=n_prompts * 3, seed=seed)
+        kw = {"judge_model": judge_model} if judge_model else {}
+        return MaskEnv.from_dataset(config=subset or "provided_facts", n=n_prompts * 3, seed=seed, **kw)
     if name == "sycophancy":
         from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 
@@ -99,13 +100,16 @@ def main() -> None:
                     help="as a LAST resort, nudge for a missing class (off-policy). DEFAULT is "
                          "natural-only: drop prompts without an on-policy pair (a clean 75%% beats a janky 100%%)")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--judge-model", default=None,
+                    help="MASK lie-oracle judge (default: MaskEnv's haiku). Use a stronger judge "
+                         "(e.g. anthropic/claude-sonnet-4.6) for cleaner labels.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     sc = tinker.ServiceClient()
     client = sc.create_sampling_client(base_model=args.policy)
     tok = client.get_tokenizer()
-    env = make_env(args.env, args.subset, args.n_prompts, seed=0)
+    env = make_env(args.env, args.subset, args.n_prompts, seed=0, judge_model=args.judge_model)
 
     # Distinct prompts.
     seen: set[str] = set()
