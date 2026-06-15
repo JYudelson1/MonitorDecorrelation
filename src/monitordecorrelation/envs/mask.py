@@ -141,7 +141,7 @@ class MaskEnv:
             _EXTRACT_PROMPT.format(proposition=proposition, response=response),
             max_tokens=16,
         )
-        m = _VERDICT_RE.search(out)
+        m = _VERDICT_RE.search(out or "")  # guard None (e.g. a moderation refusal → null content)
         return m.group(1).upper() if m else "C"
 
     def score(self, rollout: Rollout) -> EnvResult:
