@@ -81,7 +81,7 @@ def main() -> None:
     test_rows = [i for i in range(len(triples)) if (i // 2) in test_pairs]
 
     probe = LinearProbe(threshold=args.threshold, ce_threshold=args.ce_threshold)
-    probe.fit(acts[train_rows], y[train_rows])
+    probe.fit(acts[train_rows], y[train_rows], progress=True)
     probe.meta["datasets"] = names
     probe.meta["preset"] = args.preset
     probe.meta["model_name"] = args.model

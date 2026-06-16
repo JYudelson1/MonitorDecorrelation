@@ -26,8 +26,9 @@ class LinearProbe:
         self.layer_ce: dict[int, float] = {}
         self.meta: dict = {}
 
-    def fit(self, acts: np.ndarray, labels) -> "LinearProbe":
+    def fit(self, acts: np.ndarray, labels, *, progress: bool = False) -> "LinearProbe":
         """``acts`` [n, L, d], ``labels`` [n] in {0,1}. Fits a LR per layer, keeps low-CE layers.
+        ``progress`` shows a tqdm bar over the per-layer fits (the trainer passes it).
 
         Features are standardized per layer before the fit — raw residual-stream activations are poorly
         scaled, so unstandardized lbfgs never converges (burns max_iter every layer → minutes of spam).
@@ -41,7 +42,12 @@ class LinearProbe:
         y = np.asarray(labels).astype(int)
         n, n_layers, _ = acts.shape
         self._models, self.layer_ce = {}, {}
-        for layer in range(n_layers):
+        layers = range(n_layers)
+        if progress:
+            from tqdm import tqdm
+
+            layers = tqdm(layers, total=n_layers, desc="fit per-layer LR", unit="layer")
+        for layer in layers:
             x = acts[:, layer, :].astype(np.float64)  # bf16-derived floats → f64 for a stable solve
             scaler = StandardScaler().fit(x)           # scale_ is 1.0 for zero-variance cols (no div0)
             # tol=1e-3 (vs default 1e-4): high-dim activations are near-separable + collinear, so the
