@@ -31,8 +31,12 @@ class TinkerBackend:
         self.learning_rate = learning_rate
         self.seed = seed
         self._sample_calls = 0  # advances every sample() so each call gets a distinct derived seed
-        self._sc = tinker.ServiceClient(seed=seed)  # seeds tinker-side RNG for reproducibility
-        self.training_client = self._sc.create_lora_training_client(base_model, rank=lora_rank)
+        self._sc = tinker.ServiceClient()
+        # seed lives on the training client (seeds the LoRA init), NOT on ServiceClient. Sampling is
+        # seeded separately via per-call SamplingParams(seed=…) in sample().
+        self.training_client = self._sc.create_lora_training_client(
+            base_model, rank=lora_rank, seed=seed
+        )
         self.tokenizer = self.training_client.get_tokenizer()
         self._sampler = None  # lazily (re)built from current weights
 
