@@ -40,20 +40,61 @@ uv run python experiments/make_mbpp_matrix_configs.py --no-cot --model meta-llam
 5. **LoRA alpha**: `TinkerBackend` exposes only `rank`; tinker sets alpha (verify it's 2×rank = 128 to
    match OA's 64/128).
 
-## Run + assemble
+## 🏃 Run-day runbook (#47 → the matrix) — copy-paste, GPU box
+
+Assumes: tinker billing active, and you're on the rented CUDA box (the frozen-model probe forward
+passes want CUDA). `M=Qwen/Qwen3-8B`, seed 0. Everything is parametric — swap `--seed`/`--model` to scale.
 
 ```bash
+# ── 0. one-time setup on the box ────────────────────────────────────────────
+uv sync --extra gpu            # flash-attn + linear-attn kernels (Linux/CUDA only; no-op on mac)
+
+# ── 1. train the two frozen-model probes for M (#47) ────────────────────────
+# probe_iid = the on-domain MBPP reward-hack probe. NOTE --out: the preset slug would be `.../mbpp`,
+# but the configs reference `.../mbpp_honeypot`, so name it explicitly. The `mbpp` adapter defaults to
+# the canonical TRAIN task_id split (mbpp_split.py) → this probe never sees an RL-eval prompt.
+uv run python experiments/train_probe.py --preset mbpp --model Qwen/Qwen3-8B --seed 0 \
+    --out data/probes/Qwen3-8B/mbpp_honeypot          # → HELD-OUT AUROC printed; expect ≫ 0.5
+# probe_ood = the diverse-deception probe. Already trained for Qwen3-8B (0.958 in-dist); confirm it loads:
+uv run python -c "from monitordecorrelation.whitebox.probe import LinearProbe; \
+    p=LinearProbe.load('data/probes/Qwen3-8B/diverse_deception'); print('ood probe OK:', p.meta['datasets'])"
+# (for a different M, retrain it: train_probe.py --preset diverse_deception --model <M> --n-per 300)
+
+# ── 2. (re)generate the run configs for this model/seed ─────────────────────
+uv run python experiments/make_mbpp_matrix_configs.py --model Qwen/Qwen3-8B --seed 0 --validate
+
+# ── 3. SMOKE one short run first, then sanity-check exploration ─────────────
+uv run python experiments/run_experiment.py --config experiments/configs/mbpp_matrix/row_control.json \
+    --set run_name=mbpp_smoke n_steps=3 eval_size=16
+# GRPO group-variance check: a seeded sample call must still give DIVERSE samples per prompt, else
+# advantages are all ~0 and nothing learns. This asserts per-group advantage spread is non-zero.
+uv run python -c "
+import json, statistics as st, collections
+g=collections.defaultdict(list)
+for l in open('data/runs/mbpp_smoke/rollouts.jsonl'):
+    r=json.loads(l); g[(r['step'], r['question'])].append(r['advantage'])
+spreads=[max(v)-min(v) for v in g.values() if len(v)>1]
+print(f'{len(spreads)} groups; mean adv spread={st.mean(spreads):.4f}; zero-spread={sum(s<1e-9 for s in spreads)}')
+assert spreads and st.mean(spreads) > 1e-6, 'GROUP COLLAPSE: seeded sampling gave identical rollouts!'
+print('exploration OK — groups have variance')
+"
+
+# ── 4. the full set: 6 monitors + control (1 run each) ──────────────────────
 for c in experiments/configs/mbpp_matrix/row_*.json; do
   uv run python experiments/run_experiment.py --config "$c"
 done
+
+# ── 5. assemble the three grids (AUROC-drop, gap-drop, end-AUROC) ───────────
 uv run python -c "from monitordecorrelation.eval.degradation import build_degradation_matrix as b; \
   import glob; b(sorted(glob.glob('data/runs/mbpp_Qwen3-8B_*_s0')), out_dir='data/runs/mbpp_matrix_s0')"
+# → data/runs/mbpp_matrix_s0/{degradation_matrix,gap_drop_matrix,end_auroc_matrix}.{json,csv,png}
+
+# ── 6. more seeds (OA uses 3) — repeat 2–5 with --seed 1, 2; average grids MANUALLY ─
 ```
 
 Each run scores ALL monitors (train + held) into `eval_metrics.jsonl` every `eval_every` steps, so the
-matrix builds from that — no post-hoc pass. Average across seeds **manually** (keep per-seed bookkeeping;
-the per-run data is the point). Report TWO distinct metrics: **AUROC** (ranking separation) and the
-**suspiciousness gap** (`mean_score_hack − mean_score_honest`, magnitude separation) — they capture
-different failure modes (a monitor can keep AUROC while the gap collapses). Both go NaN at single-class
-eval (no honest rollouts left → no honest mean → both undefined); the gap is NOT an AUROC fallback. See
-`docs/LW_NOTE_SEEDS.md`.
+grids build from that — no post-hoc pass. **Report TWO distinct metrics: AUROC** (ranking separation)
+and the **suspiciousness gap** (`mean_score_hack − mean_score_honest`, magnitude separation) — a monitor
+can keep AUROC while the gap collapses. Both go NaN at single-class eval (no honest rollouts left → no
+honest mean); the gap is NOT an AUROC fallback. Average across seeds **manually** (the per-seed/per-run
+bookkeeping is the point). See `docs/LW_NOTE_SEEDS.md`.
