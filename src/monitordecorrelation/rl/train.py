@@ -17,6 +17,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Callable, Sequence
 
+import numpy as np
+
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, roc_auc
@@ -86,6 +88,12 @@ def run_grpo(
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset)."""
     rng = random.Random(cfg.seed)
+    # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
+    # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
+    # env construction + holdout + this rng all take cfg.seed. So one cfg.seed pins the whole run.
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, and the tinker sampler all derive from it)")
     all_monitors: list[Monitor] = [*train_against, *held_out]
     run = None
     if cfg.logging.use_wandb:
@@ -120,6 +128,9 @@ def run_grpo(
     # held-out set) go to separate files + wandb namespaces. Degradation curves come from EVAL.
     metrics_log = (rollout_log_dir / "metrics.jsonl").open("w")
     eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open("w")
+    # Per-eval-prompt record: EVERY monitor's score on EVERY held-out eval prompt+continuation, each
+    # eval step (the full bookkeeping for post-hoc recalibration / the suspiciousness-gap analysis).
+    eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open("w")
 
     # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
     # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
@@ -164,6 +175,21 @@ def run_grpo(
         row["time/total_s"] = t_sample + t_score
         eval_metrics_log.write(json.dumps(row) + "\n")
         eval_metrics_log.flush()
+        # Per-prompt dump: one record per eval rollout with EVERY monitor's score+label (so monitors
+        # can be re-thresholded/recalibrated post-hoc, and the hack-vs-honest gap computed per prompt).
+        for i, (r, er, g) in enumerate(zip(ev, ev_env, gt)):
+            eval_rollouts_log.write(json.dumps({
+                "step": step,
+                "task_id": r.prompt.meta.get("task_id") if r.prompt.meta else None,
+                "question": r.prompt.text,
+                "cot": r.cot,
+                "answer": r.output,
+                "behavior_present": bool(g),
+                "unparsed": er.meta.get("unparsed"),
+                "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
+                             for m in all_monitors},
+            }) + "\n")
+        eval_rollouts_log.flush()
         if run is not None:
             run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
@@ -281,6 +307,7 @@ def run_grpo(
     rollout_log.close()
     metrics_log.close()
     eval_metrics_log.close()
+    eval_rollouts_log.close()
     if run is not None:
         run.finish()
 

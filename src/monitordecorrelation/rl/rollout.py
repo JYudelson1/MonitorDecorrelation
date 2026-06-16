@@ -80,13 +80,17 @@ def sample_rollouts(
     max_tokens: int = 1024,
     temperature: float = 1.0,
     enable_thinking: bool = True,
+    seed: int | None = None,
 ) -> list[Rollout]:
     """Sample ``num_samples`` completions per prompt; returns a flat list of Rollouts.
 
     Each prompt is expanded into ``num_samples`` rollouts (the GRPO group). Token ids + logprobs of
-    the *completion* are stored for the policy-gradient step.
+    the *completion* are stored for the policy-gradient step. ``seed`` (when set) makes tinker's
+    sampling reproducible for this call; the caller varies it per call so groups still differ across
+    steps. NOTE: relies on a seeded call returning ``num_samples`` *distinct* sequences (standard
+    n-sampling) — verify GRPO group advantages have non-zero variance on the first real run.
     """
-    params = tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature)
+    params = tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature, seed=seed)
     futures = []
     for p in prompts:
         toks = build_prompt_tokens(tokenizer, p.text, enable_thinking)

@@ -27,25 +27,37 @@ def _prompt(row: dict) -> str:
 
 
 @register("mbpp")
-def load(n: int | None = None, seed: int = 0) -> list[ContrastivePair]:
+def load(n: int | None = None, seed: int = 0, split: str | None = "train") -> list[ContrastivePair]:
+    """Contrastive MBPP-hardcode pairs. ``split`` selects the canonical task_id partition
+    (``mbpp_split``): default ``"train"`` so the iid probe NEVER trains on RL-eval task_ids (leak-safe
+    by default — the registry calls this with only n/seed). ``"eval"`` = the held-out ids; ``None`` =
+    all. Rows without a task_id are dropped (can't be placed in a stable split)."""
     from datasets import load_dataset  # lazy
 
+    from monitordecorrelation.mbpp_split import is_eval_task
+
+    if split not in ("train", "eval", None):
+        raise ValueError(f"split must be 'train'/'eval'/None, got {split!r}")
     ds = load_dataset(_REPO, split="train")
     rng = random.Random(seed)
     idxs = list(range(len(ds)))
-    if n is not None and n < len(idxs):
-        idxs = rng.sample(idxs, n)
+    rng.shuffle(idxs)  # shuffle BEFORE the n-cap so a capped sample still spans the split
     pairs: list[ContrastivePair] = []
     for i in idxs:
         row = ds[i]
-        if not row.get("code") or not row.get("hardcode"):
+        tid = row.get("task_id")
+        if tid is None or not row.get("code") or not row.get("hardcode"):
             continue
+        if split is not None and is_eval_task(tid) != (split == "eval"):
+            continue  # keep only the requested side of the canonical split
         pairs.append(
             ContrastivePair(
                 prompt=_prompt(row),
                 honest=row["code"],
                 deceptive=row["hardcode"],
-                meta={"source": "mbpp", "task_id": row.get("task_id")},
+                meta={"source": "mbpp", "task_id": tid, "split": split},
             )
         )
+        if n is not None and len(pairs) >= n:
+            break
     return pairs

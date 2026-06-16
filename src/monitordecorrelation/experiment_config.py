@@ -27,7 +27,7 @@ class CoTMonitorSpec(_Strict):
     name: str
     role: Literal["train_against", "held_out"]
     model_id: str  # OpenRouter model id (the judge)
-    behavior: str = "sycophancy"
+    behavior: str | None = None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
     threshold: float = 0.5
     use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
 
@@ -51,7 +51,7 @@ class ExperimentConfig(_Strict):
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
     backend: Literal["tinker", "transformers"] = "tinker"
-    env: Literal["sycophancy"] = "sycophancy"
+    env: Literal["sycophancy", "mbpp_honeypot"] = "sycophancy"
     subset: str = "nlp"
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")
@@ -80,9 +80,11 @@ def load_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig.model_validate(data)
 
 
-def build_monitors(specs: list[MonitorSpec]) -> tuple[list, list]:
+def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy") -> tuple[list, list]:
     """Construct (train_against, held_out) monitor objects. WhiteBoxModels are shared across probes
-    that use the same ``probe_model`` so we never load the same model twice."""
+    that use the same ``probe_model`` so we never load the same model twice. A CoT monitor with no
+    explicit ``behavior`` inherits ``default_behavior`` (the env's ``behavior_name``) so a config's
+    monitors target the right rubric (sycophancy vs reward_hacking) without repeating it per monitor."""
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
     from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
     from monitordecorrelation.whitebox.model import WhiteBoxModel
@@ -92,8 +94,8 @@ def build_monitors(specs: list[MonitorSpec]) -> tuple[list, list]:
     by_role: dict[str, list] = {"train_against": [], "held_out": []}
     for s in specs:
         if s.kind == "cot":
-            mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior, threshold=s.threshold,
-                             use_cot=s.use_cot)
+            mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior or default_behavior,
+                             threshold=s.threshold, use_cot=s.use_cot)
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")

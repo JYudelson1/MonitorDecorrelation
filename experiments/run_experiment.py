@@ -24,7 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from monitordecorrelation.config import LoggingConfig, RunConfig
-from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
+from monitordecorrelation.envs.factory import make_env
 from monitordecorrelation.experiment_config import build_monitors, load_config
 from monitordecorrelation.hyperparams import get_lr
 from monitordecorrelation.rl.train import run_grpo
@@ -60,13 +60,13 @@ def main() -> None:
     # Backend
     if cfg.backend == "tinker":
         from monitordecorrelation.backends.tinker_backend import TinkerBackend
-        backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
+        backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed)
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
         backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
 
-    env = SycophancyQAEnv.from_subset(cfg.subset, n=cfg.n_prompts_pool, seed=cfg.seed)
-    train_against, held_out = build_monitors(cfg.monitors)
+    env = make_env(cfg)
+    train_against, held_out = build_monitors(cfg.monitors, default_behavior=env.behavior_name)
 
     # Write the EFFECTIVE config (after --set overrides are applied) into the run folder, so a run is
     # trivially + exactly reproducible — copying the raw source file would drop the overrides:
@@ -93,7 +93,9 @@ def main() -> None:
         return ", ".join(getattr(m, "name", "?") for m in ms) or "(none)"
 
     print(f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend={cfg.backend} lr={lr:.2e}")
-    print(f"  {cfg.batch_size}x{cfg.group_size} rollouts/step x {cfg.n_steps} steps | subset={cfg.subset}")
+    subset_note = f" subset={cfg.subset}" if cfg.env == "sycophancy" else ""
+    print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
+          f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
 
     run_grpo(

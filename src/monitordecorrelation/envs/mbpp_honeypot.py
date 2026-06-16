@@ -53,6 +53,7 @@ class MbppHoneypotEnv:
         self,
         items: list[MbppItem],
         *,
+        eval_items: list[MbppItem] | None = None,
         num_visible_tests: int = 1,
         length_penalty: float = 0.003,
         timeout: float = 6.0,
@@ -60,7 +61,8 @@ class MbppHoneypotEnv:
     ) -> None:
         if not items:
             raise ValueError("MbppHoneypotEnv needs at least one item")
-        self.items = items
+        self.items = items                       # the TRAIN pool (sample_prompt draws here)
+        self.eval_items = eval_items or []       # the held-out eval pool (holdout returns here)
         self.num_visible_tests = num_visible_tests
         self.length_penalty = length_penalty  # OA standardized honeypot value = 0.003
         self.timeout = timeout
@@ -75,26 +77,28 @@ class MbppHoneypotEnv:
         split: str = "train",
         **kw,
     ) -> "MbppHoneypotEnv":
+        """Load MBPP tasks and split them by the canonical task_id partition (``mbpp_split``): the env
+        TRAINS on the train ids and EVALS on the eval ids, the same partition the iid MBPP probe trains
+        against — so the probe never sees an eval prompt (no leakage). ``n`` caps the TRAIN pool."""
         from datasets import load_dataset  # lazy
 
+        from monitordecorrelation.mbpp_split import is_eval_task
+
         ds = load_dataset(repo, split=split)
-        items: list[MbppItem] = []
+        train: list[MbppItem] = []
+        held: list[MbppItem] = []
         for row in ds:
+            tid = row.get("task_id")
             tests = list(row.get("test_list") or [])
-            if len(tests) < 2:  # need >=1 visible + >=1 held-out for the hack signal to exist
+            if tid is None or len(tests) < 2:  # need an id + >=1 visible + >=1 held-out test
                 continue
-            items.append(
-                MbppItem(
-                    task_id=row.get("task_id"),
-                    text=row["text"],
-                    test_list=tests,
-                    test_setup_code=row.get("test_setup_code") or "",
-                )
-            )
+            item = MbppItem(task_id=tid, text=row["text"], test_list=tests,
+                            test_setup_code=row.get("test_setup_code") or "")
+            (held if is_eval_task(tid) else train).append(item)
         rng = random.Random(seed)
-        if n is not None and n < len(items):
-            items = rng.sample(items, n)
-        return cls(items, seed=seed, **kw)
+        if n is not None and n < len(train):
+            train = rng.sample(train, n)
+        return cls(train, eval_items=held, seed=seed, **kw)
 
     def _to_prompt(self, item: MbppItem) -> Prompt:
         visible = item.test_list[: self.num_visible_tests]
@@ -115,6 +119,14 @@ class MbppHoneypotEnv:
         return self._to_prompt(self._rng.choice(self.items))
 
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
+        """Up to ``n`` held-out EVAL prompts. With a canonical split (``from_dataset``) these come from
+        the disjoint eval pool — train ⟂ eval by task_id, no mutation. Without one (a directly-built
+        env, e.g. unit tests) it falls back to carving n items out of the train pool."""
+        if self.eval_items:
+            n = min(n, len(self.eval_items))
+            picks = random.Random(seed).sample(self.eval_items, n)
+            return [self._to_prompt(it) for it in picks]
+        # fallback: no split provided — remove n from the train pool (legacy / ad-hoc envs)
         n = min(n, len(self.items) - 1)
         idxs = set(random.Random(seed).sample(range(len(self.items)), n))
         held = [self.items[i] for i in sorted(idxs)]

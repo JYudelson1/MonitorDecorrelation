@@ -13,15 +13,25 @@ from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
 
+def derive_sample_seed(base_seed: int, call_index: int) -> int:
+    """A unique, reproducible seed per sampling call: same run seed → same sequence of call seeds, but
+    each call differs (so GRPO groups vary across steps instead of collapsing to one group every step).
+    Pure + deterministic so it's unit-testable without tinker."""
+    return (base_seed * 1_000_003 + call_index) % (2**31 - 1)
+
+
 class TinkerBackend:
     name = "tinker"
 
     def __init__(
-        self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5
+        self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
+        seed: int = 0,
     ) -> None:
         self.base_model = base_model
         self.learning_rate = learning_rate
-        self._sc = tinker.ServiceClient()
+        self.seed = seed
+        self._sample_calls = 0  # advances every sample() so each call gets a distinct derived seed
+        self._sc = tinker.ServiceClient(seed=seed)  # seeds tinker-side RNG for reproducibility
         self.training_client = self._sc.create_lora_training_client(base_model, rank=lora_rank)
         self.tokenizer = self.training_client.get_tokenizer()
         self._sampler = None  # lazily (re)built from current weights
@@ -40,6 +50,8 @@ class TinkerBackend:
     ) -> list[Rollout]:
         if self._sampler is None:
             self.refresh_sampler()
+        call_seed = derive_sample_seed(self.seed, self._sample_calls)
+        self._sample_calls += 1
         return sample_rollouts(
             self._sampler,
             self.tokenizer,
@@ -47,6 +59,7 @@ class TinkerBackend:
             num_samples=num_samples,
             max_tokens=max_tokens,
             temperature=temperature,
+            seed=call_seed,
         )
 
     def train_step(self, rollouts: list[Rollout], advantages: list[float]) -> dict[str, float]:

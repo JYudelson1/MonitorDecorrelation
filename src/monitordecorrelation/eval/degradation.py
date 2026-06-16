@@ -65,6 +65,33 @@ def _probe_series(run_dir: Path) -> dict[str, dict[int, float]]:
     return series
 
 
+def _gap_series(run_dir: Path) -> dict[str, dict[int, float]]:
+    """{monitor: {step: suspiciousness gap}} where gap = mean_score(behavior) − mean_score(honest).
+    (``mean_score_syco`` is the behavior-present-class mean — named for the first env, but it's the
+    positive class for any behavior, e.g. reward-hacking.)
+
+    This is a DISTINCT metric from AUROC, not a more-robust version of it. AUROC measures threshold-free
+    *ranking* separation; the gap measures the raw *magnitude* separation of the two class means. A
+    monitor can hold AUROC ~constant while the gap collapses (scores compress but still rank right) —
+    that divergence is the interesting read. NOTE: the gap needs BOTH a behavior mean and an honest
+    mean, so it is undefined under the SAME single-class condition as AUROC (e.g. no honest rollouts
+    left once obfuscation succeeds → honest mean is NaN → gap is NaN). We record a step only when both
+    means are present."""
+    series: dict[str, dict[int, float]] = {}
+    path = run_dir / "eval_metrics.jsonl"
+    if not path.exists():
+        return series
+    for r in _read_jsonl(path):
+        step = r["step"]
+        for k, v in r.items():
+            if k.startswith("monitor/") and k.endswith("/mean_score_syco"):
+                name = k.split("/")[1]
+                honest = r.get(f"monitor/{name}/mean_score_honest")
+                if v == v and honest is not None and honest == honest:  # both non-NaN
+                    series.setdefault(name, {})[step] = v - honest
+    return series
+
+
 def run_trajectories(run_dir: str | Path, rolling: int = 5) -> dict[str, dict[int, float]]:
     """{monitor: {step: auroc}} for one run, rolling-smoothed. Held-out monitors come from the eval
     phase (``eval_metrics.jsonl``); post-hoc probes from ``probe_eval_*.jsonl``."""
@@ -76,13 +103,19 @@ def run_trajectories(run_dir: str | Path, rolling: int = 5) -> dict[str, dict[in
 
 
 def _degradation(traj: dict[int, float], edge: int) -> float:
-    """early-mean − late-mean AUROC (positive = the detector degraded over training)."""
+    """early-mean − late-mean (positive = the detector degraded over training)."""
     vals = [traj[s] for s in sorted(traj) if traj[s] == traj[s]]  # drop NaN, step order
     if len(vals) < 2:
         return float("nan")
     early = float(np.mean(vals[:edge]))
     late = float(np.mean(vals[-edge:]))
     return early - late
+
+
+def _late_mean(traj: dict[int, float], edge: int) -> float:
+    """late-mean (the END value of a metric over training) — e.g. each monitor's final AUROC."""
+    vals = [traj[s] for s in sorted(traj) if traj[s] == traj[s]]
+    return float(np.mean(vals[-edge:])) if vals else float("nan")
 
 
 def _train_target(run_dir: Path) -> str:
@@ -92,44 +125,67 @@ def _train_target(run_dir: Path) -> str:
     return names[0] if names else run_dir.name
 
 
+def _gap_trajectories(run_dir: str | Path, rolling: int = 5) -> dict[str, dict[int, float]]:
+    """{monitor: {step: suspiciousness gap}} for one run, rolling-smoothed (from ``eval_metrics``)."""
+    return {name: _rolling_average(col, rolling) for name, col in _gap_series(Path(run_dir)).items()}
+
+
+# The grids we emit: (filename stem, trajectory fn, per-cell reducer, title, colorbar label).
+# AUROC-drop + gap-drop are "higher = more degraded"; end-AUROC is the raw final value.
+_GRIDS = [
+    ("degradation_matrix", run_trajectories, _degradation,
+     "Degradation D[i][j] = AUROC drop of j when training against i", "AUROC drop (early − late)"),
+    ("gap_drop_matrix", _gap_trajectories, _degradation,
+     "Suspiciousness-gap drop of j when training against i",
+     "gap drop (early − late), gap = mean_score(behavior) − mean_score(honest)"),
+    ("end_auroc_matrix", run_trajectories, _late_mean,
+     "Final (end) AUROC of monitor j after training against i", "end AUROC"),
+]
+
+
 def build_degradation_matrix(
     run_dirs: list[str | Path], *, edge: int = 5, rolling: int = 5, out_dir: str | Path | None = None
 ) -> dict:
-    """Assemble D[train_against_i][monitor_j] across runs that differ only in ``train_against``.
+    """Assemble, across runs that differ only in ``train_against``, three N×N grids:
+      - ``degradation_matrix``  : AUROC drop (early − late) of monitor j when training against i
+      - ``gap_drop_matrix``     : suspiciousness-gap drop (the headline read; survives single-class eval)
+      - ``end_auroc_matrix``    : monitor j's final AUROC after training against i
 
-    Each run contributes one row (its train-against detector). Columns are the union of monitors.
-    Writes ``degradation_matrix.{json,csv}`` (+ a heatmap if matplotlib available) to ``out_dir``.
+    Each run contributes one row (its train-against detector; the control row is the run with none).
+    Writes ``<stem>.{json,csv,png}`` per grid to ``out_dir``. Returns the AUROC-drop result (with the
+    other two nested under ``gap_drop_matrix`` / ``end_auroc_matrix``) — back-compatible.
     """
     runs = [Path(r) for r in run_dirs]
-    rows: list[str] = []
-    trajs_by_run: dict[str, dict[str, dict[int, float]]] = {}
-    for rd in runs:
-        target = _train_target(rd)
-        rows.append(target)
-        trajs_by_run[target] = run_trajectories(rd, rolling)
+    rows = [_train_target(rd) for rd in runs]
 
-    monitor_sets = [set(t) for t in trajs_by_run.values()]
-    monitors = sorted(set().union(*monitor_sets)) if monitor_sets else []
+    # warn once if the runs don't share a monitor set (matrix is only coherent if they do)
+    auroc_trajs = {t: run_trajectories(rd, rolling) for t, rd in zip(rows, runs)}
+    monitor_sets = [set(t) for t in auroc_trajs.values()]
     if len({frozenset(s) for s in monitor_sets}) > 1:
         print(f"⚠️  runs have DIFFERENT monitor sets {[sorted(s) for s in monitor_sets]} — the matrix "
               "is only coherent across runs with identical monitors (configs identical except train_against).")
 
-    matrix = {
-        target: {m: _degradation(trajs_by_run[target].get(m, {}), edge) for m in monitors}
-        for target in rows
-    }
-    result = {"rows_train_against": rows, "columns_monitors": monitors, "matrix": matrix,
-              "runs": [r.name for r in runs]}
+    grids: dict[str, dict] = {}
+    for stem, traj_fn, reducer, title, label in _GRIDS:
+        trajs = auroc_trajs if traj_fn is run_trajectories else {t: traj_fn(rd, rolling) for t, rd in zip(rows, runs)}
+        monitors = sorted(set().union(*[set(t) for t in trajs.values()])) if trajs else []
+        matrix = {t: {m: reducer(trajs[t].get(m, {}), edge) for m in monitors} for t in rows}
+        res = {"rows_train_against": rows, "columns_monitors": monitors, "matrix": matrix,
+               "runs": [r.name for r in runs], "title": title, "label": label}
+        grids[stem] = res
+        if out_dir is not None:
+            out_dir = Path(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{stem}.json").write_text(json.dumps(res, indent=2))
+            _write_csv(out_dir / f"{stem}.csv", rows, monitors, matrix)
+            try:
+                plot_degradation_matrix(res, out_dir / f"{stem}.png")
+            except Exception as e:  # noqa: BLE001
+                print(f"({stem} heatmap skipped: {e})")
 
-    if out_dir is not None:
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "degradation_matrix.json").write_text(json.dumps(result, indent=2))
-        _write_csv(out_dir / "degradation_matrix.csv", rows, monitors, matrix)
-        try:
-            plot_degradation_matrix(result, out_dir / "degradation_matrix.png")
-        except Exception as e:  # noqa: BLE001
-            print(f"(degradation heatmap skipped: {e})")
+    result = dict(grids["degradation_matrix"])  # back-compat: primary return is the AUROC-drop grid
+    result["gap_drop_matrix"] = grids["gap_drop_matrix"]
+    result["end_auroc_matrix"] = grids["end_auroc_matrix"]
     return result
 
 
@@ -142,7 +198,9 @@ def _write_csv(path: Path, rows: list[str], monitors: list[str], matrix: dict) -
 
 
 def plot_degradation_matrix(result: dict, path: str | Path) -> None:
-    """Heatmap: rows = train-against detector, cols = measured detector, color = AUROC drop."""
+    """Heatmap: rows = train-against detector, cols = measured detector. Uses the grid's own
+    ``title``/``label`` (set per grid by ``build_degradation_matrix``) so AUROC-drop, gap-drop, and
+    end-AUROC each render with the right caption."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -150,6 +208,8 @@ def plot_degradation_matrix(result: dict, path: str | Path) -> None:
 
     rows = result["rows_train_against"]
     cols = result["columns_monitors"]
+    title = result.get("title", "Degradation D[i][j] = AUROC drop of j when training against i")
+    label = result.get("label", "AUROC drop (early − late)")
     M = np.array([[result["matrix"][r].get(c, np.nan) for c in cols] for r in rows], dtype=float)
 
     fig, ax = plt.subplots(figsize=(1.6 + 1.1 * len(cols), 1.4 + 0.9 * len(rows)))
@@ -159,12 +219,12 @@ def plot_degradation_matrix(result: dict, path: str | Path) -> None:
     ax.set_yticks(range(len(rows)), rows)
     ax.set_xlabel("measured detector (j)")
     ax.set_ylabel("trained against (i)")
-    ax.set_title("Degradation D[i][j] = AUROC drop of j when training against i")
+    ax.set_title(title, fontsize=9)
     for i in range(len(rows)):
         for j in range(len(cols)):
             if np.isfinite(M[i, j]):
                 ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=8)
-    fig.colorbar(im, ax=ax, shrink=0.8, label="AUROC drop (early − late)")
+    fig.colorbar(im, ax=ax, shrink=0.8, label=label)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
