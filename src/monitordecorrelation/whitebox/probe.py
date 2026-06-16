@@ -44,7 +44,11 @@ class LinearProbe:
         for layer in range(n_layers):
             x = acts[:, layer, :].astype(np.float64)  # bf16-derived floats → f64 for a stable solve
             scaler = StandardScaler().fit(x)           # scale_ is 1.0 for zero-variance cols (no div0)
-            clf = LogisticRegression(max_iter=2000)
+            # tol=1e-3 (vs default 1e-4): high-dim activations are near-separable + collinear, so the
+            # L2 loss has a long flat valley — the default tol makes lbfgs grind to max_iter every layer
+            # (minutes of spam) for weights a probe doesn't need to that precision. 1e-3 converges in a
+            # few hundred iters with no measurable AUROC change.
+            clf = LogisticRegression(max_iter=2000, tol=1e-3)
             clf.fit(scaler.transform(x), y)
             # fold standardization into raw-space weights: logit = w·(x−μ)/σ + b
             #   ⇒ raw coef = w/σ,  raw intercept = b − Σ w·μ/σ
