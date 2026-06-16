@@ -84,6 +84,16 @@ def test_probe_standardization_fold_matches_pipeline():
     print("standardization fold matches pipeline OK")
 
 
+def test_probe_parallel_fit_matches_sequential():
+    """n_jobs>1 (layers fit across processes) must give identical models to n_jobs=1."""
+    acts, y = _separable_acts(n=120, n_layers=5, d=24)
+    seq = LinearProbe().fit(acts, y, n_jobs=1)
+    par = LinearProbe().fit(acts, y, n_jobs=2)
+    assert seq.kept_layers == par.kept_layers
+    np.testing.assert_allclose(par.score(acts), seq.score(acts), rtol=1e-9, atol=1e-12)
+    print("parallel fit == sequential fit OK")
+
+
 def test_probe_no_layer_below_ce_keeps_best():
     """Pure-noise data: no layer clears CE<0.6, but the probe still keeps one and functions."""
     rng = np.random.default_rng(1)

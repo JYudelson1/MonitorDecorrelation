@@ -17,6 +17,26 @@ from monitordecorrelation.eval.metrics import roc_auc
 _CE_THRESHOLD = 0.6  # keep layers with train cross-entropy below this
 
 
+def _fit_layer(acts: np.ndarray, layer: int, y: np.ndarray, max_iter: int, tol: float):
+    """Fit one standardized per-layer LR, fold the scaler into raw-space weights, return (clf, ce).
+    Module-level (not a closure) so joblib can ship it to worker processes; takes the full ``acts`` as
+    an arg so joblib memmaps it once and shares it read-only across workers instead of copying."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import log_loss
+    from sklearn.preprocessing import StandardScaler
+
+    x = np.asarray(acts[:, layer, :], dtype=np.float64)  # bf16-derived floats → f64 for a stable solve
+    scaler = StandardScaler().fit(x)                      # scale_ is 1.0 for zero-variance cols (no div0)
+    clf = LogisticRegression(max_iter=max_iter, tol=tol).fit(scaler.transform(x), y)
+    # fold standardization into raw-space weights: logit = w·(x−μ)/σ + b
+    #   ⇒ raw coef = w/σ,  raw intercept = b − Σ w·μ/σ   (so score/save/load use RAW activations)
+    w, mu, sigma = clf.coef_[0], scaler.mean_, scaler.scale_
+    clf.coef_ = (w / sigma).reshape(1, -1)
+    clf.intercept_ = np.array([clf.intercept_[0] - float(np.sum(w * mu / sigma))])
+    ce = float(log_loss(y, clf.predict_proba(x)[:, 1], labels=[0, 1]))  # CE on raw x (post-fold)
+    return clf, ce
+
+
 class LinearProbe:
     def __init__(self, threshold: float = 0.5, ce_threshold: float = _CE_THRESHOLD) -> None:
         self.threshold = threshold
@@ -26,44 +46,39 @@ class LinearProbe:
         self.layer_ce: dict[int, float] = {}
         self.meta: dict = {}
 
-    def fit(self, acts: np.ndarray, labels, *, progress: bool = False) -> "LinearProbe":
+    def fit(self, acts: np.ndarray, labels, *, progress: bool = False, n_jobs: int = 1) -> "LinearProbe":
         """``acts`` [n, L, d], ``labels`` [n] in {0,1}. Fits a LR per layer, keeps low-CE layers.
-        ``progress`` shows a tqdm bar over the per-layer fits (the trainer passes it).
+        ``progress`` shows a tqdm bar over the per-layer fits; ``n_jobs`` parallelizes the (independent)
+        layer fits across CPU cores (the trainer passes ``-1`` = all cores; default 1 keeps tests fast).
 
-        Features are standardized per layer before the fit — raw residual-stream activations are poorly
-        scaled, so unstandardized lbfgs never converges (burns max_iter every layer → minutes of spam).
-        We then FOLD the scaler back into the LR weights, so the stored model operates on RAW
-        activations: ``score``/``save``/``load`` are unchanged and there's no scaler to persist.
+        Each layer is standardized then its scaler folded into raw-space weights (see ``_fit_layer``) +
+        ``tol=1e-3``: high-dim activations are near-separable + collinear, so the default ``tol=1e-4``
+        makes lbfgs grind to max_iter every layer for precision a probe doesn't need. score/save/load
+        operate on RAW activations — no scaler to persist.
         """
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.metrics import log_loss
-        from sklearn.preprocessing import StandardScaler
+        from contextlib import nullcontext
+
+        from joblib import Parallel, delayed, parallel_config
 
         y = np.asarray(labels).astype(int)
         n, n_layers, _ = acts.shape
         self._models, self.layer_ce = {}, {}
-        layers = range(n_layers)
-        if progress:
-            from tqdm import tqdm
+        tasks = (delayed(_fit_layer)(acts, layer, y, 2000, 1e-3) for layer in range(n_layers))
+        # When parallelizing, pin each worker's BLAS to one thread (else N workers × BLAS threads
+        # oversubscribe the cores); inner_max_num_threads needs an explicit backend. For n_jobs=1 skip
+        # it entirely so the default stays a plain in-process run (fast for tests). return_as generator
+        # yields in submission order → enumerate gives the layer index + a tqdm bar that ticks on COMPLETE.
+        ctx = (parallel_config(backend="loky", inner_max_num_threads=1)
+               if n_jobs not in (1, None) else nullcontext())
+        with ctx:
+            gen = Parallel(n_jobs=n_jobs, return_as="generator")(tasks)
+            if progress:
+                from tqdm import tqdm
 
-            layers = tqdm(layers, total=n_layers, desc="fit per-layer LR", unit="layer")
-        for layer in layers:
-            x = acts[:, layer, :].astype(np.float64)  # bf16-derived floats → f64 for a stable solve
-            scaler = StandardScaler().fit(x)           # scale_ is 1.0 for zero-variance cols (no div0)
-            # tol=1e-3 (vs default 1e-4): high-dim activations are near-separable + collinear, so the
-            # L2 loss has a long flat valley — the default tol makes lbfgs grind to max_iter every layer
-            # (minutes of spam) for weights a probe doesn't need to that precision. 1e-3 converges in a
-            # few hundred iters with no measurable AUROC change.
-            clf = LogisticRegression(max_iter=2000, tol=1e-3)
-            clf.fit(scaler.transform(x), y)
-            # fold standardization into raw-space weights: logit = w·(x−μ)/σ + b
-            #   ⇒ raw coef = w/σ,  raw intercept = b − Σ w·μ/σ
-            w, mu, sigma = clf.coef_[0], scaler.mean_, scaler.scale_
-            clf.coef_ = (w / sigma).reshape(1, -1)
-            clf.intercept_ = np.array([clf.intercept_[0] - float(np.sum(w * mu / sigma))])
-            ce = log_loss(y, clf.predict_proba(x)[:, 1], labels=[0, 1])  # CE on raw x (post-fold)
-            self._models[layer] = clf
-            self.layer_ce[layer] = float(ce)
+                gen = tqdm(gen, total=n_layers, desc="fit per-layer LR", unit="layer")
+            for layer, (clf, ce) in enumerate(gen):
+                self._models[layer] = clf
+                self.layer_ce[layer] = ce
         self.kept_layers = [l for l, ce in self.layer_ce.items() if ce < self.ce_threshold]
         if not self.kept_layers:
             # Tiny models may clear no layer; keep the single best so the probe still functions.
