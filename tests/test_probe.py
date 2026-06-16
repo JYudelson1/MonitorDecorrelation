@@ -77,7 +77,7 @@ def test_probe_standardization_fold_matches_pipeline():
     ours = probe._models[0].predict_proba(x.astype(np.float64))[:, 1]
 
     scaler = StandardScaler().fit(x)
-    ref = LogisticRegression(max_iter=2000).fit(scaler.transform(x), y)
+    ref = LogisticRegression(max_iter=2000, tol=1e-3).fit(scaler.transform(x), y)  # match probe.fit
     theirs = ref.predict_proba(scaler.transform(x))[:, 1]
 
     np.testing.assert_allclose(ours, theirs, rtol=1e-6, atol=1e-8)
