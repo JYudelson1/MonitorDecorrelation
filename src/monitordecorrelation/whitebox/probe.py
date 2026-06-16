@@ -27,18 +27,31 @@ class LinearProbe:
         self.meta: dict = {}
 
     def fit(self, acts: np.ndarray, labels) -> "LinearProbe":
-        """``acts`` [n, L, d], ``labels`` [n] in {0,1}. Fits a LR per layer, keeps low-CE layers."""
+        """``acts`` [n, L, d], ``labels`` [n] in {0,1}. Fits a LR per layer, keeps low-CE layers.
+
+        Features are standardized per layer before the fit — raw residual-stream activations are poorly
+        scaled, so unstandardized lbfgs never converges (burns max_iter every layer → minutes of spam).
+        We then FOLD the scaler back into the LR weights, so the stored model operates on RAW
+        activations: ``score``/``save``/``load`` are unchanged and there's no scaler to persist.
+        """
         from sklearn.linear_model import LogisticRegression
         from sklearn.metrics import log_loss
+        from sklearn.preprocessing import StandardScaler
 
         y = np.asarray(labels).astype(int)
         n, n_layers, _ = acts.shape
         self._models, self.layer_ce = {}, {}
         for layer in range(n_layers):
-            x = acts[:, layer, :]
-            clf = LogisticRegression(max_iter=1000)
-            clf.fit(x, y)
-            ce = log_loss(y, clf.predict_proba(x)[:, 1], labels=[0, 1])
+            x = acts[:, layer, :].astype(np.float64)  # bf16-derived floats → f64 for a stable solve
+            scaler = StandardScaler().fit(x)           # scale_ is 1.0 for zero-variance cols (no div0)
+            clf = LogisticRegression(max_iter=2000)
+            clf.fit(scaler.transform(x), y)
+            # fold standardization into raw-space weights: logit = w·(x−μ)/σ + b
+            #   ⇒ raw coef = w/σ,  raw intercept = b − Σ w·μ/σ
+            w, mu, sigma = clf.coef_[0], scaler.mean_, scaler.scale_
+            clf.coef_ = (w / sigma).reshape(1, -1)
+            clf.intercept_ = np.array([clf.intercept_[0] - float(np.sum(w * mu / sigma))])
+            ce = log_loss(y, clf.predict_proba(x)[:, 1], labels=[0, 1])  # CE on raw x (post-fold)
             self._models[layer] = clf
             self.layer_ce[layer] = float(ce)
         self.kept_layers = [l for l, ce in self.layer_ce.items() if ce < self.ce_threshold]

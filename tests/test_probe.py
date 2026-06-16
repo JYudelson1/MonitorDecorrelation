@@ -59,6 +59,31 @@ def test_probe_save_load_roundtrip():
     print("probe save/load roundtrip OK")
 
 
+def test_probe_standardization_fold_matches_pipeline():
+    """The fitted (folded, raw-space) per-layer model must predict identically to a standardize→LR
+    pipeline applied to the RAW activations — i.e. folding the scaler into the weights is exact."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    rng = np.random.default_rng(3)
+    n, d = 200, 32
+    y = np.array([0, 1] * (n // 2))
+    # badly-scaled features (varied magnitudes) — the case that broke unstandardized lbfgs
+    x = rng.normal(size=(n, d)) * rng.uniform(0.01, 1000, size=d)
+    x[:, 0] += y * 50.0
+    acts = x[:, None, :].astype(np.float32)  # one layer
+
+    probe = LinearProbe().fit(acts, y)
+    ours = probe._models[0].predict_proba(x.astype(np.float64))[:, 1]
+
+    scaler = StandardScaler().fit(x)
+    ref = LogisticRegression(max_iter=2000).fit(scaler.transform(x), y)
+    theirs = ref.predict_proba(scaler.transform(x))[:, 1]
+
+    np.testing.assert_allclose(ours, theirs, rtol=1e-6, atol=1e-8)
+    print("standardization fold matches pipeline OK")
+
+
 def test_probe_no_layer_below_ce_keeps_best():
     """Pure-noise data: no layer clears CE<0.6, but the probe still keeps one and functions."""
     rng = np.random.default_rng(1)
