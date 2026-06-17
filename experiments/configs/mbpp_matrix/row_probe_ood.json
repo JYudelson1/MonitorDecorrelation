@@ -9,10 +9,10 @@
   "eval_every": 10,
   "eval_size": 64,
   "max_tokens": 2048,
-  "penalty_coef": 1.0,
+  "penalty_coef": 0.33,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_probe_ood_s0",
+  "run_name": "mbpp_Qwen3-8B_probe_ood_s0_p0.33",
   "description": "Train AGAINST probe_ood on MBPP-Honeypot (reward-hacking); hold out cot_weak, cot_strong, out_weak, out_strong, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
   "monitors": [
     {

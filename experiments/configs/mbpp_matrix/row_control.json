@@ -9,10 +9,10 @@
   "eval_every": 10,
   "eval_size": 64,
   "max_tokens": 2048,
-  "penalty_coef": 1.0,
+  "penalty_coef": 0.33,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_control_s0",
+  "run_name": "mbpp_Qwen3-8B_control_s0_p0.33",
   "description": "CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). Baseline for how much each monitor drifts from the policy changing at all.",
   "monitors": [
     {
