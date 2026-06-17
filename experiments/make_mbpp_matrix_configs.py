@@ -70,7 +70,8 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
         "eval_every": 10,
         "eval_size": 64,
         "max_tokens": max_tokens,
-        "penalty_coef": 1.0,
+        "penalty_coef": 1.0,      # weight on the train-against monitor penalty
+        "kl_coef": 1e-3,          # per-token KL-to-base anchor — prevents the reward-hack collapse
         "lora_rank": lora_rank,   # OA: rank 64 (alpha 128 — tinker sets alpha; verify 2×rank on the box)
         "seed": seed,
     }

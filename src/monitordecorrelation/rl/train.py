@@ -248,6 +248,7 @@ def run_grpo(
             "time/score_s": t_score,
             "time/optim_s": t_optim,
             "time/total_s": t_sample + t_score + t_optim,
+            "kl/mean": step_metrics.get("kl/mean", 0.0),  # per-token KL to base (0 if kl_coef=0)
             **{f"loss/{k}": v for k, v in step_metrics.items()},
             **{f"monitor/{m.name}/mean_score": mean(x.score for x in ta_res[m.name]) for m in train_against},
             # Brier + class-split score on training rollouts: the obfuscation signal (probe being
@@ -261,9 +262,10 @@ def run_grpo(
             run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
+        kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
         _log(
             f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
-            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f} "
+            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f}{kl_note} "
             f"| {row['time/total_s']:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s, "
             f"optim {t_optim:.0f}s)"
         )

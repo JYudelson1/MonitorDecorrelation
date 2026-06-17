@@ -60,7 +60,8 @@ def main() -> None:
     # Backend
     if cfg.backend == "tinker":
         from monitordecorrelation.backends.tinker_backend import TinkerBackend
-        backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed)
+        backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
+                                kl_coef=cfg.kl_coef)
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
         backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
@@ -85,7 +86,8 @@ def main() -> None:
         env=cfg.env, backend=cfg.backend, base_model=cfg.policy, rl_algo="grpo",
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
         eval_every=cfg.eval_every, eval_size=cfg.eval_size,
-        penalty_coef=cfg.penalty_coef, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
+        penalty_coef=cfg.penalty_coef, kl_coef=cfg.kl_coef, lora_rank=cfg.lora_rank,
+        learning_rate=lr, seed=cfg.seed,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode="offline", log_fraction=1.0),
     )
 
