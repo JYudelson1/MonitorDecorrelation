@@ -5,7 +5,7 @@ the one thing build_datum must provide for it: a ``mask`` that is 1 on completio
 
 from __future__ import annotations
 
-from monitordecorrelation.rl.grpo import build_datum
+from monitordecorrelation.rl.grpo import build_datum, strip_mask
 from monitordecorrelation.types import Prompt, Rollout
 
 
@@ -25,6 +25,17 @@ def test_build_datum_emits_completion_mask():
     assert mask == [0.0, 0.0, 1.0, 1.0]
     assert adv == [0.0, 0.0, 2.0, 2.0]          # advantage only on completion tokens
     assert len(mask) == len(adv) == len(fi["logprobs"].to_numpy()) == len(fi["target_tokens"].to_numpy())
+
+
+def test_strip_mask_removes_only_mask():
+    r = Rollout(prompt=Prompt(text="q"), cot="", output="a",
+                token_ids=[10, 11], logprobs=[-0.5, -0.7])
+    d = build_datum(_Tok(), r, 2.0)
+    assert "mask" in d.loss_fn_inputs
+    stripped = strip_mask(d)
+    assert "mask" not in stripped.loss_fn_inputs  # the loss must not receive mask
+    assert set(stripped.loss_fn_inputs) == {"target_tokens", "logprobs", "advantages"}
+    assert stripped.model_input is d.model_input  # everything else preserved
 
 
 def test_build_datum_rejects_length_mismatch():

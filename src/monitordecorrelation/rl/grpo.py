@@ -32,6 +32,16 @@ def compute_group_advantages(
     return adv.reshape(-1).tolist()
 
 
+def strip_mask(datum: tinker.Datum) -> tinker.Datum:
+    """A copy of ``datum`` without the ``mask`` key. ``mask`` is for the KL primitive / advantage
+    assembly only — the ``importance_sampling`` loss must NOT receive it (matches the cookbook's
+    ``_remove_mask`` before ``forward_backward``)."""
+    return tinker.Datum(
+        model_input=datum.model_input,
+        loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
+    )
+
+
 def build_datum(tokenizer, rollout: Rollout, advantage: float) -> tinker.Datum:
     """Pack one rollout into a tinker Datum for the ``importance_sampling`` loss.
 

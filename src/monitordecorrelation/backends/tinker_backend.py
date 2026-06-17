@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import tinker
 
-from monitordecorrelation.rl.grpo import build_datum
+from monitordecorrelation.rl.grpo import build_datum, strip_mask
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
@@ -89,7 +89,8 @@ class TinkerBackend:
                 incorporate_kl_penalty(data, self._ref_sampler, self.kl_coef, self.kl_discount_factor)
             )
             kl_mean = kl_metrics.get("kl_policy_base", 0.0)
-        fb = self.training_client.forward_backward(data, "importance_sampling")
+        # mask is for the KL primitive only — strip it before the loss (matches the cookbook).
+        fb = self.training_client.forward_backward([strip_mask(d) for d in data], "importance_sampling")
         opt = self.training_client.optim_step(tinker.AdamParams(learning_rate=self.learning_rate))
         fb_out = fb.result()
         opt.result()
