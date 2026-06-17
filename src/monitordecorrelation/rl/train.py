@@ -234,8 +234,9 @@ def run_grpo(
 
         gt_train = [er.behavior_present for er in env_results]
         gt_rate = mean(float(g) for g in gt_train)
-        loss_keys = [k for k in step_metrics if "loss" in k.lower()]
+        loss_keys = [k for k in step_metrics if "loss" in k.lower() and "logprob" not in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
+        logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
         row = {
             "step": step,
             "behavior_rate": gt_rate,  # PRIMARY (training rollouts; eval has the held-out version)
@@ -262,9 +263,11 @@ def run_grpo(
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
+        # cookbook train_step surfaces no loss metric; show mean training logprob as the proxy signal.
+        train_note = f"loss={loss_val:.1f}" if loss_val == loss_val else f"logp={logp_mean:.2f}"
         _log(
             f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
-            f"penalty={row['reward/penalty_mean']:.2f} loss={loss_val:.1f}{kl_note} "
+            f"penalty={row['reward/penalty_mean']:.2f} {train_note}{kl_note} "
             f"| {row['time/total_s']:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s, "
             f"optim {t_optim:.0f}s)"
         )
@@ -294,8 +297,7 @@ def run_grpo(
                             }
                             for m in train_against
                         },
-                        "reward": rewards[i],
-                        "advantage": advantages[i],
+                        "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
                     }
                 )

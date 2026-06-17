@@ -91,22 +91,31 @@ class TinkerBackend:
 
         opt_metrics: dict = {}
         kl_mean = 0.0
+        logprobs_D: list = []
 
         async def _optimize() -> None:
-            nonlocal kl_mean
+            nonlocal kl_mean, logprobs_D
             if self.kl_coef > 0 and self._ref_sampler is not None:
                 km = await incorporate_kl_penalty(
                     data_D, self._ref_sampler, self.kl_coef, self.kl_discount_factor
                 )
                 kl_mean = km.get("kl_policy_base", 0.0)
-            await cb_train_step(
+            logprobs_D = await cb_train_step(
                 data_D, self.training_client, self.learning_rate, num_substeps=1,
                 loss_fn="importance_sampling", metrics=opt_metrics,
             )
 
         asyncio.run(_optimize())
         self.refresh_sampler()  # next round samples from updated policy
-        out: dict[str, float] = {"n_data": float(len(data_D)), "kl/mean": kl_mean}
+        # cb_train_step returns per-datum post-update logprobs (not a loss); surface their mean as the
+        # training-signal readout (rising = policy getting more confident on its own completions).
+        import torch
+
+        logp_mean = (
+            float(torch.cat([t.flatten() for t in logprobs_D]).mean()) if logprobs_D else float("nan")
+        )
+        out: dict[str, float] = {"n_data": float(len(data_D)), "kl/mean": kl_mean,
+                                 "train/logprob_mean": logp_mean}
         out.update({k: float(v) for k, v in opt_metrics.items()})
         return out
 
