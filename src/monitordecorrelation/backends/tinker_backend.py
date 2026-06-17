@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import tinker
 
-from monitordecorrelation.rl.grpo import build_datum, strip_mask
+from monitordecorrelation.rl.grpo import to_trajectory_groups
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
@@ -73,31 +73,41 @@ class TinkerBackend:
             seed=call_seed,
         )
 
-    def train_step(self, rollouts: list[Rollout], advantages: list[float]) -> dict[str, float]:
-        """One GRPO update: build importance-sampling data, forward_backward, optim_step. When
-        ``kl_coef > 0``, the tinker-cookbook primitive ``incorporate_kl_penalty`` adds a per-token
-        KL-to-base penalty to the advantages in-place (anchors the policy → prevents the
-        reward-over-optimization collapse)."""
-        data = [build_datum(self.tokenizer, r, a) for r, a in zip(rollouts, advantages)]
+    def train_step(self, rollouts: list[Rollout], rewards: list[float], group_size: int) -> dict[str, float]:
+        """One GRPO update. We only adapt rollouts+rewards into cookbook ``TrajectoryGroup``s; the
+        cookbook does the rest — ``compute_advantages`` (centre within group), ``assemble_training_data``
+        (mask + datum + right-shift), ``incorporate_kl_penalty`` (per-token KL-to-base, when kl_coef>0),
+        and ``train_step`` (mask-stripped, pipelined forward_backward + optim_step). No hand-built masks,
+        datums, or advantages on our side."""
+        import asyncio
+
+        from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
+        from tinker_cookbook.rl.metrics import incorporate_kl_penalty
+        from tinker_cookbook.rl.train import train_step as cb_train_step
+
+        groups = to_trajectory_groups(self.tokenizer, rollouts, rewards, group_size)
+        advantages_P = compute_advantages(groups)
+        data_D, _ = assemble_training_data(groups, advantages_P)
+
+        opt_metrics: dict = {}
         kl_mean = 0.0
-        if self.kl_coef > 0 and self._ref_sampler is not None:
-            import asyncio
 
-            from tinker_cookbook.rl.metrics import incorporate_kl_penalty
-
-            kl_metrics = asyncio.run(
-                incorporate_kl_penalty(data, self._ref_sampler, self.kl_coef, self.kl_discount_factor)
+        async def _optimize() -> None:
+            nonlocal kl_mean
+            if self.kl_coef > 0 and self._ref_sampler is not None:
+                km = await incorporate_kl_penalty(
+                    data_D, self._ref_sampler, self.kl_coef, self.kl_discount_factor
+                )
+                kl_mean = km.get("kl_policy_base", 0.0)
+            await cb_train_step(
+                data_D, self.training_client, self.learning_rate, num_substeps=1,
+                loss_fn="importance_sampling", metrics=opt_metrics,
             )
-            kl_mean = kl_metrics.get("kl_policy_base", 0.0)
-        # mask is for the KL primitive only — strip it before the loss (matches the cookbook).
-        fb = self.training_client.forward_backward([strip_mask(d) for d in data], "importance_sampling")
-        opt = self.training_client.optim_step(tinker.AdamParams(learning_rate=self.learning_rate))
-        fb_out = fb.result()
-        opt.result()
+
+        asyncio.run(_optimize())
         self.refresh_sampler()  # next round samples from updated policy
-        # tinker returns aggregate training metrics in `.metrics`; surface them all.
-        out: dict[str, float] = {"n_data": float(len(data)), "kl/mean": kl_mean}
-        out.update({k: float(v) for k, v in fb_out.metrics.items()})
+        out: dict[str, float] = {"n_data": float(len(data_D)), "kl/mean": kl_mean}
+        out.update({k: float(v) for k, v in opt_metrics.items()})
         return out
 
     def save_checkpoint(self, label: str) -> str:

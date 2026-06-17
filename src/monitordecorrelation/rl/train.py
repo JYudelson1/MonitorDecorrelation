@@ -23,7 +23,6 @@ from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, roc_auc
 from monitordecorrelation.monitors.base import Monitor
-from monitordecorrelation.rl.grpo import compute_group_advantages
 from monitordecorrelation.types import MonitorResult, Rollout
 
 
@@ -226,11 +225,11 @@ def run_grpo(
             for i in range(len(rollouts))
         ]
         rewards = [er.task_reward - cfg.penalty_coef * pen for er, pen in zip(env_results, penalties)]
-        advantages = compute_group_advantages(
-            rewards, cfg.group_size, normalize=(cfg.rl_algo == "grpo")
-        )
         t2 = time.perf_counter()
-        step_metrics = backend.train_step(rollouts, advantages)
+        # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
+        # layer (advantage centering, mask/datum assembly, KL penalty, forward_backward) via cookbook
+        # primitives — see backends/tinker_backend.py:train_step.
+        step_metrics = backend.train_step(rollouts, rewards, cfg.group_size)
         t_optim = time.perf_counter() - t2
 
         gt_train = [er.behavior_present for er in env_results]
