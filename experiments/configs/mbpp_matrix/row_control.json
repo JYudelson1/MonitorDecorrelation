@@ -13,7 +13,7 @@
   "kl_coef": 0.001,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_control_s0",
+  "run_name": "mbpp_Qwen3-8B_control_s0_kl0.001",
   "description": "CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). Baseline for how much each monitor drifts from the policy changing at all.",
   "monitors": [
     {
