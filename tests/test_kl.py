@@ -1,57 +1,37 @@
-"""KL-to-reference penalty: per-token advantage math + Datum packing. Offline (no tinker service)."""
+"""KL penalty plumbing. The KL math itself is the tinker-cookbook primitive
+(``incorporate_kl_penalty``, needs a live base sampling client — not unit-tested offline). Here we pin
+the one thing build_datum must provide for it: a ``mask`` that is 1 on completion target positions,
+0 on prompt positions, aligned with advantages/logprobs."""
 
 from __future__ import annotations
 
-import numpy as np
-
-from monitordecorrelation.rl.grpo import build_datum, kl_adjusted_advantages
-
-
-def test_kl_adjusted_advantages_basic():
-    # adv_t = A − β·(logπ_t − logπ_ref_t)
-    A = 2.0
-    sample = [-1.0, -2.0, -0.5]
-    ref = [-1.5, -1.0, -0.5]  # kl = [+0.5, -1.0, 0.0]
-    adv, kl_mean = kl_adjusted_advantages(A, sample, ref, kl_coef=0.1)
-    np.testing.assert_allclose(adv, [2.0 - 0.1 * 0.5, 2.0 - 0.1 * -1.0, 2.0 - 0.1 * 0.0])
-    assert abs(kl_mean - np.mean([0.5, -1.0, 0.0])) < 1e-9
-
-
-def test_kl_zero_coef_is_identity():
-    adv, _ = kl_adjusted_advantages(1.5, [-1.0, -2.0], [-0.2, -0.3], kl_coef=0.0)
-    assert adv == [1.5, 1.5]  # β=0 → plain scalar advantage on every token
-
-
-def test_kl_handles_none_ref():
-    # None ref logprob (couldn't be computed) → that token gets no KL term
-    adv, kl_mean = kl_adjusted_advantages(1.0, [-1.0, -2.0], [None, -1.0], kl_coef=0.5)
-    assert adv[0] == 1.0  # None → kl 0
-    assert abs(adv[1] - (1.0 - 0.5 * (-2.0 - -1.0))) < 1e-9
+from monitordecorrelation.rl.grpo import build_datum
+from monitordecorrelation.types import Prompt, Rollout
 
 
 class _Tok:
-    def apply_chat_template(self, messages, **kw):
-        return "p p"  # 2 "prompt tokens" after the stub __call__ split? build_prompt_tokens uses tokenize
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **kw):
+        return [1, 2, 3]  # 3 prompt tokens
 
 
-def test_build_datum_accepts_per_token_advantages():
-    """build_datum must accept a per-token advantage vector (len = #completion tokens) as well as a
-    scalar, and assign 0 to prompt positions."""
-    from monitordecorrelation.types import Prompt, Rollout
-
-    # minimal tokenizer: apply_chat_template returns token ids when tokenize=True
-    class Tok:
-        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **kw):
-            return [1, 2, 3]  # 3 prompt tokens
-
+def test_build_datum_emits_completion_mask():
     r = Rollout(prompt=Prompt(text="q"), cot="", output="a",
                 token_ids=[10, 11], logprobs=[-0.5, -0.7])  # 2 completion tokens
+    d = build_datum(_Tok(), r, 2.0)
+    fi = d.loss_fn_inputs
+    mask = list(fi["mask"].to_numpy())
+    adv = list(fi["advantages"].to_numpy())
+    # full = 3 prompt + 2 comp = 5 tokens → right-shift → 4 target positions; last 2 are completion
+    assert mask == [0.0, 0.0, 1.0, 1.0]
+    assert adv == [0.0, 0.0, 2.0, 2.0]          # advantage only on completion tokens
+    assert len(mask) == len(adv) == len(fi["logprobs"].to_numpy()) == len(fi["target_tokens"].to_numpy())
 
-    d_scalar = build_datum(Tok(), r, 2.0)
-    d_vec = build_datum(Tok(), r, [2.0, -1.0])
-    av_scalar = d_scalar.loss_fn_inputs["advantages"].to_numpy()
-    av_vec = d_vec.loss_fn_inputs["advantages"].to_numpy()
-    # full=5 tokens, right-shifted → 4 target positions; last 2 are completion advantages
-    assert list(av_scalar[-2:]) == [2.0, 2.0]
-    assert list(av_vec[-2:]) == [2.0, -1.0]
-    assert list(av_scalar[:-2]) == [0.0, 0.0]  # prompt positions get 0
+
+def test_build_datum_rejects_length_mismatch():
+    r = Rollout(prompt=Prompt(text="q"), cot="", output="a", token_ids=[10, 11], logprobs=[-0.5])
+    try:
+        build_datum(_Tok(), r, 1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError on token/logprob length mismatch")

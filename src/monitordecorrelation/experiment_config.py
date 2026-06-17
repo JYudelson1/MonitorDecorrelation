@@ -60,8 +60,10 @@ class ExperimentConfig(_Strict):
     eval_size: int = Field(32, description="size of the fixed held-out eval set")
     max_tokens: int = 1024
     penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
-    kl_coef: float = Field(0.0, description="per-token KL-to-base penalty; >0 anchors the policy "
-                           "(prevents reward-over-optimization collapse). 0 = off (default).")
+    kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "
+                           "incorporate_kl_penalty); >0 anchors the policy → prevents the "
+                           "reward-over-optimization collapse. 0 = off (default).")
+    kl_discount_factor: float = Field(0.0, description="discount for future KL in the penalty; 0 = off")
     lora_rank: int = 16
     lr: float | None = Field(None, description="None = TM-estimated LoRA LR for the policy")
     seed: int = 0

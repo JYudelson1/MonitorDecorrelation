@@ -7,8 +7,6 @@ tinker ``importance_sampling`` format (prompt positions get advantage 0). See do
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 
 import tinker
@@ -34,35 +32,14 @@ def compute_group_advantages(
     return adv.reshape(-1).tolist()
 
 
-def kl_adjusted_advantages(
-    scalar_adv: float, sample_logprobs: Sequence[float], ref_logprobs: Sequence[float | None],
-    kl_coef: float,
-) -> tuple[list[float], float]:
-    """Per-token advantages with a KL-to-reference penalty folded in: ``adv_t = A − β·(logπ_t − logπ_ref_t)``.
-
-    The per-token KL is applied AFTER group-centering (we start from the scalar group advantage ``A``)
-    so GRPO's baseline subtraction can't cancel a penalty common to the whole group — it anchors each
-    token to the reference policy, which is what stops the runaway drift / collapse. ``logπ_t`` is the
-    sampling (behaviour-policy) logprob; ``logπ_ref_t`` comes from ``compute_logprobs`` on the frozen
-    base sampler (None where it couldn't be computed → that token gets no KL term). Returns the per-token
-    advantage list (len = #completion tokens) and the mean per-token KL (for logging)."""
-    out, kls = [], []
-    for i, s in enumerate(sample_logprobs):
-        r = ref_logprobs[i] if i < len(ref_logprobs) else None
-        kl = (s - r) if r is not None else 0.0
-        kls.append(kl)
-        out.append(scalar_adv - kl_coef * kl)
-    return out, (float(np.mean(kls)) if kls else 0.0)
-
-
-def build_datum(tokenizer, rollout: Rollout, advantage: float | Sequence[float]) -> tinker.Datum:
+def build_datum(tokenizer, rollout: Rollout, advantage: float) -> tinker.Datum:
     """Pack one rollout into a tinker Datum for the ``importance_sampling`` loss.
 
     Reconstructs the prompt tokens (deterministic via the same chat template used at sampling) and
-    assigns the advantage to every completion token (0 to prompt tokens). ``advantage`` is either a
-    scalar (broadcast to all completion tokens) or a per-completion-token sequence (e.g. with a KL
-    penalty folded in — see ``kl_adjusted_advantages``). Sequences are right-shifted: input = full[:-1],
-    targets = full[1:].
+    assigns ``advantage`` to every completion token (0 to prompt tokens). Also emits a ``mask`` (1 on
+    completion target positions, 0 on prompt) — the cookbook KL primitive
+    (``tinker_cookbook.rl.metrics.incorporate_kl_penalty``) uses it to add a per-token KL-to-base
+    penalty to the advantages in-place. Sequences are right-shifted: input = full[:-1], targets = full[1:].
     """
     if rollout.token_ids is None or rollout.logprobs is None:
         raise ValueError("rollout needs token_ids + logprobs (sampling logprobs) for GRPO")
@@ -73,24 +50,19 @@ def build_datum(tokenizer, rollout: Rollout, advantage: float | Sequence[float])
     if len(comp_ids) != len(comp_logprobs):
         raise ValueError("completion tokens and logprobs length mismatch")
 
-    if isinstance(advantage, (int, float)):
-        comp_adv = [float(advantage)] * len(comp_ids)
-    else:
-        comp_adv = [float(a) for a in advantage]
-        if len(comp_adv) != len(comp_ids):
-            raise ValueError(f"per-token advantages ({len(comp_adv)}) != completion tokens ({len(comp_ids)})")
-
     full = list(prompt_ids) + list(comp_ids)
     n_prompt = len(prompt_ids)
     sampled_logprobs = [0.0] * n_prompt + list(comp_logprobs)
-    advantages = [0.0] * n_prompt + comp_adv
+    advantages = [0.0] * n_prompt + [float(advantage)] * len(comp_ids)
+    mask = [0.0] * n_prompt + [1.0] * len(comp_ids)  # 1 on completion tokens (for the KL primitive)
 
-    # Right-shift: predict full[1:] from full[:-1]; align logprobs/advantages to the targets.
+    # Right-shift: predict full[1:] from full[:-1]; align logprobs/advantages/mask to the targets.
     input_ids = full[:-1]
     target_ids = full[1:]
     logprobs_t = sampled_logprobs[1:]
     advantages_t = advantages[1:]
-    assert len(input_ids) == len(target_ids) == len(logprobs_t) == len(advantages_t)
+    mask_t = mask[1:]
+    assert len(input_ids) == len(target_ids) == len(logprobs_t) == len(advantages_t) == len(mask_t)
 
     return tinker.Datum(
         model_input=tinker.ModelInput.from_ints(input_ids),
@@ -98,5 +70,6 @@ def build_datum(tokenizer, rollout: Rollout, advantage: float | Sequence[float])
             "target_tokens": TensorData.from_numpy(np.asarray(target_ids, dtype=np.int32)),
             "logprobs": TensorData.from_numpy(np.asarray(logprobs_t, dtype=np.float32)),
             "advantages": TensorData.from_numpy(np.asarray(advantages_t, dtype=np.float32)),
+            "mask": TensorData.from_numpy(np.asarray(mask_t, dtype=np.float32)),
         },
     )

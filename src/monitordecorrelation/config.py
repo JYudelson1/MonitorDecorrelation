@@ -50,7 +50,8 @@ class RunConfig:
     rl_algo: str = "grpo"  # "grpo" | "dr_grpo" | "dapo"
     group_size: int = 8  # rollouts per prompt for group-relative advantage
     penalty_coef: float = 1.0  # λ on the monitor penalty
-    kl_coef: float = 0.0
+    kl_coef: float = 0.0  # per-token KL-to-base penalty (anchors the policy; 0 = off)
+    kl_discount_factor: float = 0.0
 
     # Optimization
     batch_size: int = 32

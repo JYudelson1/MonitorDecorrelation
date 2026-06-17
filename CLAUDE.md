@@ -32,8 +32,10 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   progress — keep it honest (don't mark 🟢 without an actual test).
 - **Minimal tinker.** RL runs on [tinker](https://tinker-docs.thinkingmachines.ai/) with a small,
   hand-rolled loop on the raw SDK (`ServiceClient` → `create_lora_training_client` → sample →
-  `forward_backward` → `optim_step`). No `tinker-cookbook` dependency. The online tinker docs are
-  good — consult them rather than guessing the API.
+  `forward_backward` → `optim_step`). We keep our own loop, but **use tinker-cookbook *primitives*
+  where it ships the canonical implementation** (e.g. `tinker_cookbook.rl.metrics.incorporate_kl_penalty`
+  for the KL-to-base penalty) rather than reinventing them — don't adopt the cookbook's training loop.
+  The online tinker docs are good — consult them rather than guessing the API.
 - **The `Monitor` seam is sacred.** Same `.score(rollout)` interface across CoT judges, output
   judges, and white-box probes; detector strength is config, not a new interface. See `docs/MONITORS.md`.
 - **Never train on the oracle.** `behavior_present` grades detectors; it must never enter a
