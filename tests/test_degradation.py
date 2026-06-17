@@ -26,6 +26,26 @@ def _make_run(d, target, series):
             f.write(json.dumps(row) + "\n")
 
 
+def test_grid_color_scales_white_midpoints():
+    """Fixed colour scales: AUROC ∈ [0,1] (white at 0.5), drop grids ∈ [−1,1] (white at 0)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+
+    from monitordecorrelation.eval.degradation import _GRIDS
+
+    want = {"end_auroc_matrix": (0.0, 1.0, 0.5),  # (vmin, vmax, where-white-should-be)
+            "degradation_matrix": (-1.0, 1.0, 0.0),
+            "gap_drop_matrix": (-1.0, 1.0, 0.0)}
+    cmap = plt.get_cmap("RdBu_r")
+    for g in _GRIDS:
+        vmin, vmax, mid = want[g["stem"]]
+        assert (g["vmin"], g["vmax"]) == (vmin, vmax), g["stem"]
+        rgb = cmap(Normalize(vmin, vmax)(mid))[:3]
+        assert all(c > 0.95 for c in rgb), (g["stem"], rgb)  # ~white at the intended midpoint
+
+
 def test_three_grids(tmp_path):
     # run A trains against m1: m1 degrades hard (auroc 0.9->0.6, gap 0.6->0.1); m2 stays (0.8->0.78)
     _make_run(tmp_path / "runA", "m1", {

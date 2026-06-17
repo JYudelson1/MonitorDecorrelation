@@ -130,16 +130,19 @@ def _gap_trajectories(run_dir: str | Path, rolling: int = 5) -> dict[str, dict[i
     return {name: _rolling_average(col, rolling) for name, col in _gap_series(Path(run_dir)).items()}
 
 
-# The grids we emit: (filename stem, trajectory fn, per-cell reducer, title, colorbar label).
-# AUROC-drop + gap-drop are "higher = more degraded"; end-AUROC is the raw final value.
+# The grids we emit. Each fixes its colour scale so the RdBu_r white midpoint is meaningful:
+#  - end-AUROC ∈ [0,1]      → vmin/vmax 0..1, white at 0.5 (chance)
+#  - the *drop* grids (Δ)   → vmin/vmax −1..1, white at 0 (no change)
+# (fixed bounds also make magnitudes comparable across runs/grids, unlike data-driven scaling.)
 _GRIDS = [
-    ("degradation_matrix", run_trajectories, _degradation,
-     "Degradation D[i][j] = AUROC drop of j when training against i", "AUROC drop (early − late)"),
-    ("gap_drop_matrix", _gap_trajectories, _degradation,
-     "Suspiciousness-gap drop of j when training against i",
-     "gap drop (early − late), gap = mean_score(behavior) − mean_score(honest)"),
-    ("end_auroc_matrix", run_trajectories, _late_mean,
-     "Final (end) AUROC of monitor j after training against i", "end AUROC"),
+    {"stem": "degradation_matrix", "traj": run_trajectories, "reduce": _degradation, "vmin": -1.0, "vmax": 1.0,
+     "title": "Degradation D[i][j] = AUROC drop of j when training against i",
+     "label": "AUROC drop (early − late)"},
+    {"stem": "gap_drop_matrix", "traj": _gap_trajectories, "reduce": _degradation, "vmin": -1.0, "vmax": 1.0,
+     "title": "Suspiciousness-gap drop of j when training against i",
+     "label": "gap drop (early − late), gap = mean_score(behavior) − mean_score(honest)"},
+    {"stem": "end_auroc_matrix", "traj": run_trajectories, "reduce": _late_mean, "vmin": 0.0, "vmax": 1.0,
+     "title": "Final (end) AUROC of monitor j after training against i", "label": "end AUROC"},
 ]
 
 
@@ -166,12 +169,14 @@ def build_degradation_matrix(
               "is only coherent across runs with identical monitors (configs identical except train_against).")
 
     grids: dict[str, dict] = {}
-    for stem, traj_fn, reducer, title, label in _GRIDS:
+    for g in _GRIDS:
+        traj_fn, reducer, stem = g["traj"], g["reduce"], g["stem"]
         trajs = auroc_trajs if traj_fn is run_trajectories else {t: traj_fn(rd, rolling) for t, rd in zip(rows, runs)}
         monitors = sorted(set().union(*[set(t) for t in trajs.values()])) if trajs else []
         matrix = {t: {m: reducer(trajs[t].get(m, {}), edge) for m in monitors} for t in rows}
         res = {"rows_train_against": rows, "columns_monitors": monitors, "matrix": matrix,
-               "runs": [r.name for r in runs], "title": title, "label": label}
+               "runs": [r.name for r in runs], "title": g["title"], "label": g["label"],
+               "vmin": g["vmin"], "vmax": g["vmax"]}
         grids[stem] = res
         if out_dir is not None:
             out_dir = Path(out_dir)
@@ -212,9 +217,15 @@ def plot_degradation_matrix(result: dict, path: str | Path) -> None:
     label = result.get("label", "AUROC drop (early − late)")
     M = np.array([[result["matrix"][r].get(c, np.nan) for c in cols] for r in rows], dtype=float)
 
+    # Fixed colour scale so RdBu_r's white midpoint lands at a meaningful value (0.5 for AUROC ∈ [0,1];
+    # 0 for the −1..1 drop grids). Falls back to symmetric data-driven bounds for callers without vmin/vmax.
+    vmin, vmax = result.get("vmin"), result.get("vmax")
+    if vmin is None or vmax is None:
+        m = np.nanmax(np.abs(M)) if np.isfinite(M).any() else 1.0
+        vmin, vmax = -m, m
+
     fig, ax = plt.subplots(figsize=(1.6 + 1.1 * len(cols), 1.4 + 0.9 * len(rows)))
-    im = ax.imshow(M, cmap="RdBu_r", vmin=-np.nanmax(np.abs(M)) if np.isfinite(M).any() else -1,
-                   vmax=np.nanmax(np.abs(M)) if np.isfinite(M).any() else 1)
+    im = ax.imshow(M, cmap="RdBu_r", vmin=vmin, vmax=vmax)
     ax.set_xticks(range(len(cols)), cols, rotation=30, ha="right")
     ax.set_yticks(range(len(rows)), rows)
     ax.set_xlabel("measured detector (j)")
