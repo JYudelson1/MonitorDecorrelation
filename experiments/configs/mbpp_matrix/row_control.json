@@ -3,8 +3,8 @@
   "policy": "Qwen/Qwen3-8B",
   "backend": "tinker",
   "env": "mbpp_honeypot",
-  "n_steps": 60,
-  "batch_size": 8,
+  "n_steps": 120,
+  "batch_size": 64,
   "group_size": 8,
   "eval_every": 10,
   "eval_size": 64,
@@ -13,7 +13,7 @@
   "kl_coef": 0.001,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_control_s0_kl0.001",
+  "run_name": "mbpp_Qwen3-8B_control_s0_kl0.001_big",
   "description": "CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). Baseline for how much each monitor drifts from the policy changing at all.",
   "monitors": [
     {
