@@ -51,6 +51,17 @@ class _FakeMonitor:
         return [MonitorResult(score=0.3, label=False) for _ in rollouts]
 
 
+class _ExplodingMonitor:
+    """An API-style monitor (no score_batch → threaded path) that always raises — simulates a
+    persistent OpenRouter 404. Must NOT crash the run."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def score(self, rollout):
+        raise RuntimeError("simulated 404")
+
+
 def test_run_grpo_control_smoke():
     run_dir = Path("data/runs/smoke_test_loop")
     if run_dir.exists():
@@ -76,6 +87,31 @@ def test_run_grpo_control_smoke():
         # held-out monitor was scored every eval (degradation source)
         ev = [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
         assert ev and "monitor/probe_x/auroc" in ev[0]
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
+def test_run_grpo_survives_failing_monitor():
+    """A held-out monitor that always raises (transient API failure) must not crash the run; it gets
+    NaN-scored and the eval still completes."""
+    run_dir = Path("data/runs/smoke_test_loop_fail")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_fail", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, _FakeEnv(), _FakeBackend(),
+                 train_against=[], held_out=[_FakeMonitor("ok"), _ExplodingMonitor("bad")])
+        ev = [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
+        assert ev  # run completed despite the exploding monitor
+        # the bad monitor scored 0 rollouts; the good one scored all of them
+        assert ev[0]["monitor/bad/n_scored"] == 0
+        assert ev[0]["monitor/ok/n_scored"] == cfg.eval_size
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)

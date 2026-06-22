@@ -100,9 +100,12 @@ class CoTMonitor:
             answer=rollout.output,
         )
 
-    def _call(self, prompt: str, *, max_retries: int = 5) -> str:
-        """POST to OpenRouter, retrying only rate-limits / transient errors (not 4xx like a bad id)."""
-        retryable_status = {429, 500, 502, 503, 529}
+    def _call(self, prompt: str, *, max_retries: int = 6) -> str:
+        """POST to OpenRouter, retrying rate-limits / transient errors. 404 is included: OpenRouter
+        returns it for "no endpoints available for this model right now" (a transient provider gap),
+        which would otherwise crash a multi-hour run on a single hiccup. A genuinely-bad model id 404s
+        every attempt → still surfaces after the retries, but as a non-fatal sentinel (see _score_monitors)."""
+        retryable_status = {404, 408, 429, 500, 502, 503, 529}
         last_exc: Exception | None = None
         for attempt in range(max_retries):
             try:

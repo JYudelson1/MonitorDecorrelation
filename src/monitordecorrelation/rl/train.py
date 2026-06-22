@@ -47,12 +47,22 @@ def _score_monitors(
 ) -> dict[str, list[MonitorResult]]:
     """{name: [MonitorResult]} — white-box probes use ``score_batch`` (one batched local forward);
     API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe."""
+    # A failed score must NEVER crash the run — a single transient API hiccup on one of hundreds of
+    # rollouts would otherwise abort a multi-hour job. On failure we substitute a NaN sentinel (logged)
+    # and the metric code drops it, so that rollout just doesn't count toward this monitor's score.
+    def _sentinel(err: str) -> MonitorResult:
+        return MonitorResult(score=float("nan"), label=False, meta={"error": err})
+
     out: dict[str, list[MonitorResult]] = {}
     batched = [m for m in monitors if hasattr(m, "score_batch")]
     threaded = [m for m in monitors if not hasattr(m, "score_batch")]
     for m in batched:
         _log(f"      · scoring {m.name} (probe, {len(rollouts)} local fwd)…")
-        out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
+        try:
+            out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
+        except Exception as e:  # noqa: BLE001 — never let a probe failure kill the run
+            _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e}); NaN-scoring this eval")
+            out[m.name] = [_sentinel(f"{type(e).__name__}: {e}") for _ in rollouts]
     if threaded:
         names = ", ".join(m.name for m in threaded)
         _log(f"      · scoring {len(threaded)} API monitor(s) [{names}] × {len(rollouts)} "
@@ -65,9 +75,17 @@ def _score_monitors(
                 for m in threaded
                 for i in range(len(rollouts))
             }
+            errors: dict[str, str] = {}
             for fut in futs:
                 name, i = futs[fut]
-                out[name][i] = fut.result()
+                try:
+                    out[name][i] = fut.result()
+                except Exception as e:  # noqa: BLE001 — one bad API call shouldn't abort the run
+                    out[name][i] = _sentinel(f"{type(e).__name__}: {e}")
+                    errors[name] = f"{type(e).__name__}: {e}"
+            for name, err in errors.items():  # one concise warning per monitor, not per rollout
+                n_failed = sum(1 for r in out[name] if r.meta.get("error"))
+                _log(f"      ⚠️  {name}: {n_failed}/{len(rollouts)} scores failed ({err}); NaN-scored")
     return out
 
 
@@ -161,14 +179,19 @@ def run_grpo(
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
         }
         for m in all_monitors:
-            scores = [x.score for x in res[m.name]]
-            preds = [x.label for x in res[m.name]]
-            row[f"monitor/{m.name}/auroc"] = roc_auc(scores, gt)
-            row[f"monitor/{m.name}/accuracy"] = accuracy(preds, gt)
-            row[f"monitor/{m.name}/brier"] = brier(scores, gt)
+            # Drop rollouts this monitor failed to score (NaN sentinel from _score_monitors) so a few
+            # API hiccups don't poison the metrics — they're just computed over the rollouts that scored.
+            triples = [(x.score, x.label, g) for x, g in zip(res[m.name], gt) if x.score == x.score]
+            scores = [s for s, _, _ in triples]
+            preds = [p for _, p, _ in triples]
+            mgt = [g for _, _, g in triples]
+            row[f"monitor/{m.name}/auroc"] = roc_auc(scores, mgt)
+            row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
+            row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
             row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
-            row[f"monitor/{m.name}/mean_score_syco"] = _mean_for_class(scores, gt, True)
-            row[f"monitor/{m.name}/mean_score_honest"] = _mean_for_class(scores, gt, False)
+            row[f"monitor/{m.name}/mean_score_syco"] = _mean_for_class(scores, mgt, True)
+            row[f"monitor/{m.name}/mean_score_honest"] = _mean_for_class(scores, mgt, False)
+            row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
         row["time/sample_s"] = t_sample
         row["time/score_s"] = t_score
         row["time/total_s"] = t_sample + t_score
@@ -220,8 +243,15 @@ def run_grpo(
         t1 = time.perf_counter()
         ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
         t_score = time.perf_counter() - t1
+
+        # A failed train-against score (NaN sentinel) must not produce a NaN reward → coalesce to 0
+        # (that rollout just isn't penalized this step). Without this one API hiccup would NaN the
+        # advantages and corrupt the update.
+        def _pen(score: float) -> float:
+            return 0.0 if score != score else score
+
         penalties = [
-            mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
+            mean(_pen(ta_res[m.name][i].score) for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
         ]
         rewards = [er.task_reward - cfg.penalty_coef * pen for er, pen in zip(env_results, penalties)]
