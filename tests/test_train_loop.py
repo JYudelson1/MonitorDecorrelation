@@ -92,6 +92,29 @@ def test_run_grpo_control_smoke():
             shutil.rmtree(run_dir)
 
 
+def test_run_grpo_aborts_on_dead_train_against_monitor():
+    """A train-against monitor that scores nothing = no penalty signal → the run must ABORT (not
+    silently train as a no-penalty control), unlike a held-out monitor which is tolerated."""
+    import pytest
+
+    run_dir = Path("data/runs/smoke_test_loop_ta")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_ta", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="no training signal"):
+            run_grpo(cfg, _FakeEnv(), _FakeBackend(),
+                     train_against=[_ExplodingMonitor("bad_ta")], held_out=[])
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
 def test_run_grpo_survives_failing_monitor():
     """A held-out monitor that always raises (transient API failure) must not crash the run; it gets
     NaN-scored and the eval still completes."""

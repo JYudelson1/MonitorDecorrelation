@@ -244,8 +244,20 @@ def run_grpo(
         ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
         t_score = time.perf_counter() - t1
 
-        # A failed train-against score (NaN sentinel) must not produce a NaN reward → coalesce to 0
-        # (that rollout just isn't penalized this step). Without this one API hiccup would NaN the
+        # HARD FAIL if a train-against monitor scored NOTHING: unlike a held-out monitor (just a
+        # measurement), a dead train-against monitor means the reward has no penalty signal — the run
+        # silently becomes a no-penalty control. Far better to abort (esp. at step 0 = a config/API
+        # error) than waste hours training on no signal. Partial failures are tolerated (coalesced to 0).
+        for m in train_against:
+            if all(r.score != r.score for r in ta_res[m.name]):  # every score is NaN
+                raise RuntimeError(
+                    f"train-against monitor {m.name!r} failed to score ANY of {len(rollouts)} rollouts "
+                    f"at step {step} — aborting (no training signal). Check the monitor / API / model id. "
+                    f"First error: {next((r.meta.get('error') for r in ta_res[m.name] if r.meta.get('error')), '?')}"
+                )
+
+        # A partially-failed train-against score (NaN sentinel) must not produce a NaN reward → coalesce
+        # to 0 (that rollout just isn't penalized this step). Without this one API hiccup would NaN the
         # advantages and corrupt the update.
         def _pen(score: float) -> float:
             return 0.0 if score != score else score
