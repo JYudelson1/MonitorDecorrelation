@@ -11,7 +11,12 @@
   "description": "One row of the {weak_cot, strong_cot, iid_probe, ood_probe} matrix: train against the strong CoT, measure all others held-out. Swap which monitor has role=train_against to fill other rows. Probes use original-model probing (frozen Qwen3.5-4B base, same as policy).",
   "monitors": [
     {"kind": "cot", "name": "cot_strong", "role": "train_against", "model_id": "anthropic/claude-sonnet-4.6"},
-    {"kind": "cot", "name": "cot_weak", "role": "held_out", "model_id": "anthropic/claude-3.5-haiku"},
+    {
+      "kind": "cot",
+      "name": "cot_weak",
+      "role": "held_out",
+      "model_id": "anthropic/claude-3-haiku"
+    },
     {"kind": "probe", "name": "probe_ood", "role": "held_out",
      "probe_path": "data/probes/Qwen3.5-4B/doluschat", "probe_model": "Qwen/Qwen3.5-4B"},
     {"kind": "probe", "name": "probe_iid", "role": "held_out",

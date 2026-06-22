@@ -37,7 +37,7 @@ load_dotenv(".env")
 _DEFAULT_CANDIDATES = [
     "meta-llama/llama-3.2-3b-instruct",
     "openai/gpt-4o-mini",
-    "anthropic/claude-3.5-haiku",
+    "anthropic/claude-3-haiku",
     "anthropic/claude-sonnet-4.6",
     "anthropic/claude-opus-4.8",
 ]

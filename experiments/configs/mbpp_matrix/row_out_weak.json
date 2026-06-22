@@ -20,7 +20,7 @@
       "kind": "cot",
       "name": "cot_weak",
       "role": "held_out",
-      "model_id": "anthropic/claude-3.5-haiku",
+      "model_id": "anthropic/claude-3-haiku",
       "use_cot": true
     },
     {
@@ -34,7 +34,7 @@
       "kind": "cot",
       "name": "out_weak",
       "role": "train_against",
-      "model_id": "anthropic/claude-3.5-haiku",
+      "model_id": "anthropic/claude-3-haiku",
       "use_cot": false
     },
     {

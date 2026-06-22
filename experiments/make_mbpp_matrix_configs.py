@@ -26,7 +26,7 @@ import argparse
 import json
 from pathlib import Path
 
-WEAK = "anthropic/claude-3.5-haiku"
+WEAK = "anthropic/claude-3-haiku"
 STRONG = "anthropic/claude-sonnet-4.6"
 
 

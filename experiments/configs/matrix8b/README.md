@@ -8,7 +8,7 @@ detector j.** One run per row, all identical except which detector is `train_aga
 
 | name | kind | model | status |
 | --- | --- | --- | --- |
-| `cot_weak` | CoT judge | `anthropic/claude-3.5-haiku` | ✅ ready (API) |
+| `cot_weak` | CoT judge | `anthropic/claude-3-haiku` | ✅ ready (API) |
 | `cot_strong` | CoT judge | `anthropic/claude-sonnet-4.6` | ✅ ready (API) |
 | `probe_ood` | white-box probe | `data/probes/Qwen3-8B/diverse_deception` | ✅ trained (0.958 in-dist, 0.694 cross-domain) |
 | `probe_iid` | white-box probe | `data/probes/Qwen3-8B/sycophancy_cot` | ⚠️ **not trained yet** — see pre-req |

@@ -21,7 +21,7 @@ from pathlib import Path
 # probe_model MUST match the policy base (off-model probing is unreliable) — see docs/MONITORS.md.
 POLICY = "Qwen/Qwen3-8B"
 DETECTORS = [
-    {"kind": "cot", "name": "cot_weak", "model_id": "anthropic/claude-3.5-haiku"},
+    {"kind": "cot", "name": "cot_weak", "model_id": "anthropic/claude-3-haiku"},
     {"kind": "cot", "name": "cot_strong", "model_id": "anthropic/claude-sonnet-4.6"},
     {"kind": "probe", "name": "probe_ood",
      "probe_path": "data/probes/Qwen3-8B/diverse_deception", "probe_model": POLICY},
