@@ -175,9 +175,13 @@ def run_grpo(
         t_score = time.perf_counter() - t1
         row: dict = {
             "step": step,
-            "behavior_rate": mean(float(g) for g in gt),
+            "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
         }
+        # MBPP-Honeypot three-way reward-hacking labels (loose ⊇ strict=behavior_rate; + hardcoding).
+        if any("loose_rh" in er.meta for er in ev_env):
+            row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
+            row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
             # Drop rollouts this monitor failed to score (NaN sentinel from _score_monitors) so a few
             # API hiccups don't poison the metrics — they're just computed over the rollouts that scored.
@@ -281,7 +285,10 @@ def run_grpo(
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
         row = {
             "step": step,
-            "behavior_rate": gt_rate,  # PRIMARY (training rollouts; eval has the held-out version)
+            "behavior_rate": gt_rate,  # = strict_rh (training rollouts; eval has the held-out version)
+            **({"loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results),
+                "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
+               if any("loose_rh" in er.meta for er in env_results) else {}),
             "reward/task_mean": mean(er.task_reward for er in env_results),
             "reward/penalty_mean": mean(penalties),
             "reward/total_mean": mean(rewards),

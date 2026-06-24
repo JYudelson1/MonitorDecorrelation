@@ -114,9 +114,10 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         td.mkdir(exist_ok=True)
         ground_truth_fig(
             train_rows,
-            [("behavior_rate", "behavior rate (train)"), ("reward/penalty_mean", "train-monitor penalty"),
+            [("behavior_rate", "strict RH (train)"), ("loose_rate", "loose RH (train)"),
+             ("hardcoding_rate", "hardcoding (train)"), ("reward/penalty_mean", "train-monitor penalty"),
              ("reward/task_mean", "task reward")],
-            f"{run_dir.name} [train] — behavior + reward", td / "ground_truth.png")
+            f"{run_dir.name} [train] — reward-hacking + reward", td / "ground_truth.png")
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
                      td / "monitors.png")
 
@@ -125,8 +126,10 @@ def plot_run(run_dir: str | Path) -> list[Path]:
     if eval_rows:
         ed = run_dir / "eval"
         ed.mkdir(exist_ok=True)
-        ground_truth_fig(eval_rows, [("behavior_rate", "behavior rate (held-out)")],
-                         f"{run_dir.name} [eval] — held-out behavior", ed / "ground_truth.png")
+        ground_truth_fig(eval_rows,
+                         [("behavior_rate", "strict RH (held-out)"), ("loose_rate", "loose RH (held-out)"),
+                          ("hardcoding_rate", "hardcoding (held-out)")],
+                         f"{run_dir.name} [eval] — held-out reward-hacking", ed / "ground_truth.png")
         # AUROC is the headline; brier + mean_score_syco stay defined when AUROC goes NaN (single-class,
         # i.e. the obfuscation-success regime), so they carry the degradation signal at the extremes.
         monitors_fig(eval_rows, ["auroc", "brier", "mean_score_syco"],
