@@ -15,7 +15,6 @@ wheels/
 # Cached datasets + local logs + run artifacts
 data/**/*.jsonl
 data/runs/
-data/probes/
 data/checkpoints/
 wandb/
 err.log
