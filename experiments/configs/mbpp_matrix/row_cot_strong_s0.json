@@ -27,7 +27,7 @@
       "kind": "cot",
       "name": "cot_strong",
       "role": "train_against",
-      "model_id": "anthropic/claude-haiku-4.5",
+      "model_id": "deepseek/deepseek-chat",
       "use_cot": true
     },
     {
@@ -41,7 +41,7 @@
       "kind": "cot",
       "name": "out_strong",
       "role": "held_out",
-      "model_id": "anthropic/claude-haiku-4.5",
+      "model_id": "deepseek/deepseek-chat",
       "use_cot": false
     },
     {

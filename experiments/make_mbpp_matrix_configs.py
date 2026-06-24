@@ -31,7 +31,7 @@ from pathlib import Path
 # flash-lite (0.94 cot / 0.89 out, $0.1/$0.4) as weak, haiku-4.5 (0.99/0.98, $1/$5) as strong. ~3-10x
 # cheaper per run than the old haiku/sonnet pair, negligible detection loss.
 WEAK = "google/gemini-2.5-flash-lite"
-STRONG = "anthropic/claude-haiku-4.5"
+STRONG = "deepseek/deepseek-chat"  # 0.985/0.975, $0.3/$1.2 — strong + cheap + diff family from the policy
 
 
 def all_monitors(model: str) -> list[dict]:
