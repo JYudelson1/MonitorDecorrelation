@@ -26,8 +26,12 @@ import argparse
 import json
 from pathlib import Path
 
-WEAK = "anthropic/claude-3-haiku"
-STRONG = "anthropic/claude-sonnet-4.6"
+# Weak/strong judge ladder, chosen from the strict-label bakeoff (bakeoff_strict.json): against the
+# CLEAN strict reward-hacking oracle every model scores ~0.9-0.99, so we use the cheapest viable pair —
+# flash-lite (0.94 cot / 0.89 out, $0.1/$0.4) as weak, haiku-4.5 (0.99/0.98, $1/$5) as strong. ~3-10x
+# cheaper per run than the old haiku/sonnet pair, negligible detection loss.
+WEAK = "google/gemini-2.5-flash-lite"
+STRONG = "anthropic/claude-haiku-4.5"
 
 
 def all_monitors(model: str) -> list[dict]:
