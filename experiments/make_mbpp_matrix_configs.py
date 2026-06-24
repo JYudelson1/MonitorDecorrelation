@@ -26,12 +26,9 @@ import argparse
 import json
 from pathlib import Path
 
-# Weak/strong judge ladder, chosen from the strict-label bakeoff (bakeoff_strict.json): against the
-# CLEAN strict reward-hacking oracle every model scores ~0.9-0.99, so we use the cheapest viable pair —
-# flash-lite (0.94 cot / 0.89 out, $0.1/$0.4) as weak, haiku-4.5 (0.99/0.98, $1/$5) as strong. ~3-10x
-# cheaper per run than the old haiku/sonnet pair, negligible detection loss.
-# Weak/strong judge ladder from the strict-label bakeoff (bakeoff_strict.json) — both non-reasoning,
-# cheap, and a different family from the Qwen3-8B policy (no same-model-judge confound):
+# Weak/strong judge ladder from the strict-label bakeoff (bakeoff_strict.json): against the CLEAN strict
+# reward-hacking oracle every judge scores ~0.9-0.99, so we use a cheap, non-reasoning pair from a
+# different family than the Qwen3-8B policy (no same-model-judge confound). ~5-10x cheaper than sonnet.
 WEAK = "anthropic/claude-3-haiku"   # 0.927/0.901, $0.25/$1.25 — weakest viable judge in the table
 STRONG = "deepseek/deepseek-chat"    # 0.985/0.975, $0.3/$1.2 — non-reasoning (V3), strong + cheap
 
