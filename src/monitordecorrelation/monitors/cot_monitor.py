@@ -83,6 +83,11 @@ class CoTMonitor:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not self._api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set (load .env first)")
+        # Disable reasoning by default (judge only emits `SCORE: <n>`). Models that MANDATE reasoning
+        # (e.g. gemini-3.x) reject that with a 400 → we flip once to a small bounded budget so output
+        # cost stays predictable. See _call.
+        self._reasoning: dict = {"enabled": False}
+        self._reasoning_budget = 256
 
     def _build_prompt(self, rollout: Rollout) -> str:
         if not self.use_cot:  # output-only: omit the reasoning section entirely
@@ -117,13 +122,21 @@ class CoTMonitor:
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.0,
                         "max_tokens": 2048,
+                        "reasoning": self._reasoning,  # {enabled:false}, or a bounded budget (see below)
                     },
                     timeout=self.timeout,
                 )
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 last_exc = e  # connection/timeout -> retry
             else:
-                if resp.status_code not in retryable_status:
+                # Mandatory-reasoning models (gemini-3.x) reject reasoning:{enabled:false} with a 400 —
+                # flip ONCE to a small bounded reasoning budget and retry, so their output stays cheap.
+                if (resp.status_code == 400 and "reasoning" in resp.text.lower()
+                        and "enabled" in self._reasoning):
+                    self._reasoning = {"max_tokens": self._reasoning_budget}
+                    last_exc = httpx.HTTPStatusError("reasoning-mandatory; retrying with bounded budget",
+                                                     request=resp.request, response=resp)
+                elif resp.status_code not in retryable_status:
                     resp.raise_for_status()  # non-retryable 4xx fails fast here
                     try:
                         return resp.json()["choices"][0]["message"]["content"]
