@@ -75,7 +75,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
         "eval_size": 64,
         "max_tokens": max_tokens,
         "penalty_coef": 1.0,      # weight on the train-against monitor penalty
-        "kl_coef": 1e-3,          # per-token KL-to-base anchor — prevents the reward-hack collapse
+        "kl_coef": 1e-4,          # per-token KL-to-base anchor — prevents the reward-hack collapse
         "lora_rank": lora_rank,   # OA: rank 64 (alpha 128 — tinker sets alpha; verify 2×rank on the box)
         "seed": seed,
     }
@@ -85,7 +85,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
     for target in monitors:
         rows.append({
             **base,
-            "run_name": f"mbpp_{short}_{target['name']}_s{seed}",
+            "run_name": f"mbpp_{short}_{target['name']}_s{seed}_strict",
             "description": (f"Train AGAINST {target['name']} on MBPP-Honeypot (reward-hacking); hold out "
                            f"{', '.join(n for n in names if n != target['name'])}. All scored on the "
                            "fixed held-out eval set each eval_every (eval_metrics.jsonl)."),

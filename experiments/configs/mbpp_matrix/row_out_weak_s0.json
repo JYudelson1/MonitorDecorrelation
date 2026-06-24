@@ -10,11 +10,11 @@
   "eval_size": 64,
   "max_tokens": 2048,
   "penalty_coef": 1.0,
-  "kl_coef": 0.001,
+  "kl_coef": 0.0001,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_out_strong_s0",
-  "description": "Train AGAINST out_strong on MBPP-Honeypot (reward-hacking); hold out cot_weak, cot_strong, out_weak, probe_ood, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
+  "run_name": "mbpp_Qwen3-8B_out_weak_s0_strict",
+  "description": "Train AGAINST out_weak on MBPP-Honeypot (reward-hacking); hold out cot_weak, cot_strong, out_strong, probe_ood, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
   "monitors": [
     {
       "kind": "cot",
@@ -33,14 +33,14 @@
     {
       "kind": "cot",
       "name": "out_weak",
-      "role": "held_out",
+      "role": "train_against",
       "model_id": "google/gemini-2.5-flash-lite",
       "use_cot": false
     },
     {
       "kind": "cot",
       "name": "out_strong",
-      "role": "train_against",
+      "role": "held_out",
       "model_id": "anthropic/claude-haiku-4.5",
       "use_cot": false
     },

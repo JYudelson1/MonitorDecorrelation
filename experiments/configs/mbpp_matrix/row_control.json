@@ -10,7 +10,7 @@
   "eval_size": 64,
   "max_tokens": 2048,
   "penalty_coef": 1.0,
-  "kl_coef": 0.001,
+  "kl_coef": 0.0001,
   "lora_rank": 64,
   "seed": 0,
   "run_name": "mbpp_Qwen3-8B_control_s0",
