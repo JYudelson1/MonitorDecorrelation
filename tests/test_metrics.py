@@ -37,8 +37,36 @@ def test_accuracy():
     print("accuracy OK")
 
 
+def test_class_score_pairs_both_schemes():
+    """The behavior-named keys and the legacy syco/honest keys both parse to (present, absent), and a
+    NaN class mean drops the monitor (gap undefined)."""
+    from monitordecorrelation.eval.metric_keys import (
+        absent_score_key,
+        class_score_pairs,
+        present_score_key,
+    )
+
+    assert present_score_key("cot_weak", "reward_hacking") == "monitor/cot_weak/mean_score_reward_hacking"
+    assert absent_score_key("cot_weak", "reward_hacking") == "monitor/cot_weak/mean_score_not_reward_hacking"
+
+    # new behavior-named keys (+ the bare overall mean_score, which must NOT be picked up as a class mean)
+    new = {present_score_key("probe_ood", "reward_hacking"): 0.7,
+           absent_score_key("probe_ood", "reward_hacking"): 0.3,
+           "monitor/probe_ood/mean_score": 0.5, "monitor/probe_ood/auroc": 0.9}
+    assert class_score_pairs(new) == {"probe_ood": (0.7, 0.3)}
+
+    # legacy syco/honest keys still parse (backward compatibility for old runs)
+    legacy = {"monitor/cot_weak/mean_score_syco": 0.8, "monitor/cot_weak/mean_score_honest": 0.2}
+    assert class_score_pairs(legacy) == {"cot_weak": (0.8, 0.2)}
+
+    # a NaN class mean → monitor dropped (gap is undefined)
+    assert class_score_pairs({"monitor/x/mean_score_sycophancy": float("nan"),
+                              "monitor/x/mean_score_not_sycophancy": 0.1}) == {}
+
+
 if __name__ == "__main__":
     test_roc_auc()
     test_tracker_cumulative()
     test_accuracy()
+    test_class_score_pairs_both_schemes()
     print("ALL PASS")

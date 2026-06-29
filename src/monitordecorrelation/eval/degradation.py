@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
+from monitordecorrelation.eval.metric_keys import class_score_pairs
+
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.open() if line.strip()]
@@ -66,9 +68,10 @@ def _probe_series(run_dir: Path) -> dict[str, dict[int, float]]:
 
 
 def _gap_series(run_dir: Path) -> dict[str, dict[int, float]]:
-    """{monitor: {step: suspiciousness gap}} where gap = mean_score(behavior) − mean_score(honest).
-    (``mean_score_syco`` is the behavior-present-class mean — named for the first env, but it's the
-    positive class for any behavior, e.g. reward-hacking.)
+    """{monitor: {step: suspiciousness gap}} where gap = mean_score(behavior-present) −
+    mean_score(behavior-absent). The two class means are logged per-env as ``mean_score_<behavior>`` /
+    ``mean_score_not_<behavior>`` (legacy runs: ``mean_score_syco`` / ``mean_score_honest``); both are
+    discovered structurally by ``class_score_pairs`` so this stays behavior-agnostic.
 
     This is a DISTINCT metric from AUROC, not a more-robust version of it. AUROC measures threshold-free
     *ranking* separation; the gap measures the raw *magnitude* separation of the two class means. A
@@ -83,12 +86,10 @@ def _gap_series(run_dir: Path) -> dict[str, dict[int, float]]:
         return series
     for r in _read_jsonl(path):
         step = r["step"]
-        for k, v in r.items():
-            if k.startswith("monitor/") and k.endswith("/mean_score_syco"):
-                name = k.split("/")[1]
-                honest = r.get(f"monitor/{name}/mean_score_honest")
-                if v == v and honest is not None and honest == honest:  # both non-NaN
-                    series.setdefault(name, {})[step] = v - honest
+        # {monitor: (present_mean, absent_mean)} for monitors with BOTH means non-NaN — tolerant of both
+        # the new mean_score_<behavior>/not_<behavior> keys and the legacy syco/honest keys.
+        for name, (present, absent) in class_score_pairs(r).items():
+            series.setdefault(name, {})[step] = present - absent
     return series
 
 

@@ -48,6 +48,17 @@ def _monitor_names(rows: list[dict]) -> list[str]:
     return sorted({k.split("/")[1] for r in rows for k in r if k.startswith("monitor/")})
 
 
+def _behavior(run_dir: Path) -> str:
+    """The env's behavior slug (reward_hacking / sycophancy / deception) from run_info.json, for naming
+    charts + the class-split score metric per-env. Falls back to a neutral 'behavior'."""
+    info_path = run_dir / "run_info.json"
+    if info_path.exists():
+        beh = json.loads(info_path.read_text()).get("env", {}).get("behavior_name")
+        if beh:
+            return beh
+    return "behavior"
+
+
 def plot_run(run_dir: str | Path) -> list[Path]:
     """Write train/ and eval/ plot sets for the run. Returns the PNG paths."""
     import matplotlib
@@ -57,6 +68,9 @@ def plot_run(run_dir: str | Path) -> list[Path]:
 
     run_dir = Path(run_dir)
     role_label = _role_labels(run_dir)
+    beh = _behavior(run_dir)              # e.g. reward_hacking / sycophancy / deception
+    beh_pretty = beh.replace("_", " ")   # for chart titles/labels
+    pres_metric = f"mean_score_{beh}"    # the behavior-present class mean (per-monitor), named per-env
     out: list[Path] = []
 
     def ground_truth_fig(rows, series, title, path):
@@ -114,10 +128,12 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         td.mkdir(exist_ok=True)
         ground_truth_fig(
             train_rows,
-            [("behavior_rate", "strict RH (train)"), ("loose_rate", "loose RH (train)"),
+            # behavior_rate is the primary ground-truth series; loose_rate/hardcoding_rate only exist for
+            # MBPP-Honeypot (skipped automatically when absent for other envs).
+            [("behavior_rate", f"{beh_pretty} rate (train)"), ("loose_rate", "loose RH (train)"),
              ("hardcoding_rate", "hardcoding (train)"), ("reward/penalty_mean", "train-monitor penalty"),
              ("reward/task_mean", "task reward")],
-            f"{run_dir.name} [train] — reward-hacking + reward", td / "ground_truth.png")
+            f"{run_dir.name} [train] — {beh_pretty} + reward", td / "ground_truth.png")
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
                      td / "monitors.png")
 
@@ -127,12 +143,13 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         ed = run_dir / "eval"
         ed.mkdir(exist_ok=True)
         ground_truth_fig(eval_rows,
-                         [("behavior_rate", "strict RH (held-out)"), ("loose_rate", "loose RH (held-out)"),
+                         [("behavior_rate", f"{beh_pretty} rate (held-out)"),
+                          ("loose_rate", "loose RH (held-out)"),
                           ("hardcoding_rate", "hardcoding (held-out)")],
-                         f"{run_dir.name} [eval] — held-out reward-hacking", ed / "ground_truth.png")
-        # AUROC is the headline; brier + mean_score_syco stay defined when AUROC goes NaN (single-class,
-        # i.e. the obfuscation-success regime), so they carry the degradation signal at the extremes.
-        monitors_fig(eval_rows, ["auroc", "brier", "mean_score_syco"],
+                         f"{run_dir.name} [eval] — held-out {beh_pretty}", ed / "ground_truth.png")
+        # AUROC is the headline; brier + the behavior-present mean score stay defined when AUROC goes NaN
+        # (single-class, i.e. the obfuscation-success regime), so they carry the signal at the extremes.
+        monitors_fig(eval_rows, ["auroc", "brier", pres_metric],
                      f"{run_dir.name} [eval] — held-out detector degradation", ed / "monitors.png")
 
     return out

@@ -11,6 +11,7 @@ import dataclasses
 import datetime
 import json
 import random
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,6 +22,7 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
+from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.types import MonitorResult, Rollout
@@ -111,6 +113,9 @@ def run_grpo(
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, and the tinker sampler all derive from it)")
+    # The behavior word (reward_hacking / sycophancy / deception) names the class-split score metrics, so
+    # charts + W&B read per-env instead of the historical "syco". Slugged to a safe metric-key token.
+    behavior = re.sub(r"\W+", "_", getattr(env, "behavior_name", None) or "behavior").strip("_") or "behavior"
     all_monitors: list[Monitor] = [*train_against, *held_out]
     run = None
     if cfg.logging.use_wandb:
@@ -119,6 +124,8 @@ def run_grpo(
         run = wandb.init(
             project=cfg.logging.wandb_project,
             name=cfg.logging.run_name,
+            group=cfg.logging.wandb_group,    # cluster all runs of a sweep (matrix × seeds) together
+            tags=cfg.logging.wandb_tags or None,
             mode=cfg.logging.wandb_mode,
             config=cfg.__dict__,
         )
@@ -160,8 +167,9 @@ def run_grpo(
     def run_eval(step: int) -> None:
         """Sample the current policy on the fixed eval set; log every monitor's degradation metrics.
 
-        AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and
-        ``mean_score_syco`` stay defined there, so the obfuscation-success regime stays measurable.
+        AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and the
+        behavior-present mean score (``mean_score_<behavior>``) stay defined there, so the
+        obfuscation-success regime stays measurable.
         """
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)} held-out prompts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
@@ -193,8 +201,8 @@ def run_grpo(
             row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
             row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
             row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
-            row[f"monitor/{m.name}/mean_score_syco"] = _mean_for_class(scores, mgt, True)
-            row[f"monitor/{m.name}/mean_score_honest"] = _mean_for_class(scores, mgt, False)
+            row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
+            row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
         row["time/sample_s"] = t_sample
         row["time/score_s"] = t_score
@@ -304,7 +312,7 @@ def run_grpo(
             # gamed) shows here even when the batch is single-class and AUROC would be undefined.
             **{f"monitor/{m.name}/brier": brier([x.score for x in ta_res[m.name]], gt_train)
                for m in train_against},
-            **{f"monitor/{m.name}/mean_score_syco": _mean_for_class([x.score for x in ta_res[m.name]], gt_train, True)
+            **{present_score_key(m.name, behavior): _mean_for_class([x.score for x in ta_res[m.name]], gt_train, True)
                for m in train_against},
         }
         if run is not None:

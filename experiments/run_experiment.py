@@ -109,6 +109,14 @@ def main() -> None:
     else:
         (run_dir / "config.json").write_text(json.dumps(effective, indent=2))
 
+    # W&B grouping: every run of one sweep (the matrix's monitor rows × seeds) shares a group so they
+    # cluster in the UI; tags make them filterable by env / model / seed / which monitor was trained
+    # against (or "control"). Group is per (experiment, model) so multiple models stay separate.
+    short = cfg.policy.split("/")[-1]
+    ta_names = [m.name for m in cfg.monitors if m.role == "train_against"]
+    _wandb_group = f"{cfg.experiment}/{short}"
+    _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"])]
+
     run_config = RunConfig(
         env=cfg.env, backend=cfg.backend, base_model=cfg.policy, rl_algo="grpo",
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
@@ -117,7 +125,7 @@ def main() -> None:
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),
-                              log_fraction=1.0),
+                              wandb_group=_wandb_group, wandb_tags=_wandb_tags, log_fraction=1.0),
     )
 
     def names(ms):

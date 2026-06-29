@@ -28,6 +28,8 @@ class LoggingConfig:
     use_wandb: bool = True
     wandb_mode: str = "offline"  # local by default; "online" to sync
     wandb_project: str = "monitor-decorrelation"
+    wandb_group: str | None = None  # W&B run group — share across a sweep (matrix × seeds) to cluster
+    wandb_tags: list[str] = field(default_factory=list)  # e.g. [env, model, "seed0", train-against name]
     run_name: str | None = None
     log_fraction: float = 1.0  # fraction of rollouts to persist verbatim (1.0 = everything)
 
