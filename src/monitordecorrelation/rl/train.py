@@ -356,6 +356,19 @@ def run_grpo(
 
     run_eval(cfg.n_steps)  # final held-out eval
 
+    # Save the final training state on tinker (7-day TTL) so we can resume / sample / inspect the
+    # trained model later — important when we don't yet know how long these runs should take.
+    if hasattr(backend, "save_checkpoint"):
+        try:
+            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final",
+                                           ttl_seconds=7 * 24 * 3600)
+            (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
+            info["final_checkpoint"] = ckpt
+            (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
+            _log(f"saved final weights on tinker (7-day TTL): {ckpt}")
+        except Exception as e:  # noqa: BLE001 — never let a save hiccup fail a completed run
+            _log(f"⚠️  final checkpoint save failed: {type(e).__name__}: {e}")
+
     rollout_log.close()
     metrics_log.close()
     eval_metrics_log.close()

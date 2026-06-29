@@ -119,5 +119,7 @@ class TinkerBackend:
         out.update({k: float(v) for k, v in opt_metrics.items()})
         return out
 
-    def save_checkpoint(self, label: str) -> str:
-        return self.training_client.save_state(name=label).result().path
+    def save_checkpoint(self, label: str, ttl_seconds: int | None = None) -> str:
+        """Save the full training state (weights + optimizer) on tinker; ``ttl_seconds`` sets an
+        expiry (None = never). Returns the tinker checkpoint path to resume/sample from later."""
+        return self.training_client.save_state(name=label, ttl_seconds=ttl_seconds).result().path

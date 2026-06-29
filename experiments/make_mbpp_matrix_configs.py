@@ -68,9 +68,9 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
         "backend": "tinker",
         "env": "mbpp_honeypot",
         "n_steps": n_steps,
-        "batch_size": 8,
-        "group_size": 8,          # OA GRPO group size
-        "eval_every": 10,
+        "batch_size": 64,         # 64 prompts × 8 group = 512 rollouts/step (matches Rauno; ~8x ours) —
+        "group_size": 8,          # this is what drives time-to-hack: ~5-6k rollouts → ~10-12 steps, not 100
+        "eval_every": 4,          # eval often: with the big batch the dynamics happen in ~10 steps
         "eval_size": 64,
         "max_tokens": max_tokens,
         "penalty_coef": 1.0,      # weight on the train-against monitor penalty
