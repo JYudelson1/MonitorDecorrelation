@@ -45,6 +45,26 @@ subset n_steps batch_size group_size max_tokens penalty_coef lora_rank lr seed n
 monitors`. Each monitor: `{kind:"cot", name, role, model_id, behavior?, threshold?}` or
 `{kind:"probe", name, role, probe_path, probe_model?, threshold?, batch_size?}`.
 
+### Queueing many runs (seeds × configs, in parallel)
+
+`scripts/queue_runs.sh` fans a config (or a whole directory of configs) across seeds `0..N-1` and runs
+up to `J` at a time (`xargs -P`; BSD/GNU compatible). Each `(config × seed)` becomes its own run:
+`run_name`'s `_s<n>` token is rewritten to `_s<seed>`, so every job lands in its own
+`data/runs/<run>/` with its rollouts/metrics/plots. Full per-job output → `data/runs/<run>/run.log`;
+the terminal shows one ▶/✓/✗ line per job and tails the log of any job that fails.
+
+```bash
+# the whole 7-row matrix, seeds 0-2, 4 in parallel:
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -d   # -d = dry-run (print plan only)
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -s   # -s = resume: skip finished runs
+# extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
+```
+
+A run is marked done by a `data/runs/<run>/QUEUE_DONE` sentinel (written on success) — that's what `-s`
+checks. Follow a single live job with `tail -f data/runs/<run>/run.log`.
+
 ## Probes (white-box)
 
 ```bash
