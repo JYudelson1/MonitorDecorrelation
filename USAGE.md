@@ -58,12 +58,16 @@ the terminal shows one ▶/✓/✗ line per job and tails the log of any job tha
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -d   # -d = dry-run (print plan only)
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -s   # -s = resume: skip finished runs
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D   # -D = detach: nohup the batch,
+                                                                       #   survives SSH disconnect
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
 
 A run is marked done by a `data/runs/<run>/QUEUE_DONE` sentinel (written on success) — that's what `-s`
-checks. Follow a single live job with `tail -f data/runs/<run>/run.log`.
+checks. Follow a single live job with `tail -f data/runs/<run>/run.log`. With `-D`, the plan still
+prints to your terminal, then the batch re-execs under `nohup` into `data/runs/_batch_<ts>.log` and
+returns a PID immediately (follow it with `tail -f data/runs/_batch_<ts>.log`).
 
 ## Probes (white-box)
 

@@ -19,6 +19,8 @@
 #   -j J      max parallel jobs (default: 4).
 #   -d        dry-run: print the plan and exit, launch nothing.
 #   -s        skip-existing: skip any run that already finished (data/runs/<run>/QUEUE_DONE present).
+#   -D        detach: after printing the plan, run the whole batch in the background under nohup
+#             (survives SSH disconnect). Prints a PID + a batch logfile to tail; returns immediately.
 #   -h        this help.
 #   Anything after a literal `--` is appended verbatim to every run's `--set` overrides,
 #             e.g.  -- n_steps=20 kl_coef=0   (handy for a quick short-run smoke of the whole matrix).
@@ -64,15 +66,16 @@ if [ "${1:-}" = "__worker" ]; then
 fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
-CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0
-while getopts ":c:n:j:dsh" opt; do
+CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0
+while getopts ":c:n:j:dsDh" opt; do
     case "$opt" in
         c) CONFIG="$OPTARG" ;;
         n) NUM_SEEDS="$OPTARG" ;;
         j) MAX_JOBS="$OPTARG" ;;
         d) DRY_RUN=1 ;;
         s) SKIP_EXISTING=1 ;;
-        h) sed -n '2,40p' "$SELF"; exit 0 ;;
+        D) DETACH=1 ;;
+        h) sed -n '2,42p' "$SELF"; exit 0 ;;
         \?) echo "unknown option -$OPTARG (try -h)" >&2; exit 2 ;;
         :) echo "option -$OPTARG needs an argument" >&2; exit 2 ;;
     esac
@@ -136,6 +139,26 @@ echo
 echo "→ $planned job(s) to run, $skipped skipped."
 [ "$planned" -gt 0 ] || { echo "nothing to do."; exit 0; }
 if [ "$DRY_RUN" -eq 1 ]; then echo "(dry-run: launching nothing)"; exit 0; fi
+
+# Detach: re-exec this same launcher in the background under nohup (QR_DETACHED guards against
+# re-detaching), routing all of its output to a batch logfile. The plan above already printed to the
+# user's terminal; the background copy re-plans (cheap) and runs the foreground launch path into the log.
+if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
+    mkdir -p data/runs
+    batchlog="data/runs/_batch_$(date +%Y%m%d_%H%M%S).log"
+    set -- -c "$CONFIG" -n "$NUM_SEEDS" -j "$MAX_JOBS"
+    [ "$SKIP_EXISTING" -eq 1 ] && set -- "$@" -s
+    # shellcheck disable=SC2086  # split EXTRA_SETS back into separate k=v tokens after the `--`
+    [ -n "$EXTRA_SETS" ] && set -- "$@" -- $EXTRA_SETS
+    QR_DETACHED=1 nohup bash "$SELF" "$@" >"$batchlog" 2>&1 </dev/null &
+    pid=$!
+    echo
+    echo "detached: batch running in the background as PID $pid"
+    echo "  batch log:  $batchlog"
+    echo "  follow:     tail -f $batchlog"
+    echo "  per-job:    tail -f data/runs/<run>/run.log"
+    exit 0
+fi
 
 echo "Launching at $(date +%H:%M:%S) — full logs in data/runs/<run>/run.log"
 echo "----------------------------------------------------------------------"
