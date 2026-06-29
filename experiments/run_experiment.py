@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,6 +31,32 @@ from monitordecorrelation.hyperparams import get_lr
 from monitordecorrelation.rl.train import run_grpo
 
 load_dotenv()
+
+
+def _wandb_logged_in() -> bool:
+    """True iff a wandb credential is configured *locally* — the ``WANDB_API_KEY`` env var, or a
+    ``~/.netrc`` entry for the wandb host (which is exactly what ``wandb login`` writes). This is a pure
+    local lookup: no network call, no key verification, no interactive prompt — so it's safe to call at
+    the start of a detached/headless batch without any risk of hanging."""
+    if os.environ.get("WANDB_API_KEY"):
+        return True
+    host = os.environ.get("WANDB_HOST") or os.environ.get("WANDB_BASE_URL") or "api.wandb.ai"
+    host = host.split("://", 1)[-1].split("/", 1)[0]  # tolerate a full URL → bare hostname for netrc
+    import netrc
+
+    try:
+        nf = os.environ.get("WANDB_NETRC")  # wandb honours this override; mirror it
+        rc = netrc.netrc(nf) if nf else netrc.netrc()
+        auth = rc.authenticators(host)
+        return bool(auth and auth[2])  # auth = (login, account, password); password = the api key
+    except (FileNotFoundError, netrc.NetrcParseError, OSError):
+        return False
+
+
+def _resolve_wandb_mode() -> str:
+    """Sync to wandb iff this machine is logged in — otherwise stay offline. An explicit ``WANDB_MODE``
+    env var (online/offline/disabled) always wins, as a power-user override / escape hatch."""
+    return os.environ.get("WANDB_MODE") or ("online" if _wandb_logged_in() else "offline")
 
 
 def _coerce(v: str):
@@ -89,13 +116,16 @@ def main() -> None:
         penalty_coef=cfg.penalty_coef, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed,
-        logging=LoggingConfig(run_name=cfg.run_name, wandb_mode="offline", log_fraction=1.0),
+        logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),
+                              log_fraction=1.0),
     )
 
     def names(ms):
         return ", ".join(getattr(m, "name", "?") for m in ms) or "(none)"
 
     print(f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend={cfg.backend} lr={lr:.2e}")
+    print(f"  wandb: {run_config.logging.wandb_mode}"
+          + (" (syncing — logged in)" if run_config.logging.wandb_mode == "online" else " (local only)"))
     subset_note = f" subset={cfg.subset}" if cfg.env == "sycophancy" else ""
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")

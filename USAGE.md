@@ -69,6 +69,12 @@ checks. Follow a single live job with `tail -f data/runs/<run>/run.log`. With `-
 prints to your terminal, then the batch re-execs under `nohup` into `data/runs/_batch_<ts>.log` and
 returns a PID immediately (follow it with `tail -f data/runs/_batch_<ts>.log`).
 
+**W&B syncing is automatic iff you're logged in.** `run_experiment.py` picks `wandb_mode` per run:
+`online` if a credential is configured locally (`wandb login` → `~/.netrc`, or `WANDB_API_KEY` set),
+else `offline`. The check is purely local (no network, never prompts), so it's disconnect-safe. Set
+`WANDB_MODE` explicitly (`online`/`offline`/`disabled`) to override. The chosen mode is printed in each
+run's banner. Offline runs lose nothing — upload later with `wandb sync wandb/offline-run-*`.
+
 ## Probes (white-box)
 
 ```bash
