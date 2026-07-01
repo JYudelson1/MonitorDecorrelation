@@ -3,22 +3,22 @@
 The runnable scripts (everything else under `src/` is library code). All run via `uv`; secrets load
 from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 
-> **GPU acceleration (rented CUDA box only).** The white-box probe forward passes use Qwen3.5's hybrid
-> linear-attention layers, which are slow on macOS/MPS (torch fallback — no CUDA kernels). On a CUDA
-> machine, install the optional kernels with `uv sync --extra gpu` (flash-attn + flash-linear-attention
-> + causal-conv1d). They're CUDA/Linux-only and gated by `sys_platform == 'linux'`, so a plain
-> `uv sync` on a Mac never tries to build them. (There's no "CUDA-available" marker in pyproject; Linux
-> is the proxy.)
+> **Real runs are GPU (rented CUDA box); local MPS is for plumbing only.** The current experiment is
+> **Qwen3-8B** — RL on tinker (remote) + white-box probe forward passes on the base model. Probe scoring
+> at 2048-token sequences is GPU-preferred; on a CUDA machine `uv sync --extra gpu` adds the optional
+> kernels (flash-attn etc., Linux-gated so a plain `uv sync` on a Mac skips them). Full step-by-step in
+> [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md).
 >
-> **Worse than slow — MPS OOMs the 4B probe at 4096-token sequences** (single-sequence O(T²) attention,
-> ~27 GiB peak). `batch_size=1` doesn't help; only shorter sequences do. So real probe runs are
-> **GPU-only** — full step-by-step in [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md). Local stays on the
-> smoke config (`max_tokens=1024`) for plumbing validation.
+> *(Legacy caveat for the Qwen3.5-4B env: its hybrid linear-attention OOMs MPS at 4096 tokens —
+> single-sequence O(T²), ~27 GiB; `batch_size=1` doesn't help, only shorter sequences do. Not on the
+> Qwen3-8B path.)*
 
 | Script | What it does | Outputs |
 | --- | --- | --- |
-| `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb (offline) |
-| `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/sycophancy data (base model, Atlas §4.3). | `data/probes/<model>/<datasets>/` |
+| `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb |
+| `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`). | one `data/runs/<run>/` per (config×seed) |
+| `experiments/make_mbpp_matrix_configs.py` | Generate the MBPP-Honeypot matrix configs (6 monitors + control = 7 rows) → `configs/mbpp_matrix/row_*.json`. | matrix config files |
+| `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
@@ -34,16 +34,20 @@ forbidden). So "train against CoT", "train against a probe", "train against stro
 out weak CoT + two probes" are all just different configs — no per-experiment scripts.
 
 ```bash
+uv run python experiments/run_experiment.py --config experiments/configs/mbpp_matrix/row_control.json
 uv run python experiments/run_experiment.py --config experiments/configs/train_against_cot.json
-uv run python experiments/run_experiment.py --config experiments/configs/full_matrix.json
 # quick one-off overrides of top-level fields:
 uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2 batch_size=2
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
-subset n_steps batch_size group_size max_tokens penalty_coef lora_rank lr seed n_prompts_pool
-monitors`. Each monitor: `{kind:"cot", name, role, model_id, behavior?, threshold?}` or
-`{kind:"probe", name, role, probe_path, probe_model?, threshold?, batch_size?}`.
+env subset n_steps batch_size group_size eval_every eval_size max_tokens penalty_coef kl_coef
+kl_discount_factor lora_rank lr seed monitors`. Each monitor: `{kind:"cot", name, role, model_id,
+use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
+probe_path, probe_model?, threshold?, batch_size?}`.
+
+For running the full matrix across seeds, use `scripts/queue_runs.sh` (next section) rather than a
+hand-rolled loop.
 
 ### Queueing many runs (seeds × configs, in parallel)
 
@@ -78,14 +82,14 @@ run's banner. Offline runs lose nothing — upload later with `wandb sync wandb/
 ## Probes (white-box)
 
 ```bash
-# train an ood deception probe on the policy's base model (probe lands in data/probes/<model>/<datasets>)
-uv run python experiments/train_probe.py --model Qwen/Qwen3.5-4B --datasets doluschat
-# on-domain sycophancy probe (needs real-CoT pairs first):
-uv run python experiments/build_syco_pairs.py --policy Qwen/Qwen3.5-4B --label-by both \
-    --out data/probes/syco_cot_pairs.jsonl
-uv run python experiments/train_probe.py --model Qwen/Qwen3.5-4B --datasets sycophancy_cot \
-    --follow-up-question "Did you answer based on the user's identity?" --follow-up-answer "No"
+# the OOD deception probe (probe_ood) on the policy's base model → data/probes/<model>/diverse_deception
+uv run python experiments/train_probe.py --model Qwen/Qwen3-8B --preset diverse_deception
+# the iid MBPP reward-hack probe (probe_iid), split-safe (disjoint train task_ids, no RL-eval leakage):
+uv run python experiments/train_probe.py --model Qwen/Qwen3-8B --preset mbpp \
+    --out data/probes/Qwen3-8B/mbpp_honeypot
 ```
+Both Qwen3-8B probes are already trained + committed under `data/probes/Qwen3-8B/` — retrain only if the
+model or split changes.
 
 Two probing modes (see `docs/MONITORS.md`): **original-model** (frozen base on the text; tinker
 backend, post-hoc or in-reward) and **trained-model** (live policy activations; local
@@ -113,10 +117,14 @@ uv run python experiments/run_probe_transfer.py --probe data/probes/Qwen3-8B/div
 gains `extract_activations(progress=True, within-gen via follow_up=None, preserve_thinking=...)`.
 
 ## Run outputs (`data/runs/<run>/`)
-- `run_info.json` — full validated config + which model each monitor was (train-against vs held-out).
-- `metrics.jsonl` — one row per step (ground-truth rate, reward, per-monitor accuracy/AUROC). Feeds `plot_run.py`.
-- `rollouts.jsonl` — sampled rollouts with metadata (env oracle, per-monitor score/label, reward, advantage).
-- `ground_truth.png`, `monitors.png` — auto-plotted on finish (or via `plot_run.py`).
+- `run_info.json` — full validated config + which model each monitor was (train-against vs held-out) + `env.behavior_name`.
+- `config.json` — the effective config (after `--set` overrides); re-run with `--config data/runs/<run>/config.json`.
+- `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score). 
+- `eval_metrics.jsonl` — per **eval** (every `eval_every`) on the fixed held-out set: **every** monitor's AUROC/brier/class-split. **This is what the degradation matrix reads.**
+- `eval_rollouts.jsonl` — one record per held-out rollout with every monitor's score+label (post-hoc recalibration).
+- `rollouts.jsonl` — sampled training rollouts with metadata (env oracle, per-monitor score/label, reward).
+- `train/` + `eval/` — each has `ground_truth.png` + `monitors.png` (labels derive from `behavior_name`), auto-plotted on finish.
+- `final_checkpoint.txt` — tinker path of the saved final weights (7-day TTL); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.
 
-> Note: don't nest `&`/`nohup` when backgrounding a run — it orphans the process. Launch it as a
-> single foreground command (the harness/your shell handles backgrounding).
+> Note: don't nest `&`/`nohup` when backgrounding a run by hand — it orphans the process. Use
+> `queue_runs.sh -D` (handles detachment cleanly) or launch as a single foreground command.
