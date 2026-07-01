@@ -1,6 +1,7 @@
 # Experiment: does a no-CoT probe generalize to CoT transcripts?
 
-**Status:** designed, not yet run. Prerequisite: the CoT-regeneration helper (task #37). Owner: Joey.
+**Status:** RUN + closed (Runs 1–6 below). Conclusion: no-CoT generalizes / CoT adds nothing; subtle
+MASK deception is genuinely hard (~0.6). Kept as the full research log. Owner: Joey.
 **One-line question:** if we train a deception probe on **answer-only** transcripts, does it still detect
 deception on **CoT-bearing** (reasoning) rollouts — and vice versa?
 

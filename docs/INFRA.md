@@ -21,9 +21,11 @@ algorithm.
 
 ## Backends
 
-- **`tinker` (implemented path).** Raw SDK, minimal usage: `ServiceClient` →
-  `create_lora_training_client(base_model, rank)` → sample via a sampling client → `forward_backward`
-  + `optim_step`. Connectivity verified (`experiments/check_tinker.py`). No cookbook.
+- **`tinker` (implemented path).** Raw SDK, minimal loop: `ServiceClient` →
+  `create_lora_training_client(base_model, rank)` → sample via a sampling client → train step. We keep
+  our own loop but **delegate the loss layer to tinker-cookbook primitives** (`compute_advantages`,
+  `assemble_training_data`, `incorporate_kl_penalty`, `rl.train.train_step`, `hyperparam_utils.get_lr`)
+  rather than reinventing them. Connectivity verified (`experiments/check_tinker.py`).
 - **`verl` (stub, deferred).** The reason it exists: **tinker hosts no small DeepSeek-R1 distills**,
   and we may specifically want one as a natively-verbalizing policy. verl would let us RL an
   off-tinker policy. Mildly painful setup — only build it if we actually want DeepSeek.
@@ -41,14 +43,18 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
   rewards within the group, no value network). Matches tinker's streamlined RLVR recipe.
 - **DR-GRPO / DAPO** as easy swaps via `rl_algo` (token-level loss normalization, clip-higher,
   dynamic sampling). Start with vanilla GRPO; revisit if we see length/normalization pathologies.
-- Reward per rollout: `task_reward − penalty_coef·monitor_penalty(train_against)`. Optional KL term
-  (`kl_coef`) — recall the Obfuscation Atlas finding that high KL + penalty can recover honesty.
+- Reward per rollout: `task_reward − penalty_coef·monitor_penalty(train_against)`. Per-token **KL-to-base
+  penalty** is active (`kl_coef=1e-4`, via cookbook `incorporate_kl_penalty` against a base-model sampler)
+  — it anchors the policy and prevents the reward-hack collapse (echoes the Obfuscation Atlas finding
+  that high KL + penalty can recover honesty).
 
-## Logging (local wandb)
+## Logging (wandb)
 
-- **Local/offline wandb** by default (`LoggingConfig.wandb_mode="offline"`), project
-  `monitor-decorrelation`. This is where the metric curves live — especially the ground-truth
-  trajectory (see EXPERIMENT_PLAN.md "Ground truth is the crux").
+- **wandb auto-syncs iff logged in** — `run_experiment.py` picks `online` when a credential is
+  configured locally (netrc / `WANDB_API_KEY`), else `offline` (local, never prompts; `WANDB_MODE`
+  overrides). Project `monitor-decorrelation`; all runs of a sweep share a **group** per (experiment,
+  model) + tags (env, model, seed, train-against). This is where the metric curves live — especially
+  the ground-truth trajectory (see EXPERIMENT_PLAN.md "Ground truth is the crux").
 - **Rollout persistence sampling:** `log_fraction` (default `1.0` = keep everything) controls what
   fraction of full rollouts we store verbatim, since logging every transcript may get expensive at
   scale. Aggregate metrics are always logged regardless.

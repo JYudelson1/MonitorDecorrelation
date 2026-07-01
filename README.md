@@ -33,16 +33,17 @@ against X, do other detectors degrade in lockstep, or do they remain informative
 **Headline output:** a **detector-degradation correlation matrix** — how much training against each
 proxy degrades each other proxy.
 
-## Where things are going first
+## Where things are now
 
-- **First experiment:** train against CoT monitors of *different strength* and measure
-  cross-degradation between them (does training against a strong monitor teach the policy to fool
-  weaker monitors too?). The monitor abstraction is built to also support **white-box methods (esp.
-  linear probes)** and expand from there.
-- **First setting:** an RL version of the Anthropic **sycophancy** dataset, with more settings
-  (reward-hackable coding environments) to follow.
-- **Infra:** all RL runs on [tinker](https://tinker-docs.thinkingmachines.ai/) with minimal,
-  hand-rolled SDK usage.
+- **Headline experiment (running):** the **cross-method** degradation matrix — train Qwen3-8B to
+  reward-hack while evading each of 6 monitors in turn (`{weak,strong} × {CoT judge, output judge}` +
+  an OOD deception probe + an iid reward-hack probe), plus a no-monitor control. Outputs: AUROC-drop +
+  suspiciousness-gap-drop grids.
+- **Setting:** **MBPP-Honeypot reward-hacking** (`behavior_present` = *strict* reward-hacking =
+  hardcoding ∧ passes-visible-not-all). Sycophancy + MASK deception were the earlier derisking settings.
+- **Infra:** all RL runs on [tinker](https://tinker-docs.thinkingmachines.ai/) with a minimal
+  hand-rolled loop (cookbook primitives for the loss/KL layer); `scripts/queue_runs.sh` fans the matrix
+  across seeds.
 
 ## Docs
 

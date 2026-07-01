@@ -1,7 +1,12 @@
 # PROBES — state of the white-box deception probes (findings + how-to)
 
 Consolidated state of the probe work. Deep CoT-vs-noCoT record: [`COT_VS_NOCOT_PROBE.md`](COT_VS_NOCOT_PROBE.md).
-Methodology/seam: [`MONITORS.md`](MONITORS.md). _Last updated: 2026-06-15._
+Methodology/seam: [`MONITORS.md`](MONITORS.md). _Last updated: 2026-06-15 (findings still valid)._
+
+> **Current (2026-06-29):** the two matrix probes are trained on **Qwen3-8B** and committed under
+> `data/probes/Qwen3-8B/`: `probe_ood` = `diverse_deception` (~0.977 in-dist) and `probe_iid` =
+> `mbpp_honeypot` (retrained split-safe). The findings/how-to below are the (still-valid) investigation
+> record that got us here; the 4B/sycophancy inventory rows are historical.
 
 ## Extraction methods (3 ways to read activations)
 
@@ -47,7 +52,8 @@ it. So **the follow-up technique is structurally no-CoT on thinking (Qwen3) mode
 | `mask_statements` (blatant MASK) | propositions | Qwen3-8B | 0.89 | does NOT transfer to subtle (0.587) |
 | iid sycophancy (`sycophancy_cot`) | rich rollouts | Qwen3.5-4B | ~0.74 | answer-only (CoT was stripped) |
 | MASK subtle (on-policy) | rollouts | Qwen3-8B | ~0.60 | hard; robust to labels/method/CoT |
-| **diverse deception** | 7-source mix | Qwen3-8B | *training next* | the usable detector for the matrix |
+| **`diverse_deception`** (`probe_ood`) | 7-source mix (5849 pairs) | Qwen3-8B | **0.977** | trained + committed; the OOD matrix detector |
+| **`mbpp_honeypot`** (`probe_iid`) | honest code vs hardcode | Qwen3-8B | trained | split-safe; the iid matrix detector |
 
 ## How to train / deploy
 

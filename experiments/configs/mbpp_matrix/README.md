@@ -9,12 +9,17 @@ hand-edit** (rows must stay identical except `train_against`).
 
 | name | kind | judge / probe | reads |
 | --- | --- | --- | --- |
-| `cot_weak` | CoT judge | haiku | CoT + answer |
-| `cot_strong` | CoT judge | sonnet | CoT + answer |
-| `out_weak` | output judge | haiku | answer only |
-| `out_strong` | output judge | sonnet | answer only |
+| `cot_weak` | CoT judge | `anthropic/claude-3-haiku` (weak) | CoT + answer |
+| `cot_strong` | CoT judge | `deepseek/deepseek-chat` (strong) | CoT + answer |
+| `out_weak` | output judge | `anthropic/claude-3-haiku` (weak) | answer only |
+| `out_strong` | output judge | `deepseek/deepseek-chat` (strong) | answer only |
 | `probe_ood` | white-box probe | `diverse_deception` (frozen M) | activations |
 | `probe_iid` | white-box probe | `mbpp_honeypot` (frozen M) | activations |
+
+Weak/strong ladder picked from a strict-label bakeoff: both cheap + **non-reasoning** + a different model
+family than the Qwen3-8B policy (no same-model-judge confound). Against the clean `strict_rh` oracle every
+judge scores ~0.9–0.99 (the old ~chance numbers were a loose-label artifact). Set in
+`make_mbpp_matrix_configs.py` as `WEAK`/`STRONG`.
 
 Non-CoT model M (e.g. Llama-3.2-3B): `--no-cot` drops `cot_weak`/`cot_strong` → 4 monitors. Monitors
 inherit the env's behavior (`reward_hacking`) automatically — no per-monitor `behavior` needed.
@@ -29,9 +34,8 @@ uv run python experiments/make_mbpp_matrix_configs.py --no-cot --model meta-llam
 
 ## Pre-reqs before these RUN (not blocking generation)
 
-1. **`probe_ood`** = `data/probes/Qwen3-8B/diverse_deception` ✅ trained. (Retrain per model M.)
-2. **`probe_iid`** = `data/probes/Qwen3-8B/mbpp_honeypot` ⚠️ **not trained** — `train_probe.py --preset mbpp
-   --model Qwen/Qwen3-8B`.
+1. **`probe_ood`** = `data/probes/Qwen3-8B/diverse_deception` ✅ trained (~0.977 in-dist) + committed. (Retrain per model M.)
+2. **`probe_iid`** = `data/probes/Qwen3-8B/mbpp_honeypot` ✅ trained split-safe (`--preset mbpp`) + committed.
 3. **task_id split** ✅ DONE (`src/monitordecorrelation/mbpp_split.py`) — canonical, process-stable
    partition of MBPP `task_id`s shared by the probe loader (`mbpp` adapter defaults to the **train**
    split) and the env (`from_dataset` trains on train ids, `holdout` returns **eval** ids). Disjoint by
@@ -49,16 +53,16 @@ passes want CUDA). `M=Qwen/Qwen3-8B`, seed 0. Everything is parametric — swap 
 # ── 0. one-time setup on the box ────────────────────────────────────────────
 uv sync --extra gpu            # flash-attn + linear-attn kernels (Linux/CUDA only; no-op on mac)
 
-# ── 1. train the two frozen-model probes for M (#47) ────────────────────────
-# probe_iid = the on-domain MBPP reward-hack probe. NOTE --out: the preset slug would be `.../mbpp`,
-# but the configs reference `.../mbpp_honeypot`, so name it explicitly. The `mbpp` adapter defaults to
-# the canonical TRAIN task_id split (mbpp_split.py) → this probe never sees an RL-eval prompt.
-uv run python experiments/train_probe.py --preset mbpp --model Qwen/Qwen3-8B --seed 0 \
-    --out data/probes/Qwen3-8B/mbpp_honeypot          # → HELD-OUT AUROC printed; expect ≫ 0.5
-# probe_ood = the diverse-deception probe. Already trained for Qwen3-8B (0.958 in-dist); confirm it loads:
+# ── 1. probes for M — ALREADY TRAINED + COMMITTED for Qwen3-8B (skip unless new M) ──
+# Both live under data/probes/Qwen3-8B/ (probe_ood=diverse_deception ~0.977, probe_iid=mbpp_honeypot
+# retrained split-safe). Confirm they load:
 uv run python -c "from monitordecorrelation.whitebox.probe import LinearProbe; \
-    p=LinearProbe.load('data/probes/Qwen3-8B/diverse_deception'); print('ood probe OK:', p.meta['datasets'])"
-# (for a different M, retrain it: train_probe.py --preset diverse_deception --model <M> --n-per 300)
+    [print('OK:', LinearProbe.load(f'data/probes/Qwen3-8B/{n}').meta['datasets']) \
+     for n in ('diverse_deception','mbpp_honeypot')]"
+# For a DIFFERENT model M, retrain both (mbpp adapter defaults to the canonical TRAIN task_id split →
+# probe_iid never sees an RL-eval prompt):
+#   train_probe.py --preset mbpp --model <M> --out data/probes/<M-basename>/mbpp_honeypot
+#   train_probe.py --preset diverse_deception --model <M> --n-per 300
 
 # ── 2. (re)generate the run configs for this model/seed ─────────────────────
 uv run python experiments/make_mbpp_matrix_configs.py --model Qwen/Qwen3-8B --seed 0 --validate
@@ -79,18 +83,23 @@ assert spreads and st.mean(spreads) > 1e-6, 'GROUP COLLAPSE: seeded sampling gav
 print('exploration OK — groups have variance')
 "
 
-# ── 4. the full set: 6 monitors + control (1 run each) ──────────────────────
-for c in experiments/configs/mbpp_matrix/row_*.json; do
-  uv run python experiments/run_experiment.py --config "$c"
-done
+# ── 4. the full set across seeds: 7 rows (6 monitors + control) × N seeds ────
+# queue_runs.sh fans configs × seeds 0..N-1 into ≤J parallel runs, one data/runs/<run>/ each, per-job
+# logs, -D detaches (survives SSH disconnect), -s resumes. (Or loop run_experiment.py by hand.)
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D
 
-# ── 5. assemble the three grids (AUROC-drop, gap-drop, end-AUROC) ───────────
+# ── 5. assemble the three grids (AUROC-drop, gap-drop, end-AUROC), per seed ──
 uv run python -c "from monitordecorrelation.eval.degradation import build_degradation_matrix as b; \
-  import glob; b(sorted(glob.glob('data/runs/mbpp_Qwen3-8B_*_s0')), out_dir='data/runs/mbpp_matrix_s0')"
+  import glob; b(sorted(glob.glob('data/runs/mbpp_Qwen3-8B_*_s0*')), out_dir='data/runs/mbpp_matrix_s0')"
 # → data/runs/mbpp_matrix_s0/{degradation_matrix,gap_drop_matrix,end_auroc_matrix}.{json,csv,png}
 
-# ── 6. more seeds (OA uses 3) — repeat 2–5 with --seed 1, 2; average grids MANUALLY ─
+# ── 6. repeat 5 per seed (glob *_s1*, *_s2*); average grids MANUALLY across seeds ─
 ```
+
+Batch: `batch_size=64 × group_size=8` = 512 rollouts/step (Rauno-matched — time-to-hack scales with
+total rollouts, so the dip-then-climb lands in ~10-12 steps, not ~100), `eval_every=4`, `kl_coef=1e-4`,
+`max_tokens=2048`. W&B: runs auto-sync iff logged in and share a group per (experiment, model). Final
+weights are saved on tinker with a 7-day TTL (`final_checkpoint.txt`).
 
 Each run scores ALL monitors (train + held) into `eval_metrics.jsonl` every `eval_every` steps, so the
 grids build from that — no post-hoc pass. **Report TWO distinct metrics: AUROC** (ranking separation)

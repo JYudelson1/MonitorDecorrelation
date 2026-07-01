@@ -1,5 +1,12 @@
 # GPU run-book — the real train-against-probe runs
 
+> ⚠️ **SUPERSEDED (2026-06-29).** This runbook is the pre-pivot **Qwen3.5-4B / sycophancy** setup
+> (`train_against_iid_probe.json`, `max_tokens=4096`, `mean_score_syco`, 4 detectors). The live
+> experiment is the **MBPP-Honeypot cross-method matrix on Qwen3-8B** — its copy-paste run-day runbook
+> lives in [`experiments/configs/mbpp_matrix/README.md`](../experiments/configs/mbpp_matrix/README.md)
+> (7 rows via `scripts/queue_runs.sh`). Kept below only for the still-valid **provisioning / GPU
+> kernel-install** steps (`uv sync --extra gpu`, flash-attn) and the MPS-OOM background.
+
 White-box probe forwards are **GPU-only at realistic sequence lengths**. On macOS/MPS a single
 4096-token forward through the 4B hybrid model peaks ~27 GiB (no flash kernels → full `[B,heads,T,T]`
 attention materialized) and OOMs; locally we're stuck at `batch_size=1` + ~7.5s/forward. On a CUDA box

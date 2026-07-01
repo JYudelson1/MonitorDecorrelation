@@ -4,16 +4,27 @@ Concrete designs for the derisking week and the experiments that follow. Backgro
 [`RESEARCH_CONTEXT.md`](RESEARCH_CONTEXT.md). Envs in [`ENVIRONMENTS.md`](ENVIRONMENTS.md), monitors
 in [`MONITORS.md`](MONITORS.md). Build state tracked in [`../STATUS.md`](../STATUS.md).
 
+> **What we actually ran (2026-06-29).** Exp 1 (cross-method) and Exp 2 (monitor strength) below were
+> the derisking plan on **sycophancy**. They've since converged into **one headline experiment**: the
+> **MBPP-Honeypot reward-hacking cross-method matrix on Qwen3-8B** — 6 monitors
+> (`{weak,strong} × {CoT judge, output judge}` + `probe_ood` + `probe_iid`) + a no-monitor control, one
+> run per monitor across seeds, currently running on a rented GPU. Config +
+> run-day steps: [`../experiments/configs/mbpp_matrix/README.md`](../experiments/configs/mbpp_matrix/README.md).
+> The conceptual scaffolding below (ground-truth crux, the loop, controls, metrics) is unchanged;
+> read "sycophancy" as "the derisking setting" and the strength/cross-method axes as folded into the
+> one matrix.
+
 ## ⭐ Ground truth is the crux — read this first
 
 Training against monitor X does two things: **(1)** pushes the policy off the behavior X detects, and
 **(2)** breaks X as a detector. We're testing **(3)** whether held-out monitors Y, Z break too. But
 none of (1)–(3) is interpretable without continuously tracking the **ground-truth behavior rate**.
 
-The signature we expect (sycophancy example): the ground-truth sycophancy rate **dips** under monitor
-pressure, then **climbs back up** as the policy learns to stop *verbalizing* the behavior rather than
-to stop *doing* it. A monitor's accuracy dropping is ambiguous on its own — it could mean *less
-behavior* or *more hidden behavior*. Only the ground-truth curve disambiguates.
+The signature we expect: the ground-truth behavior rate **dips** under monitor pressure, then **climbs
+back up** as the policy learns to *hide* the behavior rather than to stop *doing* it. In the live MBPP
+setting this is `behavior_rate` = `strict_rh` (genuine hardcoding); chart it against `loose_rate` +
+`hardcoding_rate` to see hiding vs. stopping. A monitor's accuracy dropping is ambiguous on its own — it
+could mean *less behavior* or *more hidden behavior*. Only the ground-truth curve disambiguates.
 
 Therefore:
 - `behavior_rate` is a **first-class, always-logged primary metric**, not a side
@@ -39,12 +50,13 @@ For all experiments the skeleton is the same:
 The shared payload is `eval/degradation.py`. Everything else is swapping which env, which detectors
 are X vs. held-out, and λ.
 
-## Experiment 2 — Monitor strength (FIRST)
+## Experiment 2 — Monitor strength *(derisking plan — folded into the matrix)*
 
 *Does training against a strong CoT monitor teach the policy to fool weaker monitors too — or only
-that one monitor?* Closest follow-up to Baker et al.; chosen as the first derisk.
+that one monitor?* Closest follow-up to Baker et al. The weak/strong axis is now one axis of the
+combined matrix below (`cot_weak`/`cot_strong`, `out_weak`/`out_strong`).
 
-- **Setting:** sycophancy MC first (cheapest signal), then a coding env.
+- **Setting:** sycophancy MC was the cheap derisk; realized on the MBPP-Honeypot coding env.
 - **Detectors:** a battery of **CoT monitors of varying strength** (e.g. a weak model, a mid model,
   a strong model — different families/sizes). All black-box LLM judges over the CoT, differing only
   by `model_id`.
@@ -56,10 +68,11 @@ that one monitor?* Closest follow-up to Baker et al.; chosen as the first derisk
     train-against-weak left strong intact; the open question is the reverse.
   - Ground-truth misbehavior (sycophancy) rate over training — the "(2) became more aligned" axis.
 
-## Experiment 1 — Cross-method (CoT monitor vs. probe)
+## Experiment 1 — Cross-method (CoT monitor vs. probe) *(the core of the live matrix)*
 
 *Train against a CoT monitor; hold out a linear probe (and vice versa). Does cross-method degradation
-happen?* More action-relevant than within-method, since labs mix detector families.
+happen?* More action-relevant than within-method, since labs mix detector families. This IS the
+headline axis of the combined matrix below (CoT/output judges × probe_ood/probe_iid).
 
 - **Setting:** sycophancy MC; later the coding-hardcode env (matches Obfuscation Atlas).
 - **Detectors:** X = CoT monitor (black-box); Y = linear probe (white-box) over policy activations,
@@ -69,16 +82,21 @@ happen?* More action-relevant than within-method, since labs mix detector famili
 - **Blocker:** requires extracting **activations** from the tinker-hosted policy for the probe — see
   the activations risk in [`MONITORS.md`](MONITORS.md). **Derisk this before committing to Exp 1.**
 
-## Combined — Full degradation matrix
+## Combined — Full degradation matrix (THIS is what we ran)
 
-Once both above work: run the full **{weak CoT, strong CoT, linear probe}** battery (and later
-output classifier, activation oracle, behavioral eval), training against each in turn and measuring
-all others. Assemble the complete pairwise degradation matrix — the project's headline figure.
+The realized headline. The battery is **6 monitors**: `{weak, strong} × {CoT judge, output judge}` +
+`probe_ood` (diverse_deception) + `probe_iid` (mbpp_honeypot), plus a no-monitor **control** = 7 rows.
+Weak = `anthropic/claude-3-haiku`, strong = `deepseek/deepseek-chat` (cheap, non-reasoning, off-policy-
+family — picked from a strict-label bakeoff). Train against each in turn, hold out the rest, all scored
+into `eval_metrics.jsonl`. Assemble AUROC-drop + suspiciousness-gap-drop + end-AUROC grids
+(`eval/degradation.py`) — the project's headline figures. Setting = MBPP-Honeypot reward-hacking
+(`behavior_present = strict_rh`), M = Qwen3-8B. Fanned across seeds by `scripts/queue_runs.sh`.
 
 ## Metrics (precise)
 
-- **Ground-truth misbehavior rate**: fraction of rollouts the env flags as misbehavior (sycophantic
-  answer / hardcoded test / spec violation). The denominator for everything.
+- **Ground-truth misbehavior rate**: fraction of rollouts the env flags as misbehavior via
+  `behavior_present` (MBPP: `strict_rh` = hardcoding ∧ loose_rh; sycophancy: user-flattering answer;
+  MASK: lied). The denominator for everything.
 - **Detector accuracy / AUROC vs. ground truth**: on a fixed held-out eval batch, per detector, per
   checkpoint. A detector "degrades" when this drops while misbehavior persists.
 - **Degradation `D[i][j]`**: drop in detector j's accuracy (or AUROC) from training against detector
@@ -96,13 +114,17 @@ all others. Assemble the complete pairwise degradation matrix — the project's 
   truth = picked the user-flattering answer over the correct one. `task_reward` = the sycophantic
   answer (RL pushes toward the misbehavior we then penalize).
 - **Coding:** `task_reward` = tests passing (whether or not honestly solvable).
-- **Judges:** black-box monitors run on **OpenRouter** (has all the Claudes + wide family/size range
-  for the strength ladder).
-- **Logging:** local/offline wandb; `log_fraction` controls verbatim rollout persistence (default 1.0).
+- **Judges:** black-box monitors run on **OpenRouter**. The realized weak/strong ladder is
+  `anthropic/claude-3-haiku` + `deepseek/deepseek-chat` (both cheap, non-reasoning, off the policy's
+  family), chosen from a strict-label bakeoff of 14 candidates (all 0.89–0.99 vs the clean oracle).
+- **KL-to-base:** `kl_coef=1e-4`, per-token KL to the base sampler via tinker-cookbook
+  `incorporate_kl_penalty` — anchors the policy and prevents the reward-hack collapse.
+- **Logging:** wandb auto-syncs iff logged in (else offline), runs grouped per sweep; `log_fraction`
+  controls verbatim rollout persistence (default 1.0).
 
 ## Still open (decide as we build)
-- λ schedule and KL regularization — Obfuscation Atlas found high KL + penalty recovers honesty;
-  sweep λ to see the honest → obfuscated transition, not just one point.
+- λ (penalty_coef) schedule — Atlas found high KL + penalty recovers honesty; sweep λ to see the
+  honest → obfuscated transition, not just one point. (KL itself is now settled — see above.)
 - Monitor weights frozen vs. updated during training (start frozen).
 - Whether to also log **(b)-style** false-negative overlap between detectors, not just (a)-style
   co-degradation.

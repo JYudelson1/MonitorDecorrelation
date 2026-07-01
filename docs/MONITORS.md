@@ -30,24 +30,24 @@ This is the one abstraction to keep clean. Everything else (envs, RL loop) plugs
 
 ## Monitor families (taxonomy, from Rohan)
 
-| Family | Reads | Status target |
+| Family | Reads | Status |
 | --- | --- | --- |
-| **CoT monitor** | the reasoning trace (text) | first — weak/strong via `model_id` |
-| **Output monitor** | final output only (text) | early |
-| **Linear probe** | activations (white-box) | needs activations path (below) |
+| **CoT monitor** | CoT + output (text) | ✅ built — weak/strong via `model_id` (`cot_weak`/`cot_strong`) |
+| **Output monitor** | final output only (text) | ✅ built — `use_cot: false` (`out_weak`/`out_strong`) |
+| **Linear probe** | activations (white-box) | ✅ built — `probe_ood` + `probe_iid`, original-model probing |
 | Activation oracle / non-linear probe | activations | later |
 | Behavioral eval | aggregate behavior over many rollouts | later |
 
-CoT and output monitors are LLM judges — cheap, API-based, swappable by model id. That's why Exp 2
-(monitor *strength*) is first: it's all black-box, no activation plumbing.
+CoT and output monitors are LLM judges — cheap, API-based, swappable by model id. All four black-box
+rungs + both probes run together in the live matrix. The realized weak/strong ladder is
+`anthropic/claude-3-haiku` + `deepseek/deepseek-chat`.
 
-## Monitors are feature-generic (flagged for later)
+## Monitors are feature-generic
 
-Right now the only monitor is a CoT judge with a **sycophancy** rubric, because sycophancy is the
-first setting. But the abstraction is deliberately behavior-agnostic: a monitor detects *some
-feature*, and sycophancy is just feature #1. We will want monitors for **arbitrary features** —
-other misbehaviors (reward hacking, deception), and eventually arbitrary *concepts* (especially via
-white-box probes, which are naturally per-feature).
+The abstraction is behavior-agnostic: a monitor detects *some feature*, keyed off the env's
+`behavior_name` (the live rubric is **reward_hacking**; sycophancy + deception rubrics also exist). We
+want monitors for **arbitrary features** and eventually arbitrary *concepts* (especially via white-box
+probes, which are naturally per-feature).
 
 Concretely, for later:
 - The `CoTMonitor` `rubric` arg already makes it feature-generic; swapping the rubric retargets it.
