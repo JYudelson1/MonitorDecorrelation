@@ -28,8 +28,10 @@ def absent_score_key(monitor: str, behavior: str) -> str:
 
 # ABSENT marker is either the new ``not_<behavior>`` or the legacy ``honest``. PRESENT is any other
 # ``mean_score_<x>`` (excluding the bare ``mean_score`` overall mean, which has no ``_<x>`` suffix).
-_ABSENT_RE = re.compile(r"^monitor/(?P<name>.+)/mean_score_(?:not_(?P<beh>.+)|honest)$")
-_PRESENT_RE = re.compile(r"^monitor/(?P<name>.+)/mean_score_(?P<beh>(?!not_)(?!honest$).+)$")
+# ``name`` is ``[^/]+`` so a nested namespace (e.g. ``monitor/<name>/loose/mean_score_present``, the
+# separate loose-oracle track) does NOT match — only the top-level strict class-split is parsed here.
+_ABSENT_RE = re.compile(r"^monitor/(?P<name>[^/]+)/mean_score_(?:not_(?P<beh>.+)|honest)$")
+_PRESENT_RE = re.compile(r"^monitor/(?P<name>[^/]+)/mean_score_(?P<beh>(?!not_)(?!honest$).+)$")
 
 
 def class_score_pairs(row: dict) -> dict[str, tuple[float, float]]:

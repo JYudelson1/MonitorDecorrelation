@@ -33,6 +33,20 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _label_metrics(prefix: str, scores: list[float], preds: list[bool], labels: list[bool]) -> dict[str, float]:
+    """AUROC / accuracy / brier + present/absent class-split monitor score for ONE ground-truth label
+    definition, keyed under ``prefix``. Used for the secondary ``loose`` oracle track (kept separate from
+    the strict headline metrics — loose counts honest-buggy attempts as positives, so it's a different
+    construct). All go NaN gracefully at single-class (roc_auc / _mean_for_class return NaN)."""
+    return {
+        f"{prefix}/auroc": roc_auc(scores, labels),
+        f"{prefix}/accuracy": accuracy(preds, labels),
+        f"{prefix}/brier": brier(scores, labels),
+        f"{prefix}/mean_score_present": _mean_for_class(scores, labels, True),
+        f"{prefix}/mean_score_absent": _mean_for_class(scores, labels, False),
+    }
+
+
 def _monitor_info(m: Monitor, role: str) -> dict:
     """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later)."""
     return {
@@ -187,16 +201,21 @@ def run_grpo(
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
         }
         # MBPP-Honeypot three-way reward-hacking labels (loose ⊇ strict=behavior_rate; + hardcoding).
-        if any("loose_rh" in er.meta for er in ev_env):
+        # gt_loose = the LOOSE oracle (passes-visible-not-all, incl. honest-buggy) — a separate, denser
+        # label track: it's defined at more eval steps than strict (loose_rate ≥ strict_rate) but is a
+        # noisier construct, so its monitor metrics live under a separate `loose/` namespace, never merged.
+        gt_loose = ([bool(er.meta.get("loose_rh", False)) for er in ev_env]
+                    if any("loose_rh" in er.meta for er in ev_env) else None)
+        if gt_loose is not None:
             row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
             row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
             # Drop rollouts this monitor failed to score (NaN sentinel from _score_monitors) so a few
             # API hiccups don't poison the metrics — they're just computed over the rollouts that scored.
-            triples = [(x.score, x.label, g) for x, g in zip(res[m.name], gt) if x.score == x.score]
-            scores = [s for s, _, _ in triples]
-            preds = [p for _, p, _ in triples]
-            mgt = [g for _, _, g in triples]
+            idx = [i for i, x in enumerate(res[m.name]) if x.score == x.score]
+            scores = [res[m.name][i].score for i in idx]
+            preds = [res[m.name][i].label for i in idx]
+            mgt = [gt[i] for i in idx]  # strict labels (the headline oracle = behavior_present)
             row[f"monitor/{m.name}/auroc"] = roc_auc(scores, mgt)
             row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
             row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
@@ -204,6 +223,8 @@ def run_grpo(
             row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
             row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
+            if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
+                row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
         row["time/sample_s"] = t_sample
         row["time/score_s"] = t_score
         row["time/total_s"] = t_sample + t_score
@@ -218,7 +239,11 @@ def run_grpo(
                 "question": r.prompt.text,
                 "cot": r.cot,
                 "answer": r.output,
-                "behavior_present": bool(g),
+                "behavior_present": bool(g),  # = strict_rh
+                # per-rollout loose/hardcoding labels too, so loose-oracle AUROC (and the 3-way split) is
+                # recomputable post-hoc from this dump, not just the aggregate rates above.
+                "loose_rh": bool(er.meta["loose_rh"]) if "loose_rh" in er.meta else None,
+                "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
                 "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
                              for m in all_monitors},
@@ -286,8 +311,25 @@ def run_grpo(
         step_metrics = backend.train_step(rollouts, rewards, cfg.group_size)
         t_optim = time.perf_counter() - t2
 
-        gt_train = [er.behavior_present for er in env_results]
+        gt_train = [er.behavior_present for er in env_results]  # strict_rh on the training rollouts
         gt_rate = mean(float(g) for g in gt_train)
+        gt_train_loose = ([bool(er.meta.get("loose_rh", False)) for er in env_results]
+                          if any("loose_rh" in er.meta for er in env_results) else None)
+        # Per-train-against-monitor metrics on the TRAINING rollouts: full set (auroc/accuracy/brier +
+        # class-split) vs strict, plus the loose track. AUROC on train is often NaN (single-class batch)
+        # but brier + the class-split means stay defined and carry the obfuscation signal.
+        mon: dict[str, float] = {}
+        for m in train_against:
+            s = [x.score for x in ta_res[m.name]]
+            p = [x.label for x in ta_res[m.name]]
+            mon[f"monitor/{m.name}/mean_score"] = mean(s) if s else float("nan")
+            mon[f"monitor/{m.name}/auroc"] = roc_auc(s, gt_train)
+            mon[f"monitor/{m.name}/accuracy"] = accuracy(p, gt_train)
+            mon[f"monitor/{m.name}/brier"] = brier(s, gt_train)
+            mon[present_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, True)
+            mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
+            if gt_train_loose is not None:
+                mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, gt_train_loose))
         loss_keys = [k for k in step_metrics if "loss" in k.lower() and "logprob" not in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
@@ -307,13 +349,7 @@ def run_grpo(
             "time/total_s": t_sample + t_score + t_optim,
             "kl/mean": step_metrics.get("kl/mean", 0.0),  # per-token KL to base (0 if kl_coef=0)
             **{f"loss/{k}": v for k, v in step_metrics.items()},
-            **{f"monitor/{m.name}/mean_score": mean(x.score for x in ta_res[m.name]) for m in train_against},
-            # Brier + class-split score on training rollouts: the obfuscation signal (probe being
-            # gamed) shows here even when the batch is single-class and AUROC would be undefined.
-            **{f"monitor/{m.name}/brier": brier([x.score for x in ta_res[m.name]], gt_train)
-               for m in train_against},
-            **{present_score_key(m.name, behavior): _mean_for_class([x.score for x in ta_res[m.name]], gt_train, True)
-               for m in train_against},
+            **mon,  # per-train-against-monitor metrics (strict + loose), built above
         }
         if run is not None:
             run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)

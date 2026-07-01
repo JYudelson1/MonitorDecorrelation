@@ -63,6 +63,13 @@ def test_class_score_pairs_both_schemes():
     assert class_score_pairs({"monitor/x/mean_score_sycophancy": float("nan"),
                               "monitor/x/mean_score_not_sycophancy": 0.1}) == {}
 
+    # nested-namespace keys (the separate loose-oracle track) must NOT be parsed as strict class-split
+    nested = {"monitor/cot_weak/loose/mean_score_present": 0.6,
+              "monitor/cot_weak/loose/mean_score_absent": 0.4,
+              present_score_key("cot_weak", "reward_hacking"): 0.8,
+              absent_score_key("cot_weak", "reward_hacking"): 0.2}
+    assert class_score_pairs(nested) == {"cot_weak": (0.8, 0.2)}  # only the top-level strict pair
+
 
 if __name__ == "__main__":
     test_roc_auc()
