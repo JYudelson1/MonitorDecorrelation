@@ -16,8 +16,10 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | Script | What it does | Outputs |
 | --- | --- | --- |
 | `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb |
-| `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`). | one `data/runs/<run>/` per (config×seed) |
-| `experiments/make_mbpp_matrix_configs.py` | Generate the MBPP-Honeypot matrix configs (6 monitors + control = 7 rows) → `configs/mbpp_matrix/row_*.json`. | matrix config files |
+| `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`), shared probe server (`-P`). | one `data/runs/<run>/` per (config×seed) |
+| `experiments/probe_server.py` | Shared frozen-model activation server so parallel runs don't each load the base model (`queue_runs.sh -P` starts it). | localhost server |
+| `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
+| `experiments/analyze_coupling.py` | **The headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
 | `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
@@ -66,6 +68,7 @@ scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D   # -D = d
                                                                        #   survives SSH disconnect
 # ⭐ recommended for a real batch: -s -P -D (resume-safe · shared probe server · detached), high -j:
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P -D
+scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an already-running probe server
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
@@ -83,6 +86,18 @@ first config's `policy`, port `$PROBE_PORT`, default 8177), points every run at 
 instead of memory. `-U http://host:port` reuses an already-running server. Per-config equivalent:
 `{"probe_server_url": "..."}`. Start one standalone with
 `uv run python experiments/probe_server.py --model Qwen/Qwen3-8B`.
+
+### Analyzing a run set — directed coupling (the headline)
+
+```bash
+uv run python experiments/analyze_coupling.py 'data/runs/mbpp_Qwen3-8B_*lowpen' --bootstrap 3000
+uv run python experiments/analyze_coupling.py 'data/runs/mbpp_*' --metric dprime_margin --out data/runs/_coup
+```
+β(A→B) = per unit detector A's reliability (d′) degrades within a run, how much does B's — the DIRECTED,
+asymmetric coupling. Writes `coupling_pooled.png` (all runs, driver→responder) + `coupling_by_target.png`
+(conditioned on the training target: *does training against i degrade held-out j?*) + `coupling.json`.
+`--metric auroc` (→ d′, resolution-aware clip) or `dprime_margin` (native, non-saturating); `--bootstrap N`
+adds per-cell 90% CIs. Reads `eval_metrics.jsonl` (+ dir name for the target). See `docs/DEGRADATION_METRICS.md`.
 
 **W&B syncing is automatic iff you're logged in.** `run_experiment.py` picks `wandb_mode` per run:
 `online` if a credential is configured locally (`wandb login` → `~/.netrc`, or `WANDB_API_KEY` set),
