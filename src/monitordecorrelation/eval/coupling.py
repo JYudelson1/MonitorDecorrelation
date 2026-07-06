@@ -127,7 +127,7 @@ def directed_coupling(run_dirs, monitors=None, metric="auroc", *, bootstrap=0, s
     """Pooled directed-coupling matrix β(row→col) over ``run_dirs`` (**chart 7b**).
 
     Returns a dict: ``monitors``, ``beta`` [n,n], ``n_runs``, ``n_pairs``, and (if ``bootstrap``>0)
-    ``lo``/``hi`` [n,n] percentile-90 CIs from resampling runs with replacement."""
+    ``lo``/``hi`` [n,n] 90% CIs (5/95 percentile) from resampling runs with replacement."""
     run_dirs = [str(d) for d in run_dirs]
     monitors = monitors or monitor_names(run_dirs[0])
     diffs = [df for _, _, df in _run_diffs(run_dirs, monitors, metric)]

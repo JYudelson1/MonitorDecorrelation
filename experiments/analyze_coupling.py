@@ -58,7 +58,7 @@ def main() -> None:
     ap.add_argument("runs_glob", help="glob for run dirs, e.g. 'data/runs/mbpp_Qwen3-8B_*'")
     ap.add_argument("--metric", default="auroc", choices=["auroc", "dprime_margin"],
                     help="reliability scale: auroc→d′ (default) or the native margin d′")
-    ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples for 90%% CIs")
+    ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
     ap.add_argument("--out", default="data/runs/_coupling")
     args = ap.parse_args()
 
@@ -80,12 +80,13 @@ def main() -> None:
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     unit = "d′" if args.metric == "auroc" else "margin d′"
+    # note printed on both charts when bootstrap CIs are shown, so the bracketed numbers are self-explaining
+    ci_note = "\ncells: β  with  [5–95 percentile bootstrap CI] underneath" if args.bootstrap else ""
 
     fig, ax = plt.subplots(figsize=(8.5, 7))
     im = _heat(ax, pooled["beta"], monitors, monitors,
                f"Directed coupling β(driver→responder), pooled ({args.metric}, {unit})\n"
-               f"{pooled['n_runs']} runs · {pooled['n_pairs']} Δ-pairs"
-               + ("  · [90% CI]" if args.bootstrap else ""),
+               f"{pooled['n_runs']} runs · {pooled['n_pairs']} Δ-pairs" + ci_note,
                lo=pooled.get("lo"), hi=pooled.get("hi"))
     ax.set_xlabel("→ effect on detector (col)"); ax.set_ylabel("driver detector (row)")
     plt.colorbar(im, ax=ax, label=f"β = Σ Δ{unit}_A·Δ{unit}_B / Σ Δ{unit}_A²", shrink=0.85)
@@ -95,7 +96,7 @@ def main() -> None:
         fig, ax = plt.subplots(figsize=(8.5, max(3, 0.9 * len(bytgt["targets"]) + 3)))
         im = _heat(ax, bytgt["beta"], bytgt["targets"], monitors,
                    f"Directed coupling CONDITIONED ON TRAINING TARGET ({args.metric})\n"
-                   "β(trained-against i → held-out j): does training against i degrade j?",
+                   "β(trained-against i → held-out j): does training against i degrade j?" + ci_note,
                    lo=bytgt.get("lo"), hi=bytgt.get("hi"), diag_rows=bytgt["targets"])
         # small n's just under each row label (left): runs + Δd′ datapoints. 'n/a' = no run hacked here.
         for ri, (nr, npair) in enumerate(zip(bytgt["n_runs_per_target"], bytgt["n_pairs_per_target"])):
