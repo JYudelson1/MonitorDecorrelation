@@ -8,7 +8,7 @@
   "group_size": 8,
   "eval_every": 2,
   "eval_size": 64,
-  "eval_samples_per_prompt": 8,
+  "eval_samples_per_prompt": 4,
   "max_tokens": 2048,
   "penalty_coef": 1.0,
   "kl_coef": 0.0001,
