@@ -134,7 +134,7 @@ def plot_run(run_dir: str | Path) -> list[Path]:
             # MBPP-Honeypot (skipped automatically when absent for other envs).
             [("behavior_rate", f"{beh_pretty} rate (train)"), ("loose_rate", "loose RH (train)"),
              ("hardcoding_rate", "hardcoding (train)"), ("reward/penalty_mean", "train-monitor penalty"),
-             ("reward/task_mean", "task reward")],
+             ("reward/len_penalty_mean", "code-length penalty"), ("reward/task_mean", "task reward")],
             f"{run_dir.name} [train] — {beh_pretty} + reward", td / "ground_truth.png")
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
                      td / "monitors.png")
