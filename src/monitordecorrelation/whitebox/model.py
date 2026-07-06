@@ -52,7 +52,27 @@ def fold_assistant(cot: str, answer: str) -> str:
 
 
 class WhiteBoxModel:
-    def __init__(self, model_name: str = "Qwen/Qwen3-0.6B", device: str | None = None) -> None:
+    remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
+
+    def __init__(self, model_name: str = "Qwen/Qwen3-0.6B", device: str | None = None,
+                 server_url: str | None = None) -> None:
+        """Local mode (default): load the HF model for activation reads. **Remote mode** (``server_url``
+        set): load NOTHING locally — proxy ``extract_activations`` to a shared ``probe_server.py`` that
+        holds one copy of the model for all runs. Same ``.extract_activations`` interface either way, so
+        ``ProbeMonitor`` is unchanged. Remote mode removes the per-run 16 GB model copy → far higher
+        run-parallelism (bounded then by tinker/API limits, not local GPU memory)."""
+        self.remote = server_url is not None
+        if self.remote:
+            import json
+            import urllib.request
+
+            self.server_url = server_url.rstrip("/")
+            with urllib.request.urlopen(f"{self.server_url}/meta", timeout=120) as r:
+                meta = json.loads(r.read())
+            self.model_name = meta["model_name"]
+            self._n_layers, self._d_model = meta["n_layers"], meta["d_model"]
+            return
+
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -68,6 +88,23 @@ class WhiteBoxModel:
         )
         self.model.to(self.device)
         self.model.eval()
+
+    def _extract_remote(self, items, follow_up, batch_size, preserve_thinking) -> np.ndarray:
+        """POST the (question, cot, answer) triples to the shared server; it renders + reads activations
+        and returns the [n, n_layers, d_model] array (numpy .npy over the wire, localhost)."""
+        import json
+        import urllib.request
+        from io import BytesIO
+
+        triples = [list(_as_triple(it)) for it in items]
+        if not triples:
+            return np.empty((0, self.n_layers, self.d_model), dtype=np.float32)
+        payload = json.dumps({"items": triples, "follow_up": list(follow_up) if follow_up else None,
+                              "batch_size": batch_size, "preserve_thinking": preserve_thinking}).encode()
+        req = urllib.request.Request(f"{self.server_url}/extract_activations", data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=1800) as r:  # generous: big batch on a shared GPU
+            return np.load(BytesIO(r.read()))
 
     def _build_messages(
         self, question: str, cot: str, answer: str, follow_up: tuple[str, str] | None
@@ -149,6 +186,9 @@ class WhiteBoxModel:
         every layer. ``follow_up`` must match what the probe was trained with. ``preserve_thinking``
         keeps the rollout's `<think>` in the follow-up render (else Qwen strips it → no-CoT).
         ``progress=True`` shows a tqdm bar (handy on slow MPS runs)."""
+        if self.remote:
+            return self._extract_remote(items, follow_up, batch_size, preserve_thinking)
+
         import torch
 
         if not items:
@@ -197,8 +237,12 @@ class WhiteBoxModel:
 
     @property
     def n_layers(self) -> int:
+        if self.remote:
+            return self._n_layers
         return int(self._text_config.num_hidden_layers) + 1  # + embeddings
 
     @property
     def d_model(self) -> int:
+        if self.remote:
+            return self._d_model
         return int(self._text_config.hidden_size)

@@ -21,17 +21,28 @@
 #   -s        skip-existing: skip any run that already finished (data/runs/<run>/QUEUE_DONE present).
 #   -D        detach: after printing the plan, run the whole batch in the background under nohup
 #             (survives SSH disconnect). Prints a PID + a batch logfile to tail; returns immediately.
+#   -P        shared probe server: load the base model ONCE (probe_server.py) and point every run at it,
+#             so J parallel runs don't each hold a copy of the 8B model (lifts the memory-bound -j cap).
+#             Model is read from the first config's `policy`; port from $PROBE_PORT (default 8177).
+#   -U URL    use an ALREADY-running probe server at URL (instead of -P starting one).
 #   -h        this help.
 #   Anything after a literal `--` is appended verbatim to every run's `--set` overrides,
 #             e.g.  -- n_steps=20 kl_coef=0   (handy for a quick short-run smoke of the whole matrix).
 #
 # Examples:
-#   # the full 7-row matrix, 3 seeds each (0,1,2), 4 at a time:
+#   # ⭐ RECOMMENDED default for a real batch: -s -P -D  (resume-safe · shared probe server · detached).
+#   #   Skips finished runs, loads the base model once for all runs, survives disconnect. Bump -j high —
+#   #   with -P the parallelism cap is tinker/API limits, not local GPU memory.
+#   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P -D
+#
+#   # the full 7-row matrix, 3 seeds each (0,1,2), 4 at a time (no shared server):
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4
 #   # one config, 5 seeds, just show what would run:
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix/row_control.json -n 5 -d
 #   # resume a half-finished batch (skip the runs that already completed):
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -s
+#   # shared probe server → run MANY in parallel without per-run 8B copies, detached:
+#   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -P -D
 #
 # To follow a single live job:  tail -f data/runs/<run_name>/run.log
 #
@@ -66,16 +77,18 @@ if [ "${1:-}" = "__worker" ]; then
 fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
-CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0
-while getopts ":c:n:j:dsDh" opt; do
+CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""
+while getopts ":c:n:j:U:dsDPh" opt; do
     case "$opt" in
         c) CONFIG="$OPTARG" ;;
         n) NUM_SEEDS="$OPTARG" ;;
         j) MAX_JOBS="$OPTARG" ;;
+        U) PROBE_URL="$OPTARG" ;;
         d) DRY_RUN=1 ;;
         s) SKIP_EXISTING=1 ;;
         D) DETACH=1 ;;
-        h) sed -n '2,42p' "$SELF"; exit 0 ;;
+        P) PROBE_SERVER=1 ;;
+        h) sed -n '2,47p' "$SELF"; exit 0 ;;
         \?) echo "unknown option -$OPTARG (try -h)" >&2; exit 2 ;;
         :) echo "option -$OPTARG needs an argument" >&2; exit 2 ;;
     esac
@@ -107,6 +120,19 @@ try:
 except json.JSONDecodeError:
     import yaml; d = yaml.safe_load(t)
 print(d["run_name"])
+PY
+}
+
+# Read a config's policy (for the shared probe server's model). Falls back to Qwen3-8B.
+read_policy() {
+    uv run python - "$1" <<'PY'
+import sys, json, pathlib
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+try:
+    d = json.loads(t)
+except json.JSONDecodeError:
+    import yaml; d = yaml.safe_load(t)
+print(d.get("policy") or d.get("base_model") or "Qwen/Qwen3-8B")
 PY
 }
 
@@ -148,6 +174,8 @@ if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     batchlog="data/runs/_batch_$(date +%Y%m%d_%H%M%S).log"
     set -- -c "$CONFIG" -n "$NUM_SEEDS" -j "$MAX_JOBS"
     [ "$SKIP_EXISTING" -eq 1 ] && set -- "$@" -s
+    [ "$PROBE_SERVER" -eq 1 ] && set -- "$@" -P     # detached child owns the probe server
+    [ -n "$PROBE_URL" ] && set -- "$@" -U "$PROBE_URL"
     # shellcheck disable=SC2086  # split EXTRA_SETS back into separate k=v tokens after the `--`
     [ -n "$EXTRA_SETS" ] && set -- "$@" -- $EXTRA_SETS
     QR_DETACHED=1 nohup bash "$SELF" "$@" >"$batchlog" 2>&1 </dev/null &
@@ -158,6 +186,30 @@ if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     echo "  follow:     tail -f $batchlog"
     echo "  per-job:    tail -f data/runs/<run>/run.log"
     exit 0
+fi
+
+# Shared probe server: point every run at ONE base-model copy (frees per-run GPU memory → higher -j).
+# -U reuses an already-running server; -P starts+owns one for this batch (this runner — foreground or
+# the detached child — so the server lives exactly as long as the batch).
+if [ -n "$PROBE_URL" ]; then
+    export PROBE_SERVER_URL="$PROBE_URL"
+    echo "probes → existing shared server $PROBE_SERVER_URL"
+elif [ "$PROBE_SERVER" -eq 1 ]; then
+    PROBE_PORT="${PROBE_PORT:-8177}"
+    model="$(read_policy "${configs[0]}")"
+    srvlog="data/runs/_probe_server_$(date +%Y%m%d_%H%M%S).log"
+    echo "starting shared probe server: $model on :$PROBE_PORT  (log: $srvlog) …"
+    uv run python experiments/probe_server.py --model "$model" --port "$PROBE_PORT" >"$srvlog" 2>&1 &
+    SRV_PID=$!
+    trap '[ -n "${SRV_PID:-}" ] && kill "$SRV_PID" 2>/dev/null' EXIT
+    export PROBE_SERVER_URL="http://127.0.0.1:$PROBE_PORT"
+    for _ in $(seq 1 300); do   # up to ~10 min for the model to load
+        curl -sf "$PROBE_SERVER_URL/health" >/dev/null 2>&1 && break
+        kill -0 "$SRV_PID" 2>/dev/null || { echo "✗ probe server died on startup — see $srvlog"; tail -n 20 "$srvlog"; exit 1; }
+        sleep 2
+    done
+    curl -sf "$PROBE_SERVER_URL/health" >/dev/null 2>&1 || { echo "✗ probe server not ready after ~10 min — see $srvlog"; exit 1; }
+    echo "probes → shared server $PROBE_SERVER_URL ($model ready)"
 fi
 
 echo "Launching at $(date +%H:%M:%S) — full logs in data/runs/<run>/run.log"

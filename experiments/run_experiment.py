@@ -94,7 +94,11 @@ def main() -> None:
         backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
 
     env = make_env(cfg)
-    train_against, held_out = build_monitors(cfg.monitors, default_behavior=env.behavior_name)
+    probe_server_url = cfg.probe_server_url or os.environ.get("PROBE_SERVER_URL")
+    train_against, held_out = build_monitors(cfg.monitors, default_behavior=env.behavior_name,
+                                             probe_server_url=probe_server_url)
+    if probe_server_url:
+        print(f"  probes → shared server {probe_server_url}")
 
     # Write the EFFECTIVE config (after --set overrides are applied) into the run folder, so a run is
     # trivially + exactly reproducible — copying the raw source file would drop the overrides:

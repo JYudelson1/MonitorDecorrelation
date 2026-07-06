@@ -64,6 +64,8 @@ scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -d   # -d = d
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -s   # -s = resume: skip finished runs
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D   # -D = detach: nohup the batch,
                                                                        #   survives SSH disconnect
+# ⭐ recommended for a real batch: -s -P -D (resume-safe · shared probe server · detached), high -j:
+scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P -D
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
@@ -72,6 +74,15 @@ A run is marked done by a `data/runs/<run>/QUEUE_DONE` sentinel (written on succ
 checks. Follow a single live job with `tail -f data/runs/<run>/run.log`. With `-D`, the plan still
 prints to your terminal, then the batch re-execs under `nohup` into `data/runs/_batch_<ts>.log` and
 returns a PID immediately (follow it with `tail -f data/runs/_batch_<ts>.log`).
+
+**Shared probe server (`-P`).** Probes read activations by running the policy's text through a frozen
+copy of the base model. Without `-P`, *each* run process loads its own ~16 GB copy, so `-j` is capped by
+GPU memory (~4 on an 80 GB card). `-P` starts one `experiments/probe_server.py` (model read from the
+first config's `policy`, port `$PROBE_PORT`, default 8177), points every run at it via
+`PROBE_SERVER_URL`, and tears it down when the batch ends — so `-j` is then bounded by tinker/API limits
+instead of memory. `-U http://host:port` reuses an already-running server. Per-config equivalent:
+`{"probe_server_url": "..."}`. Start one standalone with
+`uv run python experiments/probe_server.py --model Qwen/Qwen3-8B`.
 
 **W&B syncing is automatic iff you're logged in.** `run_experiment.py` picks `wandb_mode` per run:
 `online` if a credential is configured locally (`wandb login` → `~/.netrc`, or `WANDB_API_KEY` set),

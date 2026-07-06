@@ -61,6 +61,9 @@ class ExperimentConfig(_Strict):
     eval_samples_per_prompt: int = Field(
         1, description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
         "at eval_size×this monitor-scoring cost)")
+    probe_server_url: str | None = Field(
+        None, description="if set, probes read activations from a shared probe_server.py instead of "
+        "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
     max_tokens: int = 1024
     penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
     kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "
@@ -87,9 +90,12 @@ def load_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig.model_validate(data)
 
 
-def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy") -> tuple[list, list]:
+def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy",
+                   probe_server_url: str | None = None) -> tuple[list, list]:
     """Construct (train_against, held_out) monitor objects. WhiteBoxModels are shared across probes
-    that use the same ``probe_model`` so we never load the same model twice. A CoT monitor with no
+    that use the same ``probe_model`` so we never load the same model twice. ``probe_server_url`` (set)
+    → probes proxy activation reads to a shared ``probe_server.py`` instead of each loading the base
+    model locally (see experiments/probe_server.py). A CoT monitor with no
     explicit ``behavior`` inherits ``default_behavior`` (the env's ``behavior_name``) so a config's
     monitors target the right rubric (sycophancy vs reward_hacking) without repeating it per monitor."""
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
@@ -107,7 +113,7 @@ def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
             if model_name not in wb_cache:
-                wb_cache[model_name] = WhiteBoxModel(model_name)
+                wb_cache[model_name] = WhiteBoxModel(model_name, server_url=probe_server_url)
             mon = ProbeMonitor(
                 s.name, wb_cache[model_name], probe, threshold=s.threshold, batch_size=s.batch_size
             )
