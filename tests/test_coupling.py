@@ -42,7 +42,11 @@ def test_directed_coupling_recovers_known_slope(tmp_path):
     assert abs(B[ia, ic]) < 0.25                # A→C ≈ 0 (independent)
     assert r["lo"][ia, ib] < 0.5 < r["hi"][ia, ib]  # CI brackets the truth
 
-    # conditioned on training target: all runs trained against A → row A populated, B/C rows absent
+    # conditioned on training target: all runs trained against A → SQUARE matrix, row A populated,
+    # B/C rows kept but NaN (no run trained against them); both n's tracked.
     bt = directed_coupling_by_target(dirs, ["A", "B", "C"], metric="dprime_margin")
-    assert bt["targets"] == ["A"]
-    assert abs(bt["beta"][0, ib] - 0.5) < 0.05
+    assert bt["targets"] == ["A", "B", "C"]           # square: all monitors as rows
+    assert abs(bt["beta"][0, ib] - 0.5) < 0.05        # row A populated
+    assert np.isnan(bt["beta"][1]).all() and np.isnan(bt["beta"][2]).all()  # B, C rows NaN
+    assert list(bt["n_runs_per_target"]) == [4, 0, 0]
+    assert bt["n_pairs_per_target"][0] == 4 * 11 and bt["n_pairs_per_target"][1] == 0  # 4 runs × 11 diffs

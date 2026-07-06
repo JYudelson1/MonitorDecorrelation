@@ -146,25 +146,30 @@ def directed_coupling_by_target(run_dirs, monitors=None, metric="auroc", *, boot
     """β(trained-against i → held-out j), conditioned on the training target (**chart 10**).
 
     Row i = training target; restricted to the runs trained against i; NaN row if that condition never
-    produced a defined reliability trajectory (policy stayed honest). Returns ``targets`` (row order),
-    ``monitors`` (cols), ``beta`` [n_targets, n_mon], ``n_runs`` per row, and optional CIs."""
+    produced a defined reliability trajectory (policy stayed honest). **All monitors are kept as rows**
+    (square matrix — unpopulated targets are NaN rows, not dropped). Returns ``targets`` (= ``monitors``
+    order), ``beta`` [n_mon, n_mon], ``n_runs_per_target`` and ``n_pairs_per_target`` (Δd′ pairs), + CIs."""
     run_dirs = [str(d) for d in run_dirs]
     monitors = monitors or monitor_names(run_dirs[0])
     by_t: dict[str, list[np.ndarray]] = {}
     for _, tgt, df in _run_diffs(run_dirs, monitors, metric):
         if tgt is not None:
             by_t.setdefault(tgt, []).append(df)
-    targets = [m for m in monitors if m in by_t]  # keep monitor order; only populated targets
+    targets = list(monitors)  # ALL monitors as rows → square; targets with no runs stay NaN
     B = np.full((len(targets), len(monitors)), np.nan)
     nR = np.zeros(len(targets), int)
+    nP = np.zeros(len(targets), int)
     lo = np.full_like(B, np.nan)
     hi = np.full_like(B, np.nan)
     rng = np.random.default_rng(seed)
     for ri, tgt in enumerate(targets):
-        diffs = by_t[tgt]
+        diffs = by_t.get(tgt, [])
         nR[ri] = len(diffs)
+        if not diffs:
+            continue  # no run trained against this monitor → NaN row
         ti = monitors.index(tgt)
         Dt = np.hstack([df[ti] for df in diffs])
+        nP[ri] = len(Dt)
         denom = np.sum(Dt * Dt)
         if denom > 0:
             for j in range(len(monitors)):
@@ -179,7 +184,8 @@ def directed_coupling_by_target(run_dirs, monitors=None, metric="auroc", *, boot
                 bs.append([np.sum(dt * np.hstack([diffs[k][j] for k in sel])) / dn
                            if dn > 0 else np.nan for j in range(len(monitors))])
             lo[ri], hi[ri] = np.nanpercentile(np.array(bs), [5, 95], axis=0)
-    out = {"targets": targets, "monitors": monitors, "beta": B, "n_runs_per_target": nR, "metric": metric}
+    out = {"targets": targets, "monitors": monitors, "beta": B,
+           "n_runs_per_target": nR, "n_pairs_per_target": nP, "metric": metric}
     if bootstrap:
         out["lo"], out["hi"] = lo, hi
     return out

@@ -91,15 +91,16 @@ def main() -> None:
     plt.colorbar(im, ax=ax, label=f"β = Σ Δ{unit}_A·Δ{unit}_B / Σ Δ{unit}_A²", shrink=0.85)
     fig.tight_layout(); fig.savefig(out / "coupling_pooled.png", bbox_inches="tight")
 
-    if bytgt["targets"]:
+    if any(bytgt["n_runs_per_target"]):
         fig, ax = plt.subplots(figsize=(8.5, max(3, 0.9 * len(bytgt["targets"]) + 3)))
         im = _heat(ax, bytgt["beta"], bytgt["targets"], monitors,
                    f"Directed coupling CONDITIONED ON TRAINING TARGET ({args.metric})\n"
                    "β(trained-against i → held-out j): does training against i degrade j?",
                    lo=bytgt.get("lo"), hi=bytgt.get("hi"), diag_rows=bytgt["targets"])
-        # small n-of-runs just under each row label (left), not out by the colorbar
-        for ri, n in enumerate(bytgt["n_runs_per_target"]):
-            ax.text(-0.015, ri + 0.32, f"n={n}", transform=ax.get_yaxis_transform(),
+        # small n's just under each row label (left): runs + Δd′ datapoints. 'n/a' = no run hacked here.
+        for ri, (nr, npair) in enumerate(zip(bytgt["n_runs_per_target"], bytgt["n_pairs_per_target"])):
+            txt = f"n={nr}r/{npair}p" if nr else "n/a (honest)"
+            ax.text(-0.015, ri + 0.33, txt, transform=ax.get_yaxis_transform(),
                     ha="right", va="center", fontsize=6, color="#888")
         ax.set_xlabel("→ held-out detector j"); ax.set_ylabel("TRAINED AGAINST i")
         plt.colorbar(im, ax=ax, label="β(target→held-out)", shrink=0.85)
