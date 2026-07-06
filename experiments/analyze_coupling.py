@@ -1,0 +1,112 @@
+"""Directed detector-coupling charts for a set of degradation runs (the reusable 'chart 7b + 10').
+
+    uv run python experiments/analyze_coupling.py 'data/runs/mbpp_Qwen3-8B_*'         # auroc→d′
+    uv run python experiments/analyze_coupling.py 'data/runs/mbpp_*' --metric dprime_margin --bootstrap 3000
+    uv run python experiments/analyze_coupling.py 'data/runs/mbpp_*' --out data/runs/_coupling
+
+Produces, in --out (default: alongside, ``data/runs/_coupling/``):
+  coupling_pooled.png       — β(driver→responder) pooled over all runs where the metric is defined (7b)
+  coupling_by_target.png    — β(trained-against i → held-out j), conditioned on training target (10)
+  coupling.json             — the raw matrices + n + CIs
+
+See ``eval/coupling.py`` for the metric definitions (β, the auroc→d′ vs margin-d′ choice, bootstrap).
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+from pathlib import Path
+
+import numpy as np
+
+from monitordecorrelation.eval.coupling import (
+    directed_coupling,
+    directed_coupling_by_target,
+    monitor_names,
+)
+
+
+def _heat(ax, M, rows, cols, title, *, lo=None, hi=None, diag_rows=None):
+    import matplotlib.pyplot as plt
+
+    im = ax.imshow(M, cmap="PuOr_r", vmin=-1, vmax=1, aspect="auto")
+    for i in range(len(rows)):
+        for j in range(len(cols)):
+            v = M[i, j]
+            if np.isnan(v):
+                ax.text(j, i, "N/A", ha="center", va="center", fontsize=8, color="#bbb")
+                continue
+            txt = f"{v:+.2f}"
+            if lo is not None and not np.isnan(lo[i, j]):
+                txt += f"\n[{lo[i, j]:+.2f},{hi[i, j]:+.2f}]"
+            is_diag = (diag_rows or rows)[i] == cols[j]
+            ax.text(j, i, txt, ha="center", va="center", fontsize=7.5 if lo is not None else 9,
+                    color="white" if abs(v) > 0.6 else "k", weight="bold" if is_diag else "normal")
+            if is_diag:
+                ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec="k", lw=2))
+    ax.set_xticks(range(len(cols))); ax.set_xticklabels(cols, rotation=40, ha="right", fontsize=8.5)
+    ax.set_yticks(range(len(rows))); ax.set_yticklabels(rows, fontsize=8.5)
+    ax.set_title(title, fontsize=10)
+    return im
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("runs_glob", help="glob for run dirs, e.g. 'data/runs/mbpp_Qwen3-8B_*'")
+    ap.add_argument("--metric", default="auroc", choices=["auroc", "dprime_margin"],
+                    help="reliability scale: auroc→d′ (default) or the native margin d′")
+    ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples for 90%% CIs")
+    ap.add_argument("--out", default="data/runs/_coupling")
+    args = ap.parse_args()
+
+    run_dirs = sorted(d for d in glob.glob(args.runs_glob) if (Path(d) / "eval_metrics.jsonl").exists())
+    if not run_dirs:
+        ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r}")
+    monitors = monitor_names(run_dirs[0])
+    print(f"{len(run_dirs)} runs · {len(monitors)} monitors · metric={args.metric}"
+          + (f" · bootstrap={args.bootstrap}" if args.bootstrap else ""))
+
+    pooled = directed_coupling(run_dirs, monitors, args.metric, bootstrap=args.bootstrap)
+    bytgt = directed_coupling_by_target(run_dirs, monitors, args.metric, bootstrap=args.bootstrap)
+    print(f"  pooled: {pooled['n_runs']} runs contributed, {pooled['n_pairs']} Δ-pairs")
+    print(f"  by-target rows populated: {bytgt['targets'] or '(none — no targeted run degraded)'}")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    unit = "d′" if args.metric == "auroc" else "margin d′"
+
+    fig, ax = plt.subplots(figsize=(8.5, 7))
+    im = _heat(ax, pooled["beta"], monitors, monitors,
+               f"Directed coupling β(driver→responder), pooled ({args.metric}, {unit})\n"
+               f"{pooled['n_runs']} runs · {pooled['n_pairs']} Δ-pairs"
+               + ("  · [90% CI]" if args.bootstrap else ""),
+               lo=pooled.get("lo"), hi=pooled.get("hi"))
+    ax.set_xlabel("→ effect on detector (col)"); ax.set_ylabel("driver detector (row)")
+    plt.colorbar(im, ax=ax, label=f"β = Σ Δ{unit}_A·Δ{unit}_B / Σ Δ{unit}_A²", shrink=0.85)
+    fig.tight_layout(); fig.savefig(out / "coupling_pooled.png", bbox_inches="tight")
+
+    if bytgt["targets"]:
+        fig, ax = plt.subplots(figsize=(8.5, max(3, 0.9 * len(bytgt["targets"]) + 3)))
+        im = _heat(ax, bytgt["beta"], bytgt["targets"], monitors,
+                   f"Directed coupling CONDITIONED ON TRAINING TARGET ({args.metric})\n"
+                   "β(trained-against i → held-out j): does training against i degrade j?",
+                   lo=bytgt.get("lo"), hi=bytgt.get("hi"), diag_rows=bytgt["targets"])
+        for ri, n in enumerate(bytgt["n_runs_per_target"]):
+            ax.text(len(monitors) - .4, ri, f"n={n}", va="center", fontsize=8, color="#555")
+        ax.set_xlabel("→ held-out detector j"); ax.set_ylabel("TRAINED AGAINST i")
+        plt.colorbar(im, ax=ax, label="β(target→held-out)", shrink=0.85)
+        fig.tight_layout(); fig.savefig(out / "coupling_by_target.png", bbox_inches="tight")
+
+    def _ser(d):  # numpy → json
+        return {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in d.items()}
+    (out / "coupling.json").write_text(json.dumps({"pooled": _ser(pooled), "by_target": _ser(bytgt)}, indent=2))
+    print(f"→ wrote {out}/coupling_pooled.png, coupling_by_target.png, coupling.json")
+
+
+if __name__ == "__main__":
+    main()
