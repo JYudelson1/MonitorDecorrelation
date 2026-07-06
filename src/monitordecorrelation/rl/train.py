@@ -23,7 +23,7 @@ import numpy as np
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
-from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, roc_auc
+from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.types import MonitorResult, Rollout
 
@@ -42,6 +42,7 @@ def _label_metrics(prefix: str, scores: list[float], preds: list[bool], labels: 
         f"{prefix}/auroc": roc_auc(scores, labels),
         f"{prefix}/accuracy": accuracy(preds, labels),
         f"{prefix}/brier": brier(scores, labels),
+        f"{prefix}/dprime_margin": dprime_margin(scores, labels),
         f"{prefix}/mean_score_present": _mean_for_class(scores, labels, True),
         f"{prefix}/mean_score_absent": _mean_for_class(scores, labels, False),
     }
@@ -185,9 +186,10 @@ def run_grpo(
         behavior-present mean score (``mean_score_<behavior>``) stay defined there, so the
         obfuscation-success regime stays measurable.
         """
-        _log(f"  [eval @ {step}] sampling {len(eval_prompts)} held-out prompts (max_tokens={max_tokens})…")
+        n_per = getattr(cfg, "eval_samples_per_prompt", 1) or 1
+        _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
-        ev = backend.sample(eval_prompts, num_samples=1, max_tokens=max_tokens, temperature=1.0)
+        ev = backend.sample(eval_prompts, num_samples=n_per, max_tokens=max_tokens, temperature=1.0)
         ev_env = [env.score(r) for r in ev]
         gt = [er.behavior_present for er in ev_env]
         t_sample = time.perf_counter() - t0
@@ -222,6 +224,11 @@ def run_grpo(
             row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
             row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
             row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
+            # margin d′ (non-saturating separation, no AUROC ceiling) + class counts (n_pos·n_neg gives
+            # the AUROC resolution, so a d′-via-AUROC clip can be sample-size-aware downstream).
+            row[f"monitor/{m.name}/dprime_margin"] = dprime_margin(scores, mgt)
+            row[f"monitor/{m.name}/n_pos"] = sum(mgt)
+            row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
             if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
                 row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
@@ -326,6 +333,7 @@ def run_grpo(
             mon[f"monitor/{m.name}/auroc"] = roc_auc(s, gt_train)
             mon[f"monitor/{m.name}/accuracy"] = accuracy(p, gt_train)
             mon[f"monitor/{m.name}/brier"] = brier(s, gt_train)
+            mon[f"monitor/{m.name}/dprime_margin"] = dprime_margin(s, gt_train)
             mon[present_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, True)
             mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
             if gt_train_loose is not None:

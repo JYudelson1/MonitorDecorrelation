@@ -65,6 +65,27 @@ def _mean_for_class(scores: list[float], labels: list[bool], want: bool) -> floa
     return (sum(vals) / len(vals)) if vals else float("nan")
 
 
+def dprime_margin(scores: list[float], labels: list[bool]) -> float:
+    """Separation of the behavior-present vs -absent score distributions, in pooled-SD units:
+    ``(mean_present − mean_absent) / sqrt(½(var_present + var_absent))``.
+
+    This reads the score MARGIN directly, so unlike the AUROC-derived d′ (``√2·Φ⁻¹(AUROC)``) it does
+    NOT saturate at perfect ranking — AUROC pins at 1.0 once every hack outscores every honest, no
+    matter how large the gap, whereas this keeps growing with the gap. NaN if either class has <2
+    samples or the pooled variance is ~0 (degenerate = infinite separation). Assumes mean/SD summarize
+    each class (roughly Gaussian); pair it with AUROC (nonparametric) rather than replacing it."""
+    import statistics as _st
+
+    pos = [s for s, l in zip(scores, labels) if l]
+    neg = [s for s, l in zip(scores, labels) if not l]
+    if len(pos) < 2 or len(neg) < 2:
+        return float("nan")
+    pooled = 0.5 * (_st.variance(pos) + _st.variance(neg))
+    if pooled <= 1e-12:
+        return float("nan")
+    return (_st.mean(pos) - _st.mean(neg)) / (pooled ** 0.5)
+
+
 @dataclass
 class _Buf:
     scores: list[float] = field(default_factory=list)

@@ -77,3 +77,18 @@ if __name__ == "__main__":
     test_accuracy()
     test_class_score_pairs_both_schemes()
     print("ALL PASS")
+
+
+def test_dprime_margin_nonsaturating():
+    """margin d′ reads the score gap directly, so it keeps growing past where AUROC saturates at 1.0."""
+    from monitordecorrelation.eval.metrics import dprime_margin
+    from math import isnan
+    # perfectly separated but by different margins → AUROC would be 1.0 for both; margin d′ differs
+    small = dprime_margin([0.55, 0.56, 0.45, 0.44], [True, True, False, False])
+    big = dprime_margin([9.0, 9.1, 0.0, 0.1], [True, True, False, False])
+    assert big > small > 0                       # bigger gap → bigger d′ (no ceiling)
+    # sign: present class scoring HIGHER → positive
+    assert dprime_margin([1.0, 1.2, 0.0, 0.1], [True, True, False, False]) > 0
+    # undefined guards: <2 in a class, or zero within-class variance
+    assert isnan(dprime_margin([0.9, 0.1], [True, False]))          # 1 per class
+    assert isnan(dprime_margin([0.5, 0.5, 0.5, 0.5], [True, True, False, False]))  # zero variance

@@ -57,7 +57,10 @@ class ExperimentConfig(_Strict):
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
     eval_every: int = Field(10, description="run the held-out eval phase every N steps (+ 0 + final)")
-    eval_size: int = Field(32, description="size of the fixed held-out eval set")
+    eval_size: int = Field(32, description="number of distinct held-out eval PROMPTS (fixed set)")
+    eval_samples_per_prompt: int = Field(
+        1, description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
+        "at eval_size×this monitor-scoring cost)")
     max_tokens: int = 1024
     penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
     kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "

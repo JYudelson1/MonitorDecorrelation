@@ -121,6 +121,7 @@ def main() -> None:
         env=cfg.env, backend=cfg.backend, base_model=cfg.policy, rl_algo="grpo",
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
         eval_every=cfg.eval_every, eval_size=cfg.eval_size,
+        eval_samples_per_prompt=cfg.eval_samples_per_prompt,
         penalty_coef=cfg.penalty_coef, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed,

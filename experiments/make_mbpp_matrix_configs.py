@@ -70,8 +70,11 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
         "n_steps": n_steps,
         "batch_size": 64,         # 64 prompts × 8 group = 512 rollouts/step (matches Rauno; ~8x ours) —
         "group_size": 8,          # this is what drives time-to-hack: ~5-6k rollouts → ~10-12 steps, not 100
-        "eval_every": 4,          # eval often: with the big batch the dynamics happen in ~10 steps
-        "eval_size": 64,
+        "eval_every": 2,          # eval often: with the big batch the dynamics happen in ~10-12 steps
+        "eval_size": 64,          # distinct held-out prompts
+        "eval_samples_per_prompt": 8,  # 8 rollouts/prompt → 512 eval rollouts/round: higher-fidelity
+                                       # AUROC/d′ + more honest examples even when behavior_rate is high
+                                       # (costs 8× monitor scoring per eval — watch judge-API spend)
         "max_tokens": max_tokens,
         "penalty_coef": 1.0,      # weight on the train-against monitor penalty
         "kl_coef": 1e-4,          # per-token KL-to-base anchor — prevents the reward-hack collapse

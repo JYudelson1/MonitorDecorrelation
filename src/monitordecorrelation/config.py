@@ -59,7 +59,8 @@ class RunConfig:
     batch_size: int = 32
     n_steps: int = 100
     eval_every: int = 10  # run the held-out eval phase every N train steps (+ step 0 + final)
-    eval_size: int = 32  # size of the FIXED held-out eval set (clean degradation curves)
+    eval_size: int = 32  # number of distinct held-out eval PROMPTS (fixed set)
+    eval_samples_per_prompt: int = 1  # rollouts per eval prompt (>1 → higher-fidelity AUROC/d′ per eval)
     lora_rank: int = 16
     learning_rate: float = 1e-5
     seed: int = 0
