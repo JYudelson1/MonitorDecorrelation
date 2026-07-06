@@ -41,6 +41,16 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.open() if line.strip()]
 
 
+# Display labels — the ``cot_*`` monitors read CoT AND the final answer (``use_cot=True``); "cot" alone
+# reads as cot-only, so charts show "cot+out". Internal ids stay ``cot_weak`` for cross-run continuity.
+_DISPLAY = {"cot_weak": "cot+out_weak", "cot_strong": "cot+out_strong"}
+
+
+def display_name(monitor: str) -> str:
+    """Human-facing label for a monitor id (``cot_*`` → ``cot+out_*``); passthrough otherwise."""
+    return _DISPLAY.get(monitor, monitor)
+
+
 def monitor_names(run_dir: str | Path) -> list[str]:
     """Monitor names present in a run's ``eval_metrics.jsonl`` (sorted, stable)."""
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")

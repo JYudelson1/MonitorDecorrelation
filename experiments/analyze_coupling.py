@@ -24,6 +24,7 @@ import numpy as np
 from monitordecorrelation.eval.coupling import (
     directed_coupling,
     directed_coupling_by_target,
+    display_name,
     monitor_names,
 )
 
@@ -46,8 +47,8 @@ def _heat(ax, M, rows, cols, title, *, lo=None, hi=None, diag_rows=None):
                     color="white" if abs(v) > 0.6 else "k", weight="bold" if is_diag else "normal")
             if is_diag:
                 ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec="k", lw=2))
-    ax.set_xticks(range(len(cols))); ax.set_xticklabels(cols, rotation=40, ha="right", fontsize=8.5)
-    ax.set_yticks(range(len(rows))); ax.set_yticklabels(rows, fontsize=8.5)
+    ax.set_xticks(range(len(cols))); ax.set_xticklabels([display_name(c) for c in cols], rotation=40, ha="right", fontsize=8.5)
+    ax.set_yticks(range(len(rows))); ax.set_yticklabels([display_name(r) for r in rows], fontsize=8.5)
     ax.set_title(title, fontsize=10)
     return im
 

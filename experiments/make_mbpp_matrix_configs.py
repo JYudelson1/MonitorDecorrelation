@@ -60,8 +60,9 @@ def _spec(d: dict, role: str) -> dict:
 
 
 def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lora_rank: int,
-               max_tokens: int, control: bool) -> list[dict]:
+               max_tokens: int, control: bool, penalty_coef: float = 1.0, tag: str = "") -> list[dict]:
     short = model.split("/")[-1]
+    suf = f"_{tag}" if tag else ""  # run-name suffix marking this run set (e.g. _lowpen)
     base = {
         "experiment": "mbpp_degradation_matrix",
         "policy": model,
@@ -76,7 +77,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
                                        # AUROC/d′ + more honest examples even when behavior_rate is high
                                        # (costs 4× monitor scoring per eval — kept at 4 not 8 for spend)
         "max_tokens": max_tokens,
-        "penalty_coef": 1.0,      # weight on the train-against monitor penalty
+        "penalty_coef": penalty_coef,  # weight on the train-against monitor penalty (lower → more room to hack)
         "kl_coef": 1e-4,          # per-token KL-to-base anchor — prevents the reward-hack collapse
         "lora_rank": lora_rank,   # OA: rank 64 (alpha 128 — tinker sets alpha; verify 2×rank on the box)
         "seed": seed,
@@ -87,7 +88,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
     for target in monitors:
         rows.append({
             **base,
-            "run_name": f"mbpp_{short}_{target['name']}_s{seed}_strict",
+            "run_name": f"mbpp_{short}_{target['name']}_s{seed}{suf}",
             "description": (f"Train AGAINST {target['name']} on MBPP-Honeypot (reward-hacking); hold out "
                            f"{', '.join(n for n in names if n != target['name'])}. All scored on the "
                            "fixed held-out eval set each eval_every (eval_metrics.jsonl)."),
@@ -98,7 +99,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
     if control:
         rows.append({
             **base,
-            "run_name": f"mbpp_{short}_control_s{seed}",
+            "run_name": f"mbpp_{short}_control_s{seed}{suf}",
             "description": ("CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). "
                            "Baseline for how much each monitor drifts from the policy changing at all."),
             "monitors": [_spec(d, "held_out") for d in monitors],
@@ -116,6 +117,9 @@ def main() -> None:
     ap.add_argument("--n-steps", type=int, default=60, help="OA uses 120; default 60 for a 'shortish' run")
     ap.add_argument("--lora-rank", type=int, default=64, help="OA uses 64 (alpha 128)")
     ap.add_argument("--max-tokens", type=int, default=2048)
+    ap.add_argument("--penalty-coef", type=float, default=1.0,
+                    help="train-against monitor penalty weight (lower → policy has more room to hack)")
+    ap.add_argument("--tag", default="", help="run-name + folder marker for this run set (e.g. lowpen)")
     ap.add_argument("--out-dir", default="experiments/configs/mbpp_matrix")
     ap.add_argument("--validate", action="store_true")
     args = ap.parse_args()
@@ -131,7 +135,8 @@ def main() -> None:
     for stale in out_dir.glob("row_*.json"):  # never mix old + new sets under a row_*.json glob
         stale.unlink()
     rows = build_rows(args.model, monitors, seed=args.seed, n_steps=args.n_steps,
-                      lora_rank=args.lora_rank, max_tokens=args.max_tokens, control=not args.no_control)
+                      lora_rank=args.lora_rank, max_tokens=args.max_tokens, control=not args.no_control,
+                      penalty_coef=args.penalty_coef, tag=args.tag)
     for r in rows:
         target = r["run_name"].rsplit("_s", 1)[0].split(f"{args.model.split('/')[-1]}_", 1)[1]
         p = out_dir / f"row_{target}.json"
