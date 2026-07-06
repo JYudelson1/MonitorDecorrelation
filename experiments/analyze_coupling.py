@@ -32,7 +32,7 @@ from monitordecorrelation.eval.coupling import (
 def _heat(ax, M, rows, cols, title, *, lo=None, hi=None, diag_rows=None):
     import matplotlib.pyplot as plt
 
-    im = ax.imshow(M, cmap="PuOr_r", vmin=-1, vmax=1, aspect="auto")
+    im = ax.imshow(M, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
     for i in range(len(rows)):
         for j in range(len(cols)):
             v = M[i, j]
