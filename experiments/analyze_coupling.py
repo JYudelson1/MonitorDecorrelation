@@ -97,8 +97,10 @@ def main() -> None:
                    f"Directed coupling CONDITIONED ON TRAINING TARGET ({args.metric})\n"
                    "β(trained-against i → held-out j): does training against i degrade j?",
                    lo=bytgt.get("lo"), hi=bytgt.get("hi"), diag_rows=bytgt["targets"])
+        # small n-of-runs just under each row label (left), not out by the colorbar
         for ri, n in enumerate(bytgt["n_runs_per_target"]):
-            ax.text(len(monitors) - .4, ri, f"n={n}", va="center", fontsize=8, color="#555")
+            ax.text(-0.015, ri + 0.32, f"n={n}", transform=ax.get_yaxis_transform(),
+                    ha="right", va="center", fontsize=6, color="#888")
         ax.set_xlabel("→ held-out detector j"); ax.set_ylabel("TRAINED AGAINST i")
         plt.colorbar(im, ax=ax, label="β(target→held-out)", shrink=0.85)
         fig.tight_layout(); fig.savefig(out / "coupling_by_target.png", bbox_inches="tight")
