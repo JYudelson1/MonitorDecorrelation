@@ -29,6 +29,7 @@ autocorrelated within a run). Pure/stdlib+numpy so it's unit-testable; plotting 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from statistics import NormalDist
 
@@ -60,12 +61,17 @@ def monitor_names(run_dir: str | Path) -> list[str]:
 
 
 def train_target(run_dir: str | Path) -> str | None:
-    """The single train-against monitor name (from ``run_info.json``), or None (control / unknown)."""
+    """The single train-against monitor name. Prefers ``run_info.json`` (authoritative); falls back to
+    parsing the run-DIR NAME (``mbpp_<model>_<target>_s<seed>[_tag]``) so a copied ``eval_metrics.jsonl``
+    in a correctly-named dir is enough — no ``run_info.json`` needed. ``control`` / unparsable → None."""
     p = Path(run_dir) / "run_info.json"
-    if not p.exists():
-        return None
-    ta = [m.get("name") for m in json.loads(p.read_text()).get("train_against", [])]
-    return ta[0] if ta else None
+    if p.exists():
+        ta = [m.get("name") for m in json.loads(p.read_text()).get("train_against", [])]
+        return ta[0] if ta else None  # present-but-empty = control
+    m = re.search(r"_([a-z][a-z_]*?)_s\d+", Path(run_dir).name)  # <target> is lowercase; model has caps/digits
+    if m and m.group(1) != "control":
+        return m.group(1)
+    return None
 
 
 def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "auroc") -> np.ndarray:
