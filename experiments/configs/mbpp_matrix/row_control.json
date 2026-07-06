@@ -6,7 +6,7 @@
   "n_steps": 90,
   "batch_size": 64,
   "group_size": 8,
-  "eval_every": 2,
+  "eval_every": 3,
   "eval_size": 64,
   "eval_samples_per_prompt": 4,
   "max_tokens": 2048,
