@@ -18,7 +18,8 @@ from pathlib import Path
 def _load(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.open() if line.strip()]
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def _series(rows: list[dict], key: str) -> tuple[list, list]:
@@ -111,7 +112,8 @@ def plot_run(run_dir: str | Path) -> list[Path]:
             ax.set_ylabel(metric)
             ax.set_title(metric + ("  (lower=better)" if metric == "brier" else ""))
             ax.set_ylim(-0.05, 1.05)
-            ax.legend(fontsize=8)
+            if ax.get_legend_handles_labels()[0]:  # only if something was actually plotted+labeled
+                ax.legend(fontsize=8)
         if not any_data:
             plt.close(fig)
             return

@@ -27,7 +27,8 @@ def load(n: int | None = None, seed: int = 0, path: str = _DEFAULT_PATH) -> list
             f"{path} not found — build it first: "
             "uv run python experiments/build_syco_pairs.py --out " + path
         )
-    rows = [json.loads(line) for line in p.open() if line.strip()]
+    with p.open() as f:
+        rows = [json.loads(line) for line in f if line.strip()]
     if n is not None and n < len(rows):
         rows = rows[:n]
     return [

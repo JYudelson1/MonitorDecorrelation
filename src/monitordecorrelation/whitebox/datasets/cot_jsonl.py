@@ -27,7 +27,8 @@ def load_cot_jsonl(
         raise FileNotFoundError(
             f"{path} not found — build it: uv run python experiments/build_cot_pairs.py --out {path}"
         )
-    rows = [json.loads(line) for line in p.open() if line.strip()]
+    with p.open() as f:
+        rows = [json.loads(line) for line in f if line.strip()]
     if n is not None and n < len(rows):
         rows = rows[:n]
 

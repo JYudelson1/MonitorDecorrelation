@@ -38,7 +38,8 @@ _N = NormalDist()
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.open() if line.strip()]
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 # Display labels — the ``cot_*`` monitors read CoT AND the final answer (``use_cot=True``); "cot" alone

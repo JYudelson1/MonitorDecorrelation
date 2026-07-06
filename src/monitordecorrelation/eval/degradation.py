@@ -27,7 +27,8 @@ from monitordecorrelation.eval.metric_keys import class_score_pairs
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.open() if line.strip()]
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def _rolling_average(series: dict[int, float], window: int) -> dict[int, float]:
