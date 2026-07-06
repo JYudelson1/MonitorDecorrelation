@@ -114,7 +114,7 @@ def main() -> None:
     ap.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="drop monitors by name")
     ap.add_argument("--no-control", action="store_true", help="omit the no-monitor control run")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--n-steps", type=int, default=60, help="OA uses 120; default 60 for a 'shortish' run")
+    ap.add_argument("--n-steps", type=int, default=90, help="OA uses 120; 90 gives the dip-then-climb room")
     ap.add_argument("--lora-rank", type=int, default=64, help="OA uses 64 (alpha 128)")
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--penalty-coef", type=float, default=1.0,

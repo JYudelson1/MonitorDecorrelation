@@ -3,7 +3,7 @@
   "policy": "Qwen/Qwen3-8B",
   "backend": "tinker",
   "env": "mbpp_honeypot",
-  "n_steps": 60,
+  "n_steps": 90,
   "batch_size": 64,
   "group_size": 8,
   "eval_every": 2,

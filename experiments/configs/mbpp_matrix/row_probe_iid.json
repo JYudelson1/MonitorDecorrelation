@@ -3,7 +3,7 @@
   "policy": "Qwen/Qwen3-8B",
   "backend": "tinker",
   "env": "mbpp_honeypot",
-  "n_steps": 60,
+  "n_steps": 90,
   "batch_size": 64,
   "group_size": 8,
   "eval_every": 2,
@@ -14,8 +14,8 @@
   "kl_coef": 0.0001,
   "lora_rank": 64,
   "seed": 0,
-  "run_name": "mbpp_Qwen3-8B_cot_strong_s0_strict",
-  "description": "Train AGAINST cot_strong on MBPP-Honeypot (reward-hacking); hold out cot_weak, out_weak, out_strong, probe_ood, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
+  "run_name": "mbpp_Qwen3-8B_probe_iid_s0",
+  "description": "Train AGAINST probe_iid on MBPP-Honeypot (reward-hacking); hold out cot_weak, cot_strong, out_weak, out_strong, probe_ood. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
   "monitors": [
     {
       "kind": "cot",
@@ -27,7 +27,7 @@
     {
       "kind": "cot",
       "name": "cot_strong",
-      "role": "train_against",
+      "role": "held_out",
       "model_id": "deepseek/deepseek-chat",
       "use_cot": true
     },
@@ -55,7 +55,7 @@
     {
       "kind": "probe",
       "name": "probe_iid",
-      "role": "held_out",
+      "role": "train_against",
       "probe_path": "data/probes/Qwen3-8B/mbpp_honeypot",
       "probe_model": "Qwen/Qwen3-8B"
     }
