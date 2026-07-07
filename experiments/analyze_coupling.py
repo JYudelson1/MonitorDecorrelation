@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -55,7 +56,8 @@ def _heat(ax, M, rows, cols, title, *, lo=None, hi=None, diag_rows=None):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("runs_glob", help="glob for run dirs, e.g. 'data/runs/mbpp_Qwen3-8B_*'")
+    ap.add_argument("runs_glob", nargs="+", help="one or more globs for run dirs (unioned), e.g. "
+                    "'data/runs/mbpp_Qwen3-8B_*' '~/other/runs/mbpp_*'")
     ap.add_argument("--metric", default="auroc", choices=["auroc", "dprime_margin"],
                     help="reliability scale: auroc→d′ (default) or the native margin d′")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
@@ -64,7 +66,9 @@ def main() -> None:
     ap.add_argument("--out", default="data/runs/_coupling")
     args = ap.parse_args()
 
-    run_dirs = sorted(d for d in glob.glob(args.runs_glob) if (Path(d) / "eval_metrics.jsonl").exists())
+    run_dirs = sorted({d for pat in args.runs_glob
+                       for d in glob.glob(os.path.expanduser(pat))
+                       if (Path(d) / "eval_metrics.jsonl").exists()})
     if not run_dirs:
         ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r}")
     monitors = monitor_names(run_dirs[0])
