@@ -59,6 +59,8 @@ def main() -> None:
     ap.add_argument("--metric", default="auroc", choices=["auroc", "dprime_margin"],
                     help="reliability scale: auroc→d′ (default) or the native margin d′")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
+    ap.add_argument("--no-penalty-label", action="store_true",
+                    help="omit the per-row α=<penalty> annotation (useful when a row mixes many schedules)")
     ap.add_argument("--out", default="data/runs/_coupling")
     args = ap.parse_args()
 
@@ -100,8 +102,9 @@ def main() -> None:
                    lo=bytgt.get("lo"), hi=bytgt.get("hi"), diag_rows=bytgt["targets"])
         # small n's + penalty (α) just under each row label (left): runs + Δd′ datapoints + λ used.
         pens = bytgt.get("penalty_per_target", [""]*len(bytgt["targets"]))
+        show_pen = not args.no_penalty_label
         for ri, (nr, npair, pen) in enumerate(zip(bytgt["n_runs_per_target"], bytgt["n_pairs_per_target"], pens)):
-            txt = (f"n={nr}r/{npair}p" if nr else "n/a (honest)") + (f"   α={pen}" if (nr and pen) else "")
+            txt = (f"n={nr}r/{npair}p" if nr else "n/a (honest)") + (f"   α={pen}" if (nr and pen and show_pen) else "")
             ax.text(-0.015, ri + 0.33, txt, transform=ax.get_yaxis_transform(),
                     ha="right", va="center", fontsize=6, color="#888")
         ax.set_xlabel("→ held-out detector j"); ax.set_ylabel("TRAINED AGAINST i")

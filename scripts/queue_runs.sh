@@ -23,7 +23,8 @@
 #             (survives SSH disconnect). Prints a PID + a batch logfile to tail; returns immediately.
 #   -P        shared probe server: load the base model ONCE (probe_server.py) and point every run at it,
 #             so J parallel runs don't each hold a copy of the 8B model (lifts the memory-bound -j cap).
-#             Model is read from the first config's `policy`; port from $PROBE_PORT (default 8177).
+#             Model is read from the first config's `policy`; port from `-p` / $PROBE_PORT (default 8177).
+#   -p PORT   port for the -P probe server (default 8177). Use a distinct port per concurrent batch.
 #   -U URL    use an ALREADY-running probe server at URL (instead of -P starting one).
 #   -h        this help.
 #   Anything after a literal `--` is appended verbatim to every run's `--set` overrides,
@@ -77,18 +78,19 @@ if [ "${1:-}" = "__worker" ]; then
 fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
-CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""
-while getopts ":c:n:j:U:dsDPh" opt; do
+CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""; PROBE_PORT_ARG=""
+while getopts ":c:n:j:U:p:dsDPh" opt; do
     case "$opt" in
         c) CONFIG="$OPTARG" ;;
         n) NUM_SEEDS="$OPTARG" ;;
         j) MAX_JOBS="$OPTARG" ;;
         U) PROBE_URL="$OPTARG" ;;
+        p) PROBE_PORT_ARG="$OPTARG" ;;
         d) DRY_RUN=1 ;;
         s) SKIP_EXISTING=1 ;;
         D) DETACH=1 ;;
         P) PROBE_SERVER=1 ;;
-        h) sed -n '2,47p' "$SELF"; exit 0 ;;
+        h) sed -n '2,48p' "$SELF"; exit 0 ;;
         \?) echo "unknown option -$OPTARG (try -h)" >&2; exit 2 ;;
         :) echo "option -$OPTARG needs an argument" >&2; exit 2 ;;
     esac
@@ -176,6 +178,7 @@ if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     [ "$SKIP_EXISTING" -eq 1 ] && set -- "$@" -s
     [ "$PROBE_SERVER" -eq 1 ] && set -- "$@" -P     # detached child owns the probe server
     [ -n "$PROBE_URL" ] && set -- "$@" -U "$PROBE_URL"
+    [ -n "$PROBE_PORT_ARG" ] && set -- "$@" -p "$PROBE_PORT_ARG"
     # shellcheck disable=SC2086  # split EXTRA_SETS back into separate k=v tokens after the `--`
     [ -n "$EXTRA_SETS" ] && set -- "$@" -- $EXTRA_SETS
     QR_DETACHED=1 nohup bash "$SELF" "$@" >"$batchlog" 2>&1 </dev/null &
@@ -195,7 +198,7 @@ if [ -n "$PROBE_URL" ]; then
     export PROBE_SERVER_URL="$PROBE_URL"
     echo "probes → existing shared server $PROBE_SERVER_URL"
 elif [ "$PROBE_SERVER" -eq 1 ]; then
-    PROBE_PORT="${PROBE_PORT:-8177}"
+    PROBE_PORT="${PROBE_PORT_ARG:-${PROBE_PORT:-8177}}"   # -p flag > $PROBE_PORT env > default
     model="$(read_policy "${configs[0]}")"
     srvlog="data/runs/_probe_server_$(date +%Y%m%d_%H%M%S).log"
     echo "starting shared probe server: $model on :$PROBE_PORT  (log: $srvlog) …"
