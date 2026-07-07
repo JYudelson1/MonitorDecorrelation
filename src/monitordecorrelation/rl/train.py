@@ -324,11 +324,21 @@ def run_grpo(
         def _pen(score: float) -> float:
             return 0.0 if score != score else score
 
+        # ``penalties[i]`` = raw mean train-against suspiciousness for rollout i (BEFORE the coefficient).
+        # This is the obfuscation signal (drops as the policy evades) — logged as monitor_suspiciousness_mean.
         penalties = [
             mean(_pen(ta_res[m.name][i].score) for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
         ]
-        rewards = [er.task_reward - cfg.penalty_coef * pen for er, pen in zip(env_results, penalties)]
+        # Effective λ this step: constant penalty_coef, OR a linear ramp start→end if penalty_schedule is
+        # set (hack-then-hide curriculum). Logged as penalty_coef so the schedule is visible; the applied
+        # reward penalty (penalty_mean) is λ·suspiciousness, now decoupled since λ can vary over training.
+        pen_coef = cfg.penalty_coef
+        if cfg.penalty_schedule:
+            frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
+            s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
+            pen_coef = s + (e - s) * frac
+        rewards = [er.task_reward - pen_coef * pen for er, pen in zip(env_results, penalties)]
         t2 = time.perf_counter()
         # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
         # layer (advantage centering, mask/datum assembly, KL penalty, forward_backward) via cookbook
@@ -366,7 +376,10 @@ def run_grpo(
                 "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
                if any("loose_rh" in er.meta for er in env_results) else {}),
             "reward/task_mean": mean(er.task_reward for er in env_results),
-            "reward/penalty_mean": mean(penalties),
+            # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ:
+            "reward/monitor_suspiciousness_mean": mean(penalties),
+            "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
+            "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
             "reward/total_mean": mean(rewards),
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),

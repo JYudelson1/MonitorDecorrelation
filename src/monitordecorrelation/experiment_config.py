@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class _Strict(BaseModel):
@@ -66,6 +66,17 @@ class ExperimentConfig(_Strict):
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
     max_tokens: int = 1024
     penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
+    penalty_schedule: dict | None = Field(
+        None, description="None → constant penalty_coef. Else {'start_penalty': x, 'end_penalty': y}: λ "
+        "ramps linearly x→y across n_steps (hack-then-hide curriculum — low λ to establish hacking, then "
+        "rising λ to drive obfuscation). Overrides penalty_coef.")
+
+    @field_validator("penalty_schedule")
+    @classmethod
+    def _check_schedule(cls, v):
+        if v is not None and set(v) != {"start_penalty", "end_penalty"}:
+            raise ValueError("penalty_schedule must be {'start_penalty': float, 'end_penalty': float}")
+        return v
     kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "
                            "incorporate_kl_penalty); >0 anchors the policy → prevents the "
                            "reward-over-optimization collapse. 0 = off (default).")

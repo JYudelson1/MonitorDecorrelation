@@ -126,7 +126,7 @@ def main() -> None:
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
         eval_every=cfg.eval_every, eval_size=cfg.eval_size,
         eval_samples_per_prompt=cfg.eval_samples_per_prompt,
-        penalty_coef=cfg.penalty_coef, kl_coef=cfg.kl_coef,
+        penalty_coef=cfg.penalty_coef, penalty_schedule=cfg.penalty_schedule, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),

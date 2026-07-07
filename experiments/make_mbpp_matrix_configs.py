@@ -60,9 +60,12 @@ def _spec(d: dict, role: str) -> dict:
 
 
 def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lora_rank: int,
-               max_tokens: int, control: bool, penalty_coef: float = 1.0, tag: str = "") -> list[dict]:
+               max_tokens: int, control: bool, penalty_coef: float = 1.0, tag: str = "",
+               penalty_schedule: list | None = None) -> list[dict]:
     short = model.split("/")[-1]
     suf = f"_{tag}" if tag else ""  # run-name suffix marking this run set (e.g. _lowpen)
+    sched = ({"start_penalty": penalty_schedule[0], "end_penalty": penalty_schedule[1]}
+             if penalty_schedule else None)
     base = {
         "experiment": "mbpp_degradation_matrix",
         "policy": model,
@@ -78,6 +81,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
                                        # (costs 4× monitor scoring per eval — kept at 4 not 8 for spend)
         "max_tokens": max_tokens,
         "penalty_coef": penalty_coef,  # weight on the train-against monitor penalty (lower → more room to hack)
+        "penalty_schedule": sched,     # None, or {start,end} λ ramp (hack-then-hide curriculum)
         "kl_coef": 1e-4,          # per-token KL-to-base anchor — prevents the reward-hack collapse
         "lora_rank": lora_rank,   # OA: rank 64 (alpha 128 — tinker sets alpha; verify 2×rank on the box)
         "seed": seed,
@@ -119,6 +123,9 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--penalty-coef", type=float, default=1.0,
                     help="train-against monitor penalty weight (lower → policy has more room to hack)")
+    ap.add_argument("--penalty-schedule", type=float, nargs=2, metavar=("START", "END"), default=None,
+                    help="ramp λ linearly START→END over training (hack-then-hide curriculum); "
+                         "overrides --penalty-coef")
     ap.add_argument("--tag", default="", help="run-name + folder marker for this run set (e.g. lowpen)")
     ap.add_argument("--out-dir", default="experiments/configs/mbpp_matrix")
     ap.add_argument("--validate", action="store_true")
@@ -136,9 +143,10 @@ def main() -> None:
         stale.unlink()
     rows = build_rows(args.model, monitors, seed=args.seed, n_steps=args.n_steps,
                       lora_rank=args.lora_rank, max_tokens=args.max_tokens, control=not args.no_control,
-                      penalty_coef=args.penalty_coef, tag=args.tag)
+                      penalty_coef=args.penalty_coef, tag=args.tag, penalty_schedule=args.penalty_schedule)
     for r in rows:
-        target = r["run_name"].rsplit("_s", 1)[0].split(f"{args.model.split('/')[-1]}_", 1)[1]
+        ta = [m["name"] for m in r["monitors"] if m["role"] == "train_against"]
+        target = ta[0] if ta else "control"  # from the monitors, not run_name parsing (tag-robust)
         p = out_dir / f"row_{target}.json"
         p.write_text(json.dumps(r, indent=2) + "\n")
         print(f"wrote {p}  (train_against={target if target != 'control' else 'NONE (control)'})")

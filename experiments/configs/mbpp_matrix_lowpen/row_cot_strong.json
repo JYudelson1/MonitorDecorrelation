@@ -11,6 +11,7 @@
   "eval_samples_per_prompt": 4,
   "max_tokens": 2048,
   "penalty_coef": 0.5,
+  "penalty_schedule": null,
   "kl_coef": 0.0001,
   "lora_rank": 64,
   "seed": 0,

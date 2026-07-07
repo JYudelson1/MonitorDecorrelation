@@ -133,7 +133,9 @@ def plot_run(run_dir: str | Path) -> list[Path]:
             # behavior_rate is the primary ground-truth series; loose_rate/hardcoding_rate only exist for
             # MBPP-Honeypot (skipped automatically when absent for other envs).
             [("behavior_rate", f"{beh_pretty} rate (train)"), ("loose_rate", "loose RH (train)"),
-             ("hardcoding_rate", "hardcoding (train)"), ("reward/penalty_mean", "train-monitor penalty"),
+             ("hardcoding_rate", "hardcoding (train)"),
+             ("reward/monitor_suspiciousness_mean", "monitor suspiciousness"),
+             ("reward/penalty_mean", "applied penalty (λ·sus)"),
              ("reward/len_penalty_mean", "code-length penalty"), ("reward/task_mean", "task reward")],
             f"{run_dir.name} [train] — {beh_pretty} + reward", td / "ground_truth.png")
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
