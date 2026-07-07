@@ -74,6 +74,23 @@ def train_target(run_dir: str | Path) -> str | None:
     return None
 
 
+def run_penalty(run_dir: str | Path) -> str:
+    """Display string for a run's monitor-penalty λ (shown as α on the charts): ``'0.5'`` constant, or
+    ``'0.2→0.6'`` if scheduled; ``''`` if unknown. Reads run_info.json (config) then config.json."""
+    for fn, key in (("run_info.json", "config"), ("config.json", None)):
+        p = Path(run_dir) / fn
+        if not p.exists():
+            continue
+        d = json.loads(p.read_text())
+        cfg = d.get(key, {}) if key else d
+        sched = cfg.get("penalty_schedule")
+        if sched:
+            return f"{sched['start_penalty']:g}→{sched['end_penalty']:g}"
+        if cfg.get("penalty_coef") is not None:
+            return f"{cfg['penalty_coef']:g}"
+    return ""
+
+
 def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "auroc") -> np.ndarray:
     """``[n_monitors, n_eval_steps]`` reliability array (NaN where undefined), in a common d′-like scale.
 
@@ -158,9 +175,11 @@ def directed_coupling_by_target(run_dirs, monitors=None, metric="auroc", *, boot
     run_dirs = [str(d) for d in run_dirs]
     monitors = monitors or monitor_names(run_dirs[0])
     by_t: dict[str, list[np.ndarray]] = {}
-    for _, tgt, df in _run_diffs(run_dirs, monitors, metric):
+    by_pen: dict[str, set] = {}  # penalty λ string(s) contributing to each target row (for the α label)
+    for d, tgt, df in _run_diffs(run_dirs, monitors, metric):
         if tgt is not None:
             by_t.setdefault(tgt, []).append(df)
+            by_pen.setdefault(tgt, set()).add(run_penalty(d))
     targets = list(monitors)  # ALL monitors as rows → square; targets with no runs stay NaN
     B = np.full((len(targets), len(monitors)), np.nan)
     nR = np.zeros(len(targets), int)
@@ -190,8 +209,9 @@ def directed_coupling_by_target(run_dirs, monitors=None, metric="auroc", *, boot
                 bs.append([np.sum(dt * np.hstack([diffs[k][j] for k in sel])) / dn
                            if dn > 0 else np.nan for j in range(len(monitors))])
             lo[ri], hi[ri] = np.nanpercentile(np.array(bs), [5, 95], axis=0)
-    out = {"targets": targets, "monitors": monitors, "beta": B,
-           "n_runs_per_target": nR, "n_pairs_per_target": nP, "metric": metric}
+    penalty = ["/".join(sorted(p for p in by_pen.get(t, set()) if p)) for t in targets]  # e.g. "0.5" or "0.5/1"
+    out = {"targets": targets, "monitors": monitors, "beta": B, "n_runs_per_target": nR,
+           "n_pairs_per_target": nP, "penalty_per_target": penalty, "metric": metric}
     if bootstrap:
         out["lo"], out["hi"] = lo, hi
     return out

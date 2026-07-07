@@ -8,7 +8,7 @@ import numpy as np
 from monitordecorrelation.eval.coupling import directed_coupling, directed_coupling_by_target
 
 
-def _make_run(tmp, name, series, target=None):
+def _make_run(tmp, name, series, target=None, penalty=0.5):
     """Write a minimal run dir: eval_metrics.jsonl with monitor/<m>/dprime_margin per step."""
     d = tmp / name
     d.mkdir()
@@ -21,7 +21,8 @@ def _make_run(tmp, name, series, target=None):
         rows.append(row)
     (d / "eval_metrics.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     if target is not None:
-        (d / "run_info.json").write_text(json.dumps({"train_against": [{"name": target}]}))
+        (d / "run_info.json").write_text(json.dumps(
+            {"train_against": [{"name": target}], "config": {"penalty_coef": penalty}}))
     return str(d)
 
 
@@ -50,3 +51,6 @@ def test_directed_coupling_recovers_known_slope(tmp_path):
     assert np.isnan(bt["beta"][1]).all() and np.isnan(bt["beta"][2]).all()  # B, C rows NaN
     assert list(bt["n_runs_per_target"]) == [4, 0, 0]
     assert bt["n_pairs_per_target"][0] == 4 * 11 and bt["n_pairs_per_target"][1] == 0  # 4 runs × 11 diffs
+    from monitordecorrelation.eval.coupling import run_penalty
+    assert bt["penalty_per_target"][0] == "0.5"          # α label for the populated (A) row
+    assert run_penalty(dirs[0]) == "0.5"
