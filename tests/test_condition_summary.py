@@ -59,6 +59,20 @@ def test_condition_table_groups_and_distributions(tmp_path):
     assert table[0]["hack_dist"][0] == 0.5 and table[0]["hack_dist"][-1] == 0.5
 
 
+def test_control_regimes_merge_across_penalty(tmp_path):
+    # two control runs at DIFFERENT penalties collapse into one ("control", "any") row
+    def _ctl(name, pen, beh):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "eval_metrics.jsonl").write_text(json.dumps({"step": 0, "behavior_rate": beh}) + "\n")
+        (d / "run_info.json").write_text(json.dumps({"train_against": [], "config": {"penalty_coef": pen}}))
+        return str(d)
+    table = condition_table([_ctl("c1", 1.0, 0.9), _ctl("c2", 0.5, 0.8)], ["A"])
+    ctl = [r for r in table if r["target"] == "control"]
+    assert len(ctl) == 1 and ctl[0]["penalty"] == "any" and ctl[0]["n"] == 2
+    assert ctl[0]["dprime_dist_n"] == 0  # no train-against monitor → d′ distribution empty (N/A in plot)
+
+
 def test_dist_buckets_and_nan_handling():
     fracs, n = _dist([-2.0, 0.0, 2.0, float("nan")], DPRIME_BUCKETS)
     assert n == 3 and fracs[0] == fracs[2] == fracs[4] == 1 / 3  # big-drop / flat / sharper

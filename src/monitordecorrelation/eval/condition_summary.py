@@ -89,7 +89,9 @@ def condition_table(run_dirs, monitors: list[str]) -> list[dict]:
     summaries = [run_summary(d, monitors) for d in run_dirs]
     groups: dict[tuple, list[dict]] = {}
     for s in summaries:
-        groups.setdefault((s["target"] or "control", s["penalty"]), []).append(s)
+        # control has no monitor penalty, so λ is meaningless → merge all control regimes into one row.
+        key = ("control", "any") if s["target"] is None else (s["target"], s["penalty"])
+        groups.setdefault(key, []).append(s)
     table = []
     for (tgt, pen), ss in sorted(groups.items()):
         row = {"target": tgt, "penalty": pen, "n": len(ss)}

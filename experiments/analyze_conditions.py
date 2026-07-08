@@ -49,9 +49,12 @@ _TARGET_ORDER = ["cot_weak", "cot_strong", "out_weak", "out_strong", "probe_iid"
 def _sort_key(row):
     t = row["target"]
     ti = _TARGET_ORDER.index(t) if t in _TARGET_ORDER else len(_TARGET_ORDER)
-    # penalty order: constants ascending, then schedules
+    # penalty order: numeric constants ascending, then schedules / non-numeric ("any") last
     p = row["penalty"]
-    pk = (1, p) if "→" in p else (0, float(p) if p else 0.0)
+    try:
+        pk = (1, 0.0) if "→" in p else (0, float(p))
+    except ValueError:
+        pk = (2, 0.0)
     return (ti, pk)
 
 
@@ -82,8 +85,10 @@ def main() -> None:
         colors = ["#b03a2e" if (diverging and m > 0) else "#5f8fb0" for m in np.nan_to_num(means)]
         ax.barh(y, means, xerr=np.nan_to_num(stds), color=colors, alpha=0.85,
                 error_kw=dict(elinewidth=0.7, ecolor="#666"))
-        for yi, m in zip(y, means):
-            ax.text(0, yi, "n/a", va="center", ha="center", fontsize=6, color="#bbb") if m != m else None
+        for yi, m, r in zip(y, means, table):
+            if m != m:  # NaN mean → N/A (control has no monitor; else too few hacking rollouts)
+                msg = "N/A" if r["target"] == "control" else "N/A\n(not enough\nhacking rollouts)"
+                ax.text(0, yi, msg, va="center", ha="center", fontsize=5.5, color="#999")
         if diverging:
             ax.axvline(0, color="#333", lw=0.8)
         ax.set_title(title, fontsize=9)
@@ -95,6 +100,10 @@ def main() -> None:
 
     for ax, (dkey, nkey, buckets, colors, title) in zip(axes[3:], _DIST_COLS):
         for r, yi in zip(table, y):
+            if r[nkey] == 0 or all(f != f for f in r[dkey]):  # no runs with this metric defined
+                msg = "N/A" if r["target"] == "control" else "N/A (not enough hacking rollouts)"
+                ax.text(0.5, yi, msg, ha="center", va="center", fontsize=6, color="#999")
+                continue
             left = 0.0
             for frac, color in zip(r[dkey], colors):
                 f = 0.0 if frac != frac else frac
@@ -111,6 +120,12 @@ def main() -> None:
         ax.legend(handles=[Patch(facecolor=c, label=lbl) for (_, _, lbl), c in zip(buckets, colors)],
                   fontsize=5.6, ncol=1, loc="upper left", bbox_to_anchor=(0.0, -0.04),
                   frameon=False, handlelength=1.0, handleheight=1.0, labelspacing=0.25)
+
+    # separators between train-against monitor groups (so multi-penalty rows read as one monitor block)
+    boundaries = [i for i in range(nrows - 1) if table[i]["target"] != table[i + 1]["target"]]
+    for ax in axes:
+        for i in boundaries:
+            ax.axhline(y[i] - 0.5, color="#999", lw=0.8, zorder=0)
 
     fig.suptitle("What training did, per (train-against monitor × penalty λ) — over seeds\n"
                  "μ bars = mean ± std over seeds. Distributions = fraction of a condition's runs per bucket "
