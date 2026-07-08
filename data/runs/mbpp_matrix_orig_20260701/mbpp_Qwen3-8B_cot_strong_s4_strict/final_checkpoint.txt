@@ -1,0 +1,1 @@
+tinker://3eda80a3-c1de-5b6a-9b83-a5b6bbc309a6:train:0/weights/mbpp_Qwen3-8B_cot_strong_s4_strict-final

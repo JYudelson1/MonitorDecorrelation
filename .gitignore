@@ -14,11 +14,18 @@ wheels/
 
 # Cached datasets + local logs + run artifacts
 data/**/*.jsonl
-data/runs/
+data/runs/**/rollouts.json
+data/runs/**/rollouts.jsonl
+data/runs/**/eval_rollouts.json
+data/runs/**/eval_rollouts.jsonl
 data/probes/*.log
+data/runs/*.log
+data/runs/*.jsonl
+data/runs/*.json
 data/checkpoints/
 wandb/
 err.log
+data/runs/archived/
 
 # Old docs
 docs/Original Project Proposal.md

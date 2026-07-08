@@ -1,0 +1,1 @@
+tinker://b0876682-d539-5a95-aabd-5228989cd03b:train:0/weights/mbpp_Qwen3-8B_cot_weak_s2_strict-final

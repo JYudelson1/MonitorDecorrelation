@@ -1,0 +1,1 @@
+tinker://eb303aa5-0b66-5f50-bba8-8eaa1aa639ad:train:0/weights/mbpp_Qwen3-8B_probe_iid_s2_strict-final

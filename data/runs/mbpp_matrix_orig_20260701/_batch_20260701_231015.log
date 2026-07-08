@@ -1,0 +1,99 @@
+Planning: 7 config(s) × 5 seed(s), up to 3 parallel
+
+  skip  mbpp_Qwen3-8B_control_s0                     (already done)
+  queue mbpp_Qwen3-8B_control_s1                     seed=1  (experiments/configs/mbpp_matrix/row_control.json)
+  queue mbpp_Qwen3-8B_control_s2                     seed=2  (experiments/configs/mbpp_matrix/row_control.json)
+  queue mbpp_Qwen3-8B_control_s3                     seed=3  (experiments/configs/mbpp_matrix/row_control.json)
+  queue mbpp_Qwen3-8B_control_s4                     seed=4  (experiments/configs/mbpp_matrix/row_control.json)
+  skip  mbpp_Qwen3-8B_cot_strong_s0_strict           (already done)
+  queue mbpp_Qwen3-8B_cot_strong_s1_strict           seed=1  (experiments/configs/mbpp_matrix/row_cot_strong_s0.json)
+  queue mbpp_Qwen3-8B_cot_strong_s2_strict           seed=2  (experiments/configs/mbpp_matrix/row_cot_strong_s0.json)
+  queue mbpp_Qwen3-8B_cot_strong_s3_strict           seed=3  (experiments/configs/mbpp_matrix/row_cot_strong_s0.json)
+  queue mbpp_Qwen3-8B_cot_strong_s4_strict           seed=4  (experiments/configs/mbpp_matrix/row_cot_strong_s0.json)
+  skip  mbpp_Qwen3-8B_cot_weak_s0_strict             (already done)
+  queue mbpp_Qwen3-8B_cot_weak_s1_strict             seed=1  (experiments/configs/mbpp_matrix/row_cot_weak_s0.json)
+  queue mbpp_Qwen3-8B_cot_weak_s2_strict             seed=2  (experiments/configs/mbpp_matrix/row_cot_weak_s0.json)
+  queue mbpp_Qwen3-8B_cot_weak_s3_strict             seed=3  (experiments/configs/mbpp_matrix/row_cot_weak_s0.json)
+  queue mbpp_Qwen3-8B_cot_weak_s4_strict             seed=4  (experiments/configs/mbpp_matrix/row_cot_weak_s0.json)
+  skip  mbpp_Qwen3-8B_out_strong_s0_strict           (already done)
+  queue mbpp_Qwen3-8B_out_strong_s1_strict           seed=1  (experiments/configs/mbpp_matrix/row_out_strong_s0.json)
+  queue mbpp_Qwen3-8B_out_strong_s2_strict           seed=2  (experiments/configs/mbpp_matrix/row_out_strong_s0.json)
+  queue mbpp_Qwen3-8B_out_strong_s3_strict           seed=3  (experiments/configs/mbpp_matrix/row_out_strong_s0.json)
+  queue mbpp_Qwen3-8B_out_strong_s4_strict           seed=4  (experiments/configs/mbpp_matrix/row_out_strong_s0.json)
+  skip  mbpp_Qwen3-8B_out_weak_s0_strict             (already done)
+  queue mbpp_Qwen3-8B_out_weak_s1_strict             seed=1  (experiments/configs/mbpp_matrix/row_out_weak_s0.json)
+  queue mbpp_Qwen3-8B_out_weak_s2_strict             seed=2  (experiments/configs/mbpp_matrix/row_out_weak_s0.json)
+  queue mbpp_Qwen3-8B_out_weak_s3_strict             seed=3  (experiments/configs/mbpp_matrix/row_out_weak_s0.json)
+  queue mbpp_Qwen3-8B_out_weak_s4_strict             seed=4  (experiments/configs/mbpp_matrix/row_out_weak_s0.json)
+  skip  mbpp_Qwen3-8B_probe_iid_s0_strict            (already done)
+  queue mbpp_Qwen3-8B_probe_iid_s1_strict            seed=1  (experiments/configs/mbpp_matrix/row_probe_iid_s0.json)
+  queue mbpp_Qwen3-8B_probe_iid_s2_strict            seed=2  (experiments/configs/mbpp_matrix/row_probe_iid_s0.json)
+  queue mbpp_Qwen3-8B_probe_iid_s3_strict            seed=3  (experiments/configs/mbpp_matrix/row_probe_iid_s0.json)
+  queue mbpp_Qwen3-8B_probe_iid_s4_strict            seed=4  (experiments/configs/mbpp_matrix/row_probe_iid_s0.json)
+  skip  mbpp_Qwen3-8B_probe_ood_s0_strict            (already done)
+  queue mbpp_Qwen3-8B_probe_ood_s1_strict            seed=1  (experiments/configs/mbpp_matrix/row_probe_ood_s0.json)
+  queue mbpp_Qwen3-8B_probe_ood_s2_strict            seed=2  (experiments/configs/mbpp_matrix/row_probe_ood_s0.json)
+  queue mbpp_Qwen3-8B_probe_ood_s3_strict            seed=3  (experiments/configs/mbpp_matrix/row_probe_ood_s0.json)
+  queue mbpp_Qwen3-8B_probe_ood_s4_strict            seed=4  (experiments/configs/mbpp_matrix/row_probe_ood_s0.json)
+
+→ 28 job(s) to run, 7 skipped.
+Launching at 23:10:16 — full logs in data/runs/<run>/run.log
+----------------------------------------------------------------------
+▶ 23:10:16  mbpp_Qwen3-8B_control_s3                     seed=3  → data/runs/mbpp_Qwen3-8B_control_s3/run.log
+▶ 23:10:16  mbpp_Qwen3-8B_control_s2                     seed=2  → data/runs/mbpp_Qwen3-8B_control_s2/run.log
+▶ 23:10:16  mbpp_Qwen3-8B_control_s1                     seed=1  → data/runs/mbpp_Qwen3-8B_control_s1/run.log
+✓ 00:03:27  mbpp_Qwen3-8B_control_s2                     done
+▶ 00:03:27  mbpp_Qwen3-8B_control_s4                     seed=4  → data/runs/mbpp_Qwen3-8B_control_s4/run.log
+✓ 00:14:41  mbpp_Qwen3-8B_control_s1                     done
+▶ 00:14:41  mbpp_Qwen3-8B_cot_strong_s1_strict           seed=1  → data/runs/mbpp_Qwen3-8B_cot_strong_s1_strict/run.log
+✓ 00:16:50  mbpp_Qwen3-8B_control_s3                     done
+▶ 00:16:50  mbpp_Qwen3-8B_cot_strong_s2_strict           seed=2  → data/runs/mbpp_Qwen3-8B_cot_strong_s2_strict/run.log
+✓ 00:53:36  mbpp_Qwen3-8B_control_s4                     done
+▶ 00:53:36  mbpp_Qwen3-8B_cot_strong_s3_strict           seed=3  → data/runs/mbpp_Qwen3-8B_cot_strong_s3_strict/run.log
+✓ 02:05:20  mbpp_Qwen3-8B_cot_strong_s1_strict           done
+▶ 02:05:20  mbpp_Qwen3-8B_cot_strong_s4_strict           seed=4  → data/runs/mbpp_Qwen3-8B_cot_strong_s4_strict/run.log
+✓ 02:07:59  mbpp_Qwen3-8B_cot_strong_s2_strict           done
+▶ 02:07:59  mbpp_Qwen3-8B_cot_weak_s1_strict             seed=1  → data/runs/mbpp_Qwen3-8B_cot_weak_s1_strict/run.log
+✓ 02:38:44  mbpp_Qwen3-8B_cot_strong_s3_strict           done
+▶ 02:38:44  mbpp_Qwen3-8B_cot_weak_s2_strict             seed=2  → data/runs/mbpp_Qwen3-8B_cot_weak_s2_strict/run.log
+✓ 04:03:42  mbpp_Qwen3-8B_cot_weak_s1_strict             done
+▶ 04:03:42  mbpp_Qwen3-8B_cot_weak_s3_strict             seed=3  → data/runs/mbpp_Qwen3-8B_cot_weak_s3_strict/run.log
+✓ 04:13:33  mbpp_Qwen3-8B_cot_strong_s4_strict           done
+▶ 04:13:33  mbpp_Qwen3-8B_cot_weak_s4_strict             seed=4  → data/runs/mbpp_Qwen3-8B_cot_weak_s4_strict/run.log
+✓ 04:30:39  mbpp_Qwen3-8B_cot_weak_s2_strict             done
+▶ 04:30:39  mbpp_Qwen3-8B_out_strong_s1_strict           seed=1  → data/runs/mbpp_Qwen3-8B_out_strong_s1_strict/run.log
+✓ 05:40:23  mbpp_Qwen3-8B_cot_weak_s3_strict             done
+▶ 05:40:23  mbpp_Qwen3-8B_out_strong_s2_strict           seed=2  → data/runs/mbpp_Qwen3-8B_out_strong_s2_strict/run.log
+✓ 05:51:13  mbpp_Qwen3-8B_cot_weak_s4_strict             done
+▶ 05:51:13  mbpp_Qwen3-8B_out_strong_s3_strict           seed=3  → data/runs/mbpp_Qwen3-8B_out_strong_s3_strict/run.log
+✓ 06:24:34  mbpp_Qwen3-8B_out_strong_s1_strict           done
+▶ 06:24:34  mbpp_Qwen3-8B_out_strong_s4_strict           seed=4  → data/runs/mbpp_Qwen3-8B_out_strong_s4_strict/run.log
+✓ 07:35:06  mbpp_Qwen3-8B_out_strong_s2_strict           done
+▶ 07:35:06  mbpp_Qwen3-8B_out_weak_s1_strict             seed=1  → data/runs/mbpp_Qwen3-8B_out_weak_s1_strict/run.log
+✓ 07:44:28  mbpp_Qwen3-8B_out_strong_s3_strict           done
+▶ 07:44:28  mbpp_Qwen3-8B_out_weak_s2_strict             seed=2  → data/runs/mbpp_Qwen3-8B_out_weak_s2_strict/run.log
+✓ 08:16:13  mbpp_Qwen3-8B_out_strong_s4_strict           done
+▶ 08:16:13  mbpp_Qwen3-8B_out_weak_s3_strict             seed=3  → data/runs/mbpp_Qwen3-8B_out_weak_s3_strict/run.log
+✓ 09:08:17  mbpp_Qwen3-8B_out_weak_s1_strict             done
+▶ 09:08:17  mbpp_Qwen3-8B_out_weak_s4_strict             seed=4  → data/runs/mbpp_Qwen3-8B_out_weak_s4_strict/run.log
+✓ 09:20:55  mbpp_Qwen3-8B_out_weak_s2_strict             done
+▶ 09:20:55  mbpp_Qwen3-8B_probe_iid_s1_strict            seed=1  → data/runs/mbpp_Qwen3-8B_probe_iid_s1_strict/run.log
+✓ 09:52:10  mbpp_Qwen3-8B_out_weak_s3_strict             done
+▶ 09:52:10  mbpp_Qwen3-8B_probe_iid_s2_strict            seed=2  → data/runs/mbpp_Qwen3-8B_probe_iid_s2_strict/run.log
+✓ 10:49:14  mbpp_Qwen3-8B_out_weak_s4_strict             done
+▶ 10:49:14  mbpp_Qwen3-8B_probe_iid_s3_strict            seed=3  → data/runs/mbpp_Qwen3-8B_probe_iid_s3_strict/run.log
+✓ 11:07:23  mbpp_Qwen3-8B_probe_iid_s1_strict            done
+▶ 11:07:23  mbpp_Qwen3-8B_probe_iid_s4_strict            seed=4  → data/runs/mbpp_Qwen3-8B_probe_iid_s4_strict/run.log
+✓ 11:39:36  mbpp_Qwen3-8B_probe_iid_s2_strict            done
+▶ 11:39:36  mbpp_Qwen3-8B_probe_ood_s1_strict            seed=1  → data/runs/mbpp_Qwen3-8B_probe_ood_s1_strict/run.log
+✓ 12:13:06  mbpp_Qwen3-8B_probe_iid_s3_strict            done
+▶ 12:13:06  mbpp_Qwen3-8B_probe_ood_s2_strict            seed=2  → data/runs/mbpp_Qwen3-8B_probe_ood_s2_strict/run.log
+✓ 12:44:00  mbpp_Qwen3-8B_probe_iid_s4_strict            done
+▶ 12:44:00  mbpp_Qwen3-8B_probe_ood_s3_strict            seed=3  → data/runs/mbpp_Qwen3-8B_probe_ood_s3_strict/run.log
+✓ 13:24:09  mbpp_Qwen3-8B_probe_ood_s1_strict            done
+▶ 13:24:09  mbpp_Qwen3-8B_probe_ood_s4_strict            seed=4  → data/runs/mbpp_Qwen3-8B_probe_ood_s4_strict/run.log
+✓ 14:11:44  mbpp_Qwen3-8B_probe_ood_s2_strict            done
+✓ 14:42:08  mbpp_Qwen3-8B_probe_ood_s3_strict            done
+✓ 15:05:48  mbpp_Qwen3-8B_probe_ood_s4_strict            done
+----------------------------------------------------------------------
+✓ batch finished at 15:05:48 — all 28 job(s) completed.

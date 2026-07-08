@@ -1,0 +1,24 @@
+{
+  "_note": "backfilled by hand — this run started before run_info.json was added; values match the launch command",
+  "run_name": "run_nlp40",
+  "policy": "Qwen/Qwen3-8B",
+  "experiment": "train_against_cot",
+  "subset": "nlp",
+  "lr": 0.00047297908091376354,
+  "config": {
+    "rl_algo": "grpo",
+    "batch_size": 8,
+    "group_size": 8,
+    "n_steps": 40,
+    "max_tokens": 1024,
+    "penalty_coef": 1.0,
+    "lora_rank": 16
+  },
+  "env": {"name": "sycophancy", "behavior_name": "sycophancy"},
+  "train_against": [
+    {"name": "cot_weak", "role": "train_against", "model_id": "anthropic/claude-3.5-haiku", "behavior": "sycophancy", "threshold": 0.5}
+  ],
+  "held_out": [
+    {"name": "cot_strong", "role": "held_out", "model_id": "anthropic/claude-sonnet-4.6", "behavior": "sycophancy", "threshold": 0.5}
+  ]
+}
