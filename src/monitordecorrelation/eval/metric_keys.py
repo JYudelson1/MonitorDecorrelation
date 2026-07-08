@@ -45,6 +45,17 @@ def present_score(row: dict, monitor: str) -> float:
     return float("nan")
 
 
+def absent_score(row: dict, monitor: str) -> float:
+    """The behavior-ABSENT class mean (μ_clean — suspicion on the non-hack/'clean' class) for one
+    monitor, or NaN. Rising μ_clean (honest rollouts looking suspicious) is what collapses d′ *without*
+    the monitor being evaded. Matches ``mean_score_not_<behavior>`` / legacy ``mean_score_honest``."""
+    for k, v in row.items():
+        m = _ABSENT_RE.match(k)
+        if m and m.group("name") == monitor and v is not None and v == v:
+            return float(v)
+    return float("nan")
+
+
 def class_score_pairs(row: dict) -> dict[str, tuple[float, float]]:
     """``{monitor: (present_mean, absent_mean)}`` parsed from one metrics row, tolerant of both the new
     ``<behavior>``/``not_<behavior>`` keys and the legacy ``syco``/``honest`` keys. Only monitors that

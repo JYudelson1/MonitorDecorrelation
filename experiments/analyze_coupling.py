@@ -59,10 +59,11 @@ def main() -> None:
     ap.add_argument("runs_glob", nargs="+", help="one or more globs for run dirs (unioned), e.g. "
                     "'data/runs/mbpp_Qwen3-8B_*' '~/other/runs/mbpp_*'")
     ap.add_argument("--metric", default="auroc",
-                    choices=["auroc", "dprime_margin", "dprime", "suspicion_on_hacks"],
+                    choices=["auroc", "dprime_margin", "dprime", "suspicion_on_hacks", "suspicion_on_clean"],
                     help="reliability scale: auroc→d′ (default) · dprime_margin (native) · dprime (HYBRID "
                          "margin-or-AUROC, best for combining old+new runs) · suspicion_on_hacks (μ_hack — "
-                         "co-EVASION: does the held-out monitor stop CATCHING hacks? immune to honest-drift)")
+                         "co-EVASION: does the held-out monitor stop CATCHING hacks?) · suspicion_on_clean "
+                         "(μ_clean — honest-class drift, the OTHER driver of d′ collapse)")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
     ap.add_argument("--no-penalty-label", action="store_true",
                     help="omit the per-row α=<penalty> annotation (useful when a row mixes many schedules)")

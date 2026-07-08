@@ -35,7 +35,7 @@ from statistics import NormalDist
 
 import numpy as np
 
-from monitordecorrelation.eval.metric_keys import present_score
+from monitordecorrelation.eval.metric_keys import absent_score, present_score
 
 _N = NormalDist()
 
@@ -108,6 +108,10 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
     honest-class-drift artifact that degrades d′/AUROC (a monitor can keep μ_hack≈1 — still flags every
     hack — while its d′ collapses because honest rollouts started looking suspicious). ``coupling`` β on
     this = "training against i makes held-out j score hacks lower". Note: a DROP is degradation, same as d′.
+
+    ``metric="suspicion_on_clean"``: μ_clean — the monitor's mean score on the NON-hack ('clean') class.
+    The complement of μ_hack: a RISE here (honest rollouts looking suspicious) collapses d′ *without* the
+    monitor being evaded. β on this measures co-movement of the honest-class drift across monitors.
     """
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
     out = np.full((len(monitors), len(rows)), np.nan)
@@ -135,9 +139,11 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
                               else _auroc_dprime(r, m, mask_saturated=True))
             elif metric == "suspicion_on_hacks":
                 out[mi, t] = present_score(r, m)  # μ_hack (co-evasion metric)
+            elif metric == "suspicion_on_clean":
+                out[mi, t] = absent_score(r, m)   # μ_clean (honest-class drift — the OTHER driver of d′)
             else:
-                raise ValueError(f"unknown metric {metric!r} "
-                                 "(use auroc / dprime_margin / dprime / suspicion_on_hacks)")
+                raise ValueError(f"unknown metric {metric!r} (use auroc / dprime_margin / dprime / "
+                                 "suspicion_on_hacks / suspicion_on_clean)")
     return out
 
 
