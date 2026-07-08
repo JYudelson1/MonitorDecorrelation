@@ -96,23 +96,37 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
 
     ``metric="auroc"``: AUROC → d′ with a resolution-aware clip from the logged ``n_pos``/``n_neg``.
     ``metric="dprime_margin"``: the logged margin d′ verbatim.
+    ``metric="dprime"``: HYBRID — native margin d′ when a run logged it (best, non-saturating), else
+    back-calc √2·Φ⁻¹(AUROC) but ONLY where AUROC is non-saturated (interior); saturated points (AUROC
+    at the 0/1 boundary, where the back-calc is a clip artifact and would disagree with margin d′) are
+    left NaN. Lets the pre-margin-logging runs contribute their trustworthy d′ steps to a combined chart.
     """
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
     out = np.full((len(monitors), len(rows)), np.nan)
+
+    def _auroc_dprime(r, m, *, mask_saturated):
+        a = r.get(f"monitor/{m}/auroc", np.nan)
+        if a is None or a != a:
+            return np.nan
+        np_, nn = r.get(f"monitor/{m}/n_pos"), r.get(f"monitor/{m}/n_neg")
+        eps = 1.0 / (2 * np_ * nn) if (np_ and nn) else 1e-3
+        if mask_saturated and (a <= eps or a >= 1 - eps):  # at the resolution boundary → back-calc unreliable
+            return np.nan
+        return np.sqrt(2) * _N.inv_cdf(min(max(a, eps), 1 - eps))
+
     for t, r in enumerate(rows):
         for mi, m in enumerate(monitors):
             if metric == "dprime_margin":
                 v = r.get(f"monitor/{m}/dprime_margin", np.nan)
                 out[mi, t] = float(v) if v is not None else np.nan
             elif metric == "auroc":
-                a = r.get(f"monitor/{m}/auroc", np.nan)
-                if a is None or a != a:  # None / NaN
-                    continue
-                np_, nn = r.get(f"monitor/{m}/n_pos"), r.get(f"monitor/{m}/n_neg")
-                eps = 1.0 / (2 * np_ * nn) if (np_ and nn) else 1e-3
-                out[mi, t] = np.sqrt(2) * _N.inv_cdf(min(max(a, eps), 1 - eps))
+                out[mi, t] = _auroc_dprime(r, m, mask_saturated=False)  # clip (keep ceiling values)
+            elif metric == "dprime":
+                v = r.get(f"monitor/{m}/dprime_margin")
+                out[mi, t] = (float(v) if (v is not None and v == v)
+                              else _auroc_dprime(r, m, mask_saturated=True))
             else:
-                raise ValueError(f"unknown metric {metric!r} (use 'auroc' or 'dprime_margin')")
+                raise ValueError(f"unknown metric {metric!r} (use 'auroc', 'dprime_margin', or 'dprime')")
     return out
 
 
