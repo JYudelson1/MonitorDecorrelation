@@ -58,10 +58,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs_glob", nargs="+", help="one or more globs for run dirs (unioned), e.g. "
                     "'data/runs/mbpp_Qwen3-8B_*' '~/other/runs/mbpp_*'")
-    ap.add_argument("--metric", default="auroc", choices=["auroc", "dprime_margin", "dprime"],
-                    help="reliability scale: auroc→d′ (default) · dprime_margin (native only) · "
-                         "dprime (HYBRID: margin where logged, else non-saturated AUROC→d′ — best for "
-                         "combining pre- and post-margin-logging runs)")
+    ap.add_argument("--metric", default="auroc",
+                    choices=["auroc", "dprime_margin", "dprime", "suspicion_on_hacks"],
+                    help="reliability scale: auroc→d′ (default) · dprime_margin (native) · dprime (HYBRID "
+                         "margin-or-AUROC, best for combining old+new runs) · suspicion_on_hacks (μ_hack — "
+                         "co-EVASION: does the held-out monitor stop CATCHING hacks? immune to honest-drift)")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
     ap.add_argument("--no-penalty-label", action="store_true",
                     help="omit the per-row α=<penalty> annotation (useful when a row mixes many schedules)")

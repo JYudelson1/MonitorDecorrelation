@@ -34,6 +34,17 @@ _ABSENT_RE = re.compile(r"^monitor/(?P<name>[^/]+)/mean_score_(?:not_(?P<beh>.+)
 _PRESENT_RE = re.compile(r"^monitor/(?P<name>[^/]+)/mean_score_(?P<beh>(?!not_)(?!honest$).+)$")
 
 
+def present_score(row: dict, monitor: str) -> float:
+    """The behavior-PRESENT class mean (μ_hack — suspicion on actual hacks) for one monitor, or NaN.
+    Defined whenever ≥1 present example exists (unlike the gap/AUROC, which also need the absent class).
+    Env-agnostic (matches ``mean_score_<behavior>``, incl. legacy ``mean_score_syco``)."""
+    for k, v in row.items():
+        m = _PRESENT_RE.match(k)
+        if m and m.group("name") == monitor and v is not None and v == v:
+            return float(v)
+    return float("nan")
+
+
 def class_score_pairs(row: dict) -> dict[str, tuple[float, float]]:
     """``{monitor: (present_mean, absent_mean)}`` parsed from one metrics row, tolerant of both the new
     ``<behavior>``/``not_<behavior>`` keys and the legacy ``syco``/``honest`` keys. Only monitors that
