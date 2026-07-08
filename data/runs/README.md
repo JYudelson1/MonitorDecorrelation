@@ -22,7 +22,7 @@ probe_iid, probe_ood}` + a no-monitor control. The batches differ only in the **
 - **`mbpp_matrix_lowpen_small_20260706/`** — **λ = 0.5**, 60-step `cot_weak` runs (3 seeds). Includes
   the **`cot_weak_s1` case study**, where the weak judges are genuinely fooled (μ_hack → ~0) while the
   strong judges are not.
-- **`mbpp_matrix_sched01_20260707/`** — penalty **schedule λ: 0.0 → 1.0** linearly increasing (in a curriculum, teahcing the models first to hack, then ideally to hide their hacks), strong-monitor runs (`cot_strong`, `out_strong`; 6 runs, seeds 0–2).
+- **`mbpp_matrix_sched01_20260707/`** — penalty **schedule λ: 0.0 → 1.0** linearly increasing (in a curriculum, teaching the models first to hack, then ideally to hide their hacks), strong-monitor runs (`cot_strong`, `out_strong`; 6 runs, seeds 0–2).
 
 ## Earlier sycophancy runs (pre-MBPP derisking)
 
