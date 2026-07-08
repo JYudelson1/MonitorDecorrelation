@@ -4,13 +4,13 @@
 
 Part of the [Aether](docs/RESEARCH_CONTEXT.md) project proposals, June 2026 
 
-## High-level goal
+<!-- ## High-level goal
 
 We are excited about doing alignment science on training methods that appear to be part of the
 short-timelines alignment plan. Labs are deploying those methods faster than the field understands
 them. We want to do the basic science needed to (a) understand why these methods work when they
 work, (b) ensure they don't silently degrade the held-out evals we'll need to trust them, and (c)
-improve the most promising ones.
+improve the most promising ones. -->
 
 ## The question
 
@@ -33,7 +33,7 @@ against X, do other detectors degrade in lockstep, or do they remain informative
 **Headline output:** a **detector-degradation correlation matrix** — how much training against each
 proxy degrades each other proxy.
 
-## Where things are now
+<!-- ## Where things are now
 
 - **Headline experiment (running):** the **cross-method** degradation matrix — train Qwen3-8B to
   reward-hack while evading each of 6 monitors in turn (`{weak,strong} × {CoT judge, output judge}` +
@@ -43,7 +43,7 @@ proxy degrades each other proxy.
   hardcoding ∧ passes-visible-not-all). Sycophancy + MASK deception were the earlier derisking settings.
 - **Infra:** all RL runs on [tinker](https://tinker-docs.thinkingmachines.ai/) with a minimal
   hand-rolled loop (cookbook primitives for the loss/KL layer); `scripts/queue_runs.sh` fans the matrix
-  across seeds.
+  across seeds. -->
 
 ## Docs
 
