@@ -27,6 +27,11 @@ wandb/
 err.log
 data/runs/archived/
 
+# …but DO track the small per-step metrics (the analysis reads eval_metrics.jsonl; the big
+# rollouts.jsonl / eval_rollouts.jsonl stay excluded above, and archived/ is fully excluded).
+!data/runs/**/eval_metrics.jsonl
+!data/runs/**/metrics.jsonl
+
 # Old docs
 docs/Original Project Proposal.md
 docs/Joey Research Ideas.md
