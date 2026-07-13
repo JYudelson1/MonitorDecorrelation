@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 
+from monitordecorrelation.eval.coupling import filter_by_hacking, run_hacked
 from monitordecorrelation.eval.eval_degradation import (
     _degradation, degradation_matrix,
 )
@@ -31,6 +32,24 @@ def _run(tmp, name, *, target, dp):  # dp: {monitor: [d′ per step]}
     ta = [] if target is None else [{"name": target}]
     (d / "run_info.json").write_text(json.dumps({"train_against": ta, "config": {"penalty_coef": 0.5}}))
     return str(d)
+
+
+def _run_beh(tmp, name, beh):
+    d = tmp / name
+    d.mkdir()
+    (d / "eval_metrics.jsonl").write_text(
+        "\n".join(json.dumps({"step": i, "behavior_rate": b}) for i, b in enumerate(beh)) + "\n")
+    return str(d)
+
+
+def test_filter_by_hacking(tmp_path):
+    hacked = _run_beh(tmp_path, "h", [0.0, 0.3, 0.6])   # max 0.6 ≥ 0.10
+    honest = _run_beh(tmp_path, "o", [0.0, 0.02, 0.01])  # max 0.02 < 0.10
+    assert run_hacked(hacked) and not run_hacked(honest)
+    dirs = [hacked, honest]
+    assert filter_by_hacking(dirs, "present") == [hacked]
+    assert filter_by_hacking(dirs, "absent") == [honest]
+    assert set(filter_by_hacking(dirs, "any")) == set(dirs)
 
 
 def test_matrix_control_row_and_subtraction(tmp_path):

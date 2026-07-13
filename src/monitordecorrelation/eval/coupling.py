@@ -76,6 +76,25 @@ def train_target(run_dir: str | Path) -> str | None:
     return None
 
 
+def run_hacked(run_dir: str | Path, thresh: float = 0.10, stat: str = "max") -> bool:
+    """Did this run's policy actually reward-hack? True if the held-out strict hack rate reaches
+    ``thresh`` (``stat='max'`` over eval, or ``'final'``). The obfuscation dynamics only exist where the
+    policy hacks, so this is the natural way to condition the degradation/coupling analyses."""
+    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    beh = [r["behavior_rate"] for r in rows if r.get("behavior_rate") == r.get("behavior_rate")]
+    if not beh:
+        return False
+    return (max(beh) if stat == "max" else beh[-1]) >= thresh
+
+
+def filter_by_hacking(run_dirs, mode: str = "any", thresh: float = 0.10, stat: str = "max") -> list:
+    """Subset run dirs by hacking: ``'present'`` (hacked ≥ thresh), ``'absent'`` (did not), or ``'any'``."""
+    if mode == "any":
+        return list(run_dirs)
+    hacked = {str(d) for d in run_dirs if run_hacked(d, thresh, stat)}
+    return [d for d in run_dirs if (str(d) in hacked) == (mode == "present")]
+
+
 def run_penalty(run_dir: str | Path) -> str:
     """Display string for a run's monitor-penalty λ (shown as α on the charts): ``'0.5'`` constant, or
     ``'0.2→0.6'`` if scheduled; ``''`` if unknown. Reads run_info.json (config) then config.json."""

@@ -26,6 +26,7 @@ from monitordecorrelation.eval.coupling import (
     directed_coupling,
     directed_coupling_by_target,
     display_name,
+    filter_by_hacking,
     monitor_names,
 )
 
@@ -67,14 +68,18 @@ def main() -> None:
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95 pctile] shown under each cell")
     ap.add_argument("--no-penalty-label", action="store_true",
                     help="omit the per-row α=<penalty> annotation (useful when a row mixes many schedules)")
+    ap.add_argument("--hacking", default="any", choices=["any", "present", "absent"],
+                    help="condition on hacking: keep runs that DID hack ('present'), did NOT ('absent'), all")
+    ap.add_argument("--hack-thresh", type=float, default=0.10, help="max hack rate to count as 'hacked'")
     ap.add_argument("--out", default="data/runs/_coupling")
     args = ap.parse_args()
 
     run_dirs = sorted({d for pat in args.runs_glob
                        for d in glob.glob(os.path.expanduser(pat))
                        if (Path(d) / "eval_metrics.jsonl").exists()})
+    run_dirs = filter_by_hacking(run_dirs, args.hacking, args.hack_thresh)
     if not run_dirs:
-        ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r}")
+        ap.error(f"no run dirs matched {args.runs_glob!r} (hacking={args.hacking})")
     monitors = monitor_names(run_dirs[0])
     print(f"{len(run_dirs)} runs · {len(monitors)} monitors · metric={args.metric}"
           + (f" · bootstrap={args.bootstrap}" if args.bootstrap else ""))

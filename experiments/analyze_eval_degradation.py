@@ -26,7 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from monitordecorrelation.eval.coupling import display_name, monitor_names
+from monitordecorrelation.eval.coupling import display_name, filter_by_hacking, monitor_names
 from monitordecorrelation.eval.eval_degradation import degradation_matrix
 
 
@@ -61,13 +61,19 @@ def main() -> None:
     ap.add_argument("--method", default="slope", choices=["slope", "endpoint"],
                     help="per-run total: slope×span (default, robust) or the literal first−last drop")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95]")
+    ap.add_argument("--hacking", default="any", choices=["any", "present", "absent"],
+                    help="condition on hacking: keep runs that DID hack ('present'), did NOT ('absent'), "
+                         "or all ('any'). The obfuscation dynamics live in 'present'.")
+    ap.add_argument("--hack-thresh", type=float, default=0.10,
+                    help="a run 'hacked' if its max held-out strict hack rate reaches this (default 0.10)")
     ap.add_argument("--out", default="data/runs/_degradation")
     args = ap.parse_args()
 
     run_dirs = sorted({d for pat in args.runs_glob for d in glob.glob(os.path.expanduser(pat))
                        if (Path(d) / "eval_metrics.jsonl").exists()})
+    run_dirs = filter_by_hacking(run_dirs, args.hacking, args.hack_thresh)
     if not run_dirs:
-        ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r}")
+        ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r} (hacking={args.hacking})")
     monitors = sorted({m for d in run_dirs for m in monitor_names(d)})
     R = degradation_matrix(run_dirs, monitors, method=args.method, bootstrap=args.bootstrap)
     mons, tgts = R["monitors"], R["targets"]
@@ -75,6 +81,8 @@ def main() -> None:
     ci_note = "\ncells: mean total d′ drop  ·  [5–95% bootstrap CI]  ·  n runs" if args.bootstrap else \
               "\ncells: mean total d′ drop  ·  n runs"
     meth = "slope×span" if args.method == "slope" else "first−last endpoint"
+    hk = {"any": "", "present": f"  ·  HACKING runs only (max hack ≥ {args.hack_thresh:g})",
+          "absent": f"  ·  NON-hacking runs only (max hack < {args.hack_thresh:g})"}[args.hacking]
     sub_txt = "  positive (red) = detector degraded  ·  negative (blue) = sharpened"
 
     out_dir = Path(os.path.expanduser(args.out)); out_dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +93,7 @@ def main() -> None:
     _heat(ax, R["D"], tgts, mons, "", vmax=vmax, lo=R["lo"], hi=R["hi"], n=R["n"])
     ax.set_xlabel("→ detector degraded (col)", fontsize=9)
     ax.set_ylabel("TRAINED ON (row)", fontsize=9)
-    fig.suptitle(f"Total d′ degradation of each detector, per training condition [{meth}]\n"
+    fig.suptitle(f"Total d′ degradation of each detector, per training condition [{meth}]{hk}\n"
                  f"CONTROL row = no-monitor baseline (policy just learns to hack).{sub_txt}{ci_note}",
                  fontsize=10.5, y=0.985)
     fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label="d′ drop")
@@ -98,7 +106,7 @@ def main() -> None:
     _heat(ax, R["sub"], mons, mons, "", vmax=vmax2, lo=R["sub_lo"], hi=R["sub_hi"])
     ax.set_xlabel("→ detector degraded (col)", fontsize=9)
     ax.set_ylabel("TRAINED ON (row)", fontsize=9)
-    fig.suptitle(f"EXCESS degradation beyond the control baseline (row − control) [{meth}]\n"
+    fig.suptitle(f"EXCESS degradation beyond the control baseline (row − control) [{meth}]{hk}\n"
                  f"what training against this monitor costs held-out detectors, above generic hacking drift."
                  f"{sub_txt}", fontsize=10.5, y=0.985)
     fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label="excess d′ drop")
