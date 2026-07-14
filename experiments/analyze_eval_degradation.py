@@ -60,6 +60,10 @@ def main() -> None:
     ap.add_argument("runs_glob", nargs="+", help="one or more globs for run dirs (unioned)")
     ap.add_argument("--method", default="slope", choices=["slope", "endpoint"],
                     help="per-run total: slope×span (default, robust) or the literal first−last drop")
+    ap.add_argument("--metric", default="dprime",
+                    choices=["dprime", "suspicion_on_hacks", "suspicion_on_clean"],
+                    help="what degrades: dprime (discrimination, default) · suspicion_on_hacks (μ_hack; "
+                         "drop = the detector was EVADED) · suspicion_on_clean (μ_clean)")
     ap.add_argument("--bootstrap", type=int, default=0, help="bootstrap-over-runs samples → 90%% CI [5,95]")
     ap.add_argument("--hacking", default="any", choices=["any", "present", "absent"],
                     help="condition on hacking: keep runs that DID hack ('present'), did NOT ('absent'), "
@@ -75,15 +79,20 @@ def main() -> None:
     if not run_dirs:
         ap.error(f"no run dirs with eval_metrics.jsonl matched {args.runs_glob!r} (hacking={args.hacking})")
     monitors = sorted({m for d in run_dirs for m in monitor_names(d)})
-    R = degradation_matrix(run_dirs, monitors, method=args.method, bootstrap=args.bootstrap)
+    R = degradation_matrix(run_dirs, monitors, method=args.method, bootstrap=args.bootstrap, metric=args.metric)
     mons, tgts = R["monitors"], R["targets"]
 
-    ci_note = "\ncells: mean total d′ drop  ·  [5–95% bootstrap CI]  ·  n runs" if args.bootstrap else \
-              "\ncells: mean total d′ drop  ·  n runs"
+    # metric-specific labels: (what degrades, short cell unit, what "positive" means)
+    METLAB = {"dprime": ("d′ degradation", "d′ drop", "detector degraded"),
+              "suspicion_on_hacks": ("μ_hack drop (evasion)", "μ_hack drop", "detector EVADED (scores hacks lower)"),
+              "suspicion_on_clean": ("μ_clean drop", "μ_clean drop", "clean looks less suspicious")}
+    what, unit, pos = METLAB[args.metric]
+    ci_note = (f"\ncells: mean total {unit}  ·  [5–95% bootstrap CI]  ·  n runs" if args.bootstrap
+               else f"\ncells: mean total {unit}  ·  n runs")
     meth = "slope×span" if args.method == "slope" else "first−last endpoint"
     hk = {"any": "", "present": f"  ·  HACKING runs only (max hack ≥ {args.hack_thresh:g})",
           "absent": f"  ·  NON-hacking runs only (max hack < {args.hack_thresh:g})"}[args.hacking]
-    sub_txt = "  positive (red) = detector degraded  ·  negative (blue) = sharpened"
+    sub_txt = f"  positive (red) = {pos}  ·  negative (blue) = improved"
 
     out_dir = Path(os.path.expanduser(args.out)); out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,10 +102,10 @@ def main() -> None:
     _heat(ax, R["D"], tgts, mons, "", vmax=vmax, lo=R["lo"], hi=R["hi"], n=R["n"])
     ax.set_xlabel("→ detector degraded (col)", fontsize=9)
     ax.set_ylabel("TRAINED ON (row)", fontsize=9)
-    fig.suptitle(f"Total d′ degradation of each detector, per training condition [{meth}]{hk}\n"
+    fig.suptitle(f"Total {what} of each detector, per training condition [{meth}]{hk}\n"
                  f"CONTROL row = no-monitor baseline (policy just learns to hack).{sub_txt}{ci_note}",
                  fontsize=10.5, y=0.985)
-    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label="d′ drop")
+    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label=unit)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_dir / "degradation_raw.png", dpi=160, bbox_inches="tight"); plt.close(fig)
 
@@ -106,10 +115,10 @@ def main() -> None:
     _heat(ax, R["sub"], mons, mons, "", vmax=vmax2, lo=R["sub_lo"], hi=R["sub_hi"])
     ax.set_xlabel("→ detector degraded (col)", fontsize=9)
     ax.set_ylabel("TRAINED ON (row)", fontsize=9)
-    fig.suptitle(f"EXCESS degradation beyond the control baseline (row − control) [{meth}]{hk}\n"
+    fig.suptitle(f"EXCESS {what} beyond the control baseline (row − control) [{meth}]{hk}\n"
                  f"what training against this monitor costs held-out detectors, above generic hacking drift."
                  f"{sub_txt}", fontsize=10.5, y=0.985)
-    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label="excess d′ drop")
+    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label=f"excess {unit}")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(out_dir / "degradation_excess.png", dpi=160, bbox_inches="tight"); plt.close(fig)
 

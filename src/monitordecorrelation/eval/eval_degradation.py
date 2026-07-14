@@ -46,14 +46,17 @@ def _degradation(dp: np.ndarray, steps: np.ndarray, method: str) -> float:
     raise ValueError(f"unknown method {method!r} (use 'slope' or 'endpoint')")
 
 
-def run_degradation(run_dir: str | Path, monitors: list[str], method: str = "slope") -> dict:
-    """Per-detector degradation D for one run, plus its train-against target and penalty."""
+def run_degradation(run_dir: str | Path, monitors: list[str], method: str = "slope",
+                    metric: str = "dprime") -> dict:
+    """Per-detector degradation D (total DROP in ``metric`` over the run) for one run, plus its
+    train-against target and penalty. ``metric`` is any coupling reliability metric — "dprime" (default,
+    discrimination), "suspicion_on_hacks" (μ_hack; drop = evasion), "suspicion_on_clean" (μ_clean), …"""
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
     steps = np.array([r.get("step", i) for i, r in enumerate(rows)], dtype=float)
-    dp = reliability_series(run_dir, monitors, "dprime")  # [n_monitors, n_steps]
+    series = reliability_series(run_dir, monitors, metric)  # [n_monitors, n_steps]
     return {"run": Path(run_dir).name, "target": train_target(run_dir) or "control",
             "penalty": run_penalty(run_dir),
-            "D": {m: _degradation(dp[i], steps, method) for i, m in enumerate(monitors)}}
+            "D": {m: _degradation(series[i], steps, method) for i, m in enumerate(monitors)}}
 
 
 def _boot_ci(vals: np.ndarray, rng, n_boot: int) -> tuple[float, float]:
@@ -65,14 +68,14 @@ def _boot_ci(vals: np.ndarray, rng, n_boot: int) -> tuple[float, float]:
 
 
 def degradation_matrix(run_dirs, monitors: list[str], method: str = "slope",
-                       bootstrap: int = 0, seed: int = 0) -> dict:
+                       bootstrap: int = 0, seed: int = 0, metric: str = "dprime") -> dict:
     """Assemble the (targets × monitors) mean-degradation matrix + control-subtracted companion.
 
     Returns ``targets`` (monitors present as train-against + 'control'), ``monitors`` (columns), ``D``
     (mean), ``lo``/``hi`` (bootstrap-over-runs CI), ``n`` (runs with the cell defined); ``sub``/``sub_lo``
     /``sub_hi`` (control-subtracted, monitor rows only)."""
     monitors = [m for m in MONITOR_ORDER if m in monitors] or list(monitors)
-    summaries = [run_degradation(d, monitors, method) for d in run_dirs]
+    summaries = [run_degradation(d, monitors, method, metric) for d in run_dirs]
     targets = [m for m in monitors] + ["control"]
     by_t: dict[str, list[dict]] = {t: [] for t in targets}
     for s in summaries:
@@ -105,5 +108,5 @@ def degradation_matrix(run_dirs, monitors: list[str], method: str = "slope",
                     diffs = [rng.choice(rv, len(rv), True).mean() - rng.choice(cv, len(cv), True).mean()
                              for _ in range(bootstrap)]
                     SUB_LO[i, j], SUB_HI[i, j] = np.nanpercentile(diffs, [5, 95])
-    return {"targets": targets, "monitors": monitors, "method": method,
+    return {"targets": targets, "monitors": monitors, "method": method, "metric": metric,
             "D": M, "n": N, "lo": LO, "hi": HI, "sub": SUB, "sub_lo": SUB_LO, "sub_hi": SUB_HI}
