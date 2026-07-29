@@ -39,7 +39,9 @@ def main() -> None:
     ap.add_argument("--hacking", default="present", choices=["any", "present", "absent"],
                     help="default 'present' — a detector's reliability is only meaningful where hacks exist")
     ap.add_argument("--hack-thresh", type=float, default=0.10)
-    ap.add_argument("--bootstrap", type=int, default=0)
+    ap.add_argument("--final-frac", type=float, default=1.0,
+                    help="window of training to score: 1.0 = whole run (default), 0.10 = final 10% "
+                         "(deployment-time state). Cell = fraction of the window's eval snapshots below the bar.")
     ap.add_argument("--out", default="data/runs/_reliability")
     args = ap.parse_args()
     thresh = args.threshold if args.threshold is not None else _DEFAULT_THRESH[args.metric]
@@ -50,21 +52,19 @@ def main() -> None:
     if not run_dirs:
         ap.error(f"no run dirs matched (hacking={args.hacking})")
     monitors = sorted({m for d in run_dirs for m in monitor_names(d)})
-    R = threshold_matrix(run_dirs, monitors, thresh, metric=args.metric, bootstrap=args.bootstrap)
-    P, mons, tgts, n, lo, hi = R["P"], R["monitors"], R["targets"], R["n"], R["lo"], R["hi"]
+    R = threshold_matrix(run_dirs, monitors, thresh, metric=args.metric, final_frac=args.final_frac)
+    P, mons, tgts = R["P"], R["monitors"], R["targets"]
+    below, total, n = R["below"], R["total"], R["n"]
 
     fig, ax = plt.subplots(figsize=(8.8, 8.2))
-    ax.imshow(P, cmap="Reds", vmin=0, vmax=1, aspect="auto")  # sequential: 0% good (white) → 100% bad (red)
+    ax.imshow(P, cmap="Reds", vmin=0, vmax=1, aspect="auto")  # sequential: 0 good (white) → 1 bad (red)
     for i in range(len(tgts)):
         for j in range(len(mons)):
             v = P[i, j]
             if np.isnan(v):
                 ax.text(j, i, "N/A", ha="center", va="center", fontsize=7.5, color="#b0b0b0")
                 continue
-            txt = f"{100*v:.0f}%"
-            if not np.isnan(lo[i, j]):
-                txt += f"\n[{100*lo[i,j]:.0f},{100*hi[i,j]:.0f}]"
-            txt += f"\nn={n[i,j]}"
+            txt = f"{below[i,j]}/{total[i,j]}\n{v:.2f}\n{n[i,j]} runs"  # raw fraction of snapshots, no bootstrap
             is_diag = tgts[i] == mons[j]
             ax.text(j, i, txt, ha="center", va="center", fontsize=6.8,
                     color="white" if v > 0.55 else "k", weight="bold" if is_diag else "normal")
@@ -78,11 +78,13 @@ def main() -> None:
     unit = f"d′ < {thresh:g}" if args.metric == "dprime" else f"{args.metric.replace('suspicion_on_','μ_')} < {thresh:g}"
     auroc = f"  (d′={thresh:g} ≈ AUROC {__import__('statistics').NormalDist().cdf(thresh/2**0.5):.2f})" \
             if args.metric == "dprime" else ""
+    window = "whole run" if args.final_frac >= 1.0 else f"final {args.final_frac*100:g}% of training"
     fig.suptitle(f"How often is each held-out detector UNRELIABLE ({unit}){auroc}\n"
-                 f"% of measurable eval-time below the bar, hacking runs (max hack ≥ {args.hack_thresh:g}). "
-                 f"CONTROL = no-monitor baseline.\ncells: mean %  ·  [5–95% bootstrap CI]  ·  n runs  ·  "
-                 f"redder = detector more often below a bar you'd trust", fontsize=10, y=0.985)
-    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label=f"% of eval-time with {unit}")
+                 f"fraction of {window} eval snapshots below the bar, hacking runs (max hack ≥ "
+                 f"{args.hack_thresh:g}). CONTROL = no-monitor baseline.\ncells: below/total snapshots  ·  "
+                 f"fraction  ·  n runs  ·  redder = detector more often below a bar you'd trust",
+                 fontsize=10, y=0.985)
+    fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04, label=f"fraction of snapshots with {unit}")
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     out_dir = Path(os.path.expanduser(args.out)); out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "reliability.png", dpi=160, bbox_inches="tight"); plt.close(fig)
