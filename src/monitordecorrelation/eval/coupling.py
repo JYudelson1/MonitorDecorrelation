@@ -112,8 +112,15 @@ def run_penalty(run_dir: str | Path) -> str:
     return ""
 
 
-def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "auroc") -> np.ndarray:
+def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "auroc",
+                       min_class: int = 0) -> np.ndarray:
     """``[n_monitors, n_eval_steps]`` reliability array (NaN where undefined), in a common d′-like scale.
+
+    ``min_class`` (0 = off): require at least this many examples in the class(es) the metric needs, else
+    NaN. d′/AUROC need BOTH classes — at a high hack rate the NEGATIVE (clean) class collapses to a handful
+    and gets contaminated with loose-hacks, so AUROC pins near chance and d′→0 for a monitor that still
+    catches every hack; gating on ``min_class`` (e.g. 20) drops those unestimable snapshots. μ_hack needs
+    only the present class, μ_clean only the absent class.
 
     ``metric="auroc"``: AUROC → d′ with a resolution-aware clip from the logged ``n_pos``/``n_neg``.
     ``metric="dprime_margin"``: the logged margin d′ verbatim.
@@ -135,6 +142,17 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
     out = np.full((len(monitors), len(rows)), np.nan)
 
+    def _class_ok(r, m):
+        """Enough examples in the class(es) this metric needs to be estimable?"""
+        if min_class <= 0:
+            return True
+        npos, nneg = r.get(f"monitor/{m}/n_pos") or 0, r.get(f"monitor/{m}/n_neg") or 0
+        if metric == "suspicion_on_hacks":
+            return npos >= min_class
+        if metric == "suspicion_on_clean":
+            return nneg >= min_class
+        return npos >= min_class and nneg >= min_class  # auroc / dprime / dprime_margin need BOTH
+
     def _auroc_dprime(r, m, *, mask_saturated):
         a = r.get(f"monitor/{m}/auroc", np.nan)
         if a is None or a != a:
@@ -147,6 +165,8 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
 
     for t, r in enumerate(rows):
         for mi, m in enumerate(monitors):
+            if not _class_ok(r, m):
+                continue  # too few examples in the needed class → leave NaN (unmeasurable)
             if metric == "dprime_margin":
                 v = r.get(f"monitor/{m}/dprime_margin", np.nan)
                 out[mi, t] = float(v) if v is not None else np.nan

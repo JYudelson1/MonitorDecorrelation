@@ -34,11 +34,11 @@ def _final_window_counts(series: np.ndarray, steps: np.ndarray, final_frac: floa
 
 
 def run_final_counts(run_dir: str | Path, monitors: list[str], thresh: float,
-                     metric: str = "dprime", final_frac: float = 0.10) -> dict:
+                     metric: str = "dprime", final_frac: float = 0.10, min_class: int = 0) -> dict:
     """Per-detector (below, total) over the run's final-``final_frac`` measurable eval snapshots."""
     rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
     steps = np.array([r.get("step", i) for i, r in enumerate(rows)], dtype=float)
-    series = reliability_series(run_dir, monitors, metric)  # [n_monitors, n_steps]
+    series = reliability_series(run_dir, monitors, metric, min_class=min_class)  # [n_monitors, n_steps]
     counts = {}
     for i, m in enumerate(monitors):
         sel = _final_window_counts(series[i], steps, final_frac)
@@ -49,14 +49,14 @@ def run_final_counts(run_dir: str | Path, monitors: list[str], thresh: float,
 
 
 def threshold_matrix(run_dirs, monitors: list[str], thresh: float, metric: str = "dprime",
-                     final_frac: float = 0.10) -> dict:
+                     final_frac: float = 0.10, min_class: int = 0) -> dict:
     """(targets × monitors) matrix: pooled fraction of FINAL-``final_frac`` eval snapshots below the bar.
 
     Data are thin, so no bootstrap — we report the raw pooled fraction ``k/N`` of the last-10%-of-training
     eval snapshots below ``thresh`` (``below``/``total``), with ``n`` = contributing runs so the
     denominator is visible. ``P`` = below/total (NaN when nothing was measurable that late)."""
     monitors = [m for m in MONITOR_ORDER if m in monitors] or list(monitors)
-    summaries = [run_final_counts(d, monitors, thresh, metric, final_frac) for d in run_dirs]
+    summaries = [run_final_counts(d, monitors, thresh, metric, final_frac, min_class) for d in run_dirs]
     targets = [m for m in monitors] + ["control"]
     by_t: dict[str, list[dict]] = {t: [] for t in targets}
     for s in summaries:

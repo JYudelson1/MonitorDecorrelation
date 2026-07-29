@@ -42,6 +42,9 @@ def main() -> None:
     ap.add_argument("--final-frac", type=float, default=1.0,
                     help="window of training to score: 1.0 = whole run (default), 0.10 = final 10% "
                          "(deployment-time state). Cell = fraction of the window's eval snapshots below the bar.")
+    ap.add_argument("--min-class", type=int, default=20,
+                    help="require ≥ this many examples in each needed class for a d′/AUROC snapshot "
+                         "to count (else NaN). Guards against the n_neg-collapse artifact at high hack rates.")
     ap.add_argument("--out", default="data/runs/_reliability")
     args = ap.parse_args()
     thresh = args.threshold if args.threshold is not None else _DEFAULT_THRESH[args.metric]
@@ -52,7 +55,7 @@ def main() -> None:
     if not run_dirs:
         ap.error(f"no run dirs matched (hacking={args.hacking})")
     monitors = sorted({m for d in run_dirs for m in monitor_names(d)})
-    R = threshold_matrix(run_dirs, monitors, thresh, metric=args.metric, final_frac=args.final_frac)
+    R = threshold_matrix(run_dirs, monitors, thresh, metric=args.metric, final_frac=args.final_frac, min_class=args.min_class)
     P, mons, tgts = R["P"], R["monitors"], R["targets"]
     below, total, n = R["below"], R["total"], R["n"]
 
