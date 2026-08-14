@@ -26,6 +26,6 @@
   "lora_rank": 32,
   "lr": 0.0002,
   "seed": 0,
-  "n_prompts_pool": 512,
+  "n_prompts_pool": 999999,
   "monitors": []
 }
