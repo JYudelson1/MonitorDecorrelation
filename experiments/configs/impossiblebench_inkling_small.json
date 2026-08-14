@@ -13,10 +13,10 @@
     "total_timeout": 600.0,
     "exec_workers": 32
   },
-  "n_steps": 40,
+  "n_steps": 256,
   "batch_size": 16,
   "group_size": 8,
-  "eval_every": 5,
+  "eval_every": 8,
   "eval_size": 32,
   "eval_samples_per_prompt": 2,
   "max_tokens": 8192,
