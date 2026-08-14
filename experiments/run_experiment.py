@@ -82,13 +82,27 @@ def main() -> None:
         overrides = {k: _coerce(v) for k, v in (kv.split("=", 1) for kv in args.set)}
         cfg = cfg.model_copy(update=overrides)
 
-    lr = cfg.lr if cfg.lr is not None else get_lr(cfg.policy)
+    # LR: the config's explicit value, else TM's LoRA-LR heuristic. That heuristic is only calibrated
+    # for some families (it refuses Inkling outright), so translate its exception into instructions
+    # rather than a bare traceback 30 seconds before the run would have started.
+    if cfg.lr is not None:
+        lr = cfg.lr
+    else:
+        try:
+            lr = get_lr(cfg.policy)
+        except Exception as e:
+            raise SystemExit(
+                f"No learning rate: tinker-cookbook's LoRA-LR heuristic does not cover "
+                f"{cfg.policy!r} ({type(e).__name__}: {e}). Set \"lr\" explicitly in the config "
+                f"(or --set lr=2e-4)."
+            ) from e
 
     # Backend
     if cfg.backend == "tinker":
         from monitordecorrelation.backends.tinker_backend import TinkerBackend
         backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
-                                kl_coef=cfg.kl_coef, kl_discount_factor=cfg.kl_discount_factor)
+                                kl_coef=cfg.kl_coef, kl_discount_factor=cfg.kl_discount_factor,
+                                thinking_effort=cfg.thinking_effort)
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
         backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
@@ -139,7 +153,7 @@ def main() -> None:
     print(f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend={cfg.backend} lr={lr:.2e}")
     print(f"  wandb: {run_config.logging.wandb_mode}"
           + (" (syncing — logged in)" if run_config.logging.wandb_mode == "online" else " (local only)"))
-    subset_note = f" subset={cfg.subset}" if cfg.env == "sycophancy" else ""
+    subset_note = f" subset={cfg.subset}" if cfg.env in ("sycophancy", "impossiblebench") else ""
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")

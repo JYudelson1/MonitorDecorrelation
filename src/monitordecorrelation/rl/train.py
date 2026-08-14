@@ -65,6 +65,23 @@ def _length_metrics(results: Sequence, env) -> dict[str, float]:
             "reward/len_penalty_mean": len_pen}          # avg reward lost to length (passers), reward units
 
 
+def _score_env(env: Env, rollouts: list[Rollout]) -> list:
+    """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
+
+    Envs whose grading is expensive and out-of-process (running generated code) implement
+    ``score_batch`` to execute rollouts concurrently; otherwise this is the plain serial loop. Errors
+    propagate deliberately — a grading failure is never coerced into a reward."""
+    if hasattr(env, "score_batch"):
+        results = list(env.score_batch(rollouts))  # type: ignore[attr-defined]
+        if len(results) != len(rollouts):
+            raise RuntimeError(
+                f"{type(env).__name__}.score_batch returned {len(results)} results for "
+                f"{len(rollouts)} rollouts"
+            )
+        return results
+    return [env.score(r) for r in rollouts]
+
+
 def _monitor_info(m: Monitor, role: str) -> dict:
     """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later)."""
     return {
@@ -207,7 +224,7 @@ def run_grpo(
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
         ev = backend.sample(eval_prompts, num_samples=n_per, max_tokens=max_tokens, temperature=1.0)
-        ev_env = [env.score(r) for r in ev]
+        ev_env = _score_env(env, ev)
         gt = [er.behavior_present for er in ev_env]
         t_sample = time.perf_counter() - t0
         _log(f"  [eval @ {step}] scoring {len(all_monitors)} monitors…")
@@ -270,9 +287,10 @@ def run_grpo(
                 "loose_rh": bool(er.meta["loose_rh"]) if "loose_rh" in er.meta else None,
                 "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
+                "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
                 "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
                              for m in all_monitors},
-            }) + "\n")
+            }, default=str) + "\n")
         eval_rollouts_log.flush()
         if run is not None:
             run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
@@ -295,7 +313,7 @@ def run_grpo(
         rollouts = backend.sample(
             prompts, num_samples=cfg.group_size, max_tokens=max_tokens, temperature=1.0
         )
-        env_results = [env.score(r) for r in rollouts]
+        env_results = _score_env(env, rollouts)
         t_sample = time.perf_counter() - t0
         if train_against:
             _log(f"step {step}: scoring train-against monitor(s)…")
@@ -422,6 +440,10 @@ def run_grpo(
                             "behavior_present": er.behavior_present,
                             "choice": er.meta.get("choice"),
                             "unparsed": er.meta.get("unparsed"),
+                            # The env's full grading record (per-env keys: MBPP's loose_rh/hardcoding,
+                            # ImpossibleBench's frac_passed/passes_original/first_error, …) so a run can
+                            # be re-analysed without re-running the env.
+                            "meta": er.meta,
                         },
                         "monitors": {
                             m.name: {
@@ -432,7 +454,8 @@ def run_grpo(
                         },
                         "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
-                    }
+                    },
+                    default=str,  # never let an exotic meta value abort a run mid-step
                 )
                 + "\n"
             )

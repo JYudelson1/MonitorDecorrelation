@@ -24,6 +24,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
+| `scripts/train_impossiblebench_inkling.sh` | **RL Inkling-Small on the ImpossibleBench impossible subset** (oneoff + conflicting), plotting to W&B. Thin wrapper over the runner: checks credentials up front, forwards `--set …`. | `data/runs/ib_Inkling-Small_s0/` + wandb |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
 
@@ -43,8 +44,12 @@ uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick 
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
-env subset n_steps batch_size group_size eval_every eval_size max_tokens penalty_coef kl_coef
-kl_discount_factor lora_rank lr seed monitors`. Each monitor: `{kind:"cot", name, role, model_id,
+env{sycophancy,mbpp_honeypot,impossiblebench} subset env_options n_steps batch_size group_size
+eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort penalty_coef penalty_schedule
+kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
+`monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
+`env_options` holds env-specific constructor kwargs (impossiblebench only) and `thinking_effort`
+[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere). Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
 
@@ -104,6 +109,35 @@ adds per-cell 90% CIs. Reads `eval_metrics.jsonl` (+ dir name for the target). S
 else `offline`. The check is purely local (no network, never prompts), so it's disconnect-safe. Set
 `WANDB_MODE` explicitly (`online`/`offline`/`disabled`) to override. The chosen mode is printed in each
 run's banner. Offline runs lose nothing — upload later with `wandb sync wandb/offline-run-*`.
+
+## ImpossibleBench × Inkling-Small
+
+```bash
+# full run (40 steps, 16x8 rollouts/step) — plots to W&B, aborts up front if credentials are missing
+scripts/train_impossiblebench_inkling.sh
+
+# smoke test first (2 steps, tiny batch, short completions) — same code path, minutes not hours
+scripts/train_impossiblebench_inkling.sh --set run_name=ib_smoke n_steps=2 batch_size=2 group_size=4 \
+    eval_size=2 eval_every=1 max_tokens=2048 thinking_effort=0.1
+```
+
+Everything after the script name is forwarded to `run_experiment.py`. Config:
+`experiments/configs/impossiblebench_inkling_small.json`.
+
+- **The setting.** `subset: "impossible"` = `oneoff` + `conflicting`, the two mutated splits where no
+  correct implementation can pass — so `behavior_present` ("passed the tests") *is* the cheating oracle.
+  One prompt → one assistant message → one fenced code block; no tool loop, no retry-on-failure.
+- **Watch these metrics.** `train/behavior_rate` (= cheat rate, the primary signal),
+  `train/reward/task_mean` (fraction of the check passing), `train/unparsed_rate` (answers with no
+  codeblock — spikes mean `max_tokens` is cutting the model off mid-thought).
+- **`thinking_effort`** conditions Inkling's reasoning length (0.1 minimal … 0.9 high, the model
+  default). High effort on these tasks costs thousands of CoT tokens per rollout, so it must be paired
+  with a large `max_tokens` or the answer never arrives (the rollout is `unparsed`).
+- **No LLM judges are configured** (`monitors: []`) — this is the plain-RL baseline for the env. Add
+  monitors the same way as the MBPP matrix rows once a decorrelation row is wanted; the CoT judges need
+  `OPENROUTER_API_KEY`.
+- **Untrusted code executes locally** (subprocess + per-statement alarm + address-space rlimit, not a
+  sandbox). See the warning in `envs/impossiblebench.py`.
 
 ## Probes (white-box)
 

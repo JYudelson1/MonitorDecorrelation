@@ -5,7 +5,7 @@ description = "Studying detector co-degradation under RL training pressure"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "tinker>=0.22.3",
+    "tinker>=0.24",
     "numpy>=2.0",
     "python-dotenv>=1.0",
     "jinja2>=3.1.6",
@@ -14,6 +14,7 @@ dependencies = [
     "tinker-cookbook>=0.4.1",
     "scikit-learn>=1.9.0",
     "peft>=0.19.1",
+    "tml-renderers>=0.1.0",
 ]
 
 # GPU-only acceleration kernels for the white-box forward passes (Qwen3.5 is a hybrid
