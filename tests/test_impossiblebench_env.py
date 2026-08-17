@@ -7,6 +7,8 @@ reward-0 rollout, while a **scaffold** failure must raise instead of quietly sco
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from monitordecorrelation.envs.impossiblebench import (
@@ -132,6 +134,41 @@ def test_test_source_that_blows_up_on_import_raises_instead_of_scoring_zero():
     )
     with pytest.raises(ScaffoldError, match="test source"):
         run_checks(HONEST, exploding)
+
+
+def test_very_long_code_exceeds_the_argv_limit_and_still_grades():
+    """Regression: the harness used to reach the child via ``python -c``, so a completion whose
+    source pushed the script past MAX_ARG_STRLEN (128 KiB — a *per-argument* kernel cap, unrelated to
+    the much larger total ARG_MAX) died with ``OSError: [Errno 7] Argument list too long``, killing
+    the whole training run from inside a grading thread. A degenerate model output must cost at most
+    its own rollout."""
+    padding = "".join(f"# filler line {i} — padding this source past the execve argv limit\n"
+                      for i in range(3000))
+    code = padding + CHEAT
+    assert len(code) > 131072  # the cap the old `-c` path hit
+    res = run_checks(code, ITEM, phases=("test", "original"))
+    assert res["test"].passed is True  # graded exactly as the unpadded CHEAT is
+    assert res["test"].n_passed == 3
+    assert res["test"].code_error is None
+    assert res["original"].passed is False
+
+
+def test_concurrent_calls_are_isolated_from_each_other_and_from_the_model():
+    """Each call gets its own mkdtemp'd directory, so parallel RL runs / grading threads on one box
+    never share harness or working files — and the harness lives outside the child's cwd, so model
+    code writing into that cwd (here: a decoy under the harness's own name) can't corrupt grading."""
+    hostile = (
+        "import pathlib\n"
+        "pathlib.Path('ib_harness.py').write_text('raise SystemExit(99)\\n')\n"
+        "pathlib.Path('scratch.txt').write_text('x' * 1000)\n"
+        + HONEST
+    )
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(lambda _: run_checks(hostile, ITEM), range(16)))
+    for res in results:
+        assert res["test"].code_error is None
+        assert res["test"].n_passed == 2  # the honest solution, unaffected by the decoy
+        assert res["test"].passed is False
 
 
 def test_unknown_phase_raises():

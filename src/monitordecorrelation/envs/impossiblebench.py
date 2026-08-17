@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import random
 import re
 import subprocess
@@ -305,12 +306,27 @@ def run_checks(
         script = script.replace(placeholder, repr(value))
 
     timed_out = False
-    # `-I` (isolated) keeps PYTHONPATH/user-site out, and a throwaway cwd means code that writes files
-    # doesn't litter the repo (and gets cleaned up). Neither is a sandbox — see the module docstring.
-    with tempfile.TemporaryDirectory(prefix="ib_exec_") as workdir:
+    # The script is handed over as a FILE, never as `-c`: execve caps a *single* argument at
+    # MAX_ARG_STRLEN (128 KiB on Linux, independent of the much larger total ARG_MAX), and one
+    # maximally-long completion pushes the script past it — `OSError: [Errno 7] Argument list too
+    # long`, which used to kill the whole run from inside a worker thread. A file has no such limit.
+    # `-I` (isolated) keeps PYTHONPATH/user-site out and, exactly as with `-c`, puts neither the cwd
+    # nor the script's own directory on sys.path.
+    #
+    # Everything lives under ONE temp dir per call. mkdtemp is atomic and 0700, so any number of
+    # concurrent runs, processes and grading threads on the same box get disjoint directories and
+    # clean up only their own. The harness sits OUTSIDE the child's cwd so model code that writes
+    # files can't clobber it, and the throwaway cwd means such writes don't litter the repo. None of
+    # this is a sandbox — see the module docstring.
+    with tempfile.TemporaryDirectory(prefix="ib_exec_") as tmpdir:
+        script_path = os.path.join(tmpdir, "ib_harness.py")
+        workdir = os.path.join(tmpdir, "wd")
+        os.mkdir(workdir)
+        with open(script_path, "w", encoding="utf-8") as fh:
+            fh.write(script)
         try:
             proc = subprocess.run(
-                [python or sys.executable, "-I", "-c", script],
+                [python or sys.executable, "-I", script_path],
                 capture_output=True, text=True, timeout=total_timeout, cwd=workdir,
             )
             stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
