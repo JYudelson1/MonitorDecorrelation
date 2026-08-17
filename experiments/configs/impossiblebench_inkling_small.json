@@ -7,7 +7,7 @@
   "env": "impossiblebench",
   "subset": "impossible",
   "env_options": {
-    "reward_mode": "fraction",
+    "reward_mode": "all_or_nothing",
     "score_original": true,
     "per_test_timeout": 1.0,
     "total_timeout": 600.0,
