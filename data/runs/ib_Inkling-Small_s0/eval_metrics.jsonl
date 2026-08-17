@@ -1,5 +1,8 @@
-{"step": 0, "behavior_rate": 0.0, "unparsed_rate": 0.15625, "time/sample_s": 378.56580713499716, "time/score_s": 4.820001777261496e-06, "time/total_s": 378.56581195499894}
-{"step": 5, "behavior_rate": 0.015625, "unparsed_rate": 0.1875, "time/sample_s": 317.0631871259975, "time/score_s": 1.8630002159625292e-05, "time/total_s": 317.06320575599966}
-{"step": 10, "behavior_rate": 0.03125, "unparsed_rate": 0.140625, "time/sample_s": 312.93125716199575, "time/score_s": 6.499998562503606e-06, "time/total_s": 312.9312636619943}
-{"step": 15, "behavior_rate": 0.046875, "unparsed_rate": 0.125, "time/sample_s": 353.78773924100096, "time/score_s": 6.701011443510652e-06, "time/total_s": 353.7877459420124}
-{"step": 20, "behavior_rate": 0.078125, "unparsed_rate": 0.125, "time/sample_s": 358.28938186400046, "time/score_s": 4.9009977374225855e-06, "time/total_s": 358.2893867649982}
+{"step": 0, "behavior_rate": 0.015625, "unparsed_rate": 0.1875, "time/sample_s": 343.952031023975, "time/score_s": 5.289999535307288e-06, "time/total_s": 343.95203631397453}
+{"step": 8, "behavior_rate": 0.078125, "unparsed_rate": 0.1875, "time/sample_s": 332.9101682639739, "time/score_s": 6.0010061133652925e-06, "time/total_s": 332.91017426498}
+{"step": 16, "behavior_rate": 0.0, "unparsed_rate": 0.125, "time/sample_s": 506.72872728598304, "time/score_s": 5.220004823058844e-06, "time/total_s": 506.72873250598786}
+{"step": 24, "behavior_rate": 0.015625, "unparsed_rate": 0.140625, "time/sample_s": 389.44451816400397, "time/score_s": 6.299989763647318e-06, "time/total_s": 389.44452446399373}
+{"step": 32, "behavior_rate": 0.046875, "unparsed_rate": 0.09375, "time/sample_s": 397.33418377302587, "time/score_s": 6.260001100599766e-06, "time/total_s": 397.33419003302697}
+{"step": 40, "behavior_rate": 0.0, "unparsed_rate": 0.09375, "time/sample_s": 545.1319075879874, "time/score_s": 6.710004527121782e-06, "time/total_s": 545.1319142979919}
+{"step": 48, "behavior_rate": 0.015625, "unparsed_rate": 0.0, "time/sample_s": 438.5076127719949, "time/score_s": 6.271002348512411e-06, "time/total_s": 438.50761904299725}
+{"step": 56, "behavior_rate": 0.0, "unparsed_rate": 0.0625, "time/sample_s": 577.5966055860044, "time/score_s": 1.4071003533899784e-05, "time/total_s": 577.596619657008}
