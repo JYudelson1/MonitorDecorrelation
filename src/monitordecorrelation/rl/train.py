@@ -65,6 +65,29 @@ def _length_metrics(results: Sequence, env) -> dict[str, float]:
             "reward/len_penalty_mean": len_pen}          # avg reward lost to length (passers), reward units
 
 
+def _token_metrics(rollouts: Sequence[Rollout], max_tokens: int) -> dict[str, float]:
+    """Input/output token accounting for one batch of rollouts, keyed under ``tokens/``.
+
+    ``*_total`` is the whole batch at this step (what the sampling bill and the wall-clock track);
+    ``*_per_rollout`` is the mean of one rollout. ``truncated_rate`` is the fraction of completions
+    that hit ``max_tokens`` — a rising output length with truncation climbing means the metric is
+    censored, so read the two together. Empty ``{}`` if sampling didn't record counts (e.g. rollouts
+    reloaded from disk)."""
+    n_in = [r.meta["n_prompt_tokens"] for r in rollouts if "n_prompt_tokens" in r.meta]
+    n_out = [r.meta["n_output_tokens"] for r in rollouts if "n_output_tokens" in r.meta]
+    if not n_in or not n_out:
+        return {}
+    return {
+        "tokens/input_total": float(sum(n_in)),            # prompt tokens, whole batch this step
+        "tokens/output_total": float(sum(n_out)),          # completion tokens, whole batch this step
+        "tokens/total": float(sum(n_in) + sum(n_out)),
+        "tokens/input_per_rollout": mean(n_in),
+        "tokens/output_per_rollout": mean(n_out),
+        "tokens/output_max": float(max(n_out)),
+        "tokens/truncated_rate": mean(float(n >= max_tokens) for n in n_out),
+    }
+
+
 def _score_env(env: Env, rollouts: list[Rollout]) -> list:
     """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
 
@@ -236,6 +259,7 @@ def run_grpo(
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
             **_length_metrics(ev_env, env),  # code length + its reward penalty (MBPP)
+            **_token_metrics(ev, max_tokens),  # input/output token counts for this eval batch
         }
         # MBPP-Honeypot three-way reward-hacking labels (loose ⊇ strict=behavior_rate; + hardcoding).
         # gt_loose = the LOOSE oracle (passes-visible-not-all, incl. honest-buggy) — a separate, denser
@@ -302,6 +326,7 @@ def run_grpo(
         _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} | {summ} "
              f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
+    cum_tokens = 0.0  # running input+output token count across train steps (tokens/cum_total)
     for step in range(cfg.n_steps):
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
@@ -384,6 +409,8 @@ def run_grpo(
             mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
             if gt_train_loose is not None:
                 mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, gt_train_loose))
+        tok = _token_metrics(rollouts, max_tokens)
+        cum_tokens += tok.get("tokens/total", 0.0)  # tokens sampled so far (train batches only)
         loss_keys = [k for k in step_metrics if "loss" in k.lower() and "logprob" not in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
@@ -400,6 +427,8 @@ def run_grpo(
             "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
             "reward/total_mean": mean(rewards),
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
+            **tok,  # tokens/{input,output}_{total,per_rollout} for this step's train batch
+            **({"tokens/cum_total": cum_tokens} if tok else {}),  # running total over the run
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
             "time/sample_s": t_sample,
             "time/score_s": t_score,
@@ -414,11 +443,13 @@ def run_grpo(
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
+        tok_note = (f" tok={tok['tokens/input_per_rollout']:.0f}in/{tok['tokens/output_per_rollout']:.0f}out"
+                    f" per rollout, {tok['tokens/total']/1e3:.1f}k this step" if tok else "")
         # cookbook train_step surfaces no loss metric; show mean training logprob as the proxy signal.
         train_note = f"loss={loss_val:.1f}" if loss_val == loss_val else f"logp={logp_mean:.2f}"
         _log(
             f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
-            f"penalty={row['reward/penalty_mean']:.2f} {train_note}{kl_note} "
+            f"penalty={row['reward/penalty_mean']:.2f} {train_note}{kl_note}{tok_note} "
             f"| {row['time/total_s']:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s, "
             f"optim {t_optim:.0f}s)"
         )

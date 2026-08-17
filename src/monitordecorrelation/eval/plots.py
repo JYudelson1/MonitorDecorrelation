@@ -123,6 +123,46 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         plt.close(fig)
         out.append(path)
 
+    def tokens_fig(rows, title, path):
+        """Token accounting: batch totals (left) vs per-rollout means (right). Two panels because the
+        scales differ by ~the batch size; truncation rate rides the per-rollout panel on a twin axis
+        since a saturating output length is only interpretable next to it."""
+        panels = [("batch total (per step)", [("tokens/input_total", "input"),
+                                              ("tokens/output_total", "output"),
+                                              ("tokens/total", "input+output")]),
+                  ("per rollout", [("tokens/input_per_rollout", "input"),
+                                   ("tokens/output_per_rollout", "output"),
+                                   ("tokens/output_max", "output (max)")])]
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+        any_data = False
+        for ax, (sub, series) in zip(axes, panels):
+            for key, label in series:
+                xs, ys = _series(rows, key)
+                if xs:
+                    ax.plot(xs, ys, marker="o", ls="--" if "max" in key else "-", label=label)
+                    any_data = True
+            ax.set_xlabel("step")
+            ax.set_ylabel("tokens")
+            ax.set_title(sub)
+            ax.set_ylim(bottom=0)
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=8)
+        xs, ys = _series(rows, "tokens/truncated_rate")
+        if xs:
+            ax2 = axes[1].twinx()
+            ax2.plot(xs, ys, color="grey", lw=0.9, ls=":", label="truncated frac")
+            ax2.set_ylabel("truncated fraction")
+            ax2.set_ylim(-0.02, 1.02)
+            ax2.legend(fontsize=8, loc="lower right")
+        if not any_data:
+            plt.close(fig)
+            return
+        fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        out.append(path)
+
     # TRAIN plots (training rollouts)
     train_rows = _load(run_dir / "metrics.jsonl")
     if train_rows:
@@ -140,6 +180,7 @@ def plot_run(run_dir: str | Path) -> list[Path]:
             f"{run_dir.name} [train] — {beh_pretty} + reward", td / "ground_truth.png")
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
                      td / "monitors.png")
+        tokens_fig(train_rows, f"{run_dir.name} [train] — token counts", td / "tokens.png")
 
     # EVAL plots (held-out set — the degradation curves)
     eval_rows = _load(run_dir / "eval_metrics.jsonl")
@@ -155,5 +196,6 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         # (single-class, i.e. the obfuscation-success regime), so they carry the signal at the extremes.
         monitors_fig(eval_rows, ["auroc", "brier", pres_metric],
                      f"{run_dir.name} [eval] — held-out detector degradation", ed / "monitors.png")
+        tokens_fig(eval_rows, f"{run_dir.name} [eval] — token counts", ed / "tokens.png")
 
     return out

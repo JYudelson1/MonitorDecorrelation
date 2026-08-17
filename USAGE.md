@@ -130,6 +130,12 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
 - **Watch these metrics.** `train/behavior_rate` (= cheat rate, the primary signal),
   `train/reward/task_mean` (fraction of the check passing), `train/unparsed_rate` (answers with no
   codeblock — spikes mean `max_tokens` is cutting the model off mid-thought).
+- **Token counts** come free with every run: `tokens/{input,output}_total` (the whole batch at that
+  step), `tokens/{input,output}_per_rollout`, `tokens/output_max`, `tokens/truncated_rate` (fraction of
+  completions that hit `max_tokens` — read output length next to it, since a censored length flattens
+  out), and `tokens/cum_total` (running total, train batches only). They're in `metrics.jsonl` /
+  `eval_metrics.jsonl`, in W&B under `train/tokens/*` and `eval/tokens/*`, plotted to
+  `data/runs/<run>/{train,eval}/tokens.png`, and echoed on each step line (`tok=…in/…out per rollout`).
 - **`thinking_effort`** conditions Inkling's reasoning length (0.1 minimal … 0.9 high, the model
   default). High effort on these tasks costs thousands of CoT tokens per rollout, so it must be paired
   with a large `max_tokens` or the answer never arrives (the rollout is `unparsed`).

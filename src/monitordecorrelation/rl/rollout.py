@@ -89,10 +89,14 @@ def sample_rollouts(
     )
     futures = []
     for p in prompts:
-        futures.append((p, sampling_client.sample(rend.model_input(p.text), num_samples, params)))
+        model_input = rend.model_input(p.text)
+        # Prompt length is only knowable here (the rendered ModelInput, not p.text) — stash it per
+        # rollout so the loop can log input-token counts without re-rendering. All ``num_samples``
+        # rollouts of a prompt share it.
+        futures.append((p, model_input.length, sampling_client.sample(model_input, num_samples, params)))
 
     rollouts: list[Rollout] = []
-    for prompt, fut in futures:
+    for prompt, n_prompt_tokens, fut in futures:
         resp = fut.result()
         for seq in resp.sequences:
             cot, answer, text = rend.parse(list(seq.tokens))
@@ -103,7 +107,9 @@ def sample_rollouts(
                     output=answer,
                     token_ids=list(seq.tokens),
                     logprobs=list(seq.logprobs) if seq.logprobs is not None else None,
-                    meta={"stop_reason": str(seq.stop_reason), "full_text": text},
+                    meta={"stop_reason": str(seq.stop_reason), "full_text": text,
+                          "n_prompt_tokens": int(n_prompt_tokens),
+                          "n_output_tokens": len(seq.tokens)},
                 )
             )
     return rollouts
