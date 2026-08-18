@@ -1,8 +1,8 @@
 {
   "experiment": "impossiblebench_nemo",
   "run_name": "ib_Qwen3.5-4B_nemo_s0",
-  "description": "RL Qwen3.5-4B-Base on Impossible-LiveCodeBench via NeMo-RL (Megatron+LoRA, colocated vLLM). Same GRPO/hyperparameters as the tinker backend — see experiments/configs/nemo/grpo.yaml.",
-  "policy": "Qwen/Qwen3.5-4B-Base",
+  "description": "RL Qwen3.5-4B on Impossible-LiveCodeBench via NeMo-RL (Megatron+LoRA, colocated vLLM). Same GRPO/hyperparameters as the tinker backend — see experiments/configs/nemo/grpo.yaml. The POST-TRAINED model, not -Base: this env needs the policy to follow an instruction and emit one fenced code block, and a base model leaves most of the batch unparsed (reward 0, so no group advantage).",
+  "policy": "Qwen/Qwen3.5-4B",
   "backend": "nemo",
   "env": "impossiblebench",
   "subset": "impossible",
@@ -14,7 +14,7 @@
     "exec_workers": 32
   },
   "n_steps": 40,
-  "batch_size": 8,
+  "batch_size": 64,
   "group_size": 8,
   "eval_every": 10,
   "eval_size": 16,

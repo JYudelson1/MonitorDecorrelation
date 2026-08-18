@@ -74,7 +74,7 @@ checkpointing:
   save_consolidated: false
 
 policy:
-  model_name: ${oc.env:MD_MODEL_NAME,Qwen/Qwen3.5-4B-Base}                    # cfg.policy
+  model_name: ${oc.env:MD_MODEL_NAME,Qwen/Qwen3.5-4B}                         # cfg.policy
   tokenizer:
     name: ${policy.model_name}
   # == cfg.batch_size * cfg.group_size, which is what makes force_on_policy_ratio legal.

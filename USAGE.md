@@ -164,7 +164,7 @@ scripts/train_impossiblebench_nemo.sh --set policy=Qwen/Qwen3.5-35B-A3B-Base run
 
 # any existing config can be moved onto it
 uv run python experiments/run_experiment.py --config experiments/configs/full_matrix.yaml \
-    --set backend=nemo policy=Qwen/Qwen3.5-4B-Base
+    --set backend=nemo policy=Qwen/Qwen3.5-4B
 ```
 
 - **One config file.** `experiments/configs/nemo/grpo.yaml` is the only NeMo-RL config in the repo.
