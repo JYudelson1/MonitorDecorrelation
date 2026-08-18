@@ -99,6 +99,13 @@ FALLBACK_GPU_MEMORY_UTILIZATION = {"dense": 0.6, "moe": 0.55}
 
 SEQUENCE_LENGTH_ROUND = 64  # NeMo-RL's sequence_packing.sequence_length_round
 
+# The one seam through which a thinking budget can be enforced without touching NeMo-RL: it splats
+# ``policy.generation.vllm_kwargs`` into ``vllm.LLM(**kwargs)``, and ``vllm.LLM`` takes a list of
+# logits-processor class names. See backends/nemo/thinking_budget.py for why nothing simpler works.
+THINKING_BUDGET_LOGITS_PROCESSOR = (
+    "monitordecorrelation.backends.nemo.thinking_budget:ThinkingBudgetLogitsProcessor"
+)
+
 # NOTE (measured 2026-08-18, do not redo): NeMo-RL hands ``policy.make_sequence_length_divisible_by``
 # to the sequence packer as ``sequence_length_pad_multiple`` (lm_policy.Policy.__init__), so it also
 # quantises every training micro-batch's tensor length. Leaving it at the tensor-parallel size (1 for
@@ -333,6 +340,14 @@ def nemo_env_vars(
     vllm_kwargs: dict[str, Any] = (
         {"moe_backend": "triton", "max_num_seqs": 1024} if moe else {}
     )
+    # Off unless asked for: on a default run neither key is emitted and the vLLM engine is built
+    # exactly as before. ``vllm_cfg.env_vars`` is NeMo-RL's own passthrough to the vLLM worker
+    # processes, which is where the logits processor reads the budget from.
+    vllm_env_vars: dict[str, str] = {}
+    budget = opts.pop("thinking_budget", cfg.thinking_budget)
+    if budget is not None and int(budget) > 0:
+        vllm_kwargs["logits_processors"] = [THINKING_BUDGET_LOGITS_PROCESSOR]
+        vllm_env_vars["MD_THINKING_BUDGET"] = str(int(budget))
 
     env = {
         "MD_MODEL_NAME": cfg.policy,
@@ -364,6 +379,7 @@ def nemo_env_vars(
         "MD_VLLM_TP": vllm_tensor_parallel_size(n_gpus, moe),
         "MD_GPU_MEMORY_UTILIZATION": gmu,
         "MD_VLLM_KWARGS": vllm_kwargs,
+        "MD_VLLM_ENV_VARS": vllm_env_vars,
         # --- bookkeeping -----------------------------------------------------------------------
         "MD_CHECKPOINT_DIR": f"{run_dir}/nemo_checkpoints" if run_dir else "results/grpo",
         "MD_SAVE_PERIOD": cfg.n_steps,  # only the final step, like the tinker backend's one save

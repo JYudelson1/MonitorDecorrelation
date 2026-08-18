@@ -170,6 +170,10 @@ policy:
       # CUDA graphs cut a measured 35B step from 409s to 114s (generation 298s -> 32s) with the
       # generation/training KL error unchanged, for +2 GB resident.
       enforce_eager: false
+      # Forwarded by NeMo-RL into every vLLM worker process. Empty unless cfg.thinking_budget is
+      # set, in which case params.py puts MD_THINKING_BUDGET here — that is where the logits
+      # processor named in vllm_kwargs below reads its budget from.
+      env_vars: ${oc.decode:${oc.env:MD_VLLM_ENV_VARS,'{}'}}
     # Empty for dense policies. For MoE, params.py sets
     #   {"moe_backend": "triton", "max_num_seqs": 1024}
     # because vLLM's default SM100 unquantized-MoE backend (FlashInfer TRTLLM) swizzles the expert
@@ -177,6 +181,9 @@ policy:
     # raises "shard_dim=0 is not a valid data dimension for a 3D tensor" — Triton keeps the plain 3D
     # layout. max_num_seqs is left at 1024 (see params.py) — note the pinned vLLM 0.20 defaults to
     # 128, so this raises decode concurrency rather than capping it.
+    # cfg.thinking_budget additionally puts `logits_processors: [<fqcn>]` here: NeMo-RL splats this
+    # dict into vllm.LLM(**kwargs), which is the only reachable-from-config way into vLLM's sampler.
+    # See backends/nemo/thinking_budget.py.
     vllm_kwargs: ${oc.decode:${oc.env:MD_VLLM_KWARGS,'{}'}}
     colocated:
       enabled: true

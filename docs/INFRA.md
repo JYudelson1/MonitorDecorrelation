@@ -85,6 +85,19 @@ choice inline.
 monitor API keys as soon as a config lists monitors); an explicit shell export still wins over `.env`.
 The W&B mode is resolved exactly as on the tinker path.
 
+**Thinking budget (optional, off).** `thinking_budget: <int>` caps the tokens the policy may spend
+inside `<think>…</think>`; unset (the default) is uncapped and changes nothing about the engine. It
+cannot be a plain config value: NeMo-RL builds its `SamplingParams` from a fixed kwargs list, so
+vLLM's own `thinking_token_budget` — and therefore its built-in budget logits processor — is
+unreachable from YAML. What *is* reachable is `policy.generation.vllm_kwargs`, which NeMo-RL splats
+into `vllm.LLM(**kwargs)` and which accepts `logits_processors: [<fqcn>]`. So `params.py` names
+`backends/nemo/thinking_budget.py` there and puts the budget in `vllm_cfg.env_vars`; the processor
+(a subclass of vLLM's, with the budget and the `<think>`/`</think>` ids taken from the environment
+instead of from per-request sampling params) drives the logits of `</think>` once the count is
+reached. **No NeMo-RL source is modified.** Two caveats: the forced `</think>` is part of the sampled
+sequence and is trained on at whatever logprob the policy gave it, and the cap is approximate by a
+token or two (vLLM's state machine skips re-parsing while a countdown runs).
+
 ### Policy model note
 The policy is the RL'd model, so it must be **tinker-hosted** and should **natively verbalize CoT**
 (small 2025-era reasoner that has to think through the task — otherwise there's no load-bearing CoT

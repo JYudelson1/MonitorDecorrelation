@@ -82,6 +82,11 @@ class ExperimentConfig(_Strict):
         description="nemo backend only: last-word overrides of the derived MD_* knobs that "
         "parametrize experiments/configs/nemo/grpo.yaml, e.g. {'train_micro_batch_size': 2, "
         "'moe': true}. Keys may be bare or MD_-prefixed. See backends/nemo/params.py.")
+    thinking_budget: int | None = Field(
+        None, description="nemo backend only: hard cap on the tokens the policy may spend inside "
+        "<think>…</think>. None (default) = uncapped. When set, generation forces </think> once the "
+        "budget is reached — see backends/nemo/thinking_budget.py, including the note that the "
+        "forced token is trained on.")
     thinking_effort: float = Field(
         0.9, ge=0.0, lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "

@@ -6,11 +6,14 @@ Covers (a) the parity contract with the tinker backend (batch/step/seed/LoRA/KL 
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from monitordecorrelation.backends.nemo.params import (
     GPU_MEMORY_SAFETY_FACTOR,
     MAX_GPU_MEMORY_UTILIZATION,
+    THINKING_BUDGET_LOGITS_PROCESSOR,
     gpu_memory_utilization,
     is_moe,
     micro_batch_size,
@@ -287,3 +290,49 @@ def test_config_matches_the_tinker_backends_grpo_semantics():
     assert g["max_rollout_turns"] == 1 and g["overlong_filtering"] is False
     assert g["seed"] == 3 and g["max_num_steps"] == 25
     assert g["val_at_start"] is True and g["val_at_end"] is True
+
+
+# --- the thinking budget (backends/nemo/thinking_budget.py) -------------------------------------
+# It is off by default and, when on, is expressed entirely as vLLM engine config: a logits-processor
+# class name in vllm_kwargs (which NeMo-RL splats into vllm.LLM(**kwargs)) plus the budget in
+# vllm_cfg.env_vars. No NeMo-RL source is involved, so this test is the whole integration contract.
+
+def test_thinking_budget_is_off_by_default():
+    c = resolve(nemo_env_vars(cfg(), lr=1e-5, n_gpus=1))
+    gen = c["policy"]["generation"]
+    assert gen["vllm_kwargs"] == {}
+    assert gen["vllm_cfg"]["env_vars"] == {}
+    assert ExperimentConfig(run_name="t").thinking_budget is None
+
+
+def test_thinking_budget_wires_the_logits_processor_and_the_env_var():
+    c = resolve(nemo_env_vars(cfg(thinking_budget=512), lr=1e-5, n_gpus=1))
+    gen = c["policy"]["generation"]
+    assert gen["vllm_kwargs"]["logits_processors"] == [THINKING_BUDGET_LOGITS_PROCESSOR]
+    assert gen["vllm_cfg"]["env_vars"] == {"MD_THINKING_BUDGET": "512"}
+    # the FQCN has to name something that actually exists, or the engine dies at startup
+    module, _, qualname = THINKING_BUDGET_LOGITS_PROCESSOR.partition(":")
+    path = "src/" + module.replace(".", "/") + ".py"
+    assert Path(path).exists() and f"class {qualname}(" in Path(path).read_text()
+
+
+def test_thinking_budget_survives_a_moe_policys_vllm_kwargs():
+    """vllm_kwargs is not empty for MoE — the budget must be added to it, not replace it."""
+    c = resolve(nemo_env_vars(cfg(policy="Qwen/Qwen3.5-35B-A3B-Base", thinking_budget=256),
+                              lr=1e-5, n_gpus=2))
+    kwargs = c["policy"]["generation"]["vllm_kwargs"]
+    assert kwargs["moe_backend"] == "triton" and kwargs["max_num_seqs"] == 1024
+    assert kwargs["logits_processors"] == [THINKING_BUDGET_LOGITS_PROCESSOR]
+
+
+def test_thinking_budget_can_also_come_from_nemo_options_and_zero_means_off():
+    c = resolve(nemo_env_vars(cfg(nemo_options={"thinking_budget": 128}), lr=1e-5, n_gpus=1))
+    assert c["policy"]["generation"]["vllm_cfg"]["env_vars"] == {"MD_THINKING_BUDGET": "128"}
+    # ... and does not leak through the generic opts passthrough as a bare MD_THINKING_BUDGET,
+    # which would set it in the driver's environment but never reach the vLLM workers.
+    env = nemo_env_vars(cfg(nemo_options={"thinking_budget": 128}), lr=1e-5, n_gpus=1)
+    assert "MD_THINKING_BUDGET" not in env
+
+    off = resolve(nemo_env_vars(cfg(thinking_budget=0), lr=1e-5, n_gpus=1))
+    assert off["policy"]["generation"]["vllm_kwargs"] == {}
+    assert off["policy"]["generation"]["vllm_cfg"]["env_vars"] == {}

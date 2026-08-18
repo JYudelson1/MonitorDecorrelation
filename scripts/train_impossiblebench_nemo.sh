@@ -6,6 +6,7 @@
 #   scripts/train_impossiblebench_nemo.sh --set n_gpus=1                    # pin the GPU count
 #   scripts/train_impossiblebench_nemo.sh --set policy=Qwen/Qwen3.5-35B-A3B-Base run_name=ib_35b
 #   scripts/train_impossiblebench_nemo.sh --set n_steps=2 batch_size=2 group_size=4 eval_size=2  # smoke
+#   scripts/train_impossiblebench_nemo.sh --set thinking_budget=1024                # cap the CoT
 #
 # Everything after the script name is forwarded to experiments/run_experiment.py, so `--set key=value`
 # overrides any config field (dict fields take JSON: --set 'nemo_options={"train_micro_batch_size":2}').

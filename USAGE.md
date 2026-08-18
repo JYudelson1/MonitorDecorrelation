@@ -174,6 +174,13 @@ uv run python experiments/run_experiment.py --config experiments/configs/full_ma
   budgets ONE sequence length for prompt+completion, so `max_total_sequence_length = max_tokens +
   max_prompt_tokens`), and `nemo_options` — the last-word override of any derived knob, e.g.
   `--set 'nemo_options={"train_micro_batch_size":2,"checkpoint_enabled":false}'`.
+- **`thinking_budget` (off by default).** A hard cap on the tokens the policy may spend inside
+  `<think>…</think>`; `--set thinking_budget=1024` forces `</think>` once the budget is reached, so
+  the rest of `max_tokens` goes to the answer instead of an unbounded CoT. Unset (the default) means
+  uncapped and adds nothing to the vLLM engine. It is enforced by a logits processor named from
+  `vllm_kwargs` (`backends/nemo/thinking_budget.py`) because NeMo-RL's config has no such knob — note
+  the forced `</think>` is part of the sampled sequence and **is trained on**. Verify a run with
+  `jq -r .cot data/runs/<run>/rollouts.jsonl` — nothing should run much past the budget.
 - **Hyperparameters follow the tinker backend**, not the transformers one: mean-centred group
   advantages (no std normalisation, no leave-one-out), one optimizer step per rollout batch, KL applied
   to the reward, Adam(0.9, 0.95) with no weight decay or gradient clipping, constant LR, LoRA alpha 32,
