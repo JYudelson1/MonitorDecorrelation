@@ -26,6 +26,9 @@ data/checkpoints/
 wandb/
 err.log
 data/runs/archived/
+# NeMo-RL run artifacts (checkpoints + its own tensorboard/wandb logs)
+data/runs/**/nemo_checkpoints/
+data/runs/**/nemo_logs/
 
 # …but DO track the small per-step metrics (the analysis reads eval_metrics.jsonl; the big
 # rollouts.jsonl / eval_rollouts.jsonl stay excluded above, and archived/ is fully excluded).

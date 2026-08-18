@@ -1,0 +1,206 @@
+# The ONE NeMo-RL config for this repo.
+# ==============================================================================================
+# There is deliberately no per-model / per-GPU-count variant and no base+child pair of our own:
+# every knob that differs between runs is an ``MD_*`` environment variable with an inline default,
+# and ``src/monitordecorrelation/backends/nemo/params.py`` derives those variables from the
+# ``experiments/run_experiment.py`` config (so `--set n_steps=2 policy=... n_gpus=1` lands here).
+# The resolved config is written to ``data/runs/<run_name>/nemo_config.yaml`` for the record.
+#
+# It inherits NeMo-RL's own ``grpo_math_1B.yaml`` (the vendored submodule) purely so that keys we
+# never touch keep their upstream defaults instead of drifting; everything this project cares about
+# is restated below.
+#
+# ---- Why these values: parity with the tinker backend --------------------------------------
+# The reference implementation of "how this repo does RL" is ``backends/tinker_backend.py`` +
+# tinker-cookbook, NOT the transformers backend. Concretely that means:
+#   * GRPO advantages are the group rewards **mean-centred only** — cookbook
+#     ``compute_advantages`` does ``r - r.mean()``: no std normalisation, no leave-one-out
+#     baseline.  ->  normalize_rewards: false, use_leave_one_out_baseline: false
+#   * exactly ONE optimizer step per rollout batch (cookbook ``train_step(..., num_substeps=1)``),
+#     so the PPO ratio is 1.0 by construction.
+#     ->  train_global_batch_size == num_prompts_per_step * num_generations_per_prompt
+#     ->  force_on_policy_ratio: true  (skips the redundant prev-logprob forward)
+#   * the KL-to-base penalty is applied to the **reward**, not the loss: the tinker backend calls
+#     ``tinker_cookbook.rl.metrics.incorporate_kl_penalty``, which subtracts kl_coef * KL from the
+#     per-token rewards.  ->  use_kl_in_reward: true, reference_policy_kl_penalty: ${MD_KL_COEF}
+#     (0.0 — the repo default — means no reference policy at all).
+#   * Adam(beta1=0.9, beta2=0.95, eps=1e-8), weight_decay 0, NO gradient clipping and a CONSTANT
+#     learning rate — those are tinker's ``AdamParams`` defaults as used by the cookbook's
+#     ``train_step``.  ->  see policy.megatron_cfg.optimizer / .scheduler below.
+#   * LoRA alpha is fixed at 32 regardless of rank, as on tinker.
+#   * sampling temperature 1.0 for both training and eval rollouts (rl/train.py samples at 1.0).
+#
+# ---- Why the Megatron/vLLM block looks the way it does --------------------------------------
+# The parallelism, memory and fusion settings are lifted from the measured 2xB200 Qwen3.5 recipes
+# (grpo-qwen3.5-{4b,9b,27b,35ba3b}-1n{1,2}g-megatron[-ep2tp2]-lora.yaml). The per-model differences
+# there (TP/EP layout, micro-batch size, vLLM memory fraction, MoE backend) are exactly the MD_*
+# variables params.py computes from the policy name and the GPU count; the invariants (rope fusion
+# off, LoRA scoped to *language_model*, caches cleared before refit, CUDA graphs on) are hard-coded
+# here because they are properties of the Qwen3.5 family, not of a particular run.
+defaults: ../../../third_party/nemo-rl/examples/configs/grpo_math_1B.yaml
+
+grpo:
+  num_prompts_per_step: ${oc.decode:${oc.env:MD_NUM_PROMPTS_PER_STEP,8}}      # cfg.batch_size
+  num_generations_per_prompt: ${oc.decode:${oc.env:MD_GROUP_SIZE,8}}          # cfg.group_size
+  max_rollout_turns: 1            # every env in this repo is single-step (one assistant message)
+  max_num_epochs: 1
+  max_num_steps: ${oc.decode:${oc.env:MD_N_STEPS,40}}                         # cfg.n_steps
+  # tinker parity: mean-centre within the group, nothing else (see header).
+  normalize_rewards: false
+  use_leave_one_out_baseline: false
+  val_period: ${oc.decode:${oc.env:MD_EVAL_EVERY,10}}                         # cfg.eval_every
+  val_at_start: true              # rl/train.py evaluates at step 0 …
+  val_at_end: true                # … and once more after the final step
+  overlong_filtering: false       # tinker keeps truncated rollouts in the batch
+  # eval_size * eval_samples_per_prompt: the val set is the held-out prompts, each repeated
+  # eval_samples_per_prompt times (r0.7.0 has no val_num_generations_per_prompt).
+  max_val_samples: ${oc.decode:${oc.env:MD_VAL_SAMPLES,32}}
+  val_batch_size: ${oc.decode:${oc.env:MD_VAL_SAMPLES,32}}
+  seed: ${oc.decode:${oc.env:MD_SEED,0}}                                      # cfg.seed
+
+loss_fn:
+  # cfg.kl_coef. 0.0 (the repo default) disables the reference policy entirely.
+  reference_policy_kl_penalty: ${oc.decode:${oc.env:MD_KL_COEF,0.0}}
+  use_kl_in_reward: true          # tinker applies KL to the reward, not the loss (see header)
+  token_level_loss: true
+  force_on_policy_ratio: true     # one optim step per rollout batch => ratio == 1 (see header)
+
+checkpointing:
+  enabled: ${oc.decode:${oc.env:MD_CHECKPOINT_ENABLED,true}}
+  checkpoint_dir: ${oc.env:MD_CHECKPOINT_DIR,results/grpo}
+  metric_name: null               # "keep the latest" — our val metrics have no "accuracy" key
+  keep_top_k: 1
+  save_period: ${oc.decode:${oc.env:MD_SAVE_PERIOD,40}}
+  save_consolidated: false
+
+policy:
+  model_name: ${oc.env:MD_MODEL_NAME,Qwen/Qwen3.5-4B-Base}                    # cfg.policy
+  tokenizer:
+    name: ${policy.model_name}
+  # == cfg.batch_size * cfg.group_size, which is what makes force_on_policy_ratio legal.
+  train_global_batch_size: ${oc.decode:${oc.env:MD_TRAIN_GLOBAL_BATCH_SIZE,64}}
+  train_micro_batch_size: ${oc.decode:${oc.env:MD_TRAIN_MICRO_BATCH_SIZE,4}}
+  logprob_batch_size: ${policy.train_micro_batch_size}
+  # cfg.max_tokens + cfg.max_prompt_tokens — the completion budget plus the prompt allowance.
+  max_total_sequence_length: ${oc.decode:${oc.env:MD_MAX_TOTAL_SEQUENCE_LENGTH,4096}}
+  precision: bfloat16
+  # Also the sequence packer's per-sequence pad multiple, so it quantises every training
+  # micro-batch's tensor length. Coarsening it to cut Dynamo re-tracing was measured and rejected —
+  # see the note above SEQUENCE_LENGTH_ROUND in backends/nemo/params.py.
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  max_grad_norm: 0.0              # tinker's AdamParams.grad_clip_norm default is 0 = no clipping
+
+  dtensor_cfg:
+    enabled: false                # Megatron backend (the measured B200 recipes are Megatron+LoRA)
+
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.logprob_batch_size}}
+
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: ${oc.decode:${oc.env:MD_TP,1}}
+    expert_model_parallel_size: ${oc.decode:${oc.env:MD_EP,1}}
+    expert_tensor_parallel_size: ${oc.decode:${oc.env:MD_ETP,1}}
+    # Megatron only shards activations along the sequence dim when TP > 1, and NeMo-RL assigns
+    # model_cfg.sequence_parallel straight from this key — so it must track TP by hand.
+    sequence_parallel: ${oc.decode:${oc.env:MD_SEQUENCE_PARALLEL,false}}
+    # Must stay false for this family: megatron-bridge hard-asserts against apply_rope_fusion in
+    # models/qwen_vl/modelling_qwen3_vl/rope.py (its freqs are per-token absolute, shape
+    # (seq_len, bs, 1, 2*dim), where TE's fused kernels expect (max_seqlen, 1, 1, 2*dim)).
+    apply_rope_fusion: false
+    activation_checkpointing: true
+    defer_fp32_logits: true
+    # Colocated generation dies at the step-2 vLLM wake_up without this: RotaryEmbedding.forward's
+    # lru_cache holds one GPU tensor per unique packed-sequence shape and anchors segments that
+    # gc + empty_cache cannot return.
+    clear_memory_caches_before_refit: true
+    peft:
+      enabled: true
+      # Scoped to the language model on purpose. Qwen3.5-*-Base is a
+      # Qwen3_5[Moe]ForConditionalGeneration and megatron-bridge builds the vision encoder
+      # alongside the LM. Bare leaf names match on module name, so they would wrap the vision
+      # tower's linears too; those adapters never receive a gradient on a text-only task, which
+      # trips param_and_grad_buffer.py reset()'s per-param grad-count assert at the first
+      # zero_grad_buffer(). Override MD_PEFT_TARGET_MODULES for a non-Qwen3.5 policy.
+      target_modules: ${oc.decode:${oc.env:MD_PEFT_TARGET_MODULES,'["*language_model*linear_qkv", "*language_model*linear_proj", "*language_model*linear_fc1", "*language_model*linear_fc2"]'}}
+      dim: ${oc.decode:${oc.env:MD_LORA_RANK,16}}                             # cfg.lora_rank
+      alpha: ${oc.decode:${oc.env:MD_LORA_ALPHA,32}}                          # fixed at 32, as on tinker
+
+    optimizer:
+      optimizer: adam
+      lr: ${oc.decode:${oc.env:MD_LR,1e-5}}          # cfg.lr, else the tinker-cookbook LoRA-LR heuristic
+      min_lr: ${oc.decode:${oc.env:MD_LR,1e-5}}      # constant LR: min == max
+      weight_decay: 0.0                              # tinker AdamParams default
+      adam_beta1: 0.9                                # cookbook train_step passes these explicitly
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: ${policy.max_grad_norm}
+
+    scheduler:                                       # constant LR, no warmup — tinker never ramps
+      start_weight_decay: 0.0
+      end_weight_decay: 0.0
+      weight_decay_incr_style: constant
+      lr_decay_style: constant
+      lr_decay_iters: ${grpo.max_num_steps}
+      lr_warmup_iters: 0
+      lr_warmup_init: ${oc.decode:${oc.env:MD_LR,1e-5}}
+
+  generation:
+    backend: vllm
+    max_new_tokens: ${oc.decode:${oc.env:MD_MAX_TOKENS,1024}}                 # cfg.max_tokens
+    temperature: 1.0                                                          # rl/train.py samples at 1.0
+    top_p: 1.0
+    top_k: null
+    vllm_cfg:
+      tensor_parallel_size: ${oc.decode:${oc.env:MD_VLLM_TP,1}}
+      # Sized per policy by backends/nemo/params.py: vLLM gets everything the trainer does not
+      # need, since more KV cache is strictly better. The inline 0.6 is only the fallback for a
+      # policy whose size cannot be determined. Measured 2xB200: 4B 0.90, 9B 0.85, 35B-A3B 0.72.
+      gpu_memory_utilization: ${oc.decode:${oc.env:MD_GPU_MEMORY_UTILIZATION,0.6}}
+      max_model_len: ${policy.max_total_sequence_length}
+      # CUDA graphs cut a measured 35B step from 409s to 114s (generation 298s -> 32s) with the
+      # generation/training KL error unchanged, for +2 GB resident.
+      enforce_eager: false
+    # Empty for dense policies. For MoE, params.py sets
+    #   {"moe_backend": "triton", "max_num_seqs": 1024}
+    # because vLLM's default SM100 unquantized-MoE backend (FlashInfer TRTLLM) swizzles the expert
+    # weights into a 4D block layout that the refit weight_loader cannot index, so the first refit
+    # raises "shard_dim=0 is not a valid data dimension for a 3D tensor" — Triton keeps the plain 3D
+    # layout. max_num_seqs is left at 1024 (see params.py) — note the pinned vLLM 0.20 defaults to
+    # 128, so this raises decode concurrency rather than capping it.
+    vllm_kwargs: ${oc.decode:${oc.env:MD_VLLM_KWARGS,'{}'}}
+    colocated:
+      enabled: true
+
+data:
+  # The datasets are built in-process by backends/nemo/driver.py from the repo's own Env
+  # (prompt pool + holdout), so nothing here loads a HuggingFace dataset.
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: false                  # the prompt list is already a random draw from the env pool
+  num_workers: 0
+  use_multiple_dataloader: false
+  # NeMo-RL's schema requires a train dataset entry even though this backend never loads one
+  # (setup_response_data is not called); the name is a marker, not something that gets fetched.
+  train:
+    dataset_name: unused-monitordecorrelation-builds-its-own
+  validation: null
+  default: null
+
+env: {}                           # our environment actor is constructed by the driver, not by name
+
+logger:
+  log_dir: ${oc.env:MD_LOG_DIR,logs}
+  wandb_enabled: ${oc.decode:${oc.env:MD_WANDB_ENABLED,false}}
+  tensorboard_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: ${oc.env:MD_WANDB_PROJECT,monitor-decorrelation}
+    name: ${oc.env:MD_RUN_NAME,nemo-run}
+    group: ${oc.decode:${oc.env:MD_WANDB_GROUP,null}}
+    tags: ${oc.decode:${oc.env:MD_WANDB_TAGS,[]}}
+
+cluster:
+  gpus_per_node: ${oc.decode:${oc.env:MD_GPUS_PER_NODE,1}}                    # cfg.n_gpus
+  num_nodes: 1

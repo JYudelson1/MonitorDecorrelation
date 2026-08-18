@@ -24,6 +24,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
+| `scripts/train_impossiblebench_nemo.sh` | **RL Qwen3.5 on ImpossibleBench with the `nemo` backend** (NeMo-RL, this machine's GPUs). Checks the submodule + venv, builds the venv if missing, forwards `--set …`. | `data/runs/ib_Qwen3.5-4B_nemo_s0/` + wandb |
 | `scripts/train_impossiblebench_inkling.sh` | **RL Inkling-Small on the ImpossibleBench impossible subset** (oneoff + conflicting), plotting to W&B. Thin wrapper over the runner: checks credentials up front, forwards `--set …`. | `data/runs/ib_Inkling-Small_s0/` + wandb |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
@@ -144,6 +145,50 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
   `OPENROUTER_API_KEY`.
 - **Untrusted code executes locally** (subprocess + per-statement alarm + address-space rlimit, not a
   sandbox). See the warning in `envs/impossiblebench.py`.
+
+## The `nemo` backend (local multi-GPU, NeMo-RL)
+
+`backend: "nemo"` trains on **this machine's GPUs** via [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
+(Megatron policy workers + LoRA, colocated vLLM generation) instead of on tinker. Everything else is
+unchanged: same envs, same monitors, same reward, same `data/runs/<run>/` artifacts, so
+`analyze_coupling.py` / `eval/degradation.py` / `scripts/plot_run.py` read a nemo run as usual.
+
+```bash
+# one-time (or after a fresh clone without --recursive):
+git submodule update --init --recursive
+
+# every config field works the same; n_gpus defaults to every GPU on the machine
+scripts/train_impossiblebench_nemo.sh
+scripts/train_impossiblebench_nemo.sh --set n_gpus=1
+scripts/train_impossiblebench_nemo.sh --set policy=Qwen/Qwen3.5-35B-A3B-Base run_name=ib_35b_nemo
+
+# any existing config can be moved onto it
+uv run python experiments/run_experiment.py --config experiments/configs/full_matrix.yaml \
+    --set backend=nemo policy=Qwen/Qwen3.5-4B-Base
+```
+
+- **One config file.** `experiments/configs/nemo/grpo.yaml` is the only NeMo-RL config in the repo.
+  Everything that varies between runs is an `MD_*` env var derived from the experiment config by
+  `backends/nemo/params.py`; the fully-resolved result is saved as `data/runs/<run>/nemo_config.yaml`.
+- **nemo-only config fields.** `n_gpus` (default: all visible GPUs), `max_prompt_tokens` (NeMo-RL
+  budgets ONE sequence length for prompt+completion, so `max_total_sequence_length = max_tokens +
+  max_prompt_tokens`), and `nemo_options` — the last-word override of any derived knob, e.g.
+  `--set 'nemo_options={"train_micro_batch_size":2,"checkpoint_enabled":false}'`.
+- **Hyperparameters follow the tinker backend**, not the transformers one: mean-centred group
+  advantages (no std normalisation, no leave-one-out), one optimizer step per rollout batch, KL applied
+  to the reward, Adam(0.9, 0.95) with no weight decay or gradient clipping, constant LR, LoRA alpha 32,
+  temperature 1.0. The reasoning for each is inline in `experiments/configs/nemo/grpo.yaml`.
+- **`.env` is propagated** to the NeMo-RL process (`WANDB_API_KEY`, and monitor API keys once a config
+  lists monitors). An explicit shell export still wins over `.env`.
+- **Two virtualenvs.** NeMo-RL pins Python 3.13 + torch 2.11 + Megatron + vLLM and lives in
+  `third_party/nemo-rl/.venv`; this project keeps its own. Do **not** point both at the same
+  `UV_PROJECT_ENVIRONMENT` — each `uv run` would uninstall the other's dependencies. The launcher pins
+  NeMo-RL's explicitly for exactly this reason. On a NeMo-RL container the image exports
+  `UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv`, which this project's `uv run` will claim; that is fine
+  (the backend never uses it) but it does mean the image's prebuilt driver venv is replaced.
+- **What is NOT carried over.** `thinking_effort` (Inkling/TML-only; nemo policies use the HF chat
+  template), and `lr=None` still resolves through tinker-cookbook's LoRA-LR heuristic on this side
+  before being passed down.
 
 ## Probes (white-box)
 

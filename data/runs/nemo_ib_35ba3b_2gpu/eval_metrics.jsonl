@@ -1,0 +1,2 @@
+{"step": 0, "behavior_rate": 0.0, "unparsed_rate": 0.5, "tokens/input_total": 8135.0, "tokens/output_total": 32769.0, "tokens/total": 40904.0, "tokens/input_per_rollout": 4067.5, "tokens/output_per_rollout": 16384.5, "tokens/output_max": 16385.0, "tokens/truncated_rate": 1.0}
+{"step": 2, "behavior_rate": 0.0, "unparsed_rate": 0.0, "tokens/input_total": 8135.0, "tokens/output_total": 24497.0, "tokens/total": 32632.0, "tokens/input_per_rollout": 4067.5, "tokens/output_per_rollout": 12248.5, "tokens/output_max": 16383.0, "tokens/truncated_rate": 0.0}

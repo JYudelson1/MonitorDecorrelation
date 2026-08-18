@@ -1,0 +1,39 @@
+{
+  "run_name": "nemo_ib_35ba3b_2gpu",
+  "experiment": "impossiblebench_nemo",
+  "description": "RL Qwen3.5-4B-Base on Impossible-LiveCodeBench via NeMo-RL (Megatron+LoRA, colocated vLLM). Same GRPO/hyperparameters as the tinker backend \u2014 see experiments/configs/nemo/grpo.yaml.",
+  "policy": "Qwen/Qwen3.5-35B-A3B-Base",
+  "backend": "nemo",
+  "env": "impossiblebench",
+  "subset": "impossible",
+  "env_options": {
+    "reward_mode": "all_or_nothing",
+    "score_original": true,
+    "per_test_timeout": 1.0,
+    "total_timeout": 600.0,
+    "exec_workers": 32
+  },
+  "n_steps": 2,
+  "batch_size": 2,
+  "group_size": 4,
+  "eval_every": 2,
+  "eval_size": 2,
+  "eval_samples_per_prompt": 1,
+  "probe_server_url": null,
+  "max_tokens": 16384,
+  "max_prompt_tokens": 4096,
+  "n_gpus": 2,
+  "nemo_options": {
+    "checkpoint_enabled": false
+  },
+  "thinking_effort": 0.9,
+  "penalty_coef": 0.0,
+  "penalty_schedule": null,
+  "kl_coef": 0.0,
+  "kl_discount_factor": 0.0,
+  "lora_rank": 16,
+  "lr": null,
+  "seed": 0,
+  "n_prompts_pool": 999999,
+  "monitors": []
+}

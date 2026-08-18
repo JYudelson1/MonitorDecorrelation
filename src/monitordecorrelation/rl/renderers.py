@@ -22,33 +22,17 @@ from typing import Any
 
 import tinker
 
-_THINK_CLOSE = "</think>"
+# ``build_prompt_tokens`` / ``split_cot_answer`` live in ``rl/text.py`` (no tinker import) so the
+# NeMo-RL backend glue, which runs in NeMo-RL's own venv, can reuse them. Re-exported here because
+# this has always been their import path.
+from monitordecorrelation.rl.text import (  # noqa: E402
+    _THINK_CLOSE,
+    build_prompt_tokens,
+    split_cot_answer,
+)
+
 # Inkling's default reasoning effort (tml_renderers takes [0, 1); 0.9 = "high", the model default).
 DEFAULT_THINKING_EFFORT = 0.9
-
-
-def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True) -> list[int]:
-    """Render a single user turn to token ids with a generation prompt (HF chat template)."""
-    messages = [{"role": "user", "content": question}]
-    out = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=False,
-        enable_thinking=enable_thinking,
-    )
-    # transformers 5.x may return a BatchEncoding even with return_dict=False on some paths.
-    if hasattr(out, "input_ids"):
-        out = out.input_ids
-    return list(out)
-
-
-def split_cot_answer(text: str) -> tuple[str, str]:
-    """Split a Qwen3-style completion into (cot, answer) on the closing think tag."""
-    if _THINK_CLOSE in text:
-        cot, answer = text.split(_THINK_CLOSE, 1)
-        return cot.replace("<think>", "").strip(), answer.strip()
-    return "", text.strip()
 
 
 class HFChatRenderer:

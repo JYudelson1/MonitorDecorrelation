@@ -37,5 +37,6 @@ packages = ["src/monitordecorrelation"]
 
 [dependency-groups]
 dev = [
+    "omegaconf>=2.3.1",
     "pytest>=9.0.3",
 ]

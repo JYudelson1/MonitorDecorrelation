@@ -50,7 +50,7 @@ class ExperimentConfig(_Strict):
     experiment: str = "experiment"
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
-    backend: Literal["tinker", "transformers"] = "tinker"
+    backend: Literal["tinker", "transformers", "nemo"] = "tinker"
     env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench"] = "sycophancy"
     subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
     env_options: dict = Field(
@@ -69,6 +69,19 @@ class ExperimentConfig(_Strict):
         None, description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
     max_tokens: int = 1024
+    max_prompt_tokens: int = Field(
+        4096, description="nemo backend only: prompt-token allowance. NeMo-RL sizes ONE sequence "
+        "budget for prompt+completion, so it needs this on top of max_tokens; a prompt longer than "
+        "this is truncated by the dataloader. Ignored by the tinker backend, which caps only the "
+        "completion.")
+    n_gpus: int | None = Field(
+        None, description="nemo backend only: GPUs to train on (one node). None = every GPU visible "
+        "on this machine. Sets cluster.gpus_per_node and the vLLM tensor-parallel size.")
+    nemo_options: dict = Field(
+        default_factory=dict,
+        description="nemo backend only: last-word overrides of the derived MD_* knobs that "
+        "parametrize experiments/configs/nemo/grpo.yaml, e.g. {'train_micro_batch_size': 2, "
+        "'moe': true}. Keys may be bare or MD_-prefixed. See backends/nemo/params.py.")
     thinking_effort: float = Field(
         0.9, ge=0.0, lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "

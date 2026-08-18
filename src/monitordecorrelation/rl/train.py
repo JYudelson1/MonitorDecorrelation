@@ -11,7 +11,6 @@ import dataclasses
 import datetime
 import json
 import random
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,8 +21,8 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
-from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
-from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
+from monitordecorrelation.eval.rows import eval_row, train_row
+from monitordecorrelation.eval.rows import token_metrics as _token_metrics
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.types import MonitorResult, Rollout
 
@@ -33,63 +32,11 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _label_metrics(prefix: str, scores: list[float], preds: list[bool], labels: list[bool]) -> dict[str, float]:
-    """AUROC / accuracy / brier + present/absent class-split monitor score for ONE ground-truth label
-    definition, keyed under ``prefix``. Used for the secondary ``loose`` oracle track (kept separate from
-    the strict headline metrics — loose counts honest-buggy attempts as positives, so it's a different
-    construct). All go NaN gracefully at single-class (roc_auc / _mean_for_class return NaN)."""
-    return {
-        f"{prefix}/auroc": roc_auc(scores, labels),
-        f"{prefix}/accuracy": accuracy(preds, labels),
-        f"{prefix}/brier": brier(scores, labels),
-        f"{prefix}/dprime_margin": dprime_margin(scores, labels),
-        f"{prefix}/mean_score_present": _mean_for_class(scores, labels, True),
-        f"{prefix}/mean_score_absent": _mean_for_class(scores, labels, False),
-    }
-
-
-def _length_metrics(results: Sequence, env) -> dict[str, float]:
-    """The code-length term of the reward, for accounting alongside task + monitor terms.
-    MBPP-Honeypot reward = max(0, 1 − length_penalty·len(code)); this surfaces (a) mean code length and
-    (b) the reward actually lost to length **among rollouts that pass the visible test** (where length is
-    the only thing modulating reward 0→1) — both directly comparable to reward/task_mean. Empty ``{}`` for
-    envs without a code-length penalty (``length_penalty``)."""
-    lp = getattr(env, "length_penalty", None)
-    lens = [r.meta["code_len"] for r in results if "code_len" in r.meta]
-    if lp is None or not lens:
-        return {}
-    passers = [r.meta["code_len"] for r in results
-               if r.meta.get("passes_visible") and "code_len" in r.meta]
-    len_pen = mean(min(1.0, lp * c) for c in passers) if passers else 0.0
-    return {"reward/code_len_mean": mean(lens),          # avg chars of generated code
-            "reward/len_penalty_mean": len_pen}          # avg reward lost to length (passers), reward units
-
-
-def _token_metrics(rollouts: Sequence[Rollout], max_tokens: int) -> dict[str, float]:
-    """Input/output token accounting for one batch of rollouts, keyed under ``tokens/``.
-
-    ``*_total`` is the whole batch at this step (what the sampling bill and the wall-clock track);
-    ``*_per_rollout`` is the mean of one rollout. ``truncated_rate`` is the fraction of completions
-    that hit ``max_tokens`` — a rising output length with truncation climbing means the metric is
-    censored, so read the two together. Empty ``{}`` if sampling didn't record counts (e.g. rollouts
-    reloaded from disk)."""
-    n_in = [r.meta["n_prompt_tokens"] for r in rollouts if "n_prompt_tokens" in r.meta]
-    n_out = [r.meta["n_output_tokens"] for r in rollouts if "n_output_tokens" in r.meta]
-    if not n_in or not n_out:
-        return {}
-    return {
-        "tokens/input_total": float(sum(n_in)),            # prompt tokens, whole batch this step
-        "tokens/output_total": float(sum(n_out)),          # completion tokens, whole batch this step
-        "tokens/total": float(sum(n_in) + sum(n_out)),
-        "tokens/input_per_rollout": mean(n_in),
-        "tokens/output_per_rollout": mean(n_out),
-        "tokens/output_max": float(max(n_out)),
-        "tokens/truncated_rate": mean(float(n >= max_tokens) for n in n_out),
-    }
-
-
-def _score_env(env: Env, rollouts: list[Rollout]) -> list:
+def score_env(env: Env, rollouts: list[Rollout]) -> list:
     """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
+
+    Public and backend-agnostic, like ``score_monitors``: the NeMo-RL environment actor grades
+    through this same function so both backends handle batching and failures identically.
 
     Envs whose grading is expensive and out-of-process (running generated code) implement
     ``score_batch`` to execute rollouts concurrently; otherwise this is the plain serial loop. Errors
@@ -116,11 +63,16 @@ def _monitor_info(m: Monitor, role: str) -> dict:
     }
 
 
-def _score_monitors(
-    monitors: Sequence[Monitor], rollouts: list[Rollout], workers: int
+def score_monitors(
+    monitors: Sequence[Monitor], rollouts: list[Rollout], workers: int = 16
 ) -> dict[str, list[MonitorResult]]:
     """{name: [MonitorResult]} — white-box probes use ``score_batch`` (one batched local forward);
-    API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe."""
+    API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe.
+
+    Public and backend-agnostic: the NeMo-RL environment actor scores its monitors through this same
+    function (``backends/nemo/env_actor.py``), so failure handling and concurrency behave identically
+    on both backends. This module imports nothing backend-specific, so it is importable from
+    NeMo-RL's virtualenv."""
     # A failed score must NEVER crash the run — a single transient API hiccup on one of hundreds of
     # rollouts would otherwise abort a multi-hour job. On failure we substitute a NaN sentinel (logged)
     # and the metric code drops it, so that rollout just doesn't count toward this monitor's score.
@@ -185,9 +137,6 @@ def run_grpo(
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, and the tinker sampler all derive from it)")
-    # The behavior word (reward_hacking / sycophancy / deception) names the class-split score metrics, so
-    # charts + W&B read per-env instead of the historical "syco". Slugged to a safe metric-key token.
-    behavior = re.sub(r"\W+", "_", getattr(env, "behavior_name", None) or "behavior").strip("_") or "behavior"
     all_monitors: list[Monitor] = [*train_against, *held_out]
     run = None
     if cfg.logging.use_wandb:
@@ -247,50 +196,21 @@ def run_grpo(
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
         ev = backend.sample(eval_prompts, num_samples=n_per, max_tokens=max_tokens, temperature=1.0)
-        ev_env = _score_env(env, ev)
+        ev_env = score_env(env, ev)
         gt = [er.behavior_present for er in ev_env]
         t_sample = time.perf_counter() - t0
         _log(f"  [eval @ {step}] scoring {len(all_monitors)} monitors…")
         t1 = time.perf_counter()
-        res = _score_monitors(all_monitors, ev, monitor_workers)
+        res = score_monitors(all_monitors, ev, monitor_workers)
         t_score = time.perf_counter() - t1
-        row: dict = {
-            "step": step,
-            "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
-            "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
-            **_length_metrics(ev_env, env),  # code length + its reward penalty (MBPP)
-            **_token_metrics(ev, max_tokens),  # input/output token counts for this eval batch
-        }
-        # MBPP-Honeypot three-way reward-hacking labels (loose ⊇ strict=behavior_rate; + hardcoding).
-        # gt_loose = the LOOSE oracle (passes-visible-not-all, incl. honest-buggy) — a separate, denser
-        # label track: it's defined at more eval steps than strict (loose_rate ≥ strict_rate) but is a
-        # noisier construct, so its monitor metrics live under a separate `loose/` namespace, never merged.
-        gt_loose = ([bool(er.meta.get("loose_rh", False)) for er in ev_env]
-                    if any("loose_rh" in er.meta for er in ev_env) else None)
-        if gt_loose is not None:
-            row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
-            row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
-        for m in all_monitors:
-            # Drop rollouts this monitor failed to score (NaN sentinel from _score_monitors) so a few
-            # API hiccups don't poison the metrics — they're just computed over the rollouts that scored.
-            idx = [i for i, x in enumerate(res[m.name]) if x.score == x.score]
-            scores = [res[m.name][i].score for i in idx]
-            preds = [res[m.name][i].label for i in idx]
-            mgt = [gt[i] for i in idx]  # strict labels (the headline oracle = behavior_present)
-            row[f"monitor/{m.name}/auroc"] = roc_auc(scores, mgt)
-            row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
-            row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
-            row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
-            row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
-            row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
-            # margin d′ (non-saturating separation, no AUROC ceiling) + class counts (n_pos·n_neg gives
-            # the AUROC resolution, so a d′-via-AUROC clip can be sample-size-aware downstream).
-            row[f"monitor/{m.name}/dprime_margin"] = dprime_margin(scores, mgt)
-            row[f"monitor/{m.name}/n_pos"] = sum(mgt)
-            row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
-            row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
-            if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
-                row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
+        # The row schema is shared with every other backend — see eval/rows.py. It carries the
+        # strict oracle metrics per monitor plus, for envs that define one, the separate `loose/`
+        # oracle track (loose ⊇ strict: it also counts honest-but-buggy attempts, so it is a denser
+        # but noisier construct and is never merged into the headline numbers).
+        row: dict = eval_row(
+            step=step, rollouts=ev, env_results=ev_env, monitor_results=res,
+            monitor_names=[m.name for m in all_monitors], env=env, max_tokens=max_tokens,
+        )
         row["time/sample_s"] = t_sample
         row["time/score_s"] = t_score
         row["time/total_s"] = t_sample + t_score
@@ -338,7 +258,7 @@ def run_grpo(
         rollouts = backend.sample(
             prompts, num_samples=cfg.group_size, max_tokens=max_tokens, temperature=1.0
         )
-        env_results = _score_env(env, rollouts)
+        env_results = score_env(env, rollouts)
         t_sample = time.perf_counter() - t0
         if train_against:
             _log(f"step {step}: scoring train-against monitor(s)…")
@@ -346,7 +266,7 @@ def run_grpo(
         # Only the TRAIN-AGAINST monitors are scored every step (they form the reward penalty).
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
         t1 = time.perf_counter()
-        ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
+        ta_res = score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
         t_score = time.perf_counter() - t1
 
         # HARD FAIL if a train-against monitor scored NOTHING: unlike a held-out monitor (just a
@@ -389,54 +309,28 @@ def run_grpo(
         step_metrics = backend.train_step(rollouts, rewards, cfg.group_size)
         t_optim = time.perf_counter() - t2
 
-        gt_train = [er.behavior_present for er in env_results]  # strict_rh on the training rollouts
-        gt_rate = mean(float(g) for g in gt_train)
-        gt_train_loose = ([bool(er.meta.get("loose_rh", False)) for er in env_results]
-                          if any("loose_rh" in er.meta for er in env_results) else None)
-        # Per-train-against-monitor metrics on the TRAINING rollouts: full set (auroc/accuracy/brier +
-        # class-split) vs strict, plus the loose track. AUROC on train is often NaN (single-class batch)
-        # but brier + the class-split means stay defined and carry the obfuscation signal.
-        mon: dict[str, float] = {}
-        for m in train_against:
-            s = [x.score for x in ta_res[m.name]]
-            p = [x.label for x in ta_res[m.name]]
-            mon[f"monitor/{m.name}/mean_score"] = mean(s) if s else float("nan")
-            mon[f"monitor/{m.name}/auroc"] = roc_auc(s, gt_train)
-            mon[f"monitor/{m.name}/accuracy"] = accuracy(p, gt_train)
-            mon[f"monitor/{m.name}/brier"] = brier(s, gt_train)
-            mon[f"monitor/{m.name}/dprime_margin"] = dprime_margin(s, gt_train)
-            mon[present_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, True)
-            mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
-            if gt_train_loose is not None:
-                mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, gt_train_loose))
+        gt_rate = mean(float(er.behavior_present) for er in env_results)
         tok = _token_metrics(rollouts, max_tokens)
         cum_tokens += tok.get("tokens/total", 0.0)  # tokens sampled so far (train batches only)
         loss_keys = [k for k in step_metrics if "loss" in k.lower() and "logprob" not in k.lower()]
         loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
+        # Reward decomposition + per-train-against-monitor metrics, in the schema every backend
+        # shares (eval/rows.py); the tinker-specific bits (timings, optimizer metrics, cumulative
+        # tokens) are layered on here.
         row = {
-            "step": step,
-            "behavior_rate": gt_rate,  # = strict_rh (training rollouts; eval has the held-out version)
-            **({"loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results),
-                "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
-               if any("loose_rh" in er.meta for er in env_results) else {}),
-            "reward/task_mean": mean(er.task_reward for er in env_results),
-            # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ:
-            "reward/monitor_suspiciousness_mean": mean(penalties),
-            "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
-            "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
-            "reward/total_mean": mean(rewards),
-            **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
-            **tok,  # tokens/{input,output}_{total,per_rollout} for this step's train batch
+            **train_row(
+                step=step, rollouts=rollouts, env_results=env_results, monitor_results=ta_res,
+                train_against_names=[m.name for m in train_against], env=env,
+                max_tokens=max_tokens, penalties=penalties, pen_coef=pen_coef, rewards=rewards,
+            ),
             **({"tokens/cum_total": cum_tokens} if tok else {}),  # running total over the run
-            "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
             "time/sample_s": t_sample,
             "time/score_s": t_score,
             "time/optim_s": t_optim,
             "time/total_s": t_sample + t_score + t_optim,
             "kl/mean": step_metrics.get("kl/mean", 0.0),  # per-token KL to base (0 if kl_coef=0)
             **{f"loss/{k}": v for k, v in step_metrics.items()},
-            **mon,  # per-train-against-monitor metrics (strict + loose), built above
         }
         if run is not None:
             run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)

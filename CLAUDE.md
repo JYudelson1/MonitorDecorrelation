@@ -30,6 +30,11 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   `⬜ unimplemented` / `🟡 implemented-untested` / `🔴 tested-buggy` / `🟢 tested-correct`.
   Update `STATUS.md` whenever you change a component's state. This is the source of truth for build
   progress — keep it honest (don't mark 🟢 without an actual test).
+- **Backends.** `backend: "tinker"` (default, the reference), `"transformers"` (local, white-box),
+  `"nemo"` (local multi-GPU via the vendored NeMo-RL submodule). **Tinker is the reference for RL
+  semantics** — when a backend has to choose, match tinker, not transformers. The nemo backend is a
+  hand-off rather than an `RLBackend` (NeMo-RL owns its loop + its own venv), but the reward, the
+  monitor seam and the run artifacts are unchanged; see `docs/INFRA.md` "The nemo backend".
 - **Minimal tinker.** RL runs on [tinker](https://tinker-docs.thinkingmachines.ai/) with a small,
   hand-rolled loop on the raw SDK (`ServiceClient` → `create_lora_training_client` → sample →
   `forward_backward` → `optim_step`). We keep our own loop, but **use tinker-cookbook *primitives*
@@ -44,7 +49,12 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   training — the key signature is behavior dipping then climbing as the policy learns to *hide*
   rather than *stop*. A monitor's accuracy alone is ambiguous. See docs/EXPERIMENT_PLAN.md.
 - **Package:** code lives under `src/monitordecorrelation/`. Use `uv` for everything
-  (`uv run python ...`, `uv add ...`).
+  (`uv run python ...`, `uv add ...`). NeMo-RL is the `third_party/nemo-rl` **git submodule** — clone
+  with `--recursive`, or `git submodule update --init --recursive` — and has its own virtualenv at
+  `third_party/nemo-rl/.venv`; never let the two projects share one `UV_PROJECT_ENVIRONMENT`.
+- **Metric rows are a contract.** `eval/rows.py` owns the `metrics.jsonl` / `eval_metrics.jsonl` key
+  layout that `eval/degradation.py` and the analysis scripts read. Add a metric there, not in one
+  backend's loop.
 - **Secrets:** `TINKER_API_KEY` and monitor API keys go in `.env` (gitignored). Never commit keys.
 
 ## The reward-hacking label seam (MBPP-Honeypot — read before touching the oracle)

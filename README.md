@@ -67,6 +67,11 @@ and [`docs/Joey Research Ideas.md`](docs/Joey%20Research%20Ideas.md).
 ## Setup
 
 ```bash
-uv sync                      # install deps (tinker SDK)
-cp .env.example .env         # then add your TINKER_API_KEY and monitor API keys
+git clone --recursive <this repo>   # --recursive pulls third_party/nemo-rl (the local-GPU backend)
+uv sync                             # install deps (tinker SDK)
+cp .env.example .env                # then add your TINKER_API_KEY and monitor API keys
 ```
+
+Already cloned without `--recursive`? `git submodule update --init --recursive`. The submodule is only
+needed for `backend: "nemo"` (training on local GPUs via NeMo-RL); the tinker and transformers
+backends do not touch it. See [`USAGE.md`](USAGE.md) and [`docs/INFRA.md`](docs/INFRA.md).

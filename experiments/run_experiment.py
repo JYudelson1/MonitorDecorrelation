@@ -12,7 +12,14 @@ Usage:
   # one-off overrides (handy for quick tests; everything else comes from the config):
   uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2
 
+  # train on this machine's GPUs (NeMo-RL) instead of tinker:
+  uv run python experiments/run_experiment.py --config <cfg> --set backend=nemo n_gpus=2
+
 The config is schema-validated (pydantic, extra keys forbidden) — a malformed config fails fast.
+
+``backend`` selects the substrate: ``tinker`` (default), ``transformers`` (local, in-process), or
+``nemo`` (local multi-GPU via the vendored NeMo-RL submodule — see docs/INFRA.md "The nemo backend";
+that one is a hand-off to NeMo-RL's own loop rather than an ``RLBackend``).
 """
 
 from __future__ import annotations
@@ -77,6 +84,13 @@ def _coerce(v: str):
             pass
     if v.lower() in ("true", "false"):
         return v.lower() == "true"
+    # dict/list-valued fields (env_options, nemo_options, penalty_schedule) are given as JSON, so
+    # --set nemo_options={"train_micro_batch_size":2} works like every other override.
+    if v[:1] in ("{", "[") and v[-1:] in ("}", "]"):
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            pass
     return v
 
 
@@ -102,6 +116,59 @@ def main() -> None:
         cfg = cfg.model_copy(update=overrides)
 
     lr = cfg.lr if cfg.lr is not None else get_lr(cfg.policy)
+
+    # Write the EFFECTIVE config (after --set overrides are applied) into the run folder, so a run is
+    # trivially + exactly reproducible — copying the raw source file would drop the overrides:
+    #   uv run python experiments/run_experiment.py --config data/runs/<run>/config.<ext>
+    # It is written before anything is constructed because the nemo backend's driver reads it back
+    # (it runs in NeMo-RL's own virtualenv and cannot be handed a live object).
+    run_dir = Path("data/runs") / cfg.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    effective = cfg.model_dump()
+    (run_dir / "config.json").write_text(json.dumps(effective, indent=2))
+    if Path(args.config).suffix.lower() in (".yaml", ".yml"):
+        import yaml
+
+        (run_dir / "config.yaml").write_text(yaml.safe_dump(effective, sort_keys=False))
+
+    # W&B grouping: every run of one sweep (the matrix's monitor rows × seeds) shares a group so they
+    # cluster in the UI; tags make them filterable by env / model / seed / which monitor was trained
+    # against (or "control"). Group is per (experiment, model) so multiple models stay separate.
+    short = cfg.policy.split("/")[-1]
+    ta_names = [m.name for m in cfg.monitors if m.role == "train_against"]
+    _wandb_group = f"{cfg.experiment}/{short}"
+    _wandb_tags = [
+        cfg.experiment,
+        cfg.env,
+        short,
+        f"seed{cfg.seed}",
+        *(ta_names or ["control"]),
+    ]
+
+    # NeMo-RL owns its own GRPO loop, its Megatron policy workers and its vLLM generation, and lives
+    # in a separate virtualenv — so this backend is a hand-off, not an ``RLBackend``. Everything the
+    # experiment config says is propagated into NeMo-RL's config as MD_* variables; see
+    # backends/nemo/params.py and experiments/configs/nemo/grpo.yaml.
+    if cfg.backend == "nemo":
+        from monitordecorrelation.backends.nemo.launcher import launch
+
+        print(
+            f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend=nemo "
+            f"lr={lr:.2e} env={cfg.env} | {cfg.batch_size}x{cfg.group_size} rollouts/step "
+            f"x {cfg.n_steps} steps"
+        )
+        code = launch(
+            cfg,
+            lr=lr,
+            wandb_mode=_resolve_wandb_mode(),
+            wandb_group=_wandb_group,
+            wandb_tags=_wandb_tags,
+            run_dir=run_dir,
+        )
+        if code != 0:
+            raise SystemExit(code)
+        print(f"\n{cfg.experiment} finished OK")
+        return
 
     # Backend
     if cfg.backend == "tinker":
@@ -134,33 +201,6 @@ def main() -> None:
     )
     if probe_server_url:
         print(f"  probes → shared server {probe_server_url}")
-
-    # Write the EFFECTIVE config (after --set overrides are applied) into the run folder, so a run is
-    # trivially + exactly reproducible — copying the raw source file would drop the overrides:
-    #   uv run python experiments/run_experiment.py --config data/runs/<run>/config.<ext>
-    run_dir = Path("data/runs") / cfg.run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    effective = cfg.model_dump()
-    if Path(args.config).suffix.lower() in (".yaml", ".yml"):
-        import yaml
-
-        (run_dir / "config.yaml").write_text(yaml.safe_dump(effective, sort_keys=False))
-    else:
-        (run_dir / "config.json").write_text(json.dumps(effective, indent=2))
-
-    # W&B grouping: every run of one sweep (the matrix's monitor rows × seeds) shares a group so they
-    # cluster in the UI; tags make them filterable by env / model / seed / which monitor was trained
-    # against (or "control"). Group is per (experiment, model) so multiple models stay separate.
-    short = cfg.policy.split("/")[-1]
-    ta_names = [m.name for m in cfg.monitors if m.role == "train_against"]
-    _wandb_group = f"{cfg.experiment}/{short}"
-    _wandb_tags = [
-        cfg.experiment,
-        cfg.env,
-        short,
-        f"seed{cfg.seed}",
-        *(ta_names or ["control"]),
-    ]
 
     run_config = RunConfig(
         env=cfg.env,
