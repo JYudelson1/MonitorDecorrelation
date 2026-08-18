@@ -9,12 +9,15 @@ from __future__ import annotations
 import pytest
 
 from monitordecorrelation.backends.nemo.params import (
+    GPU_MEMORY_SAFETY_FACTOR,
+    MAX_GPU_MEMORY_UTILIZATION,
     gpu_memory_utilization,
     is_moe,
     micro_batch_size,
     nemo_env_vars,
     parallel_layout,
     sequence_length,
+    vllm_tensor_parallel_size,
 )
 from monitordecorrelation.experiment_config import ExperimentConfig
 
@@ -98,8 +101,13 @@ def test_gpu_count_drives_topology():
     c = cfg(max_tokens=16384)
     one = nemo_env_vars(c, lr=1e-4, n_gpus=1)
     two = nemo_env_vars(c, lr=1e-4, n_gpus=2)
-    assert one["MD_GPUS_PER_NODE"] == "1" and one["MD_VLLM_TP"] == "1"
-    assert two["MD_GPUS_PER_NODE"] == "2" and two["MD_VLLM_TP"] == "2"
+    assert one["MD_GPUS_PER_NODE"] == "1" and two["MD_GPUS_PER_NODE"] == "2"
+    # A dense policy generates with one vLLM engine PER GPU (NeMo-RL derives the replica count as
+    # world_size // tp), not one TP-sharded engine — replicating removes the per-token all-reduce.
+    assert one["MD_VLLM_TP"] == "1" and two["MD_VLLM_TP"] == "1"
+    # MoE stays TP-sharded: a replica per GPU is untested and far tighter on memory.
+    moe = nemo_env_vars(cfg(policy="Qwen/Qwen3.5-35B-A3B-Base"), lr=1e-4, n_gpus=2)
+    assert moe["MD_VLLM_TP"] == "2"
 
 
 def test_moe_gets_the_triton_backend():
@@ -119,12 +127,33 @@ def test_vllm_memory_fraction_is_what_the_trainer_does_not_need():
     # Sharding the weights across tensor-parallel ranks gives the fraction straight back.
     assert gpu_memory_utilization(67.0, tp=2, moe=True, total_gib=total) > big
     # The arithmetic itself, on a case where no clamp binds: the trainer's weights (sharded by TP),
-    # plus vLLM's non-discardable residue, plus the flat margin.
-    assert big == round((total - (67.0 + 0.16 * 67.0 + 6.0)) / total, 3)
+    # plus vLLM's non-discardable residue, plus the flat margin — then the safety factor.
+    budget = (total - (67.0 + 0.16 * 67.0 + 6.0)) / total
+    assert big == round(budget * GPU_MEMORY_SAFETY_FACTOR, 3)
     # Clamped at both ends: a tiny model does not get the whole GPU, a model that cannot fit at all
     # still yields a usable fraction rather than a negative one.
-    assert gpu_memory_utilization(0.5, tp=1, moe=False, total_gib=total) == 0.90
+    assert gpu_memory_utilization(0.5, tp=1, moe=False, total_gib=total) == round(
+        MAX_GPU_MEMORY_UTILIZATION * GPU_MEMORY_SAFETY_FACTOR, 3
+    )
     assert gpu_memory_utilization(400.0, tp=1, moe=False, total_gib=total) == 0.30
+
+
+def test_safety_factor_survives_the_cap():
+    """The factor is applied AFTER the cap, so it is a real reduction rather than something the cap
+    swallows — the 4B's raw budget is 0.910, above MAX, and it must still come out 5% under MAX."""
+    total = 179.06
+    raw = (total - (8.7 + 0.16 * 8.7 + 6.0)) / total
+    assert raw > MAX_GPU_MEMORY_UTILIZATION  # the cap binds for this model
+    assert gpu_memory_utilization(8.7, tp=1, moe=False, total_gib=total) == 0.855
+    # ...and for a model where the cap does NOT bind, it is 5% off the budget.
+    assert gpu_memory_utilization(18.0, tp=1, moe=False, total_gib=total) == 0.807
+    assert gpu_memory_utilization(67.0, tp=2, moe=True, total_gib=total) == 0.684
+
+
+def test_the_fallback_constants_are_not_scaled():
+    """They are already well below the derived budget, so they carry their own margin; scaling them
+    again would quietly shrink the only path that runs when the size is unknown."""
+    assert gpu_memory_utilization(None, tp=1, moe=False, total_gib=179.06) == 0.6
 
 
 def test_unknown_policy_size_falls_back_to_the_measured_constants():
@@ -218,7 +247,7 @@ def test_config_resolves_for_each_tested_topology(policy, n_gpus, tp, ep, sp, vl
     assert c["cluster"]["gpus_per_node"] == n_gpus
     assert (mega["tensor_model_parallel_size"], mega["expert_model_parallel_size"]) == (tp, ep)
     assert mega["sequence_parallel"] is sp
-    assert gen["vllm_cfg"]["tensor_parallel_size"] == n_gpus
+    assert gen["vllm_cfg"]["tensor_parallel_size"] == vllm_tensor_parallel_size(n_gpus, moe=bool(vllm_kwargs))
     assert gen["vllm_kwargs"] == vllm_kwargs
     assert gen["vllm_cfg"]["gpu_memory_utilization"] == gmu
     assert gen["max_new_tokens"] == 16384

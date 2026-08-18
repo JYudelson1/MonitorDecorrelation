@@ -154,10 +154,17 @@ policy:
     top_p: 1.0
     top_k: null
     vllm_cfg:
+      # 1 for a dense policy, n_gpus for MoE. NeMo-RL derives the replica count as
+      # world_size // tensor_parallel_size, so TP1 on an N-GPU node means N independent engines with
+      # the rollouts sharded across them — which for a dense model beats one TP-sharded engine,
+      # because generation is bandwidth-bound and per-request parallel, so replicating buys away an
+      # all-reduce on every decoded token for the price of a duplicated copy of the weights.
       tensor_parallel_size: ${oc.decode:${oc.env:MD_VLLM_TP,1}}
       # Sized per policy by backends/nemo/params.py: vLLM gets everything the trainer does not
       # need, since more KV cache is strictly better. The inline 0.6 is only the fallback for a
-      # policy whose size cannot be determined. Measured 2xB200: 4B 0.90, 9B 0.85, 35B-A3B 0.72.
+      # policy whose size cannot be determined. Measured 2xB200 the budget alone gives 4B 0.90,
+      # 9B 0.85, 35B-A3B 0.72; a 5% safety factor (GPU_MEMORY_SAFETY_FACTOR) is then applied to keep
+      # the allocator off the ceiling, so what is actually emitted is 0.855 / 0.807 / 0.684.
       gpu_memory_utilization: ${oc.decode:${oc.env:MD_GPU_MEMORY_UTILIZATION,0.6}}
       max_model_len: ${policy.max_total_sequence_length}
       # CUDA graphs cut a measured 35B step from 409s to 114s (generation 298s -> 32s) with the

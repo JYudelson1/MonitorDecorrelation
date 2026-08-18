@@ -73,6 +73,8 @@ TRAINER_OVERHEAD_GIB = 6.0
 #   Qwen3.5-9B-Base       2     0.85  fits    169.6      9.5   129.4 GiB / 2.12M tokens  (was 84.8 at 0.6)
 #   Qwen3.5-35B-A3B-Base  2     0.78  OOM     170.3       --   cumem_allocator.cpp wake_up, step 2
 #   Qwen3.5-35B-A3B-Base  2     0.72  fits    165.5     13.5    82.2 GiB / 2.15M tokens  (was 51.9 at 0.55)
+# These are the values the BUDGET produces; what is actually emitted is 5% lower still, see
+# GPU_MEMORY_SAFETY_FACTOR below.
 # The 35B boundary is therefore between 0.72 and 0.78 and the rule lands on 0.72, with 13.5 GiB of
 # measured headroom at the peak. That headroom is the point of TRAINER_OVERHEAD_GIB: these arms run
 # 2x4 = 8 rollouts where a real run is 8x8 = 64, and while the trainer's residual is weights-only
@@ -83,6 +85,13 @@ TRAINER_OVERHEAD_GIB = 6.0
 # the detected total or the weight count is wrong.
 MAX_GPU_MEMORY_UTILIZATION = 0.90
 MIN_GPU_MEMORY_UTILIZATION = 0.30
+
+# Applied to the capped fraction, so every derived value is 5% below the largest one measured to
+# fit. The MEASURED_FIT table above is what the budget alone produces; running that close to the
+# ceiling leaves the allocator no room to breathe, and the cost of being wrong is a hard crash at
+# step-2 wake_up() rather than a slowdown. Concretely: 0.90 -> 0.855, 0.85 -> 0.807, 0.72 -> 0.684.
+# The fallback constants are not scaled — they already sit well below the derived budget.
+GPU_MEMORY_SAFETY_FACTOR = 0.95
 
 # Used only when the policy's size cannot be determined (no network and an unparseable name). These
 # are the hand-tuned values this backend shipped with, measured on the 2xB200 Qwen3.5 recipes.
@@ -246,9 +255,30 @@ def gpu_memory_utilization(
         weight_gib / max(1, tp) + VLLM_RESIDUE_FRACTION * weight_gib + overhead_gib
     )
     fraction = (total_gib - resident_gib) / total_gib
+    # The safety factor is applied AFTER the cap, so it is a real 5% off whatever we would otherwise
+    # have emitted — applying it first would let the cap swallow it for any model whose raw budget
+    # already exceeds MAX (the 4B's raw fraction is 0.910).
+    capped = min(MAX_GPU_MEMORY_UTILIZATION, fraction)
     return round(
-        min(MAX_GPU_MEMORY_UTILIZATION, max(MIN_GPU_MEMORY_UTILIZATION, fraction)), 3
+        max(MIN_GPU_MEMORY_UTILIZATION, capped * GPU_MEMORY_SAFETY_FACTOR), 3
     )
+
+
+def vllm_tensor_parallel_size(n_gpus: int, moe: bool) -> int:
+    """vLLM's tensor-parallel size for colocated generation. 1 for dense, ``n_gpus`` for MoE.
+
+    NeMo-RL derives the number of vLLM replicas as ``world_size // tensor_parallel_size``
+    (``vllm_generation.py``: ``dp_size = cluster.world_size() // model_parallel_size``). So TP1 on an
+    N-GPU node is not "use one GPU" — it is N independent engines, each holding a full copy of the
+    weights, with the step's rollouts sharded across them. For a dense policy that is strictly better
+    than one TP-sharded engine: generation is memory-bandwidth-bound and embarrassingly parallel over
+    requests, so replicating trades a few GiB of duplicated weights for the removal of an all-reduce
+    on every decoded token. Measured faster on this repo's dense runs, which is why it is the default.
+
+    MoE stays sharded. A 35B-A3B replica is ~67 GiB of weights inside a ~122 GiB vLLM budget, and the
+    whole MoE generation path here (the triton backend, the max_num_seqs cap, the Gated-DeltaNet state
+    blocks and the refit) was measured at TP = n_gpus; replicating it is untested and much tighter."""
+    return n_gpus if moe else 1
 
 
 def round_up(value: int, multiple: int) -> int:
@@ -331,7 +361,7 @@ def nemo_env_vars(
         "MD_EP": layout["ep"],
         "MD_ETP": layout["etp"],
         "MD_SEQUENCE_PARALLEL": layout["sequence_parallel"],
-        "MD_VLLM_TP": n_gpus,
+        "MD_VLLM_TP": vllm_tensor_parallel_size(n_gpus, moe),
         "MD_GPU_MEMORY_UTILIZATION": gmu,
         "MD_VLLM_KWARGS": vllm_kwargs,
         # --- bookkeeping -----------------------------------------------------------------------
