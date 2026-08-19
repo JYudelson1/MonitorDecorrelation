@@ -12,12 +12,14 @@ memory fraction, MoE backend) generalised to an arbitrary GPU count and sequence
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import shutil
 import subprocess
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -389,9 +391,50 @@ def nemo_env_vars(
         "MD_WANDB_GROUP": wandb_group,
         "MD_WANDB_TAGS": list(wandb_tags or []),
     }
-    for key, value in opts.items():
-        env[key if key.startswith("MD_") else f"MD_{key.upper()}"] = value
+    extra = {
+        (key if key.startswith("MD_") else f"MD_{key.upper()}"): value
+        for key, value in opts.items()
+    }
+    _check_option_keys(extra, derived=set(env))
+    env.update(extra)
     return {k: _as_env_value(v) for k, v in env.items()}
+
+
+@lru_cache(maxsize=None)
+def _yaml_md_knobs() -> set[str]:
+    """The ``MD_*`` names the NeMo-RL config actually interpolates. Read from the yaml so a knob that
+    only exists there (MD_CHECKPOINT_ENABLED, MD_PEFT_TARGET_MODULES, …) stays overridable without
+    having to be mirrored here."""
+    from monitordecorrelation.backends.nemo.launcher import DEFAULT_NEMO_CONFIG
+
+    path = Path(os.environ.get("MD_NEMO_CONFIG", str(DEFAULT_NEMO_CONFIG)))
+    try:
+        text = path.read_text()
+    except OSError:
+        return set()
+    return set(re.findall(r"MD_[A-Z0-9_]+", text))
+
+
+def _check_option_keys(extra: dict[str, Any], *, derived: set[str]) -> None:
+    """``nemo_options`` is a raw passthrough into the MD_* environment, so a typo'd key used to be
+    exported and then read by nobody — the run would proceed with the derived default and no warning.
+    Reject anything that is neither derived here nor referenced by the NeMo-RL config."""
+    known = derived | _yaml_md_knobs()
+    unknown = sorted(k for k in extra if k not in known)
+    if not unknown:
+        return
+    lines = []
+    for key in unknown:
+        hint = difflib.get_close_matches(key, sorted(known), n=3, cutoff=0.5)
+        lines.append(
+            f"  {key}" + (f"  — did you mean: {', '.join(hint)}?" if hint else "")
+        )
+    raise ValueError(
+        "nemo_options contains key(s) no MD_* knob reads (they would be silently ignored):\n"
+        + "\n".join(lines)
+        + "\n  Known knobs: "
+        + ", ".join(sorted(known))
+    )
 
 
 # OmegaConf's value grammar accepts an unquoted token wherever it is unambiguous. A quoted string is

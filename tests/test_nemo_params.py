@@ -336,3 +336,22 @@ def test_thinking_budget_can_also_come_from_nemo_options_and_zero_means_off():
     off = resolve(nemo_env_vars(cfg(thinking_budget=0), lr=1e-5, n_gpus=1))
     assert off["policy"]["generation"]["vllm_kwargs"] == {}
     assert off["policy"]["generation"]["vllm_cfg"]["env_vars"] == {}
+
+
+def test_unknown_nemo_options_key_is_rejected_not_silently_exported():
+    """A typo'd knob used to be exported as MD_<TYPO> and read by nobody — the run would proceed on
+    the derived default with no warning."""
+    with pytest.raises(ValueError, match="silently ignored"):
+        nemo_env_vars(cfg(nemo_options={"train_micro_batch": 2}), lr=1e-4, n_gpus=1)
+    with pytest.raises(ValueError, match="MD_TRAIN_MICRO_BATCH_SIZE"):  # did-you-mean
+        nemo_env_vars(cfg(nemo_options={"train_micro_batch": 2}), lr=1e-4, n_gpus=1)
+
+
+def test_yaml_only_knobs_stay_overridable():
+    """Keys the grpo.yaml interpolates but params.py does not derive (MD_PEFT_TARGET_MODULES,
+    MD_CHECKPOINT_ENABLED) are legitimate overrides and must pass the check."""
+    env = nemo_env_vars(
+        cfg(nemo_options={"peft_target_modules": "['all-linear']", "checkpoint_enabled": False}),
+        lr=1e-4, n_gpus=1)
+    assert env["MD_PEFT_TARGET_MODULES"] == "['all-linear']"
+    assert env["MD_CHECKPOINT_ENABLED"] == "false"

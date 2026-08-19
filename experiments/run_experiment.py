@@ -25,11 +25,14 @@ that one is a hand-off to NeMo-RL's own loop rather than an ``RLBackend``).
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 from pathlib import Path
+from typing import get_args
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from monitordecorrelation.config import LoggingConfig, RunConfig
 from monitordecorrelation.envs.factory import make_env
@@ -76,7 +79,12 @@ def _resolve_wandb_mode() -> str:
     )
 
 
-def _coerce(v: str):
+def _coerce(v: str, annotation=None):
+    """Turn a ``--set key=value`` string into a typed value. ``annotation`` is the target field's
+    declared type, when known: a plain ``str`` field keeps its value verbatim (so ``run_name=123``
+    stays the string "123"), everything else gets int/float/bool/JSON coercion."""
+    if annotation is not None and _is_str_field(annotation):
+        return v
     for cast in (int, float):
         try:
             return cast(v)
@@ -92,6 +100,45 @@ def _coerce(v: str):
         except json.JSONDecodeError:
             pass
     return v
+
+
+def _is_str_field(annotation) -> bool:
+    """True for ``str`` and ``str | None`` — the fields whose values must not be number-coerced."""
+    args = get_args(annotation)
+    return annotation is str or (
+        bool(args) and {a for a in args if a is not type(None)} == {str}
+    )
+
+
+def _apply_overrides(cfg, sets: list[str]):
+    """Apply ``--set key=value`` overrides, failing loudly on anything the config can't accept.
+
+    ``model_copy(update=...)`` skips validation entirely, so a typo'd key or an ill-typed value used
+    to be accepted silently and then ignored for the whole run. Instead: reject unknown keys up front
+    (with a did-you-mean), then re-validate the merged config through the schema."""
+    fields = type(cfg).model_fields
+    overrides = {}
+    for kv in sets:
+        if "=" not in kv:
+            raise SystemExit(
+                f"error: --set expects key=value, got {kv!r} "
+                "(quote values containing spaces, e.g. --set 'description=a note')"
+            )
+        k, v = kv.split("=", 1)
+        k = k.strip()
+        if k not in fields:
+            hint = difflib.get_close_matches(k, list(fields), n=3, cutoff=0.5)
+            raise SystemExit(
+                f"error: --set {k}={v}: unknown config field {k!r}."
+                + (f" Did you mean: {', '.join(hint)}?" if hint else "")
+                + f"\n       Valid fields: {', '.join(sorted(fields))}"
+            )
+        overrides[k] = _coerce(v, fields[k].annotation)
+
+    try:
+        return type(cfg).model_validate({**cfg.model_dump(), **overrides})
+    except ValidationError as e:
+        raise SystemExit(f"error: invalid --set override(s):\n{e}") from None
 
 
 def main() -> None:
@@ -112,8 +159,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     if args.set:
-        overrides = {k: _coerce(v) for k, v in (kv.split("=", 1) for kv in args.set)}
-        cfg = cfg.model_copy(update=overrides)
+        cfg = _apply_overrides(cfg, args.set)
 
     lr = cfg.lr if cfg.lr is not None else get_lr(cfg.policy)
 
