@@ -13,6 +13,7 @@ into the cookbook's ``Trajectory``/``TrajectoryGroup`` so those primitives can t
 
 from __future__ import annotations
 
+import tinker
 from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.rl.types import Trajectory, Transition, TrajectoryGroup
 
@@ -20,12 +21,54 @@ from monitordecorrelation.rl.renderers import as_renderer
 from monitordecorrelation.types import Rollout
 
 
+def _transitions(rend, r: Rollout, reward: float) -> list[Transition]:
+    """The rollout as cookbook transitions: normally one, but one per segment when generation was
+    interrupted and resumed (today: a thinking budget force-closing ``<think>``).
+
+    The point of the split is *what gets trained on*. Tokens we injected are put in the **observation**
+    of the segment that follows them, never in an action, and the cookbook masks observation deltas out
+    of the loss — so the forced ``</think>`` contributes no gradient and needs no invented logprob.
+    Successive observations extend the previous one exactly, which is the condition under which
+    ``trajectory_to_data`` merges the whole thing back into a single datum (and what lets the sampler
+    reuse its KV cache in the first place).
+
+    The reward rides on the last transition; ``get_total_rewards`` sums them, so the trajectory's
+    advantage — and therefore every action token's advantage — is unchanged by the split.
+    """
+    if r.token_ids is None or r.logprobs is None:
+        raise ValueError("rollout needs token_ids + logprobs (sampling logprobs) for GRPO")
+    ob0 = rend.model_input(r.prompt.text)
+    if not r.segments:
+        ac = TokensWithLogprobs(tokens=list(r.token_ids), maybe_logprobs=list(r.logprobs))
+        return [Transition(ob=ob0, ac=ac, reward=reward, episode_done=True)]
+
+    out: list[Transition] = []
+    seen: list[int] = []  # every token of the completion so far, injected ones included
+    for k, seg in enumerate(r.segments):
+        prefix = seen + list(seg.injected)
+        # An empty EncodedTextChunk is a 400 from the API, so only append when there is something.
+        ob = ob0.append(tinker.types.EncodedTextChunk(tokens=prefix)) if prefix else ob0
+        last = k == len(r.segments) - 1
+        out.append(
+            Transition(
+                ob=ob,
+                ac=TokensWithLogprobs(tokens=list(seg.tokens), maybe_logprobs=list(seg.logprobs)),
+                reward=reward if last else 0.0,
+                episode_done=last,
+            )
+        )
+        seen = prefix + list(seg.tokens)
+    return out
+
+
 def to_trajectory_groups(
     renderer, rollouts: list[Rollout], rewards: list[float], group_size: int
 ) -> list[TrajectoryGroup]:
     """Group our flat rollouts (``group_size`` consecutive rollouts per prompt) into cookbook
-    ``TrajectoryGroup``s. Each rollout is a single-turn trajectory: observation = the prompt tokens,
-    action = the sampled completion tokens+logprobs, reward = our scalar reward (task − penalty·monitor).
+    ``TrajectoryGroup``s. Each rollout is normally a single-turn trajectory: observation = the prompt
+    tokens, action = the sampled completion tokens+logprobs, reward = our scalar reward
+    (task − penalty·monitor); a rollout whose generation was interrupted and resumed becomes one
+    transition per segment instead (see ``_transitions``).
     The group-level reward is 0 (the whole reward is the per-step reward); ``compute_advantages`` centres
     rewards within each group.
 
@@ -41,14 +84,12 @@ def to_trajectory_groups(
     for start in range(0, len(rollouts), group_size):
         trajs: list[Trajectory] = []
         for r, rew in zip(rollouts[start : start + group_size], rewards[start : start + group_size]):
-            if r.token_ids is None or r.logprobs is None:
-                raise ValueError("rollout needs token_ids + logprobs (sampling logprobs) for GRPO")
-            ob = rend.model_input(r.prompt.text)
-            ac = TokensWithLogprobs(tokens=list(r.token_ids), maybe_logprobs=list(r.logprobs))
+            transitions = _transitions(rend, r, float(rew))
             trajs.append(
                 Trajectory(
-                    transitions=[Transition(ob=ob, ac=ac, reward=float(rew), episode_done=True)],
-                    final_ob=ob,  # unused by assemble_training_data (single-turn); kept for the schema
+                    transitions=transitions,
+                    # unused by assemble_training_data; kept for the schema
+                    final_ob=transitions[-1].ob,
                 )
             )
         groups.append(

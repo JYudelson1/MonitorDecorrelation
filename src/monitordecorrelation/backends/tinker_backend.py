@@ -11,6 +11,7 @@ import tinker
 from monitordecorrelation.rl.grpo import to_trajectory_groups
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.rollout import sample_rollouts
+from monitordecorrelation.rl.thinking_budget import resolve_budget
 from monitordecorrelation.types import Prompt, Rollout
 
 
@@ -27,7 +28,7 @@ class TinkerBackend:
     def __init__(
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
-        thinking_effort: float = DEFAULT_THINKING_EFFORT,
+        thinking_effort: float = DEFAULT_THINKING_EFFORT, thinking_budget: int | None = None,
     ) -> None:
         self.base_model = base_model
         self.learning_rate = learning_rate
@@ -47,6 +48,13 @@ class TinkerBackend:
         self.renderer = make_renderer(base_model, training_client=self.training_client,
                                       effort=thinking_effort)
         self.tokenizer = getattr(self.renderer, "tokenizer", None)
+        # Thinking budget (None = off, and then nothing below this line runs). Resolved HERE, at
+        # construction, so an unsupported policy fails before a single rollout is sampled rather than
+        # halfway through a training run — see rl/thinking_budget.py for the allow-list + evidence.
+        self.thinking_budget = (
+            resolve_budget(base_model, self.tokenizer, thinking_budget)
+            if thinking_budget else None
+        )
         self._sampler = None  # lazily (re)built from current weights
         # KL reference: a sampling client at the BASE model weights (the anchor for the KL penalty).
         # Only built when kl_coef > 0 (otherwise we skip the per-step reference forward passes).
@@ -78,6 +86,7 @@ class TinkerBackend:
             max_tokens=max_tokens,
             temperature=temperature,
             seed=call_seed,
+            thinking_budget=self.thinking_budget,
         )
 
     def train_step(self, rollouts: list[Rollout], rewards: list[float], group_size: int) -> dict[str, float]:

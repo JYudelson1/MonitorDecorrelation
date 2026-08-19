@@ -41,6 +41,13 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   where it ships the canonical implementation** (e.g. `tinker_cookbook.rl.metrics.incorporate_kl_penalty`
   for the KL-to-base penalty) rather than reinventing them — don't adopt the cookbook's training loop.
   The online tinker docs are good — consult them rather than guessing the API.
+- **Thinking budgets are allow-listed.** `thinking_budget` (optional, off — nothing changes by
+  default) force-closes the reasoning block, so it is only offered for policies whose *provider*
+  documents that behaviour, using that provider's own closing text: Qwen3-8B / Qwen3-30B-A3B and the
+  four Nemotron 3/3.5 policies. Never port one family's closing text to another (Qwen3.5 renumbered
+  `<think>` and pre-opens it — that is exactly how SGLang shipped a broken budget). Evidence and
+  citations live in `rl/thinking_budget.py`; the tinker path is a two-call protocol because tinker
+  has no budget knob, and its injected tokens are masked out of the loss.
 - **The `Monitor` seam is sacred.** Same `.score(rollout)` interface across CoT judges, output
   judges, and white-box probes; detector strength is config, not a new interface. See `docs/MONITORS.md`.
 - **Never train on the oracle.** `behavior_present` grades detectors; it must never enter a

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Strict(BaseModel):
@@ -83,10 +83,13 @@ class ExperimentConfig(_Strict):
         "parametrize experiments/configs/nemo/grpo.yaml, e.g. {'train_micro_batch_size': 2, "
         "'moe': true}. Keys may be bare or MD_-prefixed. See backends/nemo/params.py.")
     thinking_budget: int | None = Field(
-        None, description="nemo backend only: hard cap on the tokens the policy may spend inside "
-        "<think>…</think>. None (default) = uncapped. When set, generation forces </think> once the "
-        "budget is reached — see backends/nemo/thinking_budget.py, including the note that the "
-        "forced token is trained on.")
+        None, description="hard cap on the tokens the policy may spend on reasoning. None (default) "
+        "= uncapped, and nothing about sampling changes. When set, generation is force-closed with "
+        "the policy family's OWN documented closing text once the budget is spent, so only families "
+        "whose provider documents a budget are accepted (Qwen3 thinking, Nemotron 3/3.5) — anything "
+        "else is rejected at load. tinker: rl/thinking_budget.py (sample → force-close → resume; the "
+        "injected tokens are masked out of the loss). nemo: backends/nemo/thinking_budget.py (a vLLM "
+        "logits processor; there the forced token IS trained on). Unsupported on transformers.")
     thinking_effort: float = Field(
         0.9, ge=0.0, lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "
@@ -104,6 +107,30 @@ class ExperimentConfig(_Strict):
         if v is not None and set(v) != {"start_penalty", "end_penalty"}:
             raise ValueError("penalty_schedule must be {'start_penalty': float, 'end_penalty': float}")
         return v
+
+    @model_validator(mode="after")
+    def _check_thinking_budget(self):
+        """A budget is only honest where the force-close behaviour is documented — so reject it at
+        LOAD time (no network, no tokenizer) rather than mid-run.
+
+        Two independent gates: the backend must be able to enforce a budget at all, and the policy's
+        provider must document what to inject when the budget runs out."""
+        if self.thinking_budget is None:
+            return self
+        if self.thinking_budget <= 0:
+            raise ValueError(
+                f"thinking_budget must be a positive number of tokens (got {self.thinking_budget}); "
+                f"use null to turn it off")
+        if self.backend not in ("tinker", "nemo"):
+            raise ValueError(
+                f"thinking_budget is not supported on the {self.backend!r} backend — it is "
+                f"implemented for tinker (rl/thinking_budget.py) and nemo "
+                f"(backends/nemo/thinking_budget.py). Drop thinking_budget or switch backend.")
+        if self.backend == "tinker":
+            from monitordecorrelation.rl.thinking_budget import resolve_spec
+
+            resolve_spec(self.policy)  # raises ThinkingBudgetError, naming the reason, for the rest
+        return self
     kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "
                            "incorporate_kl_penalty); >0 anchors the policy → prevents the "
                            "reward-over-optimization collapse. 0 = off (default).")

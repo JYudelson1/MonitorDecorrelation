@@ -163,6 +163,56 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         plt.close(fig)
         out.append(path)
 
+    def budget_tokens_fig(rows, title, path):
+        """Thinking-budget cost: what the budget would cost in-engine (ideal) vs what tinker's
+        sample→force-close→resume protocol really spent (actual), for prefill and decode alike, with
+        prefill split into measured prefix-cache hits and misses.
+
+        Skipped entirely for runs without a thinking budget (the keys are simply absent). The one to
+        watch is the cache-MISS panel: cached prefill is billed at a discount, so the re-prefill of a
+        continuation is only expensive to the extent it misses.
+        """
+        panels = [
+            ("prefill (batch total)", [("tokens/prefill_ideal_total", "ideal"),
+                                       ("tokens/prefill_actual_total", "actual")]),
+            ("prefill cache miss / hit", [("tokens/prefill_ideal_cache_miss_total", "ideal miss"),
+                                          ("tokens/prefill_actual_cache_miss_total", "actual miss"),
+                                          ("tokens/prefill_ideal_cache_hit_total", "ideal hit"),
+                                          ("tokens/prefill_actual_cache_hit_total", "actual hit")]),
+            ("decode (batch total)", [("tokens/decode_ideal_total", "ideal"),
+                                      ("tokens/decode_actual_total", "actual")]),
+        ]
+        fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+        any_data = False
+        for ax, (sub, series) in zip(axes, panels):
+            for key, label in series:
+                xs, ys = _series(rows, key)
+                if xs:
+                    ax.plot(xs, ys, marker="o", ls="--" if "ideal" in key else "-", label=label)
+                    any_data = True
+            ax.set_xlabel("step")
+            ax.set_ylabel("tokens")
+            ax.set_title(sub)
+            ax.set_ylim(bottom=0)
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=8)
+        if not any_data:
+            plt.close(fig)
+            return
+        # How often the cap actually bound — an overhead curve is meaningless without it.
+        xs, ys = _series(rows, "tokens/budget_forced_rate")
+        if xs:
+            ax2 = axes[2].twinx()
+            ax2.plot(xs, ys, color="grey", lw=0.9, ls=":", label="budget forced frac")
+            ax2.set_ylabel("forced fraction")
+            ax2.set_ylim(-0.02, 1.02)
+            ax2.legend(fontsize=8, loc="lower right")
+        fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        out.append(path)
+
     # TRAIN plots (training rollouts)
     train_rows = _load(run_dir / "metrics.jsonl")
     if train_rows:
@@ -181,6 +231,8 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         monitors_fig(train_rows, ["mean_score"], f"{run_dir.name} [train] — train-against penalty",
                      td / "monitors.png")
         tokens_fig(train_rows, f"{run_dir.name} [train] — token counts", td / "tokens.png")
+        budget_tokens_fig(train_rows, f"{run_dir.name} [train] — thinking-budget token cost",
+                          td / "tokens_budget.png")
 
     # EVAL plots (held-out set — the degradation curves)
     eval_rows = _load(run_dir / "eval_metrics.jsonl")
@@ -197,5 +249,7 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         monitors_fig(eval_rows, ["auroc", "brier", pres_metric],
                      f"{run_dir.name} [eval] — held-out detector degradation", ed / "monitors.png")
         tokens_fig(eval_rows, f"{run_dir.name} [eval] — token counts", ed / "tokens.png")
+        budget_tokens_fig(eval_rows, f"{run_dir.name} [eval] — thinking-budget token cost",
+                          ed / "tokens_budget.png")
 
     return out

@@ -24,6 +24,10 @@ from monitordecorrelation.eval.metrics import (
     dprime_margin,
     roc_auc,
 )
+# Pure integer bookkeeping, no tinker import — safe to reach from NeMo-RL's virtualenv like the rest
+# of this module.
+from monitordecorrelation.rl.token_accounting import META_KEY as ACCOUNT_KEY
+from monitordecorrelation.rl.token_accounting import budget_token_metrics
 from monitordecorrelation.types import MonitorResult, Rollout
 
 
@@ -75,7 +79,13 @@ def token_metrics(rollouts: Sequence[Rollout], max_tokens: int) -> dict[str, flo
     ``*_per_rollout`` is the mean of one rollout. ``truncated_rate`` is the fraction of completions
     that hit ``max_tokens`` — a rising output length with truncation climbing means the metric is
     censored, so read the two together. Empty ``{}`` if sampling didn't record counts (e.g. rollouts
-    reloaded from disk)."""
+    reloaded from disk).
+
+    When a **thinking budget** was in force, the rollouts also carry a per-request bill and the
+    ``tokens/{prefill,decode}_{ideal,actual}…`` keys ride along (see ``rl/token_accounting.py``):
+    what the budget would cost in-engine, versus what tinker's sample→force-close→resume protocol
+    really spent, prefill split into measured prefix-cache hits and misses. Those keys are absent
+    for an unbudgeted run, so its rows are unchanged."""
     n_in = [r.meta["n_prompt_tokens"] for r in rollouts if "n_prompt_tokens" in r.meta]
     n_out = [r.meta["n_output_tokens"] for r in rollouts if "n_output_tokens" in r.meta]
     if not n_in or not n_out:
@@ -88,6 +98,7 @@ def token_metrics(rollouts: Sequence[Rollout], max_tokens: int) -> dict[str, flo
         "tokens/output_per_rollout": mean(n_out),
         "tokens/output_max": float(max(n_out)),
         "tokens/truncated_rate": mean(float(n >= max_tokens) for n in n_out),
+        **budget_token_metrics([r.meta[ACCOUNT_KEY] for r in rollouts if ACCOUNT_KEY in r.meta]),
     }
 
 

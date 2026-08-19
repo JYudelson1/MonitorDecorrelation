@@ -46,13 +46,55 @@ uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick 
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench} subset env_options n_steps batch_size group_size
-eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort penalty_coef penalty_schedule
-kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
+eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort thinking_budget penalty_coef
+penalty_schedule kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
 `env_options` holds env-specific constructor kwargs (impossiblebench only) and `thinking_effort`
-[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere). Each monitor: `{kind:"cot", name, role, model_id,
+[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
+`thinking_budget` (see below) is the *hard* alternative for the families that document one. Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
+
+### Thinking budget (optional, off)
+
+`thinking_budget: <int>` caps the tokens the policy may spend reasoning; once spent, the reasoning is
+force-closed with **that model family's own documented closing text** and the model has to answer.
+Leave it unset (the default) and nothing changes — same requests, same rollouts, same metric keys.
+
+```bash
+uv run python experiments/run_experiment.py --config <cfg> --set thinking_budget=512
+```
+
+- **Only where the provider documents one**, or the config is rejected at load with the reason:
+  `Qwen/Qwen3-8B`, `Qwen/Qwen3-30B-A3B`, and the four `nvidia/NVIDIA-Nemotron-3*` / `3.5*` policies.
+  Not Qwen3.5/3.6 (documented only for Alibaba's hosted endpoints, and their `<think>` ids +
+  template differ), not the `-Instruct-2507` Qwen3s (no thinking block), not DeepSeek/Kimi/gpt-oss/
+  Llama, not Inkling (use `thinking_effort`). Backends: `tinker` and `nemo`; `transformers` refuses.
+- **How it behaves on tinker.** Sample `min(max_tokens, budget)` tokens → if the block is still open,
+  splice in the closing text → resume for the rest of `max_tokens`. A rollout that closes its
+  reasoning inside the budget costs exactly one request. `max_tokens` still bounds the whole
+  completion, so a budgeted rollout is never longer than an unbudgeted one, and `max_tokens <=
+  thinking_budget` means the budget can never bind. Details + citations: docs/INFRA.md.
+- **The forced tokens are masked out of the RL loss** on tinker (they are observation, not action).
+  On `nemo` they are part of the sampled sequence and *are* trained on — a real cross-backend
+  difference, noted in both modules.
+- **Watch the cost.** A forced rollout re-prefills its prompt *and* its truncated reasoning, which
+  the plain `tokens/input_total` curve does not show. A budgeted run therefore logs
+  `tokens/{prefill,decode}_{ideal,actual}_total` — what an in-engine budget would cost vs what we
+  really spent — with prefill split into measured prefix-cache hits and misses
+  (`tokens/prefill_{ideal,actual}_cache_{hit,miss}_total`), plus `tokens/prefill_overhead_ratio`,
+  `tokens/prefill_miss_overhead_ratio`, `tokens/budget_forced_rate` and
+  `tokens/sampling_requests_per_rollout`. In W&B under `train/tokens/*` / `eval/tokens/*`, plotted to
+  `data/runs/<run>/{train,eval}/tokens_budget.png`, and summarised on each step line. The overhead
+  ratio is worst when prompts are short relative to the budget (short prompts also fall below the
+  cache's 64-token block, so they miss outright).
+- **Live check against real policies** (costs sampling, not part of `pytest`):
+  ```bash
+  uv run python tests/check_thinking_budget_live.py --budgets 64 256 1024 --max-tokens 2048
+  ```
+  It asserts the invariants (one closing tag, the cut lands at the budget, nothing generated after
+  the close but the answer, the bill adds up) and writes every transcript to
+  `data/thinking_budget_check/<model>.jsonl` for reading.
 
 For running the full matrix across seeds, use `scripts/queue_runs.sh` (next section) rather than a
 hand-rolled loop.
@@ -134,7 +176,8 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
 - **Token counts** come free with every run: `tokens/{input,output}_total` (the whole batch at that
   step), `tokens/{input,output}_per_rollout`, `tokens/output_max`, `tokens/truncated_rate` (fraction of
   completions that hit `max_tokens` — read output length next to it, since a censored length flattens
-  out), and `tokens/cum_total` (running total, train batches only). They're in `metrics.jsonl` /
+  out), and `tokens/cum_total` (running total, train batches only); a `thinking_budget` run adds the
+  ideal-vs-actual prefill/decode keys above. They're in `metrics.jsonl` /
   `eval_metrics.jsonl`, in W&B under `train/tokens/*` and `eval/tokens/*`, plotted to
   `data/runs/<run>/{train,eval}/tokens.png`, and echoed on each step line (`tok=…in/…out per rollout`).
 - **`thinking_effort`** conditions Inkling's reasoning length (0.1 minimal … 0.9 high, the model

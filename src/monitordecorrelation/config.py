@@ -66,5 +66,8 @@ class RunConfig:
     lora_rank: int = 16
     learning_rate: float = 1e-5
     seed: int = 0
+    # Recorded for the run's own bookkeeping (W&B config + run_info.json); the budget itself is
+    # enforced by the backend at sampling time, not by the training loop. None = off.
+    thinking_budget: int | None = None
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)

@@ -339,6 +339,10 @@ def run_grpo(
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
         tok_note = (f" tok={tok['tokens/input_per_rollout']:.0f}in/{tok['tokens/output_per_rollout']:.0f}out"
                     f" per rollout, {tok['tokens/total']/1e3:.1f}k this step" if tok else "")
+        if "tokens/budget_forced_rate" in tok:  # thinking budget on: how often it bound + what it cost
+            tok_note += (f" | budget forced {tok['tokens/budget_forced_rate']:.0%}, "
+                         f"prefill x{tok['tokens/prefill_overhead_ratio']:.2f} "
+                         f"(uncached x{tok['tokens/prefill_miss_overhead_ratio']:.2f})")
         # cookbook train_step surfaces no loss metric; show mean training logprob as the proxy signal.
         train_note = f"loss={loss_val:.1f}" if loss_val == loss_val else f"logp={logp_mean:.2f}"
         _log(

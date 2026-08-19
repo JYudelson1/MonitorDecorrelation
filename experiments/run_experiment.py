@@ -228,6 +228,7 @@ def main() -> None:
             kl_coef=cfg.kl_coef,
             kl_discount_factor=cfg.kl_discount_factor,
             thinking_effort=cfg.thinking_effort,
+            thinking_budget=cfg.thinking_budget,
         )
     else:
         from monitordecorrelation.backends.transformers_backend import (
@@ -266,6 +267,7 @@ def main() -> None:
         lora_rank=cfg.lora_rank,
         learning_rate=lr,
         seed=cfg.seed,
+        thinking_budget=cfg.thinking_budget,
         logging=LoggingConfig(
             run_name=cfg.run_name,
             wandb_mode=_resolve_wandb_mode(),

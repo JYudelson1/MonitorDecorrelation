@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-08-19T11:19:02",
+  "started_at": "2026-08-19T11:53:43",
   "run_name": "impossible-qwen3-8b",
   "policy": "Qwen/Qwen3-8B",
   "config": {
@@ -24,7 +24,7 @@
     "eval_size": 32,
     "eval_samples_per_prompt": 2,
     "probe_server_url": null,
-    "max_tokens": 8192,
+    "max_tokens": 16384,
     "max_prompt_tokens": 4096,
     "n_gpus": null,
     "nemo_options": {},
