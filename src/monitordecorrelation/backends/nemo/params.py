@@ -387,7 +387,7 @@ def nemo_env_vars(
         "MD_SAVE_PERIOD": cfg.n_steps,  # only the final step, like the tinker backend's one save
         "MD_LOG_DIR": f"{run_dir}/nemo_logs" if run_dir else "logs",
         "MD_WANDB_ENABLED": wandb_enabled,
-        "MD_WANDB_PROJECT": "monitor-decorrelation",
+        "MD_WANDB_PROJECT": "monitor-correlation-impossible-bench",
         "MD_WANDB_GROUP": wandb_group,
         "MD_WANDB_TAGS": list(wandb_tags or []),
     }

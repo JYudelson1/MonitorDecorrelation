@@ -190,7 +190,7 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
 
 - **wandb auto-syncs iff logged in** — `run_experiment.py` picks `online` when a credential is
   configured locally (netrc / `WANDB_API_KEY`), else `offline` (local, never prompts; `WANDB_MODE`
-  overrides). Project `monitor-decorrelation`; all runs of a sweep share a **group** per (experiment,
+  overrides). Project `monitor-correlation-impossible-bench`; all runs of a sweep share a **group** per (experiment,
   model) + tags (env, model, seed, train-against). This is where the metric curves live — especially
   the ground-truth trajectory (see EXPERIMENT_PLAN.md "Ground truth is the crux").
 - **Rollout persistence sampling:** `log_fraction` (default `1.0` = keep everything) controls what

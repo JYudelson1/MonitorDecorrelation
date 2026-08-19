@@ -27,7 +27,7 @@ class LoggingConfig:
 
     use_wandb: bool = True
     wandb_mode: str = "offline"  # local by default; "online" to sync
-    wandb_project: str = "monitor-decorrelation"
+    wandb_project: str = "monitor-correlation-impossible-bench"
     wandb_group: str | None = None  # W&B run group — share across a sweep (matrix × seeds) to cluster
     wandb_tags: list[str] = field(default_factory=list)  # e.g. [env, model, "seed0", train-against name]
     run_name: str | None = None

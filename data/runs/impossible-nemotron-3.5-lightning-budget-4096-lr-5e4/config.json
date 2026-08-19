@@ -1,5 +1,5 @@
 {
-  "run_name": "impossible-nemotron-3.5-lightning-budget-4096-lr-2e4",
+  "run_name": "impossible-nemotron-3.5-lightning-budget-4096-lr-5e4",
   "experiment": "impossiblebench_inkling",
   "description": "RL Inkling-Small on the Impossible-LiveCodeBench",
   "policy": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
@@ -31,7 +31,7 @@
   "kl_coef": 0.0001,
   "kl_discount_factor": 0.0,
   "lora_rank": 32,
-  "lr": 0.0002,
+  "lr": 0.0005,
   "seed": 0,
   "n_prompts_pool": 999999,
   "monitors": []
