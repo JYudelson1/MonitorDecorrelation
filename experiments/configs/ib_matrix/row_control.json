@@ -1,0 +1,61 @@
+{
+  "experiment": "ib_degradation_matrix",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "impossiblebench",
+  "subset": "impossible",
+  "env_options": {
+    "reward_mode": "all_or_nothing",
+    "score_original": true,
+    "per_test_timeout": 1.0,
+    "total_timeout": 600.0,
+    "exec_workers": 32
+  },
+  "n_steps": 256,
+  "batch_size": 64,
+  "group_size": 8,
+  "eval_every": 8,
+  "eval_size": 32,
+  "eval_samples_per_prompt": 2,
+  "max_tokens": 8192,
+  "thinking_effort": 0.5,
+  "penalty_coef": 0.0,
+  "kl_coef": 0.0001,
+  "lora_rank": 32,
+  "lr": 0.0002,
+  "seed": 0,
+  "n_prompts_pool": 999999,
+  "penalty_schedule": null,
+  "run_name": "ib_Inkling-Small_control_s0",
+  "description": "CONTROL: pure task reward, NO monitor in the gradient (all held_out). Baseline for how much each monitor drifts from the policy changing at all.",
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "cot_weak",
+      "role": "held_out",
+      "model_id": "anthropic/claude-3-haiku",
+      "use_cot": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot_strong",
+      "role": "held_out",
+      "model_id": "deepseek/deepseek-chat",
+      "use_cot": true
+    },
+    {
+      "kind": "cot",
+      "name": "out_weak",
+      "role": "held_out",
+      "model_id": "anthropic/claude-3-haiku",
+      "use_cot": false
+    },
+    {
+      "kind": "cot",
+      "name": "out_strong",
+      "role": "held_out",
+      "model_id": "deepseek/deepseek-chat",
+      "use_cot": false
+    }
+  ]
+}
