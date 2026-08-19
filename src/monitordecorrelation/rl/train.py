@@ -185,8 +185,12 @@ def run_grpo(
         _log("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
         eval_prompts = [env.sample_prompt() for _ in range(cfg.eval_size)]
 
-    def run_eval(step: int) -> None:
+    def run_eval(step: int, commit: bool = False) -> None:
         """Sample the current policy on the fixed eval set; log every monitor's degradation metrics.
+
+        ``commit`` is the wandb flush flag: an eval inside the loop is followed by the train ``log()``
+        for the SAME step, so it stays buffered (commit=False) and both rows flush together; only the
+        final eval — with no train step after it — has to commit itself.
 
         AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and the
         behavior-present mean score (``mean_score_<behavior>``) stay defined there, so the
@@ -237,7 +241,8 @@ def run_grpo(
             }, default=str) + "\n")
         eval_rollouts_log.flush()
         if run is not None:
-            run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
+            run.log({f"eval/{k}": v for k, v in row.items() if k != "step"},
+                    step=step, commit=commit)
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
         summ = " ".join(
             f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}/brier={row[f'monitor/{m.name}/brier']:.2f}"
@@ -333,7 +338,11 @@ def run_grpo(
             **{f"loss/{k}": v for k, v in step_metrics.items()},
         }
         if run is not None:
-            run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
+            # commit=True flushes this step NOW (with any eval row buffered at the same step).
+            # wandb defaults to commit=False whenever `step` is passed explicitly, which would hold
+            # every row back until the next step's log() — the metrics land one RL step late.
+            run.log({f"train/{k}": v for k, v in row.items() if k != "step"},
+                    step=step, commit=True)
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
@@ -390,7 +399,7 @@ def run_grpo(
             )
         rollout_log.flush()
 
-    run_eval(cfg.n_steps)  # final held-out eval
+    run_eval(cfg.n_steps, commit=True)  # final held-out eval (nothing follows it → commit itself)
 
     # Save the final training state on tinker (7-day TTL) so we can resume / sample / inspect the
     # trained model later — important when we don't yet know how long these runs should take.

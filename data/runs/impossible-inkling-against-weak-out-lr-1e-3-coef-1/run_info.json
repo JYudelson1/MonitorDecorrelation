@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-08-19T11:52:19",
+  "started_at": "2026-08-19T13:49:30",
   "run_name": "impossible-inkling-against-weak-out-lr-1e-3-coef-1",
   "policy": "thinkingmachines/Inkling-Small",
   "config": {

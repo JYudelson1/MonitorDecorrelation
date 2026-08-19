@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-08-19T11:30:43",
+  "started_at": "2026-08-19T13:48:24",
   "run_name": "impossible-inkling-against-weak-out-lr-1e-3-coef-0.1",
   "policy": "thinkingmachines/Inkling-Small",
   "config": {
@@ -30,7 +30,7 @@
     "nemo_options": {},
     "thinking_budget": null,
     "thinking_effort": 0.5,
-    "penalty_coef": 1.0,
+    "penalty_coef": 0.1,
     "penalty_schedule": null,
     "kl_coef": 0.0001,
     "kl_discount_factor": 0.0,
