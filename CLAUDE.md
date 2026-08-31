@@ -21,6 +21,7 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
 | The monitor abstraction + activations risk | [`docs/MONITORS.md`](docs/MONITORS.md) |
 | RL backends / GRPO / logging | [`docs/INFRA.md`](docs/INFRA.md) |
 | What's actually built/tested | [`STATUS.md`](STATUS.md) |
+| Downstream monitorability evals (separate repo) | [`docs/DOWNSTREAM_EVALS.md`](docs/DOWNSTREAM_EVALS.md) |
 | How to run the scripts | [`USAGE.md`](USAGE.md) |
 | Original source docs | `docs/Original Project Proposal.md`, `docs/Joey Research Ideas.md` |
 

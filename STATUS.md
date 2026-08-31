@@ -13,6 +13,15 @@ reusable directed-coupling analysis (eval/coupling.py), and a shared probe serve
 is archived as the penalty=1.0 baseline. See loose_threads.md for live state.) Prev 2026-06-29: matrix
 build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe investigation._
 
+## Downstream monitorability evals (2026-08-31) — separate repo, baseline in progress
+- **New track for the ICLR paper:** does in-distribution degradation transfer to downstream
+  monitorability tasks? First harness = **CoT Red-Handed** (BigCodeBench + instructed side tasks,
+  catch@1%FPR). Code lives in a fork (`JYudelson1/cot-monitoring`, branch `downstream-baseline`,
+  checkout `/Users/joey/Aether/cot-monitoring`), NOT here. See [`docs/DOWNSTREAM_EVALS.md`](docs/DOWNSTREAM_EVALS.md).
+- 🟢 tinker Inspect provider (samples base Qwen3-8B; live sample verified) · 🟡 `score_transcripts.py`
+  + `catch_rate.py` (metrics unit-tested; end-to-end on real CRH logs pending) · monitors = the same
+  4 LLM judges (haiku-3 + deepseek-chat × CoT/output). Base-model baseline only; checkpoints expired.
+
 ## Current experiment (2026-07-06) — MBPP-Honeypot cross-method degradation matrix, penalty=0.5 batch
 - **The pivot.** The first batch (`data/runs/mbpp_matrix_orig_20260701/`, penalty_coef=1.0) is the
   **baseline**: LLM monitors drove the policy fully HONEST (strict≈0), so 4/7 rows had no hacking to
