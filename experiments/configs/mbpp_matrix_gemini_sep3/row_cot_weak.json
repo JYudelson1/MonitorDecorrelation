@@ -3,7 +3,7 @@
   "policy": "Qwen/Qwen3-8B",
   "backend": "tinker",
   "env": "mbpp_honeypot",
-  "n_steps": 90,
+  "n_steps": 60,
   "batch_size": 64,
   "group_size": 8,
   "eval_every": 3,
@@ -15,7 +15,7 @@
   "kl_coef": 0.0001,
   "lora_rank": 64,
   "seed": 0,
-  "save_every": 9,
+  "save_every": 6,
   "run_name": "mbpp_Qwen3-8B_cot_weak_s0_sep3",
   "description": "Train AGAINST cot_weak on MBPP-Honeypot (reward-hacking); hold out cot_strong, out_weak, out_strong, probe_ood, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
   "monitors": [
