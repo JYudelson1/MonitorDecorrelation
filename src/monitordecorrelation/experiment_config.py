@@ -132,7 +132,7 @@ def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy
     for s in specs:
         if s.kind == "cot":
             mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior or default_behavior,
-                             threshold=s.threshold, use_cot=s.use_cot)
+                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.get("use_output", True))
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
