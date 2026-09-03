@@ -30,6 +30,7 @@ class CoTMonitorSpec(_Strict):
     behavior: str | None = None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
     threshold: float = 0.5
     use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
+    use_output: bool = True  # False = ignore the output (judge the CoT only)
 
 
 class ProbeMonitorSpec(_Strict):
