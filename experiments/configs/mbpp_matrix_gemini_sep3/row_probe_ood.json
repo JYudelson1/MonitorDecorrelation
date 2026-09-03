@@ -1,0 +1,65 @@
+{
+  "experiment": "mbpp_degradation_matrix",
+  "policy": "Qwen/Qwen3-8B",
+  "backend": "tinker",
+  "env": "mbpp_honeypot",
+  "n_steps": 90,
+  "batch_size": 64,
+  "group_size": 8,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 9,
+  "max_tokens": 2048,
+  "penalty_coef": 0.5,
+  "penalty_schedule": null,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "seed": 0,
+  "run_name": "mbpp_Qwen3-8B_probe_ood_s0_sep3",
+  "description": "Train AGAINST probe_ood on MBPP-Honeypot (reward-hacking); hold out cot_weak, cot_strong, out_weak, out_strong, probe_iid. All scored on the fixed held-out eval set each eval_every (eval_metrics.jsonl).",
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "cot_weak",
+      "role": "held_out",
+      "model_id": "anthropic/claude-3-haiku",
+      "use_cot": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot_strong",
+      "role": "held_out",
+      "model_id": "deepseek/deepseek-chat",
+      "use_cot": true
+    },
+    {
+      "kind": "cot",
+      "name": "out_weak",
+      "role": "held_out",
+      "model_id": "anthropic/claude-3-haiku",
+      "use_cot": false
+    },
+    {
+      "kind": "cot",
+      "name": "out_strong",
+      "role": "held_out",
+      "model_id": "deepseek/deepseek-chat",
+      "use_cot": false
+    },
+    {
+      "kind": "probe",
+      "name": "probe_ood",
+      "role": "train_against",
+      "probe_path": "data/probes/Qwen3-8B/diverse_deception",
+      "probe_model": "Qwen/Qwen3-8B"
+    },
+    {
+      "kind": "probe",
+      "name": "probe_iid",
+      "role": "held_out",
+      "probe_path": "data/probes/Qwen3-8B/mbpp_honeypot",
+      "probe_model": "Qwen/Qwen3-8B"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "experiment": "mbpp_degradation_matrix",
+  "policy": "Qwen/Qwen3-8B",
+  "backend": "tinker",
+  "env": "mbpp_honeypot",
+  "n_steps": 90,
+  "batch_size": 64,
+  "group_size": 8,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 9,
+  "max_tokens": 2048,
+  "penalty_coef": 0.5,
+  "penalty_schedule": null,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "seed": 0,
+  "run_name": "mbpp_Qwen3-8B_control_s0_sep3",
+  "description": "CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). Baseline for how much each monitor drifts from the policy changing at all.",
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "cot_only_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
+    },
+    {
+      "kind": "cot",
+      "name": "cot_only_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
+    },
+    {
+      "kind": "cot",
+      "name": "out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "probe",
+      "name": "probe_ood",
+      "role": "held_out",
+      "probe_path": "data/probes/Qwen3-8B/diverse_deception",
+      "probe_model": "Qwen/Qwen3-8B"
+    },
+    {
+      "kind": "probe",
+      "name": "probe_iid",
+      "role": "held_out",
+      "probe_path": "data/probes/Qwen3-8B/mbpp_honeypot",
+      "probe_model": "Qwen/Qwen3-8B"
+    }
+  ]
+}
