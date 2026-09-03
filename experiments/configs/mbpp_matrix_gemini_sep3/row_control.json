@@ -37,6 +37,22 @@
     },
     {
       "kind": "cot",
+      "name": "cot+out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
       "name": "out_weak",
       "role": "held_out",
       "model_id": "google/gemini-2.5-flash-lite",

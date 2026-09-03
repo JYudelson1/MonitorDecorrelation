@@ -21,31 +21,51 @@
   "monitors": [
     {
       "kind": "cot",
-      "name": "cot_weak",
+      "name": "cot_only_weak",
       "role": "held_out",
-      "model_id": "anthropic/claude-3-haiku",
-      "use_cot": true
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
     },
     {
       "kind": "cot",
-      "name": "cot_strong",
+      "name": "cot_only_strong",
       "role": "held_out",
-      "model_id": "deepseek/deepseek-chat",
-      "use_cot": true
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
     },
     {
       "kind": "cot",
       "name": "out_weak",
       "role": "held_out",
-      "model_id": "anthropic/claude-3-haiku",
-      "use_cot": false
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
     },
     {
       "kind": "cot",
       "name": "out_strong",
       "role": "train_against",
-      "model_id": "deepseek/deepseek-chat",
-      "use_cot": false
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
     },
     {
       "kind": "probe",
