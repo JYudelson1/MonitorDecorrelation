@@ -66,5 +66,6 @@ class RunConfig:
     lora_rank: int = 16
     learning_rate: float = 1e-5
     seed: int = 0
+    save_every: int = 500  # save checkpoint every N train steps
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)

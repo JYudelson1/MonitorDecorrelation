@@ -305,6 +305,12 @@ def run_grpo(
     for step in range(cfg.n_steps):
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
+            
+        if step % cfg.save_every == 0:
+            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}")
+            (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
+            info[f"checkpoint_{step}"] = ckpt
+            _log(f"saved checkpoint at step {step}: {ckpt}")
 
         prompts = [env.sample_prompt() for _ in range(cfg.batch_size)]
         _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
