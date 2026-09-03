@@ -51,8 +51,12 @@ class ExperimentConfig(_Strict):
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
     backend: Literal["tinker", "transformers"] = "tinker"
-    env: Literal["sycophancy", "mbpp_honeypot"] = "sycophancy"
-    subset: str = "nlp"
+    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench"] = "sycophancy"
+    subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
+    env_options: dict = Field(
+        default_factory=dict,
+        description="env-specific constructor kwargs (impossiblebench only, e.g. "
+        "{'reward_mode': 'fraction', 'exec_workers': 32}); validated by the env constructor")
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
@@ -65,6 +69,11 @@ class ExperimentConfig(_Strict):
         None, description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
     max_tokens: int = 1024
+    thinking_effort: float = Field(
+        0.9, ge=0.0, lt=1.0,
+        description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "
+        "0.7=medium, 0.9=high. Lower effort = far shorter CoT, so it trades monitor-visible reasoning "
+        "against tokens per rollout. Ignored by HF-chat-template policies (Qwen3 & co.).")
     penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
     penalty_schedule: dict | None = Field(
         None, description="None → constant penalty_coef. Else {'start_penalty': x, 'end_penalty': y}: λ "
@@ -85,7 +94,11 @@ class ExperimentConfig(_Strict):
     lr: float | None = Field(None, description="None = TM-estimated LoRA LR for the policy")
     seed: int = 0
     n_prompts_pool: int = Field(512, description="how many env prompts to draw the run's prompts from")
-    monitors: list[MonitorSpec] = Field(min_length=1)
+    monitors: list[MonitorSpec] = Field(
+        default_factory=list,
+        description="mixed CoT judges / probes, each train_against or held_out. EMPTY is legal and "
+        "means a pure-task-reward run: no monitor in the gradient and none measured (the plain-RL "
+        "baseline for a new env).")
 
 
 def load_config(path: str | Path) -> ExperimentConfig:

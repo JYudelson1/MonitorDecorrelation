@@ -13,34 +13,37 @@ into the cookbook's ``Trajectory``/``TrajectoryGroup`` so those primitives can t
 
 from __future__ import annotations
 
-import tinker
 from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.rl.types import Trajectory, Transition, TrajectoryGroup
 
-from monitordecorrelation.rl.rollout import build_prompt_tokens
+from monitordecorrelation.rl.renderers import as_renderer
 from monitordecorrelation.types import Rollout
 
 
 def to_trajectory_groups(
-    tokenizer, rollouts: list[Rollout], rewards: list[float], group_size: int
+    renderer, rollouts: list[Rollout], rewards: list[float], group_size: int
 ) -> list[TrajectoryGroup]:
     """Group our flat rollouts (``group_size`` consecutive rollouts per prompt) into cookbook
     ``TrajectoryGroup``s. Each rollout is a single-turn trajectory: observation = the prompt tokens,
     action = the sampled completion tokens+logprobs, reward = our scalar reward (task − penalty·monitor).
     The group-level reward is 0 (the whole reward is the per-step reward); ``compute_advantages`` centres
-    rewards within each group."""
+    rewards within each group.
+
+    ``renderer`` must be the SAME renderer that sampled these rollouts (or a bare tokenizer, wrapped
+    as HF-chat) — the observation has to re-render to the exact prompt tokens the policy saw."""
     if len(rollouts) != len(rewards):
         raise ValueError(f"rollouts ({len(rollouts)}) and rewards ({len(rewards)}) length mismatch")
     if len(rollouts) % group_size != 0:
         raise ValueError(f"{len(rollouts)} rollouts not divisible by group_size {group_size}")
 
+    rend = as_renderer(renderer)
     groups: list[TrajectoryGroup] = []
     for start in range(0, len(rollouts), group_size):
         trajs: list[Trajectory] = []
         for r, rew in zip(rollouts[start : start + group_size], rewards[start : start + group_size]):
             if r.token_ids is None or r.logprobs is None:
                 raise ValueError("rollout needs token_ids + logprobs (sampling logprobs) for GRPO")
-            ob = tinker.ModelInput.from_ints(build_prompt_tokens(tokenizer, r.prompt.text))
+            ob = rend.model_input(r.prompt.text)
             ac = TokensWithLogprobs(tokens=list(r.token_ids), maybe_logprobs=list(r.logprobs))
             trajs.append(
                 Trajectory(

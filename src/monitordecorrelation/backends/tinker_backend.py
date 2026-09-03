@@ -9,6 +9,7 @@ from __future__ import annotations
 import tinker
 
 from monitordecorrelation.rl.grpo import to_trajectory_groups
+from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
@@ -26,6 +27,7 @@ class TinkerBackend:
     def __init__(
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
+        thinking_effort: float = DEFAULT_THINKING_EFFORT,
     ) -> None:
         self.base_model = base_model
         self.learning_rate = learning_rate
@@ -39,7 +41,12 @@ class TinkerBackend:
         self.training_client = self._sc.create_lora_training_client(
             base_model, rank=lora_rank, seed=seed
         )
-        self.tokenizer = self.training_client.get_tokenizer()
+        # Prompt framing + CoT parsing are model-family specific (HF chat template vs Inkling's TML
+        # rendering) — the renderer owns both, and is shared by sampling and the GRPO datum path so
+        # the observation tokens always match what was sampled.
+        self.renderer = make_renderer(base_model, training_client=self.training_client,
+                                      effort=thinking_effort)
+        self.tokenizer = getattr(self.renderer, "tokenizer", None)
         self._sampler = None  # lazily (re)built from current weights
         # KL reference: a sampling client at the BASE model weights (the anchor for the KL penalty).
         # Only built when kl_coef > 0 (otherwise we skip the per-step reference forward passes).
@@ -65,7 +72,7 @@ class TinkerBackend:
         self._sample_calls += 1
         return sample_rollouts(
             self._sampler,
-            self.tokenizer,
+            self.renderer,
             prompts,
             num_samples=num_samples,
             max_tokens=max_tokens,
@@ -85,7 +92,7 @@ class TinkerBackend:
         from tinker_cookbook.rl.metrics import incorporate_kl_penalty
         from tinker_cookbook.rl.train import train_step as cb_train_step
 
-        groups = to_trajectory_groups(self.tokenizer, rollouts, rewards, group_size)
+        groups = to_trajectory_groups(self.renderer, rollouts, rewards, group_size)
         advantages_P = compute_advantages(groups)
         data_D, _ = assemble_training_data(groups, advantages_P)
 

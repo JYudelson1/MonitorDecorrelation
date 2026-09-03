@@ -22,6 +22,12 @@ class Env(Protocol):
 
     def score(self, rollout: Rollout) -> EnvResult: ...
 
+    def score_batch(self, rollouts: list[Rollout]) -> list[EnvResult]:
+        """Grade a whole batch at once. Optional — the RL loop calls it when present (``rl/train.py``
+        ``_score_env``) and otherwise loops over ``score``. Implement it when grading is expensive and
+        parallelizable (e.g. executing generated code in subprocesses)."""
+        ...
+
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
         """Pull a fixed held-out eval set of ``n`` prompts and REMOVE them from the training pool
         (eval ⟂ train). Optional — runners fall back to overlapping sampling if absent."""

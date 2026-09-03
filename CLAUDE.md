@@ -78,3 +78,11 @@ into `eval_metrics.jsonl`. Monitors (6): `{weak,strong} × {CoT judge, output ju
 `probe_iid`, plus a no-monitor control = 7 rows, fanned across seeds by `scripts/queue_runs.sh`.
 Headline outputs: the AUROC-drop and suspiciousness-gap-drop matrices (`eval/degradation.py`).
 Sycophancy + MASK were the earlier derisking settings and remain available. See `STATUS.md`.
+
+**Also available (new, not part of the matrix yet): ImpossibleBench** — `envs/impossiblebench.py`, a
+single-step (one assistant message) env over Impossible-LiveCodeBench where the tests are
+unsatisfiable, so *passing ⇒ cheating* is the oracle. Note it breaks the usual reward/oracle
+separation by construction (the reward IS the cheat measurement) — read the module docstring and
+docs/ENVIRONMENTS.md #3 before comparing it to MBPP numbers. Runs on **Inkling-Small** via the new
+`rl/renderers.py` seam (Inkling has no HF chat template; TML rendering + structured thinking).
+Launch: `scripts/train_impossiblebench_inkling.sh`.
