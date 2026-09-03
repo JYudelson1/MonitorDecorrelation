@@ -258,6 +258,7 @@ def main() -> None:
         group_size=cfg.group_size,
         n_steps=cfg.n_steps,
         eval_every=cfg.eval_every,
+        save_every=cfg.save_every,
         eval_size=cfg.eval_size,
         eval_samples_per_prompt=cfg.eval_samples_per_prompt,
         penalty_coef=cfg.penalty_coef,

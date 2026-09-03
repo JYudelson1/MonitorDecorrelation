@@ -1,0 +1,10 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[17:09:53] lcb_all: 1055 problems loaded
+[17:09:53]   evaluating 64 problems × k=4; histogram: {"easy": 22, "hard": 21, "medium": 21}
+[17:09:55]   prompt tokens: min=259 median=552 max=1074; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[17:10:10]   sampled 8/64 prompts
+[17:10:13]   sampled 16/64 prompts
+[17:10:23]   sampled 24/64 prompts
+[17:10:34]   sampled 32/64 prompts
+[17:11:11]   sampled 40/64 prompts

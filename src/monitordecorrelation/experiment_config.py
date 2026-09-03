@@ -61,6 +61,7 @@ class ExperimentConfig(_Strict):
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
     eval_every: int = Field(10, description="run the held-out eval phase every N steps (+ 0 + final)")
+    save_every: int = Field(500, description="save a policy checkpoint every N train steps (step 0 included)")
     eval_size: int = Field(32, description="number of distinct held-out eval PROMPTS (fixed set)")
     eval_samples_per_prompt: int = Field(
         1, description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
