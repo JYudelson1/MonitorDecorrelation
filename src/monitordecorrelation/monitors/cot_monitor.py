@@ -65,6 +65,7 @@ class CoTMonitor:
         timeout: float = 60.0,
         api_key: str | None = None,
         use_cot: bool = True,
+        pinned_provider: str | None = None
     ) -> None:
         self.name = name
         self.model_id = model_id
@@ -72,6 +73,11 @@ class CoTMonitor:
         self.use_cot = use_cot  # False -> output-only monitor (judges the answer, ignores reasoning)
         # Behavior is passed through; the rubric is looked up from the registry unless given
         # explicitly. A raw string is wrapped (keeping the behavior's adjective for the score line).
+        self.pinned_provider = pinned_provider
+        if pinned_provider is not None:
+            self.allow_fallbacks = False
+        else:
+            self.allow_fallbacks = True
         if rubric is None:
             self.rubric = get_rubric(behavior)
         elif isinstance(rubric, str):
@@ -113,17 +119,23 @@ class CoTMonitor:
         retryable_status = {404, 408, 429, 500, 502, 503, 529}
         last_exc: Exception | None = None
         for attempt in range(max_retries):
+            body: dict = {
+                "model": self.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 2048,
+                "reasoning": self._reasoning,  # {enabled:false}, or a bounded budget (see below)
+            }
+            if self.pinned_provider is not None:
+                body["provider"] = {
+                    "order": [self.pinned_provider],
+                    "allow_fallbacks": self.allow_fallbacks,
+                }
             try:
                 resp = httpx.post(
                     _OPENROUTER_URL,
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "model": self.model_id,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                        "max_tokens": 2048,
-                        "reasoning": self._reasoning,  # {enabled:false}, or a bounded budget (see below)
-                    },
+                    json=body,
                     timeout=self.timeout,
                 )
             except (httpx.TransportError, httpx.TimeoutException) as e:
