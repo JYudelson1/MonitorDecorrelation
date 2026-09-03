@@ -21,6 +21,12 @@ class Monitor(Protocol):
     def score(self, rollout: Rollout) -> MonitorResult: ...
 ```
 
+**Score scale.** `score` is always in **[0, 1]** regardless of family. The LLM judges (`CoTMonitor`,
+both the CoT and output-only variants) ask the model for an integer on a **0-100** scale (finer than
+0-10, so the judge can express gradations) and divide by 100 before returning, clamping to [0, 1]. The
+reward penalty is `penalty_coef × mean(train-against scores)`, so a 0-100 judge and a 0-1 probe carry
+the same weight in the reward and `penalty_coef`/`threshold` never depend on the judge's prompt scale.
+
 A `Rollout` carries everything any monitor family might need: the prompt, the policy's CoT, the final
 output, and (when available) **activations**. Black-box monitors read text fields; white-box monitors
 read activations. Detector *strength* is just configuration (which `model_id` for a CoT judge, which
