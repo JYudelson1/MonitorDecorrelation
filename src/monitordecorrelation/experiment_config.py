@@ -66,6 +66,7 @@ class ExperimentConfig(_Strict):
     eval_samples_per_prompt: int = Field(
         1, description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
         "at eval_size×this monitor-scoring cost)")
+    save_every: int = Field(500, description="save the policy every N steps")
     probe_server_url: str | None = Field(
         None, description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
