@@ -119,7 +119,7 @@ build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe
 | Rollout / sampling (`rl/rollout.py`) | 🟢 | tinker sampling + chat-template + CoT/answer split. |
 | Baseline eval (no-train measurement loop) | 🟢 | `experiments/eval_baseline.py`: real Qwen3-8B → oracle + monitor. Sycophancy rate ~0.75 on political subset. |
 | Shared metric-row schema (`eval/rows.py`) | 🟢 | The `metrics.jsonl` / `eval_metrics.jsonl` key layout, factored out of `rl/train.py` so every backend writes the same contract (`eval/degradation.py` + the analysis scripts depend on it). `rl/train.py` and the nemo env actor both build rows here; the existing loop tests cover it unchanged. |
-| RL loop (`rl/train.py`) | 🟢 | reward = task − λ·penalty; GRPO; probes via `score_batch`. Runs via `experiments/run_experiment.py`. |
+| RL loop (`rl/train.py`) | 🟢 | reward = task − λ·penalty − `length_penalty_coef`·completion tokens (length term optional, default off; tinker/transformers only, rejected on nemo at config load; logged as `reward/length_penalty_{coef,mean}`, covered by `tests/test_train_loop.py`); GRPO; probes via `score_batch`. Runs via `experiments/run_experiment.py`. |
 | Generic config runner (`experiment_config.py` + `run_experiment.py`) | 🟢 | pydantic-validated JSON/YAML config; mixed CoT+probe monitors, train/held roles; bad configs rejected. Replaces the per-experiment scripts. Live-tested. |
 | `TransformersBackend` (local, trained-model probing) | 🟢 | listed above under Backends. |
 | Ground-truth rate tracking | 🟢 | **Primary metric**, logged every step. |

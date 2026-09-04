@@ -56,6 +56,9 @@ class RunConfig:
     #   → λ ramps linearly start→end across n_steps (hack-then-hide curriculum). Overrides penalty_coef.
     kl_coef: float = 0.0  # per-token KL-to-base penalty (anchors the policy; 0 = off)
     kl_discount_factor: float = 0.0
+    # Length penalty: reward −= length_penalty_coef · (completion tokens, CoT included). 0 = off.
+    # Reward units per token, so 1e-4 costs a 1024-token completion 0.1 of a [0,1] task reward.
+    length_penalty_coef: float = 0.0
 
     # Optimization
     batch_size: int = 32

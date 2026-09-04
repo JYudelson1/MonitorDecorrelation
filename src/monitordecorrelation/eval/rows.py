@@ -185,9 +185,15 @@ def train_row(
     penalties: Sequence[float],
     pen_coef: float,
     rewards: Sequence[float],
+    length_penalties: Sequence[float] | None = None,
+    length_penalty_coef: float = 0.0,
 ) -> dict:
     """One ``metrics.jsonl`` row: the reward decomposition on this step's TRAINING rollouts, plus the
     train-against monitors' own metrics.
+
+    ``length_penalties[i]`` is the reward already subtracted from rollout i for its completion length
+    (``length_penalty_coef`` · completion tokens; see rl/train.py). Distinct from
+    ``reward/len_penalty_mean``, which is the MBPP env's own code-*character* term inside task_reward.
 
     ``penalties[i]`` is the raw mean train-against suspiciousness for rollout i, BEFORE the
     coefficient — the obfuscation signal, which is why it is logged separately from the applied
@@ -220,6 +226,8 @@ def train_row(
         "reward/monitor_suspiciousness_mean": mean(penalties) if penalties else 0.0,
         "reward/penalty_coef": pen_coef,                     # effective λ this step (schedule-aware)
         "reward/penalty_mean": pen_coef * (mean(penalties) if penalties else 0.0),  # λ · suspiciousness
+        "reward/length_penalty_coef": length_penalty_coef,   # reward units per completion token (0 = off)
+        "reward/length_penalty_mean": mean(length_penalties) if length_penalties else 0.0,  # coef · tokens
         "reward/total_mean": mean(rewards),
         **length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
         **token_metrics(rollouts, max_tokens),  # tokens/… for this step's train batch

@@ -118,6 +118,18 @@ class ExperimentConfig(_Strict):
         return v
 
     @model_validator(mode="after")
+    def _check_length_penalty(self):
+        """The length penalty lives in rl/train.py's reward assembly; NeMo-RL computes the reward in
+        its own env actor (backends/nemo/env_actor.py), which does not apply it — so refuse it there
+        at LOAD time rather than silently running an unpenalized run."""
+        if self.length_penalty_coef and self.backend == "nemo":
+            raise ValueError(
+                f"length_penalty_coef={self.length_penalty_coef} is not supported on the nemo backend "
+                f"(its env actor assembles the reward without it). Use backend 'tinker', or set "
+                f"length_penalty_coef to 0.")
+        return self
+
+    @model_validator(mode="after")
     def _check_thinking_budget(self):
         """A budget is only honest where the force-close behaviour is documented — so reject it at
         LOAD time (no network, no tokenizer) rather than mid-run.
@@ -144,6 +156,13 @@ class ExperimentConfig(_Strict):
                            "incorporate_kl_penalty); >0 anchors the policy → prevents the "
                            "reward-over-optimization collapse. 0 = off (default).")
     kl_discount_factor: float = Field(0.0, description="discount for future KL in the penalty; 0 = off")
+    length_penalty_coef: float = Field(
+        0.0, ge=0.0,
+        description="length penalty on the sampled completion: reward -= length_penalty_coef * "
+        "(number of completion tokens, CoT included), applied per rollout alongside the monitor "
+        "penalty, BEFORE GRPO centres the group. Reward units per token: 1e-4 costs a 1024-token "
+        "completion 0.1 of a [0,1] task reward. 0 = off (default). tinker (and transformers) only — "
+        "the nemo env actor does not apply it.")
     lora_rank: int = 16
     lr: float | None = Field(None, description="None = TM-estimated LoRA LR for the policy")
     seed: int = 0

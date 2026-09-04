@@ -181,7 +181,9 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
   rewards within the group, no value network). Matches tinker's streamlined RLVR recipe.
 - **DR-GRPO / DAPO** as easy swaps via `rl_algo` (token-level loss normalization, clip-higher,
   dynamic sampling). Start with vanilla GRPO; revisit if we see length/normalization pathologies.
-- Reward per rollout: `task_reward − penalty_coef·monitor_penalty(train_against)`. Per-token **KL-to-base
+- Reward per rollout: `task_reward − penalty_coef·monitor_penalty(train_against)
+  − length_penalty_coef·completion_tokens` (the length term is optional, default 0 = off; it is the
+  soft alternative to a `thinking_budget`, charged per completion token, CoT included). Per-token **KL-to-base
   penalty** is active (`kl_coef=1e-4`, via cookbook `incorporate_kl_penalty` against a base-model sampler)
   — it anchors the policy and prevents the reward-hack collapse (echoes the Obfuscation Atlas finding
   that high KL + penalty can recover honesty).

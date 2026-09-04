@@ -65,3 +65,13 @@ def test_default_behavior_falls_back_to_sycophancy():
     cfg = _cfg()
     train_against, _ = build_monitors(cfg.monitors)
     assert train_against[0].behavior == "sycophancy"
+
+
+def test_length_penalty_coef_backend_gate():
+    assert _cfg().length_penalty_coef == 0.0
+    assert _cfg(length_penalty_coef=1e-4).length_penalty_coef == 1e-4
+    assert _cfg(backend="nemo", length_penalty_coef=0.0).backend == "nemo"  # off is fine anywhere
+    with pytest.raises(Exception, match="nemo"):
+        _cfg(backend="nemo", length_penalty_coef=1e-4)
+    with pytest.raises(Exception):
+        _cfg(length_penalty_coef=-1e-4)

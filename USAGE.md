@@ -49,11 +49,15 @@ uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,codeforces_ib} subset env_options n_steps batch_size group_size
 eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort thinking_budget penalty_coef
-penalty_schedule kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
+penalty_schedule kl_coef kl_discount_factor length_penalty_coef lora_rank lr seed n_prompts_pool
+probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
 `env_options` holds env-specific constructor kwargs (impossiblebench / codeforces_ib) and `thinking_effort`
 [0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
-`thinking_budget` (see below) is the *hard* alternative for the families that document one. Each monitor: `{kind:"cot", name, role, model_id,
+`thinking_budget` (see below) is the *hard* alternative for the families that document one.
+`length_penalty_coef` (default 0 = off) subtracts `coef × completion tokens` (CoT included) from each
+rollout's reward before GRPO centres the group — reward units per token, so `1e-4` costs a 1024-token
+completion 0.1; logged as `reward/length_penalty_mean`. tinker/transformers only (rejected on nemo). Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
 

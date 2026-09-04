@@ -105,6 +105,69 @@ def test_run_grpo_control_smoke():
             shutil.rmtree(run_dir)
 
 
+class _RecordingBackend(_FakeBackend):
+    """Keeps the rewards handed to train_step so a test can check the reward assembly."""
+
+    def __init__(self):
+        super().__init__()
+        self.rewards = []
+
+    def train_step(self, rollouts, rewards, group_size):
+        self.rewards.append(list(rewards))
+        return super().train_step(rollouts, rewards, group_size)
+
+
+def test_run_grpo_length_penalty_enters_reward():
+    """length_penalty_coef>0: reward = task − coef·(completion tokens), and the metrics row records
+    both the coefficient and the mean charge. The fake rollouts have 3 token ids and no
+    meta['n_output_tokens'], so the token_ids fallback is what gets charged."""
+    run_dir = Path("data/runs/smoke_test_loop_len")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=1.0, kl_coef=0.0, length_penalty_coef=0.1, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_len", use_wandb=False, log_fraction=1.0),
+    )
+    backend = _RecordingBackend()
+    try:
+        run_grpo(cfg, _FakeEnv(), backend, train_against=[], held_out=[])
+        assert backend.rewards and all(abs(r - (0.5 - 0.1 * 3)) < 1e-9 for r in backend.rewards[0])
+        rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").open() if l.strip()]
+        assert rows[0]["reward/length_penalty_coef"] == 0.1
+        assert abs(rows[0]["reward/length_penalty_mean"] - 0.3) < 1e-9
+        assert abs(rows[0]["reward/total_mean"] - 0.2) < 1e-9
+        saved = [json.loads(l) for l in (run_dir / "rollouts.jsonl").open() if l.strip()]
+        assert all(abs(s["reward"] - 0.2) < 1e-9 for s in saved)
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
+def test_run_grpo_length_penalty_off_by_default():
+    """coef=0 (default): the reward is exactly task − λ·monitor and the row reports a zero charge."""
+    run_dir = Path("data/runs/smoke_test_loop_len0")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_len0", use_wandb=False, log_fraction=1.0),
+    )
+    backend = _RecordingBackend()
+    try:
+        run_grpo(cfg, _FakeEnv(), backend, train_against=[_FakeMonitor("ta")], held_out=[])
+        assert all(abs(r - (0.5 - 0.3)) < 1e-9 for r in backend.rewards[0])
+        rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").open() if l.strip()]
+        assert rows[0]["reward/length_penalty_coef"] == 0.0
+        assert rows[0]["reward/length_penalty_mean"] == 0.0
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
 def test_run_grpo_aborts_on_dead_train_against_monitor():
     """A train-against monitor that scores nothing = no penalty signal → the run must ABORT (not
     silently train as a no-penalty control), unlike a held-out monitor which is tolerated."""

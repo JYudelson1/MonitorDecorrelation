@@ -1,7 +1,8 @@
 """GRPO training loop for the decorrelation experiments.
 
-reward = task_reward − penalty_coef · mean(train_against monitor scores). Held-out monitors are
-scored every step but never enter the reward. The ground-truth behavior rate is logged as the
+reward = task_reward − penalty_coef · mean(train_against monitor scores)
+       − length_penalty_coef · (completion tokens)   [optional, 0 = off]
+Held-out monitors are scored every step but never enter the reward. The ground-truth behavior rate is logged as the
 primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
 """
 
@@ -50,6 +51,17 @@ def score_env(env: Env, rollouts: list[Rollout]) -> list:
             )
         return results
     return [env.score(r) for r in rollouts]
+
+
+def n_completion_tokens(r: Rollout) -> int:
+    """Tokens the policy generated for this rollout (CoT + answer), as the sampler counted them —
+    the quantity the length penalty charges for. Falls back to the sampled token ids."""
+    if "n_output_tokens" in r.meta:
+        return int(r.meta["n_output_tokens"])
+    if r.token_ids is not None:
+        return len(r.token_ids)
+    raise ValueError("rollout carries neither meta['n_output_tokens'] nor token_ids — cannot "
+                     "apply a length penalty")
 
 
 def truncate_step_log(path: Path, start_step: int) -> int:
@@ -384,7 +396,17 @@ def run_grpo(
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac
-        rewards = [er.task_reward - pen_coef * pen for er, pen in zip(env_results, penalties)]
+        # Optional length penalty (reward units per completion token, CoT included). Subtracted per
+        # rollout BEFORE GRPO centres the group, so within a group a shorter completion earns a higher
+        # advantage at equal task reward. 0 → an all-zero list, and the reward is unchanged.
+        length_pens = [
+            cfg.length_penalty_coef * n_completion_tokens(r) if cfg.length_penalty_coef else 0.0
+            for r in rollouts
+        ]
+        rewards = [
+            er.task_reward - pen_coef * pen - lp
+            for er, pen, lp in zip(env_results, penalties, length_pens)
+        ]
         t2 = time.perf_counter()
         # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
         # layer (advantage centering, mask/datum assembly, KL penalty, forward_backward) via cookbook
@@ -406,6 +428,7 @@ def run_grpo(
                 step=step, rollouts=rollouts, env_results=env_results, monitor_results=ta_res,
                 train_against_names=[m.name for m in train_against], env=env,
                 max_tokens=max_tokens, penalties=penalties, pen_coef=pen_coef, rewards=rewards,
+                length_penalties=length_pens, length_penalty_coef=cfg.length_penalty_coef,
             ),
             **({"tokens/cum_total": cum_tokens} if tok else {}),  # running total over the run
             "time/sample_s": t_sample,
@@ -424,6 +447,8 @@ def run_grpo(
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
+        if cfg.length_penalty_coef:
+            kl_note += f" len_pen={row['reward/length_penalty_mean']:.3f}"
         tok_note = (f" tok={tok['tokens/input_per_rollout']:.0f}in/{tok['tokens/output_per_rollout']:.0f}out"
                     f" per rollout, {tok['tokens/total']/1e3:.1f}k this step" if tok else "")
         if "tokens/budget_forced_rate" in tok:  # thinking budget on: how often it bound + what it cost

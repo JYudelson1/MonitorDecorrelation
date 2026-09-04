@@ -318,6 +318,7 @@ def main() -> None:
         penalty_schedule=cfg.penalty_schedule,
         kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor,
+        length_penalty_coef=cfg.length_penalty_coef,
         lora_rank=cfg.lora_rank,
         learning_rate=lr,
         seed=cfg.seed,
