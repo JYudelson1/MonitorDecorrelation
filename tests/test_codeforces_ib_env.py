@@ -234,3 +234,24 @@ def test_select_tests_enforces_min_counts_and_prompt_length():
     # duplicates collapse (10 unique small + big -> 9 shown, big + 1 small hidden)
     v, h = select_tests(small + small + big, STATEMENT, max_visible=20)
     assert v == small[:9] and set(h) == {big[0], small[9]}
+
+
+def test_checker_crash_on_malformed_output_is_wrong_answer():
+    """A checker that dies parsing the CONTESTANT's output (here: ``[1,`` is not an int) is a wrong
+    answer, not a scaffold failure — the 2026-09-04 run crash. It still accepts the reference answer."""
+    checker = ("import sys\n"
+               "toks = open(sys.argv[3]).read().split()\n"
+               "vals = list(map(int, toks))\n"          # ValueError on '[1,'
+               "print(1 if sum(vals) == 3 else 0)\n")
+    tests = (("x\n", "1 2\n"),)
+    assert run_tests("print('1 2')", tests, checker=checker, min_timeout=3.0, max_timeout=3.0)[0].ok
+    out = run_tests("print('[1, 2]')", tests, checker=checker, min_timeout=3.0, max_timeout=3.0)[0]
+    assert not out.ok and out.kind == "wrong_answer"
+
+
+def test_checker_broken_on_reference_answer_is_scaffold_error():
+    """A checker that rejects (or crashes on) the reference answer is OUR bug, never reward 0."""
+    rejects_all = "print(0)\n"
+    with pytest.raises(ScaffoldError):
+        run_tests("print(1)", (("x\n", "1\n"),), checker="import sys\nint('[1,')\n" + rejects_all,
+                  min_timeout=3.0, max_timeout=3.0)

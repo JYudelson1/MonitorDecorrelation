@@ -135,6 +135,13 @@ class TinkerBackend:
         out.update({k: float(v) for k, v in opt_metrics.items()})
         return out
 
+    def load_checkpoint(self, path: str) -> None:
+        """Resume from a ``save_checkpoint`` path: restores weights AND optimizer state (Adam moments)
+        into this training client, so the next ``train_step`` continues the run rather than restarting
+        the optimizer. The sampler is rebuilt lazily from the loaded weights on the next ``sample``."""
+        self.training_client.load_state_with_optimizer(path).result()
+        self._sampler = None
+
     def save_checkpoint(self, label: str, ttl_seconds: int | None = None) -> str:
         """Save the full training state (weights + optimizer) on tinker; ``ttl_seconds`` sets an
         expiry (None = never). Returns the tinker checkpoint path to resume/sample from later."""

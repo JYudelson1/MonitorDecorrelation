@@ -52,6 +52,29 @@ def score_env(env: Env, rollouts: list[Rollout]) -> list:
     return [env.score(r) for r in rollouts]
 
 
+def truncate_step_log(path: Path, start_step: int) -> int:
+    """Drop every row of a step-keyed ``.jsonl`` log whose ``step`` >= ``start_step`` (in place), so a
+    resumed run appends to logs that end exactly where its checkpoint was taken. Returns the number of
+    rows kept. A missing file is fine (0 kept). Unparseable rows are dropped too."""
+    if not path.exists():
+        return 0
+    kept = 0
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with path.open() as src, tmp.open("w") as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            try:
+                step = int(json.loads(line)["step"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if step < start_step:
+                dst.write(line if line.endswith("\n") else line + "\n")
+                kept += 1
+    tmp.replace(path)
+    return kept
+
+
 def _monitor_info(m: Monitor, role: str) -> dict:
     """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later)."""
     return {
@@ -126,10 +149,20 @@ def run_grpo(
     monitor_workers: int = 16,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
+    resume_step: int | None = None,
+    wandb_run_id: str | None = None,
 ) -> None:
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
-    (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset)."""
+    (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
+
+    ``resume_step``: the backend has already been loaded with the checkpoint saved at that step
+    (weights + optimizer), so training starts there instead of at 0. The run directory's step-keyed
+    logs are truncated to rows before it and appended to; the eval at that step is re-run (the
+    checkpoint's eval row is regenerated, not trusted); the checkpoint save at that step is skipped.
+    ``wandb_run_id`` (with ``resume_step``) re-attaches to the original W&B run so its curves continue
+    — but W&B ignores rows below the step it already reached (rewind is a private-preview feature),
+    so steps between the checkpoint and the crash live in the local logs only."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
@@ -142,6 +175,15 @@ def run_grpo(
     if cfg.logging.use_wandb:
         import wandb
 
+        resume_kw = {}
+        if resume_step is not None and wandb_run_id:
+            # Same run id, so the curves continue on the original W&B page. Rows at a step the run
+            # already logged are dropped by W&B (it warns once) — see the docstring.
+            resume_kw = {"id": wandb_run_id, "resume": "must"}
+            _log(f"resuming W&B run {wandb_run_id} (rows below its last logged step are ignored by "
+                 f"W&B; the local metrics.jsonl is complete)")
+        elif resume_step is not None:
+            _log("⚠️  resuming without a W&B run id — the resumed steps go to a NEW W&B run")
         run = wandb.init(
             project=cfg.logging.wandb_project,
             name=cfg.logging.run_name,
@@ -149,6 +191,7 @@ def run_grpo(
             tags=cfg.logging.wandb_tags or None,
             mode=cfg.logging.wandb_mode,
             config=cfg.__dict__,
+            **resume_kw,
         )
 
     rollout_log_dir = Path("data/runs") / (cfg.logging.run_name or "smoke")
@@ -156,8 +199,9 @@ def run_grpo(
 
     # Durable record of WHAT this run was: config + which monitor is which (train-against vs
     # held-out, model ids, behavior). Without this the logs' cot_weak/cot_strong are undecodable.
+    now = datetime.datetime.now().isoformat(timespec="seconds")
     info = {
-        "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "started_at": now,
         "run_name": cfg.logging.run_name,
         "policy": cfg.base_model,
         "config": dataclasses.asdict(cfg),
@@ -166,16 +210,32 @@ def run_grpo(
         "held_out": [_monitor_info(m, "held_out") for m in held_out],
         **(run_info or {}),
     }
+    if run is not None:
+        info["wandb_run_id"] = run.id  # what a later --set resume_from=… re-attaches to
+    start_step = 0
+    if resume_step is not None:
+        # Keep the original run's record (its started_at, its checkpoint paths) and note the resume.
+        prev_path = rollout_log_dir / "run_info.json"
+        prev = json.loads(prev_path.read_text()) if prev_path.exists() else {}
+        info = {**prev, **{k: v for k, v in info.items() if k != "started_at"},
+                "started_at": prev.get("started_at", now),
+                "resumes": [*prev.get("resumes", []), {"at": now, "from_step": resume_step}]}
+        start_step = resume_step
+        # The logs end where the checkpoint was taken; everything from start_step on is regenerated.
+        for name in ("rollouts.jsonl", "metrics.jsonl", "eval_metrics.jsonl", "eval_rollouts.jsonl"):
+            kept = truncate_step_log(rollout_log_dir / name, start_step)
+            _log(f"resume: {name} truncated to {kept} rows (step < {start_step})")
     (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
 
-    rollout_log = (rollout_log_dir / "rollouts.jsonl").open("w")
+    mode = "a" if resume_step is not None else "w"
+    rollout_log = (rollout_log_dir / "rollouts.jsonl").open(mode)
     # TRAIN metrics (per step, on the training rollouts) and EVAL metrics (periodic, on a FIXED
     # held-out set) go to separate files + wandb namespaces. Degradation curves come from EVAL.
-    metrics_log = (rollout_log_dir / "metrics.jsonl").open("w")
-    eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open("w")
+    metrics_log = (rollout_log_dir / "metrics.jsonl").open(mode)
+    eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open(mode)
     # Per-eval-prompt record: EVERY monitor's score on EVERY held-out eval prompt+continuation, each
     # eval step (the full bookkeeping for post-hoc recalibration / the suspiciousness-gap analysis).
-    eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open("w")
+    eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open(mode)
 
     # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
     # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
@@ -252,11 +312,23 @@ def run_grpo(
              f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
     cum_tokens = 0.0  # running input+output token count across train steps (tokens/cum_total)
-    for step in range(cfg.n_steps):
+    if start_step:
+        # Replay the consumed prompt / sampling-seed streams so the resumed steps see the prompts and
+        # seeds the uninterrupted run would have (rather than restarting both from step 0).
+        for _ in range(start_step * cfg.batch_size):
+            env.sample_prompt()
+        n_evals_before = sum(1 for s in range(start_step) if s % cfg.eval_every == 0)
+        if hasattr(backend, "_sample_calls"):
+            backend._sample_calls = start_step + n_evals_before
+        rows = [json.loads(l) for l in (rollout_log_dir / "metrics.jsonl").read_text().splitlines() if l.strip()]
+        cum_tokens = float(rows[-1].get("tokens/cum_total", 0.0)) if rows else 0.0
+        _log(f"resuming at step {start_step}/{cfg.n_steps} (tokens so far {cum_tokens/1e6:.2f}M)")
+    for step in range(start_step, cfg.n_steps):
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
-            
-        if step % cfg.save_every == 0:
+
+        if step % cfg.save_every == 0 and not (resume_step is not None and step == start_step):
+            # (a resumed run already has the checkpoint it started from)
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}")
             (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
             info[f"checkpoint_{step}"] = ckpt

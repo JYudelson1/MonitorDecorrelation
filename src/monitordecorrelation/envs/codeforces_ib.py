@@ -177,6 +177,11 @@ def _run_program(code_path: str, stdin: str, *, timeout: float, mem_mb: int, cwd
 
 
 def _run_checker(checker_src: str, inp: str, expected: str, out: str, cwd: str) -> bool:
+    """Problem-specific checker verdict on ``out``. A checker that dies on the CONTESTANT's output
+    (crash or timeout) is a wrong answer, exactly as on Codeforces, where testlib's ``readInt`` on a
+    malformed token is a presentation error — a policy printing ``[1, 2]`` must not take the run down
+    (it did: 2026-09-04, ``codeforces-ib-inkling-lr-1e-3-coef-0.6-seed-1`` step 13). Only a checker
+    that ALSO dies on the reference answer is our bug, and that raises :class:`ScaffoldError`."""
     paths = {}
     for name, txt in (("input", inp), ("answer", expected), ("output", out)):
         paths[name] = os.path.join(cwd, f"chk_{name}.txt")
@@ -185,14 +190,29 @@ def _run_checker(checker_src: str, inp: str, expected: str, out: str, cwd: str) 
     script = os.path.join(cwd, "checker.py")
     with open(script, "w") as fh:
         fh.write(checker_src)
-    try:
-        r = subprocess.run([sys.executable, "-I", script, paths["input"], paths["answer"], paths["output"]],
-                           capture_output=True, text=True, timeout=60, cwd=cwd, errors="replace")
-    except subprocess.TimeoutExpired as e:
-        raise ScaffoldError("the problem's checker timed out (60 s)") from e
-    if r.returncode != 0:
-        raise ScaffoldError(f"the problem's checker crashed: {r.stderr[-400:]}")
-    return r.stdout.strip().split()[-1:] == ["1"]
+
+    def _verdict(output_path: str) -> tuple[bool, str | None]:
+        """(accepted, failure) — ``failure`` is set when the checker itself did not finish cleanly."""
+        try:
+            r = subprocess.run([sys.executable, "-I", script, paths["input"], paths["answer"], output_path],
+                               capture_output=True, text=True, timeout=60, cwd=cwd, errors="replace")
+        except subprocess.TimeoutExpired:
+            return False, "the problem's checker timed out (60 s)"
+        if r.returncode != 0:
+            return False, f"the problem's checker crashed: {r.stderr[-400:]}"
+        return r.stdout.strip().split()[-1:] == ["1"], None
+
+    ok, failure = _verdict(paths["output"])
+    if failure is None:
+        return ok
+    # The checker choked. Distinguish "malformed contestant output" (wrong answer) from "the checker is
+    # broken" (scaffold): run it on the reference answer, which every sane checker must accept.
+    ref_ok, ref_failure = _verdict(paths["answer"])
+    if ref_failure is not None or not ref_ok:
+        raise ScaffoldError(
+            f"{failure} — and it fails on the reference answer too "
+            f"({ref_failure or 'rejected it'}), so the checker itself is broken")
+    return False
 
 
 def run_tests(

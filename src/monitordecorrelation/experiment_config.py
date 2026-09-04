@@ -110,6 +110,13 @@ class ExperimentConfig(_Strict):
             raise ValueError("penalty_schedule must be {'start_penalty': float, 'end_penalty': float}")
         return v
 
+    @field_validator("resume_from")
+    @classmethod
+    def _check_resume(cls, v):
+        if v is not None and v != "latest" and not str(v).isdigit():
+            raise ValueError(f"resume_from must be 'latest' or a step number, got {v!r}")
+        return v
+
     @model_validator(mode="after")
     def _check_thinking_budget(self):
         """A budget is only honest where the force-close behaviour is documented — so reject it at
@@ -141,6 +148,12 @@ class ExperimentConfig(_Strict):
     lr: float | None = Field(None, description="None = TM-estimated LoRA LR for the policy")
     seed: int = 0
     n_prompts_pool: int = Field(512, description="how many env prompts to draw the run's prompts from")
+    resume_from: str | None = Field(
+        None, description="resume THIS run_name from one of its saved checkpoints: 'latest', or a step "
+        "number, naming data/runs/<run_name>/checkpoint_<step>.txt (a tinker save_state path: weights + "
+        "optimizer). Training restarts at that step; the local metrics/rollout logs are truncated to "
+        "rows before it and appended to, and the run's W&B history is rewound to the same step (run id "
+        "from run_info.json) so the curves stay one run. tinker backend only.")
     monitors: list[MonitorSpec] = Field(
         default_factory=list,
         description="mixed CoT judges / probes, each train_against or held_out. EMPTY is legal and "

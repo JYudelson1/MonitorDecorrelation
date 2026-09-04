@@ -18,6 +18,7 @@ class _FakeBackend:
     name = "fake"
 
     def sample(self, prompts, *, num_samples=1, max_tokens=64, temperature=1.0):
+        self._sample_calls += 1  # as TinkerBackend: one derived seed per call
         return [
             Rollout(prompt=p, cot="reason", output="```python\ndef f():\n  return 1\n```",
                     token_ids=[1, 2, 3], logprobs=[-0.1, -0.2, -0.3])
@@ -27,6 +28,18 @@ class _FakeBackend:
     def train_step(self, rollouts, rewards, group_size):
         assert len(rollouts) == len(rewards)  # the Path-B signature
         return {"n_data": float(len(rollouts)), "kl/mean": 0.0, "train/logprob_mean": -1.5}
+
+    def __init__(self):
+        self.saved = []  # labels passed to save_checkpoint (the loop saves every save_every steps)
+        self.loaded = []
+        self._sample_calls = 0
+
+    def save_checkpoint(self, label, ttl_seconds=None):
+        self.saved.append(label)
+        return f"fake://{label}"
+
+    def load_checkpoint(self, path):
+        self.loaded.append(path)
 
 
 class _FakeEnv:
@@ -138,3 +151,58 @@ def test_run_grpo_survives_failing_monitor():
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
+
+
+def test_run_grpo_resume_truncates_appends_and_skips_resume_save():
+    """Resume at a checkpoint step: rows at/after it are dropped from every step-keyed log, the
+    resumed steps are appended, the checkpoint at the resume step is NOT re-saved (later ones are),
+    the prompt/seed streams are advanced, and run_info.json keeps the original record + notes the
+    resume."""
+    run_dir = Path("data/runs/smoke_test_resume")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=6, eval_every=2, eval_size=2, save_every=2,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_resume", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        first = _FakeBackend()
+        run_grpo(cfg, _FakeEnv(), first, train_against=[], held_out=[_FakeMonitor("probe_x")])
+        assert first.saved == [f"smoke_test_resume-{s}" for s in (0, 2, 4, "final")]
+        info0 = json.loads((run_dir / "run_info.json").read_text())
+        (run_dir / "run_info.json").write_text(json.dumps({**info0, "marker": "original"}))
+
+        def steps(name):
+            return [json.loads(l)["step"] for l in (run_dir / name).read_text().splitlines() if l.strip()]
+
+        assert steps("metrics.jsonl") == list(range(6))
+        assert steps("eval_metrics.jsonl") == [0, 2, 4, 6]
+
+        second = _FakeBackend()
+        run_grpo(cfg, _FakeEnv(), second, train_against=[], held_out=[_FakeMonitor("probe_x")],
+                 resume_step=4)
+        assert second.saved == ["smoke_test_resume-final"]  # step 4's checkpoint exists → not re-saved
+        assert steps("metrics.jsonl") == list(range(6))          # 0-3 kept, 4-5 regenerated
+        assert steps("eval_metrics.jsonl") == [0, 2, 4, 6]       # eval at 4 re-run, then final
+        assert sorted(set(steps("rollouts.jsonl"))) == list(range(6))
+        assert steps("eval_rollouts.jsonl").count(4) == cfg.eval_size  # exactly one eval @ 4
+        info = json.loads((run_dir / "run_info.json").read_text())
+        assert info["marker"] == "original" and info["started_at"] == info0["started_at"]
+        assert info["resumes"][0]["from_step"] == 4
+        assert info["checkpoint_0"] == "fake://smoke_test_resume-0"
+        # sampling-seed stream advanced past the 4 train + 2 eval calls the first run made before step 4
+        assert second._sample_calls == (4 + 2) + 2 + 1 + 1  # + steps 4,5 train + eval@4 + final eval
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_truncate_step_log(tmp_path):
+    from monitordecorrelation.rl.train import truncate_step_log
+
+    p = tmp_path / "m.jsonl"
+    p.write_text("".join(json.dumps({"step": s, "v": s}) + "\n" for s in range(5)) + "garbage\n")
+    assert truncate_step_log(p, 3) == 3
+    assert [json.loads(l)["step"] for l in p.read_text().splitlines()] == [0, 1, 2]
+    assert truncate_step_log(tmp_path / "missing.jsonl", 3) == 0

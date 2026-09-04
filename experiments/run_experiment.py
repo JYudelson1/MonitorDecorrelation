@@ -12,6 +12,9 @@ Usage:
   # one-off overrides (handy for quick tests; everything else comes from the config):
   uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2
 
+  # resume a crashed run from its latest saved checkpoint (same command + resume_from; tinker only):
+  uv run python experiments/run_experiment.py --config <cfg> --set run_name=<run> ... resume_from=latest
+
   # train on this machine's GPUs (NeMo-RL) instead of tinker:
   uv run python experiments/run_experiment.py --config <cfg> --set backend=nemo n_gpus=2
 
@@ -141,6 +144,43 @@ def _apply_overrides(cfg, sets: list[str]):
         raise SystemExit(f"error: invalid --set override(s):\n{e}") from None
 
 
+def _resolve_resume(run_dir: Path, resume_from: str) -> tuple[int, str]:
+    """``resume_from`` ('latest' or a step) -> (step, tinker checkpoint path) from the run dir's
+    ``checkpoint_<step>.txt`` files, which the trainer writes at every ``save_every`` step."""
+    ckpts = {}
+    for f in run_dir.glob("checkpoint_*.txt"):
+        stem = f.stem.split("_", 1)[1]
+        if stem.isdigit():
+            ckpts[int(stem)] = f.read_text().strip()
+    if not ckpts:
+        raise SystemExit(f"error: resume_from={resume_from}: no checkpoint_<step>.txt in {run_dir}")
+    step = max(ckpts) if resume_from == "latest" else int(resume_from)
+    if step not in ckpts:
+        raise SystemExit(
+            f"error: resume_from={resume_from}: no checkpoint at step {step} in {run_dir} "
+            f"(have: {sorted(ckpts)})")
+    return step, ckpts[step]
+
+
+def _find_wandb_run_id(run_dir: Path, run_name: str) -> str | None:
+    """The W&B run id this run_name logged to: recorded in run_info.json by the trainer, else
+    recovered from the local ``wandb/run-*`` directories (their metadata carries the launch args)."""
+    info_path = run_dir / "run_info.json"
+    if info_path.exists():
+        rid = json.loads(info_path.read_text()).get("wandb_run_id")
+        if rid:
+            return rid
+    candidates = []
+    for meta in Path("wandb").glob("run-*/files/wandb-metadata.json"):
+        try:
+            args = json.loads(meta.read_text()).get("args", [])
+        except (OSError, ValueError):
+            continue
+        if f"run_name={run_name}" in args:
+            candidates.append((meta.stat().st_mtime, meta.parent.parent.name.rsplit("-", 1)[-1]))
+    return max(candidates)[1] if candidates else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -239,6 +279,19 @@ def main() -> None:
             cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr
         )
 
+    # Resume: load the saved training state (weights + optimizer) before anything is sampled. The
+    # trainer then starts at that step, truncates+appends the local logs and re-attaches to the W&B run.
+    resume_step = None
+    wandb_run_id = None
+    if cfg.resume_from is not None:
+        if not hasattr(backend, "load_checkpoint"):
+            raise SystemExit(f"error: resume_from is not supported on the {cfg.backend!r} backend")
+        resume_step, ckpt_path = _resolve_resume(run_dir, cfg.resume_from)
+        print(f"  resuming from step {resume_step}: {ckpt_path}")
+        backend.load_checkpoint(ckpt_path)
+        wandb_run_id = _find_wandb_run_id(run_dir, cfg.run_name)
+        print(f"  W&B run id: {wandb_run_id or '(none found — a new W&B run will be created)'}")
+
     env = make_env(cfg)
     probe_server_url = cfg.probe_server_url or os.environ.get("PROBE_SERVER_URL")
     train_against, held_out = build_monitors(
@@ -314,6 +367,8 @@ def main() -> None:
             "lr": lr,
             "config": cfg.model_dump(),
         },
+        resume_step=resume_step,
+        wandb_run_id=wandb_run_id,
     )
     print(f"\n{cfg.experiment} finished OK")
 
