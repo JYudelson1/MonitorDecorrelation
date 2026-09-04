@@ -1,0 +1,95 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[17:35:19] codeforces: 8594 problems loaded
+[17:35:19]   subset hard512: 512 problems; difficulty histogram: {"3000": 31, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+[17:35:19]   evaluating 64 problems × k=4; histogram: {"3000": 6, "3100": 9, "3200": 15, "3300": 14, "3400": 4, "3500": 16}
+[codeforces] no generated tests file for contest 720: 404 Client Error. (Request ID: Root=1-6a99afd7-4bdec94534ec4b854f8faea5;3bb62375-3fc3-4ee4-a4b8-8760bdf3651f)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_720.parquet.
+[codeforces] no generated tests file for contest 891: 404 Client Error. (Request ID: Root=1-6a99afdb-0ae9cfe7552c83f808ce26d7;0d26f77b-2771-49cf-9966-17a1e2118d1d)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_891.parquet.
+[codeforces] no generated tests file for contest 718: 404 Client Error. (Request ID: Root=1-6a99afe0-26eb99197801960822c1bb3a;c30c70b0-00b1-4be9-8063-606956217ba6)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_718.parquet.
+[codeforces] no generated tests file for contest 756: 404 Client Error. (Request ID: Root=1-6a99afe5-616d78fb3725dbd90d7d048a;23a8321f-b334-4457-8908-4c25f85ca02f)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_756.parquet.
+[codeforces] no generated tests file for contest 798: 404 Client Error. (Request ID: Root=1-6a99b00b-54b7516f38997abf3a7e21e2;2508e88a-12f3-4d4c-8d53-ad7b9b7171b3)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_798.parquet.
+[codeforces] no generated tests file for contest 765: 404 Client Error. (Request ID: Root=1-6a99b015-6d178426257e3ee63cae1f1a;4371bac4-c679-41e9-b008-e9cd522c70be)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_765.parquet.
+[codeforces] no generated tests file for contest 696: 404 Client Error. (Request ID: Root=1-6a99b047-0e6ec7180986d9223ae91eed;5dd55aae-9322-4904-9089-cfcbf5ee795e)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_696.parquet.
+[codeforces] no generated tests file for contest 878: 404 Client Error. (Request ID: Root=1-6a99b068-0906567b09cace3c7b5e6c7f;a766f1a3-a286-47a2-96d8-bc86041a096f)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_878.parquet.
+[codeforces] no generated tests file for contest 768: 404 Client Error. (Request ID: Root=1-6a99b06e-17f69ba44bc0150f48975cad;4f1f3a69-fac0-48b1-8ff4-79bd6691a9b0)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_768.parquet.
+[codeforces] no generated tests file for contest 840: 404 Client Error. (Request ID: Root=1-6a99b06f-604d822143fa2107186b1321;bda907f1-c245-47a1-9320-251528c8f87f)
+
+Entry Not Found for url: https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_840.parquet.
+[17:38:01]   tests per problem after hook: min=4 median=30 max=116
+[17:38:04]   prompt tokens: min=346 median=879 max=1753; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[17:44:54]   sampled 8/64 prompts
+[17:47:15]   sampled 16/64 prompts
+[17:49:44]   sampled 24/64 prompts
+[17:52:20]   sampled 32/64 prompts
+[17:54:17]   sampled 40/64 prompts
+[17:55:51]   sampled 48/64 prompts
+[17:56:44]   sampled 56/64 prompts
+[17:57:30]   sampled 64/64 prompts
+[17:57:30]   sampling done in 1165s
+[18:02:54]   graded 32/256
+[18:02:54]   graded 64/256
+[18:02:55]   graded 96/256
+[18:02:56]   graded 128/256
+[18:03:50]   graded 160/256
+[18:03:50]   graded 192/256
+[18:03:50]   graded 224/256
+[18:03:50]   graded 256/256
+[18:03:50] {
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.08203125,
+  "pass_rate_se": 0.0270941101543068,
+  "frac_problems_any_pass": 0.171875,
+  "frac_problems_all_pass": 0.03125,
+  "frac_problems_mixed": 0.140625,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 41,
+  "completions_no_code": 41,
+  "status_counts": {
+    "runtime_error": 16,
+    "wrong_answer": 121,
+    "no_code": 41,
+    "timeout": 56,
+    "ok": 21,
+    "compile_error": 1
+  },
+  "output_tokens": {
+    "mean": 18591.72265625,
+    "median": 17966,
+    "p90": 32768,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1753,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}

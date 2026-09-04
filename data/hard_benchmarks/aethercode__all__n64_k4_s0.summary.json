@@ -1,0 +1,40 @@
+{
+  "benchmark": "aethercode",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 63,
+  "k": 4,
+  "n_completions": 252,
+  "pass_rate": 0.18253968253968253,
+  "pass_rate_se": 0.04093513125941347,
+  "frac_problems_any_pass": 0.30158730158730157,
+  "frac_problems_all_pass": 0.07936507936507936,
+  "frac_problems_mixed": 0.2222222222222222,
+  "prompts_truncated": 0,
+  "n_prompts": 63,
+  "completions_truncated": 13,
+  "completions_no_code": 13,
+  "status_counts": {
+    "timeout": 44,
+    "runtime_error": 28,
+    "wrong_answer": 119,
+    "ok": 46,
+    "no_code": 13,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 13035.448412698413,
+    "median": 11124,
+    "p90": 28138,
+    "max": 32768
+  },
+  "prompt_tokens_max": 2692,
+  "difficulty_hist": {
+    "Easy": 18,
+    "Extremely Hard": 4,
+    "Hard": 16,
+    "Medium": 25
+  },
+  "regraded": true
+}

@@ -1,0 +1,36 @@
+{
+  "benchmark": "lcb_all",
+  "subset": "hard350",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.40234375,
+  "pass_rate_se": 0.05596095099709281,
+  "frac_problems_any_pass": 0.5,
+  "frac_problems_all_pass": 0.3125,
+  "frac_problems_mixed": 0.1875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 12,
+  "completions_no_code": 12,
+  "status_counts": {
+    "ok": 103,
+    "wrong_answer": 83,
+    "timeout": 50,
+    "runtime_error": 8,
+    "no_code": 12
+  },
+  "output_tokens": {
+    "mean": 6803.21875,
+    "median": 2905,
+    "p90": 18584,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1497,
+  "difficulty_hist": {
+    "hard": 64
+  },
+  "regraded": true
+}

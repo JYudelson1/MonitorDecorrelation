@@ -39,4 +39,5 @@ packages = ["src/monitordecorrelation"]
 dev = [
     "omegaconf>=2.3.1",
     "pytest>=9.0.3",
+    "sortedcontainers>=2.4.0",
 ]

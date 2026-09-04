@@ -1,0 +1,57 @@
+[17:57:18] leetcode: 2869 problems loaded
+[18:01:49] leetcode: 2869 problems loaded
+[18:01:49]   tests per problem: min=3 median=101 max=243
+[18:01:49]   evaluating 64 problems × k=4; histogram: {"Easy": 9, "Hard": 20, "Medium": 35}
+[18:01:51]   prompt tokens: min=196 median=447 max=1046; truncated prompts: 0/64
+[18:02:12]   sampled 8/64 prompts
+[18:02:23]   sampled 16/64 prompts
+[18:02:35]   sampled 24/64 prompts
+[18:02:39]   sampled 32/64 prompts
+[18:02:49]   sampled 40/64 prompts
+[18:03:07]   sampled 48/64 prompts
+[18:03:23]   sampled 56/64 prompts
+[18:09:04]   sampled 64/64 prompts
+[18:09:04]   sampling done in 431s
+[18:09:21]   graded 32/256
+[18:09:21]   graded 64/256
+[18:09:22]   graded 96/256
+[18:09:22]   graded 128/256
+[18:09:22]   graded 160/256
+[18:09:36]   graded 192/256
+[18:09:36]   graded 224/256
+[18:09:36]   graded 256/256
+[18:09:36] {
+  "benchmark": "leetcode",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.73828125,
+  "pass_rate_se": 0.04923415170108637,
+  "frac_problems_any_pass": 0.8125,
+  "frac_problems_all_pass": 0.625,
+  "frac_problems_mixed": 0.1875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 0,
+  "completions_no_code": 0,
+  "status_counts": {
+    "runtime_error": 60,
+    "ok": 189,
+    "timeout": 7
+  },
+  "output_tokens": {
+    "mean": 1013.3203125,
+    "median": 349,
+    "p90": 1724,
+    "max": 14507
+  },
+  "prompt_tokens_max": 1046,
+  "difficulty_hist": {
+    "Easy": 9,
+    "Hard": 20,
+    "Medium": 35
+  }
+}

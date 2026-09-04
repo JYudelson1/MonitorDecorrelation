@@ -7,3 +7,54 @@ Your Tinker SDK version is outdated. Please upgrade to the latest version.
 [17:10:32]   sampled 8/64 prompts
 [17:10:49]   sampled 16/64 prompts
 [17:11:07]   sampled 24/64 prompts
+[17:11:27]   sampled 32/64 prompts
+[17:12:16]   sampled 40/64 prompts
+[17:15:10]   sampled 48/64 prompts
+[17:18:44]   sampled 56/64 prompts
+[17:28:54]   sampled 64/64 prompts
+[17:28:54]   sampling done in 1137s
+[17:33:04]   graded 32/256
+[17:33:04]   graded 64/256
+[17:33:05]   graded 96/256
+[17:33:05]   graded 128/256
+[17:33:06]   graded 160/256
+[17:33:29]   graded 192/256
+[17:33:56]   graded 224/256
+[17:34:30]   graded 256/256
+[17:34:30] {
+  "benchmark": "lcb_all",
+  "subset": "hard512",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.44921875,
+  "pass_rate_se": 0.05584153110427163,
+  "frac_problems_any_pass": 0.5625,
+  "frac_problems_all_pass": 0.328125,
+  "frac_problems_mixed": 0.234375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 7,
+  "completions_no_code": 7,
+  "status_counts": {
+    "ok": 115,
+    "timeout": 60,
+    "wrong_answer": 70,
+    "no_code": 7,
+    "compile_error": 1,
+    "runtime_error": 3
+  },
+  "output_tokens": {
+    "mean": 4998.6953125,
+    "median": 1841,
+    "p90": 13732,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1497,
+  "difficulty_hist": {
+    "hard": 48,
+    "medium": 16
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "benchmark": "usaco",
+  "subset": "hard228",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.34765625,
+  "pass_rate_se": 0.047075478677853326,
+  "frac_problems_any_pass": 0.53125,
+  "frac_problems_all_pass": 0.140625,
+  "frac_problems_mixed": 0.390625,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 11,
+  "completions_no_code": 9,
+  "status_counts": {
+    "wrong_answer": 119,
+    "runtime_error": 14,
+    "ok": 89,
+    "timeout": 20,
+    "no_code": 9,
+    "compile_error": 5
+  },
+  "output_tokens": {
+    "mean": 11032.23046875,
+    "median": 7963,
+    "p90": 25286,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1929,
+  "difficulty_hist": {
+    "gold": 40,
+    "platinum": 24
+  }
+}

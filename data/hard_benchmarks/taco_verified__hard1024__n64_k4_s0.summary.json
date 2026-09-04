@@ -1,0 +1,37 @@
+{
+  "benchmark": "taco_verified",
+  "subset": "hard1024",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.63671875,
+  "pass_rate_se": 0.050002956302983584,
+  "frac_problems_any_pass": 0.8125,
+  "frac_problems_all_pass": 0.484375,
+  "frac_problems_mixed": 0.328125,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 7,
+  "completions_no_code": 7,
+  "status_counts": {
+    "wrong_answer": 68,
+    "ok": 163,
+    "runtime_error": 7,
+    "timeout": 10,
+    "compile_error": 1,
+    "no_code": 7
+  },
+  "output_tokens": {
+    "mean": 10166.4296875,
+    "median": 7637,
+    "p90": 23932,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1116,
+  "difficulty_hist": {
+    "HARD": 25,
+    "VERY_HARD": 39
+  }
+}

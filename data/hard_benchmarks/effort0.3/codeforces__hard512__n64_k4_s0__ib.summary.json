@@ -1,0 +1,41 @@
+{
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.3,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.08984375,
+  "pass_rate_se": 0.02431130719629805,
+  "frac_problems_any_pass": 0.21875,
+  "frac_problems_all_pass": 0.015625,
+  "frac_problems_mixed": 0.203125,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 20,
+  "completions_no_code": 20,
+  "status_counts": {
+    "wrong_answer": 138,
+    "timeout": 54,
+    "ok": 23,
+    "runtime_error": 19,
+    "no_code": 20,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 13175.49609375,
+    "median": 11065,
+    "p90": 27932,
+    "max": 32768
+  },
+  "prompt_tokens_max": 11729,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}

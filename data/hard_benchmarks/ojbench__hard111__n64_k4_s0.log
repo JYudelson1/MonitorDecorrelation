@@ -1,0 +1,60 @@
+[17:56:49] ojbench: 215 problems loaded
+[17:56:49]   subset hard111: 111 problems; difficulty histogram: {"hard": 111}
+[18:01:17] ojbench: 215 problems loaded
+[18:01:17]   subset hard111: 111 problems; difficulty histogram: {"hard": 111}
+[18:01:39]   tests per problem: min=10 median=20 max=221
+[18:01:39]   evaluating 64 problems × k=4; histogram: {"hard": 64}
+[18:01:42]   prompt tokens: min=625 median=1299 max=3790; truncated prompts: 0/64
+[18:05:30]   sampled 8/64 prompts
+[18:08:25]   sampled 16/64 prompts
+[18:10:01]   sampled 24/64 prompts
+[18:11:32]   sampled 32/64 prompts
+[18:13:02]   sampled 40/64 prompts
+[18:14:43]   sampled 48/64 prompts
+[18:16:46]   sampled 56/64 prompts
+[18:20:34]   sampled 64/64 prompts
+[18:20:34]   sampling done in 1130s
+[18:24:27]   graded 32/256
+[18:25:00]   graded 64/256
+[18:25:00]   graded 96/256
+[18:25:00]   graded 128/256
+[18:25:00]   graded 160/256
+[18:25:00]   graded 192/256
+[18:26:44]   graded 224/256
+[18:26:44]   graded 256/256
+[18:26:44] {
+  "benchmark": "ojbench",
+  "subset": "hard111",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.0625,
+  "pass_rate_se": 0.0234375,
+  "frac_problems_any_pass": 0.125,
+  "frac_problems_all_pass": 0.015625,
+  "frac_problems_mixed": 0.109375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 11,
+  "completions_no_code": 11,
+  "status_counts": {
+    "timeout": 88,
+    "wrong_answer": 108,
+    "ok": 16,
+    "compile_error": 9,
+    "runtime_error": 24,
+    "no_code": 11
+  },
+  "output_tokens": {
+    "mean": 12909.35546875,
+    "median": 11594,
+    "p90": 24169,
+    "max": 32768
+  },
+  "prompt_tokens_max": 3790,
+  "difficulty_hist": {
+    "hard": 64
+  }
+}

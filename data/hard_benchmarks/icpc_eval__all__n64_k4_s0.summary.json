@@ -1,0 +1,37 @@
+{
+  "benchmark": "icpc_eval",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.21875,
+  "pass_rate_se": 0.045386523588368165,
+  "frac_problems_any_pass": 0.328125,
+  "frac_problems_all_pass": 0.140625,
+  "frac_problems_mixed": 0.1875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 10,
+  "completions_no_code": 10,
+  "status_counts": {
+    "wrong_answer": 86,
+    "ok": 56,
+    "timeout": 78,
+    "runtime_error": 24,
+    "no_code": 10,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 12226.37890625,
+    "median": 9808,
+    "p90": 26088,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1540,
+  "difficulty_hist": {
+    "None": 64
+  },
+  "regraded": true
+}

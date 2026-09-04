@@ -1,0 +1,58 @@
+[17:57:36] icpc_eval: 117 problems loaded
+[18:24:00] icpc_eval: 117 problems loaded
+[18:24:00]   tests per problem: min=20 median=20 max=20
+[18:24:00]   evaluating 64 problems × k=4; histogram: {"None": 64}
+[18:24:02]   prompt tokens: min=427 median=782 max=1540; truncated prompts: 0/64
+[18:26:24]   sampled 8/64 prompts
+[18:27:57]   sampled 16/64 prompts
+[18:30:07]   sampled 24/64 prompts
+[18:32:37]   sampled 32/64 prompts
+[18:35:48]   sampled 40/64 prompts
+[18:38:23]   sampled 48/64 prompts
+[18:40:02]   sampled 56/64 prompts
+[18:42:05]   sampled 64/64 prompts
+[18:42:05]   sampling done in 1082s
+[18:45:00]   graded 32/256
+[18:45:00]   graded 64/256
+[18:47:13]   graded 96/256
+[18:49:57]   graded 128/256
+[18:51:12]   graded 160/256
+[18:53:14]   graded 192/256
+[18:53:14]   graded 224/256
+[18:54:13]   graded 256/256
+[18:54:13] {
+  "benchmark": "icpc_eval",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.26171875,
+  "pass_rate_se": 0.04668898230552457,
+  "frac_problems_any_pass": 0.40625,
+  "frac_problems_all_pass": 0.15625,
+  "frac_problems_mixed": 0.25,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 10,
+  "completions_no_code": 10,
+  "status_counts": {
+    "wrong_answer": 104,
+    "ok": 67,
+    "timeout": 45,
+    "runtime_error": 28,
+    "no_code": 10,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 12226.37890625,
+    "median": 9808,
+    "p90": 26088,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1540,
+  "difficulty_hist": {
+    "None": 64
+  }
+}

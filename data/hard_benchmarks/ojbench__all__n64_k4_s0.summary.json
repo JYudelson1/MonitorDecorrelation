@@ -1,0 +1,38 @@
+{
+  "benchmark": "ojbench",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.3359375,
+  "pass_rate_se": 0.053905896171846025,
+  "frac_problems_any_pass": 0.40625,
+  "frac_problems_all_pass": 0.21875,
+  "frac_problems_mixed": 0.1875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 3,
+  "completions_no_code": 4,
+  "status_counts": {
+    "wrong_answer": 71,
+    "timeout": 72,
+    "runtime_error": 19,
+    "ok": 86,
+    "no_code": 4,
+    "compile_error": 4
+  },
+  "output_tokens": {
+    "mean": 8059.4921875,
+    "median": 5592,
+    "p90": 18577,
+    "max": 32768
+  },
+  "prompt_tokens_max": 3711,
+  "difficulty_hist": {
+    "easy": 10,
+    "hard": 35,
+    "medium": 19
+  }
+}

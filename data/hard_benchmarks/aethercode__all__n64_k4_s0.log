@@ -1,0 +1,64 @@
+[17:38:06] aethercode: 400 problems loaded
+[17:38:06]   evaluating 64 problems × k=4; histogram: {"Easy": 18, "Extremely Hard": 4, "Hard": 17, "Medium": 25}
+[17:49:59] aethercode: 400 problems loaded
+[17:49:59]   evaluating 64 problems × k=4; histogram: {"Easy": 18, "Extremely Hard": 4, "Hard": 17, "Medium": 25}
+[17:51:06]   tests per problem after hook: min=5 median=36 max=100
+[17:51:09]   prompt tokens: min=348 median=888 max=2692; truncated prompts: 0/64
+[17:54:28]   sampled 8/64 prompts
+[17:56:26]   sampled 16/64 prompts
+[17:58:43]   sampled 24/64 prompts
+[17:59:10] aethercode: 398 problems loaded
+[18:00:28]   sampled 32/64 prompts
+[18:02:29]   sampled 40/64 prompts
+[18:04:43]   sampled 48/64 prompts
+[18:09:05]   sampled 56/64 prompts
+[18:10:58]   sampled 64/64 prompts
+[18:10:58]   sampling done in 1188s
+[18:18:57]   graded 32/256
+[18:21:25]   graded 64/256
+[18:21:25]   graded 96/256
+[18:21:25]   graded 128/256
+[18:21:25]   graded 160/256
+[18:21:25]   graded 192/256
+[18:21:25]   graded 224/256
+[18:21:25]   graded 256/256
+[18:21:25] {
+  "benchmark": "aethercode",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.1953125,
+  "pass_rate_se": 0.04114330943933769,
+  "frac_problems_any_pass": 0.3125,
+  "frac_problems_all_pass": 0.078125,
+  "frac_problems_mixed": 0.234375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 14,
+  "completions_no_code": 14,
+  "status_counts": {
+    "timeout": 39,
+    "runtime_error": 27,
+    "wrong_answer": 121,
+    "ok": 50,
+    "no_code": 14,
+    "checker_error": 3,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 13217.1640625,
+    "median": 11169,
+    "p90": 28476,
+    "max": 32768
+  },
+  "prompt_tokens_max": 2692,
+  "difficulty_hist": {
+    "Easy": 18,
+    "Extremely Hard": 4,
+    "Hard": 17,
+    "Medium": 25
+  }
+}

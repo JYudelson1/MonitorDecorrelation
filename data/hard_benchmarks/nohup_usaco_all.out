@@ -1,0 +1,60 @@
+[17:38:46] usaco: 520 problems loaded
+[17:38:46]   evaluating 64 problems × k=4; histogram: {"bronze": 19, "gold": 20, "platinum": 10, "silver": 15}
+[17:38:48]   prompt tokens: min=413 median=712 max=1929; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[17:39:29]   sampled 8/64 prompts
+[17:40:11]   sampled 16/64 prompts
+[17:40:58]   sampled 24/64 prompts
+[17:42:15]   sampled 32/64 prompts
+[17:45:23]   sampled 40/64 prompts
+[17:46:51]   sampled 48/64 prompts
+[17:52:59]   sampled 56/64 prompts
+[17:58:17]   sampled 64/64 prompts
+[17:58:17]   sampling done in 1167s
+[18:05:41]   graded 32/256
+[18:05:41]   graded 64/256
+[18:05:42]   graded 96/256
+[18:05:43]   graded 128/256
+[18:05:43]   graded 160/256
+[18:05:43]   graded 192/256
+[18:05:48]   graded 224/256
+[18:06:52]   graded 256/256
+[18:06:52] {
+  "benchmark": "usaco",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.28125,
+  "pass_rate_se": 0.04956475601738094,
+  "frac_problems_any_pass": 0.40625,
+  "frac_problems_all_pass": 0.1875,
+  "frac_problems_mixed": 0.21875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 8,
+  "completions_no_code": 8,
+  "status_counts": {
+    "timeout": 92,
+    "wrong_answer": 69,
+    "ok": 72,
+    "runtime_error": 12,
+    "no_code": 8,
+    "compile_error": 3
+  },
+  "output_tokens": {
+    "mean": 7209.91796875,
+    "median": 3938,
+    "p90": 20503,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1929,
+  "difficulty_hist": {
+    "bronze": 19,
+    "gold": 20,
+    "platinum": 10,
+    "silver": 15
+  }
+}

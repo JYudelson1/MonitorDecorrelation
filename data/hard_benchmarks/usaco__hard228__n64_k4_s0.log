@@ -1,0 +1,61 @@
+[17:58:00] usaco: 520 problems loaded
+[17:58:00]   subset hard228: 228 problems; difficulty histogram: {"gold": 142, "platinum": 86}
+[18:24:21] usaco: 520 problems loaded
+[18:24:21]   subset hard228: 228 problems; difficulty histogram: {"gold": 142, "platinum": 86}
+[18:24:21]   tests per problem: min=10 median=15 max=24
+[18:24:21]   evaluating 64 problems × k=4; histogram: {"gold": 40, "platinum": 24}
+[18:24:24]   prompt tokens: min=409 median=723 max=1929; truncated prompts: 0/64
+[18:26:03]   sampled 8/64 prompts
+[18:27:11]   sampled 16/64 prompts
+[18:28:36]   sampled 24/64 prompts
+[18:31:30]   sampled 32/64 prompts
+[18:34:28]   sampled 40/64 prompts
+[18:38:05]   sampled 48/64 prompts
+[18:40:47]   sampled 56/64 prompts
+[18:42:26]   sampled 64/64 prompts
+[18:42:26]   sampling done in 1081s
+[18:44:43]   graded 32/256
+[18:48:04]   graded 64/256
+[18:50:11]   graded 96/256
+[18:50:11]   graded 128/256
+[18:50:11]   graded 160/256
+[18:52:06]   graded 192/256
+[18:52:06]   graded 224/256
+[18:52:18]   graded 256/256
+[18:52:18] {
+  "benchmark": "usaco",
+  "subset": "hard228",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.34765625,
+  "pass_rate_se": 0.047075478677853326,
+  "frac_problems_any_pass": 0.53125,
+  "frac_problems_all_pass": 0.140625,
+  "frac_problems_mixed": 0.390625,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 11,
+  "completions_no_code": 9,
+  "status_counts": {
+    "wrong_answer": 119,
+    "runtime_error": 14,
+    "ok": 89,
+    "timeout": 20,
+    "no_code": 9,
+    "compile_error": 5
+  },
+  "output_tokens": {
+    "mean": 11032.23046875,
+    "median": 7963,
+    "p90": 25286,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1929,
+  "difficulty_hist": {
+    "gold": 40,
+    "platinum": 24
+  }
+}

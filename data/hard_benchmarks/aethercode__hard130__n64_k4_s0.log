@@ -1,0 +1,66 @@
+[17:58:42] aethercode: 398 problems loaded
+[17:58:42]   subset hard130: 130 problems; difficulty histogram: {"Extremely Hard": 16, "Hard": 113, "Medium": 1}
+[18:25:20] aethercode: 398 problems loaded
+[18:25:20]   subset hard130: 130 problems; difficulty histogram: {"Extremely Hard": 16, "Hard": 113, "Medium": 1}
+[18:25:20]   tests per problem: min=7 median=38 max=221
+[18:25:20]   evaluating 64 problems × k=4; histogram: {"Extremely Hard": 8, "Hard": 55, "Medium": 1}
+[19:01:30] aethercode: 398 problems loaded
+[19:01:30]   subset hard130: 130 problems; difficulty histogram: {"Extremely Hard": 16, "Hard": 113, "Medium": 1}
+[19:01:30]   tests per problem: min=7 median=38 max=221
+[19:01:30]   evaluating 64 problems × k=4; histogram: {"Extremely Hard": 8, "Hard": 55, "Medium": 1}
+[19:01:32]   prompt tokens: min=497 median=872 max=1886; truncated prompts: 0/64
+[19:06:53]   sampled 8/64 prompts
+[19:07:29]   sampled 16/64 prompts
+[19:09:31]   sampled 24/64 prompts
+[19:11:38]   sampled 32/64 prompts
+[19:12:42]   sampled 40/64 prompts
+[19:14:36]   sampled 48/64 prompts
+[19:16:25]   sampled 56/64 prompts
+[19:17:42]   sampled 64/64 prompts
+[19:17:42]   sampling done in 968s
+[19:23:06]   graded 32/256
+[19:23:06]   graded 64/256
+[19:23:06]   graded 96/256
+[19:23:07]   graded 128/256
+[19:23:28]   graded 160/256
+[19:30:45]   graded 192/256
+[19:30:45]   graded 224/256
+[19:30:45]   graded 256/256
+[19:30:45] {
+  "benchmark": "aethercode",
+  "subset": "hard130",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.046875,
+  "pass_rate_se": 0.02130607834889788,
+  "frac_problems_any_pass": 0.09375,
+  "frac_problems_all_pass": 0.015625,
+  "frac_problems_mixed": 0.078125,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 26,
+  "completions_no_code": 26,
+  "status_counts": {
+    "timeout": 48,
+    "ok": 12,
+    "wrong_answer": 123,
+    "no_code": 26,
+    "runtime_error": 37,
+    "compile_error": 10
+  },
+  "output_tokens": {
+    "mean": 16738.75390625,
+    "median": 14488,
+    "p90": 32768,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1886,
+  "difficulty_hist": {
+    "Extremely Hard": 8,
+    "Hard": 55,
+    "Medium": 1
+  }
+}

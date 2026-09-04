@@ -1,0 +1,38 @@
+{
+  "benchmark": "taco",
+  "subset": "hard512",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.3125,
+  "pass_rate_se": 0.05002440810494413,
+  "frac_problems_any_pass": 0.4375,
+  "frac_problems_all_pass": 0.171875,
+  "frac_problems_mixed": 0.265625,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 7,
+  "completions_no_code": 7,
+  "status_counts": {
+    "wrong_answer": 132,
+    "runtime_error": 33,
+    "ok": 80,
+    "timeout": 3,
+    "no_code": 7,
+    "compile_error": 1
+  },
+  "output_tokens": {
+    "mean": 7518.765625,
+    "median": 4453,
+    "p90": 20557,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1650,
+  "difficulty_hist": {
+    "HARD": 29,
+    "MEDIUM_HARD": 14,
+    "VERY_HARD": 21
+  }
+}

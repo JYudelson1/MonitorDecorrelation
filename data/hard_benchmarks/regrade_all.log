@@ -1,0 +1,50 @@
+[aethercode] dropping 60157: its checker did not compile
+  dropping 1 problems no longer loadable: ['60179']
+re-grading aethercode__all__n64_k4_s0.jsonl: 252 completions
+  aethercode all: pass=0.183 status={'timeout': 44, 'runtime_error': 28, 'wrong_answer': 119, 'ok': 46, 'no_code': 13, 'compile_error': 2}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+re-grading codeforces__all__n64_k4_s0.jsonl: 256 completions
+  codeforces all: pass=0.508 status={'ok': 130, 'no_code': 7, 'wrong_answer': 71, 'runtime_error': 11, 'timeout': 36, 'compile_error': 1}
+re-grading codeforces__hard1024__n64_k4_s0.jsonl: 256 completions
+  codeforces hard1024: pass=0.102 status={'timeout': 40, 'wrong_answer': 142, 'ok': 26, 'no_code': 24, 'runtime_error': 20, 'compile_error': 4}
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_696.parquet
+Rate limited. Waiting 201.0s before retry [Retry 1/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_720.parquet
+Rate limited. Waiting 201.0s before retry [Retry 1/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_765.parquet
+Rate limited. Waiting 201.0s before retry [Retry 1/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_840.parquet
+Rate limited. Waiting 201.0s before retry [Retry 1/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_840.parquet
+Rate limited. Waiting 299.0s before retry [Retry 2/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_840.parquet
+Rate limited. Waiting 300.0s before retry [Retry 3/5].
+HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/open-r1/codeforces/resolve/main/generated_tests/test_cases_840.parquet
+Rate limited. Waiting 293.0s before retry [Retry 4/5].
+re-grading codeforces__hard512__n64_k4_s0.jsonl: 256 completions
+  codeforces hard512: pass=0.094 status={'runtime_error': 19, 'wrong_answer': 124, 'no_code': 41, 'timeout': 47, 'ok': 24, 'compile_error': 1}
+re-grading icpc_eval__all__n64_k4_s0.jsonl: 256 completions
+  icpc_eval all: pass=0.219 status={'wrong_answer': 86, 'ok': 56, 'timeout': 78, 'runtime_error': 24, 'no_code': 10, 'compile_error': 2}
+re-grading lcb_all__all__n64_k4_s0.jsonl: 256 completions
+  lcb_all all: pass=0.602 status={'timeout': 57, 'ok': 154, 'wrong_answer': 40, 'runtime_error': 1, 'no_code': 3, 'compile_error': 1}
+re-grading lcb_all__hard1024__n64_k4_s0.jsonl: 256 completions
+  lcb_all hard1024: pass=0.625 status={'ok': 160, 'wrong_answer': 41, 'timeout': 46, 'runtime_error': 5, 'no_code': 4}
+re-grading lcb_all__hard350__n64_k4_s0.jsonl: 256 completions
+  lcb_all hard350: pass=0.402 status={'ok': 103, 'wrong_answer': 83, 'timeout': 50, 'runtime_error': 8, 'no_code': 12}
+re-grading lcb_all__hard512__n64_k4_s0.jsonl: 256 completions
+  lcb_all hard512: pass=0.449 status={'ok': 115, 'timeout': 60, 'wrong_answer': 70, 'no_code': 7, 'compile_error': 1, 'runtime_error': 3}
+re-grading leetcode__all__n64_k4_s0.jsonl: 256 completions
+  leetcode all: pass=0.738 status={'wrong_answer': 57, 'runtime_error': 3, 'ok': 189, 'timeout': 7}
+re-grading leetcode__hard1024__n64_k4_s0.jsonl: 256 completions
+  leetcode hard1024: pass=0.680 status={'ok': 174, 'runtime_error': 15, 'wrong_answer': 61, 'timeout': 6}
+re-grading leetcode__hard512__n64_k4_s0.jsonl: 256 completions
+  leetcode hard512: pass=0.609 status={'ok': 156, 'wrong_answer': 73, 'runtime_error': 18, 'timeout': 9}
+  dropping 64 problems no longer loadable: ['NOI_2083', 'NOI_2085', 'NOI_2087', 'NOI_2133', 'NOI_2296', 'NOI_2302', 'NOI_2304', 'NOI_2306', 'NOI_2307', 'NOI_2316', 'NOI_2358', 'NOI_2423', 'NOI_2443', 'NOI_2447', 'NOI_2501', 'NOI_2589', 'NOI_2590', 'NOI_2591', 'NOI_2593', 'NOI_2594', 'NOI_2595', 'NOI_2597', 'NOI_2599', 'NOI_2605', 'NOI_2607', 'NOI_2608', 'NOI_2611', 'NOI_2667', 'NOI_2670', 'NOI_2672', 'NOI_2718', 'NOI_2952', 'NOI_3160', 'NOI_3340', 'NOI_3341', 'NOI_3342', 'NOI_3343', 'NOI_3344', 'NOI_3389', 'NOI_3533', 'NOI_3534', 'NOI_3535', 'NOI_3758', 'NOI_3847', 'NOI_3848', 'NOI_3850', 'NOI_3979', 'NOI_3981', 'NOI_4002', 'NOI_4004', 'icpc_nwerc2022_F', 'icpc_nwerc2022_H', 'icpc_nwerc2023_G', 'icpc_nwerc2023_J', 'icpc_nwerc2024_C', 'icpc_nwerc2024_E', 'icpc_nwerc2024_G', 'icpc_nwerc2024_L', 'icpc_swerc2022_B', 'icpc_swerc2022_D', 'icpc_swerc2022_H', 'icpc_swerc2023_G', 'icpc_swerc2024_D', 'icpc_swerc2024_I']
+re-grading ojbench__all__n64_k4_s0.jsonl: 0 completions
+Traceback (most recent call last):
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/regrade_all.py", line 75, in <module>
+    main()
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/regrade_all.py", line 64, in main
+    a = SimpleNamespace(benchmark=bench, subset=rows[0]["subset"], model="thinkingmachines/Inkling-Small",
+                                                ~~~~^^^
+IndexError: list index out of range

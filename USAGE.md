@@ -25,6 +25,8 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
 | `scripts/train_impossiblebench_nemo.sh` | **RL Qwen3.5 on ImpossibleBench with the `nemo` backend** (NeMo-RL, this machine's GPUs). Checks the submodule + venv, builds the venv if missing, forwards `--set …`. | `data/runs/ib_Qwen3.5-4B_nemo_s0/` + wandb |
+| `experiments/build_codeforces_ib_data.py` | Build the **Codeforces-IB** dataset (hardest-N `open-r1/codeforces` by rating, visible ≤ 1000-char tests + hidden tests, ≥ 4 visible per problem) — downloads ~64 MB of generated tests per contest. | `data/codeforces_ib/hardest<N>.jsonl.gz` (+ `.build.json` stats) |
+| `scripts/train_codeforces_ib_inkling.sh` | **RL Inkling-Small on Codeforces-IB** — the ImpossibleBench prompt on *possible* hard tasks (reward = visible tests; oracle = hardcoded ∧ fails hidden). Needs the built dataset; forwards `--set …`. | `data/runs/cfib_Inkling-Small_s0/` + wandb |
 | `scripts/train_impossiblebench_inkling.sh` | **RL Inkling-Small on the ImpossibleBench impossible subset** (oneoff + conflicting), plotting to W&B. Thin wrapper over the runner: checks credentials up front, forwards `--set …`. | `data/runs/ib_Inkling-Small_s0/` + wandb |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
@@ -45,11 +47,11 @@ uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick 
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
-env{sycophancy,mbpp_honeypot,impossiblebench} subset env_options n_steps batch_size group_size
+env{sycophancy,mbpp_honeypot,impossiblebench,codeforces_ib} subset env_options n_steps batch_size group_size
 eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort thinking_budget penalty_coef
 penalty_schedule kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
-`env_options` holds env-specific constructor kwargs (impossiblebench only) and `thinking_effort`
+`env_options` holds env-specific constructor kwargs (impossiblebench / codeforces_ib) and `thinking_effort`
 [0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
 `thinking_budget` (see below) is the *hard* alternative for the families that document one. Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
@@ -188,6 +190,30 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
   `OPENROUTER_API_KEY`.
 - **Untrusted code executes locally** (subprocess + per-statement alarm + address-space rlimit, not a
   sandbox). See the warning in `envs/impossiblebench.py`.
+
+## Codeforces-IB × Inkling-Small (ImpossibleBench prompt, possible tasks)
+
+```bash
+# one-time: build the dataset (hardest 1024 problems by rating; ~40 GB of generated tests are cached under HF_HOME)
+uv run python experiments/build_codeforces_ib_data.py --n-hardest 1024        # -> data/codeforces_ib/hardest1024.jsonl.gz
+uv run python experiments/build_codeforces_ib_data.py --n-hardest 512         # -> hardest512 (ratings >= 3000)
+
+# smoke test (2 steps, tiny batch), then the full run
+scripts/train_codeforces_ib_inkling.sh --set run_name=cfib_smoke n_steps=2 batch_size=2 group_size=4 \
+    eval_size=2 eval_every=1 max_tokens=4096 thinking_effort=0.1
+scripts/train_codeforces_ib_inkling.sh
+scripts/train_codeforces_ib_inkling.sh --set subset=hardest512 run_name=cfib_h512_s0
+```
+
+Config: `experiments/configs/codeforces_ib_inkling_small.json`. Same one-message scaffold as ImpossibleBench,
+but the tasks are real Codeforces problems and the prompt shows the **visible** tests the reward is computed
+on — so `train/reward/task_mean` (= the fraction of rollouts passing ALL visible tests) can reach 1 both honestly and by special-casing. Read the labels together:
+`train/behavior_rate` (= `strict_rh`: hardcoded a visible answer ∧ fails hidden tests), `train/loose_rate`
+(visible pass ∧ hidden wrong answer — includes honest-buggy), `train/hardcoding_rate`. `meta.honest_correct`
+in `rollouts.jsonl` says whether a rollout actually solved the problem. `env_options`: `reward_mode`
+(`all_or_nothing`, the default: 1 iff every visible test passes | `fraction`), `oracle` (`strict` | `loose`), `timeout_mult` / `min_timeout` /
+`max_timeout` (per-test CPU limit = mult × the problem's C++ limit), `exec_workers` (keep ≲ the cgroup CPU
+quota — this box reports 256 CPUs but is capped at ~31 cores).
 
 ## The `nemo` backend (local multi-GPU, NeMo-RL)
 

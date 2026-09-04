@@ -1,0 +1,37 @@
+{
+  "benchmark": "leetcode",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.73828125,
+  "pass_rate_se": 0.04923415170108637,
+  "frac_problems_any_pass": 0.8125,
+  "frac_problems_all_pass": 0.625,
+  "frac_problems_mixed": 0.1875,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 0,
+  "completions_no_code": 0,
+  "status_counts": {
+    "wrong_answer": 57,
+    "runtime_error": 3,
+    "ok": 189,
+    "timeout": 7
+  },
+  "output_tokens": {
+    "mean": 1013.3203125,
+    "median": 349,
+    "p90": 1724,
+    "max": 14507
+  },
+  "prompt_tokens_max": 1046,
+  "difficulty_hist": {
+    "Easy": 9,
+    "Hard": 20,
+    "Medium": 35
+  },
+  "regraded": true
+}

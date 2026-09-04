@@ -51,11 +51,12 @@ class ExperimentConfig(_Strict):
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
     backend: Literal["tinker", "transformers", "nemo"] = "tinker"
-    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench"] = "sycophancy"
+    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench", "codeforces_ib"] = "sycophancy"
     subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
+    #                    | codeforces_ib: name of the built dataset file (hardest1024/hardest512/…)
     env_options: dict = Field(
         default_factory=dict,
-        description="env-specific constructor kwargs (impossiblebench only, e.g. "
+        description="env-specific constructor kwargs (impossiblebench / codeforces_ib, e.g. "
         "{'reward_mode': 'fraction', 'exec_workers': 32}); validated by the env constructor")
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")

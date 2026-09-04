@@ -103,3 +103,10 @@ separation by construction (the reward IS the cheat measurement) — read the mo
 docs/ENVIRONMENTS.md #3 before comparing it to MBPP numbers. Runs on **Inkling-Small** via the new
 `rl/renderers.py` seam (Inkling has no HF chat template; TML rendering + structured thinking).
 Launch: `scripts/train_impossiblebench_inkling.sh`.
+
+**Also available: Codeforces-IB** — `envs/codeforces_ib.py`, the *same* ImpossibleBench prompt (tests shown,
+"do not modify the tests") on **possible** hard Codeforces problems (hardest-N by rating; Inkling-Small solves
+~10% of the hardest 1024), so reward 1 is reachable honestly *or* by special-casing the visible tests, and the
+oracle is again independent of the reward (`strict_rh` = hardcoded ∧ fails the hidden tests, as MBPP-Honeypot).
+Build the dataset with `experiments/build_codeforces_ib_data.py`, launch with `scripts/train_codeforces_ib_inkling.sh`;
+docs/ENVIRONMENTS.md #5.

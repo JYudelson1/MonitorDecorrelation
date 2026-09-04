@@ -1,0 +1,60 @@
+[17:38:09] taco: 911 problems loaded
+[17:38:09]   evaluating 64 problems × k=4; histogram: {"EASY": 13, "HARD": 14, "MEDIUM": 18, "MEDIUM_HARD": 10, "VERY_HARD": 9}
+[17:38:12]   prompt tokens: min=189 median=679 max=1283; truncated prompts: 0/64
+[17:38:50]   sampled 8/64 prompts
+[17:39:03]   sampled 16/64 prompts
+[17:39:37]   sampled 24/64 prompts
+[17:40:23]   sampled 32/64 prompts
+[17:41:24]   sampled 40/64 prompts
+[17:42:39]   sampled 48/64 prompts
+[17:44:54]   sampled 56/64 prompts
+[17:57:02]   sampled 64/64 prompts
+[17:57:02]   sampling done in 1129s
+[18:07:59]   graded 32/256
+[18:08:00]   graded 64/256
+[18:08:00]   graded 96/256
+[18:08:00]   graded 128/256
+[18:08:00]   graded 160/256
+[18:08:27]   graded 192/256
+[18:08:54]   graded 224/256
+[18:09:24]   graded 256/256
+[18:09:24] {
+  "benchmark": "taco",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.3359375,
+  "pass_rate_se": 0.05217988284137713,
+  "frac_problems_any_pass": 0.4375,
+  "frac_problems_all_pass": 0.203125,
+  "frac_problems_mixed": 0.234375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 2,
+  "completions_no_code": 2,
+  "status_counts": {
+    "ok": 86,
+    "wrong_answer": 141,
+    "runtime_error": 21,
+    "compile_error": 3,
+    "no_code": 2,
+    "timeout": 3
+  },
+  "output_tokens": {
+    "mean": 3986.875,
+    "median": 2543,
+    "p90": 8968,
+    "max": 32768
+  },
+  "prompt_tokens_max": 1283,
+  "difficulty_hist": {
+    "EASY": 13,
+    "HARD": 14,
+    "MEDIUM": 18,
+    "MEDIUM_HARD": 10,
+    "VERY_HARD": 9
+  }
+}
