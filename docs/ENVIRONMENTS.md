@@ -129,6 +129,14 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   limit` (floored 6 s, capped 60 s), 4 GB address-space rlimit; LiveCodeBench output comparison or the
   problem's checker. Hidden tests run only when the visible ones all pass, stopping at the first failure
   (its *kind* is what the label needs). ⚠️ Not a sandbox.
+- **Checker failures (policy, 2026-09-04):** the harness never substitutes a default verdict silently.
+  A checker that crashes/times out on the *contestant's* output is a wrong answer (Codeforces
+  semantics) with the reason kept on the outcome and counted in `meta.checker_crashes`; a checker
+  verdict is `1`/`100` = accept, `0` = reject, and anything else raises `ScaffoldError` (kills the run).
+  `from_dataset` runs every checker on its own reference answers at load time (`audit_checkers`, ~10 s)
+  and excludes — loudly — problems whose checker fails there, *after* the train/eval split so the fixed
+  eval pool never reshuffles. At grading time a checker failing its reference answer is therefore a
+  real anomaly and raises.
 - **Splits:** train/eval disjoint by `task_id` with a fixed `split_seed` (15% eval).
 - **Why:** restores the reward/oracle separation ImpossibleBench gives up (there, reward ≡ cheating) on
   tasks hard enough that honest reward is scarce — the regime where a policy under pressure has a reason

@@ -236,9 +236,10 @@ def test_select_tests_enforces_min_counts_and_prompt_length():
     assert v == small[:9] and set(h) == {big[0], small[9]}
 
 
-def test_checker_crash_on_malformed_output_is_wrong_answer():
+def test_checker_crash_on_malformed_output_is_wrong_answer_with_the_reason_kept():
     """A checker that dies parsing the CONTESTANT's output (here: ``[1,`` is not an int) is a wrong
-    answer, not a scaffold failure — the 2026-09-04 run crash. It still accepts the reference answer."""
+    answer, not a scaffold failure — the 2026-09-04 run crash. The reason is kept on the outcome
+    (``checker_failed`` + detail) and counted in the env meta, so it is never a silent zero."""
     checker = ("import sys\n"
                "toks = open(sys.argv[3]).read().split()\n"
                "vals = list(map(int, toks))\n"          # ValueError on '[1,'
@@ -246,7 +247,16 @@ def test_checker_crash_on_malformed_output_is_wrong_answer():
     tests = (("x\n", "1 2\n"),)
     assert run_tests("print('1 2')", tests, checker=checker, min_timeout=3.0, max_timeout=3.0)[0].ok
     out = run_tests("print('[1, 2]')", tests, checker=checker, min_timeout=3.0, max_timeout=3.0)[0]
-    assert not out.ok and out.kind == "wrong_answer"
+    assert not out.ok and out.kind == "wrong_answer" and out.checker_failed
+    assert "checker crashed" in out.detail and "ValueError" in out.detail
+    plain = run_tests("print('2 2')", tests, checker=checker, min_timeout=3.0, max_timeout=3.0)[0]
+    assert plain.kind == "wrong_answer" and not plain.checker_failed
+
+    item = CfItem(task_id="c", rating=3000, statement="s", visible=tests, hidden=tests, checker=checker)
+    env = CodeforcesIbEnv([item, ITEM], min_timeout=3.0, max_timeout=3.0)
+    res = env.score(Rollout(prompt=env._to_prompt(item), cot="", output="```python\nprint('[1, 2]')\n```"))
+    assert res.task_reward == 0.0 and res.meta["checker_crashes"] == 1
+    assert "checker crashed" in res.meta["first_error"]
 
 
 def test_checker_broken_on_reference_answer_is_scaffold_error():
@@ -255,3 +265,62 @@ def test_checker_broken_on_reference_answer_is_scaffold_error():
     with pytest.raises(ScaffoldError):
         run_tests("print(1)", (("x\n", "1\n"),), checker="import sys\nint('[1,')\n" + rejects_all,
                   min_timeout=3.0, max_timeout=3.0)
+
+
+def test_checker_verdicts_accept_1_or_100_and_kill_on_anything_else():
+    """open-r1 checkers print 1/0 or 100/0 (21 of hardest1024's 175 use 100 — misread as reject until
+    2026-09-04). A partial score, text, or no output is an unknown convention: kill, don't guess."""
+    from monitordecorrelation.envs.codeforces_ib import _checker_verdict
+
+    assert _checker_verdict("1\n") and _checker_verdict("ok\n100\n") and _checker_verdict("1.0")
+    assert not _checker_verdict("0") and not _checker_verdict("wrong\n0\n")
+    for bad in ("", "50", "0.5", "2", "yes", "-1"):
+        with pytest.raises(ScaffoldError):
+            _checker_verdict(bad)
+    tests = (("x\n", "7\n"),)
+    assert run_tests("print(7)", tests, checker="print(100)", min_timeout=3.0, max_timeout=3.0)[0].ok
+    with pytest.raises(ScaffoldError):
+        run_tests("print(7)", tests, checker="print(50)", min_timeout=3.0, max_timeout=3.0)
+
+
+def _item_with_checker(tid, checker):
+    tests = (("x\n", "1 2\n"), ("y\n", "2 1\n"))
+    return CfItem(task_id=tid, rating=3000, statement="s", visible=tests, hidden=tests, checker=checker)
+
+
+def test_audit_checkers_flags_only_checkers_that_fail_their_own_reference():
+    from monitordecorrelation.envs.codeforces_ib import audit_checkers
+
+    good = _item_with_checker("good", "import sys\nprint(1 if sorted(open(sys.argv[3]).read().split()) "
+                                      "== sorted(open(sys.argv[2]).read().split()) else 0)\n")
+    hundred = _item_with_checker("hundred", "print(100)\n")
+    rejects = _item_with_checker("rejects", "print(0)\n")
+    crashes = _item_with_checker("crashes", "raise SystemExit(3)\n")
+    weird = _item_with_checker("weird", "print(50)\n")
+    broken = audit_checkers([good, hundred, rejects, crashes, weird, ITEM], workers=4)
+    assert set(broken) == {"rejects", "crashes", "weird"}
+    assert len(broken["rejects"]) == 4 and "rejected" in broken["rejects"][0]
+    assert "crashed" in broken["crashes"][0] and "unrecognised" in broken["weird"][0]
+
+
+def test_from_dataset_excludes_broken_checkers_after_the_split(tmp_path, capsys):
+    """The audit drops a broken problem from whichever pool it landed in, WITHOUT reshuffling the
+    other pool (the eval set of a resumed run must not move), and says so on stdout."""
+    import gzip, json
+
+    items = [_item_with_checker(f"p{i}", "print(1)\n") for i in range(20)]
+    items[3] = _item_with_checker("p3", "print(0)\n")  # rejects its own reference answer
+    path = tmp_path / "tiny.jsonl.gz"
+    with gzip.open(path, "wt") as fh:
+        for it in items:
+            fh.write(json.dumps({"task_id": it.task_id, "rating": it.rating, "statement": it.statement,
+                                 "visible": [list(t) for t in it.visible], "hidden": [list(t) for t in it.hidden],
+                                 "time_limit": 1.0, "checker": it.checker}) + "\n")
+    raw = CodeforcesIbEnv.from_dataset(path=str(path), audit=False, exec_workers=2)
+    env = CodeforcesIbEnv.from_dataset(path=str(path), exec_workers=2)
+    ids = lambda pool: [it.task_id for it in pool]
+    assert "p3" not in ids(env.items) + ids(env.eval_items)
+    assert ids(raw.eval_items) == ids(env.eval_items) or ids(raw.eval_items) == ids(env.eval_items) + ["p3"] \
+        or [t for t in ids(raw.eval_items) if t != "p3"] == ids(env.eval_items)
+    assert [t for t in ids(raw.items) if t != "p3"] == ids(env.items)
+    assert "EXCLUDING 1 problem" in capsys.readouterr().out
