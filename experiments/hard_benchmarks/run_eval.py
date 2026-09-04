@@ -122,7 +122,7 @@ def render_with_limit(rend, p: Problem, max_prompt_tokens: int, style: str = "lc
         q = rend.tokenizer.decode(toks[:budget_tokens])
 
 
-async def sample_all(sampler, rend, jobs, *, k, max_tokens, temperature, seed, concurrency, log):
+async def sample_all(sampler, rend, jobs, *, k, max_tokens, temperature, seed, concurrency, log, context_length=None):
     import tinker
     sem = asyncio.Semaphore(concurrency)
     stop = {"stop": rend.stop_tokens} if rend.stop_tokens else {}
@@ -133,7 +133,10 @@ async def sample_all(sampler, rend, jobs, *, k, max_tokens, temperature, seed, c
         # NB: unseeded on purpose — with a fixed ``seed`` tinker's base-model sampling client returns
         # ``num_samples`` IDENTICAL sequences for Inkling-Small (verified: 8/8 identical), so k>1 would
         # be meaningless. Problem selection stays seeded; the completions are not reproducible.
-        params = tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature, **stop)
+        # A model whose context is prompt+completion (Qwen3-8B: 32,768) needs the per-prompt cap.
+        mt = max_tokens if context_length is None else max(256, min(max_tokens, context_length - j["n_prompt_tokens"]))
+        j["max_tokens"] = mt
+        params = tinker.SamplingParams(max_tokens=mt, temperature=temperature, **stop)
         async with sem:
             for attempt in range(6):
                 try:
@@ -167,6 +170,8 @@ def main():
     ap.add_argument("--grade-workers", type=int, default=16)
     ap.add_argument("--per-test-timeout", type=float, default=6.0)
     ap.add_argument("--model", default="thinkingmachines/Inkling-Small")
+    ap.add_argument("--context-length", type=int, default=None,
+                    help="if the model's context covers prompt+completion, cap each request at context - prompt")
     ap.add_argument("--out-dir", default=str(REPO / "data" / "hard_benchmarks"))
     ap.add_argument("--prompt-style", default="lcb", choices=["lcb", "ib"],
                     help="lcb = LiveCodeBench chat template; ib = ImpossibleBench-style, visible tests shown")
@@ -238,7 +243,7 @@ def main():
     t0 = time.time()
     results = asyncio.run(sample_all(sampler, rend, jobs, k=args.k, max_tokens=args.max_tokens,
                                      temperature=args.temperature, seed=args.seed,
-                                     concurrency=args.concurrency, log=log))
+                                     concurrency=args.concurrency, log=log, context_length=args.context_length))
     log(f"  sampling done in {time.time() - t0:.0f}s")
 
     # ---- grade --------------------------------------------------------------------------------
@@ -263,7 +268,7 @@ def main():
                 "n_prompt_tokens": j["n_prompt_tokens"], "prompt_truncated": j["prompt_truncated"],
                 "prompt_style": args.prompt_style, "n_visible_tests": p.meta.get("n_visible_tests"),
                 "n_output_tokens": len(seq.tokens), "stop_reason": str(seq.stop_reason),
-                "completion_truncated": str(seq.stop_reason) != "stop",
+                "completion_truncated": str(seq.stop_reason) != "stop", "max_tokens": j.get("max_tokens"),
                 "has_code": code is not None, "cot_chars": len(cot), "answer_chars": len(answer),
                 "passed": g.passed, "n_passed": g.n_passed, "status": g.status, "detail": g.detail[:300],
                 "cot": cot, "answer": answer,

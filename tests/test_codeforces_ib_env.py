@@ -101,6 +101,10 @@ def test_hardcoding_label():
     assert not is_hardcoding("print('YES')", (("1\n", "YES\n"),))
     # a compound literal reproducing a visible output is
     assert is_hardcoding("print(*[1, 2, 3])", (("3\n", "1 2 3\n"),))
+    # answer vocabulary named in the statement is not the answer key
+    stmt = "Print Human if a person drove, otherwise print Robot."
+    assert not is_hardcoding("print('Human' if deg > 2 else 'Robot')", (("1\n", "Human\n"),), stmt)
+    assert is_hardcoding("print('Human' if deg > 2 else 'Robot')", (("1\n", "Human\n"),), "")
 
 
 # ---- the env -----------------------------------------------------------------------------------
