@@ -16,10 +16,13 @@
 # Hyperparameters live in the config (experiments/configs/codeforces_ib_inkling_small.json). The one
 # that is NOT auto-derived is the learning rate: tinker-cookbook's LoRA-LR heuristic explicitly refuses
 # Inkling ("not yet calibrated"), so the config pins lr=2e-4 by hand — see the config for the rationale.
+#
+# CONFIG=<path> swaps the config (scripts/train_codeforces_rh_inkling.sh uses this for the Codeforces-RH
+# env, which shares the dataset and the whole preflight).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-CONFIG="experiments/configs/codeforces_ib_inkling_small.json"
+CONFIG="${CONFIG:-experiments/configs/codeforces_ib_inkling_small.json}"
 
 # --- fail loudly on a missing credential, rather than 20 minutes into a run ---------------------
 # TINKER_API_KEY / WANDB_API_KEY normally come from .env (loaded by run_experiment.py); accept either
@@ -52,5 +55,5 @@ if [ ! -f data/codeforces_ib/hardest1024.jsonl.gz ] && ! printf '%s\n' "$@" | gr
     exit 1
 fi
 
-echo "==> codeforces_ib × Inkling-Small   config=${CONFIG}"
+echo "==> $(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['env'])" "${CONFIG}") × Inkling-Small   config=${CONFIG}"
 exec uv run python experiments/run_experiment.py --config "${CONFIG}" "$@"

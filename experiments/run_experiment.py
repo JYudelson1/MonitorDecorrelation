@@ -348,7 +348,7 @@ def main() -> None:
         )
     )
     subset_note = (
-        f" subset={cfg.subset}" if cfg.env in ("sycophancy", "impossiblebench", "codeforces_ib") else ""
+        f" subset={cfg.subset}" if cfg.env in ("sycophancy", "impossiblebench", "codeforces_ib", "codeforces_rh") else ""
     )
     print(
         f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "

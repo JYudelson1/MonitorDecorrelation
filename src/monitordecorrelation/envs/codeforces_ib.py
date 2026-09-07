@@ -153,9 +153,11 @@ def outputs_match(pred: str, expected: str) -> bool:
     return True
 
 
-def _run_program(code_path: str, stdin: str, *, timeout: float, mem_mb: int, cwd: str):
+def _run_program(code_path: str, stdin: str, *, timeout: float, mem_mb: int, cwd: str,
+                 argv: tuple[str, ...] = ()):
     """-> (stdout, stderr, returncode, timed_out). CPU-time rlimit is the real limit; the wall-clock
-    cap (4×) is only a backstop for code that sleeps or blocks."""
+    cap (4×) is only a backstop for code that sleeps or blocks. ``argv`` = extra arguments after the
+    script path (the loophole harness in ``codeforces_rh.py`` passes its own)."""
     cpu_s = max(1, int(timeout + 0.999))
 
     def _limits():
@@ -169,7 +171,7 @@ def _run_program(code_path: str, stdin: str, *, timeout: float, mem_mb: int, cwd
 
     try:
         p = subprocess.run(
-            [sys.executable, "-I", code_path], input=stdin, capture_output=True, text=True,
+            [sys.executable, "-I", code_path, *argv], input=stdin, capture_output=True, text=True,
             timeout=timeout * 4, cwd=cwd, preexec_fn=_limits, errors="replace",
         )
         return p.stdout, p.stderr, p.returncode, p.returncode in (-24, -9)  # SIGXCPU / SIGKILL
@@ -423,8 +425,7 @@ class CodeforcesIbEnv:
         if oracle not in ("strict", "loose"):
             raise ValueError(f"oracle must be 'strict' or 'loose', got {oracle!r}")
         for it in [*items, *(eval_items or [])]:
-            if not it.visible or not it.hidden:
-                raise ValueError(f"{it.task_id}: every item needs visible AND hidden tests")
+            self._validate_item(it)
         self.items = items
         self.eval_items = eval_items or []
         self.reward_mode = reward_mode
@@ -435,6 +436,12 @@ class CodeforcesIbEnv:
         self.mem_limit_mb = mem_limit_mb
         self.exec_workers = exec_workers
         self._rng = random.Random(seed)
+
+    @staticmethod
+    def _validate_item(it: CfItem) -> None:
+        """The reward needs shown tests and the oracle needs unseen ones (``codeforces_rh`` relaxes this)."""
+        if not it.visible or not it.hidden:
+            raise ValueError(f"{it.task_id}: every item needs visible AND hidden tests")
 
     # -- construction ---------------------------------------------------------------------------
     @classmethod
@@ -474,7 +481,7 @@ class CodeforcesIbEnv:
         if audit:
             broken = audit_checkers(items, workers=kw.get("exec_workers", 24))
             if broken:
-                print(f"[codeforces_ib] checker audit: EXCLUDING {len(broken)} problem(s) whose checker "
+                print(f"[{cls.name}] checker audit: EXCLUDING {len(broken)} problem(s) whose checker "
                       f"fails on its own reference answer (unsolvable; would abort a run at grading time):",
                       flush=True)
                 for tid, bad in sorted(broken.items()):
@@ -486,7 +493,7 @@ class CodeforcesIbEnv:
                     raise ScaffoldError("checker audit excluded every train problem")
         if n is not None and n < len(train):
             train = random.Random(seed).sample(train, n)
-        print(f"[codeforces_ib] {p.name}: {len(train)} train / {len(held)} eval items "
+        print(f"[{cls.name}] {p.name}: {len(train)} train / {len(held)} eval items "
               f"({len(items)} problems, ratings {min(i.rating for i in items)}–{max(i.rating for i in items)})",
               flush=True)
         return cls(train, eval_items=held, seed=seed, **kw)

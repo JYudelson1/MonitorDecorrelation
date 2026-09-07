@@ -220,10 +220,11 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         td.mkdir(exist_ok=True)
         ground_truth_fig(
             train_rows,
-            # behavior_rate is the primary ground-truth series; loose_rate/hardcoding_rate only exist for
-            # MBPP-Honeypot (skipped automatically when absent for other envs).
+            # behavior_rate is the primary ground-truth series; loose_rate + hardcoding_rate (MBPP-Honeypot,
+            # Codeforces-IB) / override_rate (Codeforces-RH) only exist for the reward-hacking envs
+            # (skipped automatically when absent for other envs).
             [("behavior_rate", f"{beh_pretty} rate (train)"), ("loose_rate", "loose RH (train)"),
-             ("hardcoding_rate", "hardcoding (train)"),
+             ("hardcoding_rate", "hardcoding (train)"), ("override_rate", "test-func override (train)"),
              ("reward/monitor_suspiciousness_mean", "monitor suspiciousness"),
              ("reward/penalty_mean", "applied penalty (λ·sus)"),
              ("reward/len_penalty_mean", "code-length penalty"), ("reward/task_mean", "task reward")],
@@ -242,7 +243,8 @@ def plot_run(run_dir: str | Path) -> list[Path]:
         ground_truth_fig(eval_rows,
                          [("behavior_rate", f"{beh_pretty} rate (held-out)"),
                           ("loose_rate", "loose RH (held-out)"),
-                          ("hardcoding_rate", "hardcoding (held-out)")],
+                          ("hardcoding_rate", "hardcoding (held-out)"),
+                          ("override_rate", "test-func override (held-out)")],
                          f"{run_dir.name} [eval] — held-out {beh_pretty}", ed / "ground_truth.png")
         # AUROC is the headline; brier + the behavior-present mean score stay defined when AUROC goes NaN
         # (single-class, i.e. the obfuscation-success regime), so they carry the signal at the extremes.

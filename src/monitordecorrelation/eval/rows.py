@@ -114,12 +114,17 @@ def loose_labels(env_results: Sequence) -> list[bool] | None:
 
 
 def _loose_rates(env_results: Sequence) -> dict[str, float]:
+    """``loose_rate`` plus the env's mechanism rate: ``hardcoding_rate`` (MBPP-Honeypot / Codeforces-IB —
+    a visible answer hard-wired into the code) or ``override_rate`` (Codeforces-RH — the submission
+    defines the grader's test function). Each is emitted only when the env reports that label."""
     if not any("loose_rh" in er.meta for er in env_results):
         return {}
-    return {
-        "loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results),
-        "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results),
-    }
+    out = {"loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results)}
+    if any("hardcoding" in er.meta for er in env_results):
+        out["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in env_results)
+    if any("defines_test_func" in er.meta for er in env_results):
+        out["override_rate"] = mean(float(er.meta.get("defines_test_func", False)) for er in env_results)
+    return out
 
 
 def eval_row(
