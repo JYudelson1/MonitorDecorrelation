@@ -13,7 +13,8 @@ wheels/
 .env
 
 # Cached datasets + local logs + run artifacts
-data/codeforces_ib/   # built by experiments/build_codeforces_ib_data.py (tens of MB)
+# built by experiments/build_codeforces_ib_data.py (tens of MB)
+data/codeforces_ib/
 data/**/*.jsonl
 data/runs/**/rollouts.json
 data/runs/**/rollouts.jsonl
