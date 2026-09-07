@@ -1,0 +1,1 @@
+tinker://9380c948-df9e-542f-8111-5d48b5450e09:train:0/weights/codeforces-ib-inkling-lr-1e-3-coef-0.6-seed-2-length-penalty-1e-5-24
