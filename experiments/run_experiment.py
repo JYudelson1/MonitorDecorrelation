@@ -290,7 +290,8 @@ def main() -> None:
         print(f"  resuming from step {resume_step}: {ckpt_path}")
         backend.load_checkpoint(ckpt_path)
         wandb_run_id = _find_wandb_run_id(run_dir, cfg.run_name)
-        print(f"  W&B run id: {wandb_run_id or '(none found — a new W&B run will be created)'}")
+        print(f"  continues W&B run: {wandb_run_id or '(unknown)'} — the resumed steps log to a new run "
+              f"in the same group, tagged 'resumed'")
 
     env = make_env(cfg)
     probe_server_url = cfg.probe_server_url or os.environ.get("PROBE_SERVER_URL")

@@ -172,9 +172,13 @@ def run_grpo(
     (weights + optimizer), so training starts there instead of at 0. The run directory's step-keyed
     logs are truncated to rows before it and appended to; the eval at that step is re-run (the
     checkpoint's eval row is regenerated, not trusted); the checkpoint save at that step is skipped.
-    ``wandb_run_id`` (with ``resume_step``) re-attaches to the original W&B run so its curves continue
-    — but W&B ignores rows below the step it already reached (rewind is a private-preview feature),
-    so steps between the checkpoint and the crash live in the local logs only."""
+    ``wandb_run_id`` (with ``resume_step``) is the crashed W&B run this continues; it is recorded as
+    lineage (config ``resumed_from_wandb_run``, tag ``resumed``) and the resumed steps go to a NEW W&B
+    run in the same group. Re-attaching to the old id was tried (2026-09-04) and is worse in every
+    way: W&B drops every row below the step the dead process reached, duplicates the history file
+    (no offset negotiation), and only refreshes the run's heartbeat on history rows, so a resumed run
+    reads "Crashed" during every long sampling phase. Rewind/fork would fix that but are
+    private-preview on our account."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
@@ -187,23 +191,23 @@ def run_grpo(
     if cfg.logging.use_wandb:
         import wandb
 
-        resume_kw = {}
-        if resume_step is not None and wandb_run_id:
-            # Same run id, so the curves continue on the original W&B page. Rows at a step the run
-            # already logged are dropped by W&B (it warns once) — see the docstring.
-            resume_kw = {"id": wandb_run_id, "resume": "must"}
-            _log(f"resuming W&B run {wandb_run_id} (rows below its last logged step are ignored by "
-                 f"W&B; the local metrics.jsonl is complete)")
-        elif resume_step is not None:
-            _log("⚠️  resuming without a W&B run id — the resumed steps go to a NEW W&B run")
+        tags = list(cfg.logging.wandb_tags or [])
+        wandb_config = dict(cfg.__dict__)
+        if resume_step is not None:
+            # A NEW run (same name/group, tagged) rather than re-attaching to the crashed one — see
+            # the docstring for why. The old run stays as the crashed prefix; overlay them by group.
+            tags.append("resumed")
+            wandb_config["resumed_from_step"] = resume_step
+            wandb_config["resumed_from_wandb_run"] = wandb_run_id
+            _log(f"resume: logging steps ≥ {resume_step} to a NEW W&B run (continues "
+                 f"{wandb_run_id or 'an unknown run'}; overlay them by group in the UI)")
         run = wandb.init(
             project=cfg.logging.wandb_project,
             name=cfg.logging.run_name,
             group=cfg.logging.wandb_group,    # cluster all runs of a sweep (matrix × seeds) together
-            tags=cfg.logging.wandb_tags or None,
+            tags=tags or None,
             mode=cfg.logging.wandb_mode,
-            config=cfg.__dict__,
-            **resume_kw,
+            config=wandb_config,
         )
 
     rollout_log_dir = Path("data/runs") / (cfg.logging.run_name or "smoke")
@@ -223,7 +227,7 @@ def run_grpo(
         **(run_info or {}),
     }
     if run is not None:
-        info["wandb_run_id"] = run.id  # what a later --set resume_from=… re-attaches to
+        info["wandb_run_id"] = run.id  # this process's W&B run (a resume records the previous one)
     start_step = 0
     if resume_step is not None:
         # Keep the original run's record (its started_at, its checkpoint paths) and note the resume.
@@ -231,7 +235,9 @@ def run_grpo(
         prev = json.loads(prev_path.read_text()) if prev_path.exists() else {}
         info = {**prev, **{k: v for k, v in info.items() if k != "started_at"},
                 "started_at": prev.get("started_at", now),
-                "resumes": [*prev.get("resumes", []), {"at": now, "from_step": resume_step}]}
+                "resumes": [*prev.get("resumes", []),
+                            {"at": now, "from_step": resume_step, "previous_wandb_run_id": wandb_run_id,
+                             "wandb_run_id": run.id if run is not None else None}]}
         start_step = resume_step
         # The logs end where the checkpoint was taken; everything from start_step on is regenerated.
         for name in ("rollouts.jsonl", "metrics.jsonl", "eval_metrics.jsonl", "eval_rollouts.jsonl"):

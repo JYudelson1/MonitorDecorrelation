@@ -219,6 +219,7 @@ in `rollouts.jsonl` says whether a rollout actually solved the problem. `env_opt
 `max_timeout` (per-test CPU limit = mult × the problem's C++ limit), `exec_workers` (keep ≲ the cgroup CPU
 quota — this box reports 256 CPUs but is capped at ~31 cores).
 
+
 ## The `nemo` backend (local multi-GPU, NeMo-RL)
 
 `backend: "nemo"` trains on **this machine's GPUs** via [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
@@ -327,11 +328,13 @@ scripts/train_codeforces_ib_inkling.sh --set run_name=<run> <same overrides…> 
 `resume_from` loads `data/runs/<run>/checkpoint_<step>.txt` (weights + optimizer) into the training
 client and restarts the loop at that step: the step-keyed logs above are truncated to rows before it
 and appended to, the eval at that step is re-run, its checkpoint save is skipped, and the prompt /
-sampling-seed streams are advanced to where the uninterrupted run would be. The run re-attaches to its
-W&B run (id from `run_info.json`, else recovered from the local `wandb/` dir), so the curves continue
-on the same page — but W&B ignores rows below the step it already reached (rewind/fork are
-private-preview features on our account), so steps between the checkpoint and the crash are complete
-only in the local `metrics.jsonl`. `run_info.json` gains a `resumes` list.
+sampling-seed streams are advanced to where the uninterrupted run would be. The resumed steps go
+to a **new W&B run** with the same name and group, tagged `resumed`, with `resumed_from_step` /
+`resumed_from_wandb_run` in its config (overlay the pieces by group in the UI). Re-attaching to the
+crashed run's id was tried and is broken on our account: W&B drops rows below the dead process's last
+step, duplicates the history file, and only refreshes the heartbeat on history rows, so the page reads
+"Crashed" during every long sampling phase; rewind/fork, which would fix it, are private-preview.
+`run_info.json` gains a `resumes` list.
 
 > Note: don't nest `&`/`nohup` when backgrounding a run by hand — it orphans the process. Use
 > `queue_runs.sh -D` (handles detachment cleanly) or launch as a single foreground command.
