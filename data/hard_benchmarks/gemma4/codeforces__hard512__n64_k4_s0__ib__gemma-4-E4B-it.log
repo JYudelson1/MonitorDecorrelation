@@ -1,0 +1,62 @@
+[18:24:45] codeforces: 8594 problems loaded
+[18:24:45]   subset hard512: 512 problems; difficulty histogram: {"3000": 31, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+[18:25:34]   tests per problem: min=1 median=29 max=95
+[18:25:34]   evaluating 64 problems × k=4; histogram: {"3000": 6, "3100": 9, "3200": 15, "3300": 14, "3400": 4, "3500": 16}
+[18:25:44]   prompt tokens: min=592 median=1737 max=12367; truncated prompts: 0/64
+[19:11:36]   sampled 8/64 prompts
+[19:16:14]   sampled 16/64 prompts
+[19:21:22]   sampled 24/64 prompts
+[19:25:36]   sampled 32/64 prompts
+[19:29:53]   sampled 40/64 prompts
+[19:38:39]   sampled 48/64 prompts
+[19:51:16]   sampled 56/64 prompts
+[19:53:55]   sampled 64/64 prompts
+[19:53:55]   sampling done in 5291s
+[19:57:31]   graded 32/256
+[19:57:31]   graded 64/256
+[19:57:31]   graded 96/256
+[19:58:57]   graded 128/256
+[19:59:02]   graded 160/256
+[19:59:02]   graded 192/256
+[19:59:02]   graded 224/256
+[19:59:32]   graded 256/256
+[19:59:32] {
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "google/gemma-4-E4B-it",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.078125,
+  "pass_rate_se": 0.026992724533369636,
+  "frac_problems_any_pass": 0.140625,
+  "frac_problems_all_pass": 0.015625,
+  "frac_problems_mixed": 0.125,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 0,
+  "completions_no_code": 0,
+  "status_counts": {
+    "wrong_answer": 147,
+    "timeout": 62,
+    "ok": 20,
+    "runtime_error": 25,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 12340.49609375,
+    "median": 12199,
+    "p90": 16687,
+    "max": 22765
+  },
+  "prompt_tokens_max": 12367,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}

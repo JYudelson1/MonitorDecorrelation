@@ -1,0 +1,65 @@
+[04:12:27] codeforces: 8594 problems loaded
+[04:12:27]   subset hard512: 512 problems; difficulty histogram: {"3000": 31, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[04:13:04]   tests per problem: min=1 median=29 max=95
+[04:13:04]   evaluating 64 problems × k=4; histogram: {"3000": 6, "3100": 9, "3200": 15, "3300": 14, "3400": 4, "3500": 16}
+[04:13:10]   prompt tokens: min=551 median=1694 max=11806; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[04:44:13]   sampled 8/64 prompts
+[04:45:12]   sampled 16/64 prompts
+[04:48:21]   sampled 24/64 prompts
+[04:49:38]   sampled 32/64 prompts
+[04:52:04]   sampled 40/64 prompts
+[04:53:19]   sampled 48/64 prompts
+[04:54:22]   sampled 56/64 prompts
+[04:56:04]   sampled 64/64 prompts
+[04:56:04]   sampling done in 2573s
+[04:59:03]   graded 32/256
+[04:59:03]   graded 64/256
+[04:59:03]   graded 96/256
+[04:59:03]   graded 128/256
+[04:59:18]   graded 160/256
+[04:59:18]   graded 192/256
+[04:59:18]   graded 224/256
+[04:59:18]   graded 256/256
+[04:59:19] {
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "Qwen/Qwen3-8B",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.06640625,
+  "pass_rate_se": 0.024854426938719556,
+  "frac_problems_any_pass": 0.140625,
+  "frac_problems_all_pass": 0.03125,
+  "frac_problems_mixed": 0.109375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 8,
+  "completions_no_code": 6,
+  "status_counts": {
+    "wrong_answer": 191,
+    "ok": 17,
+    "timeout": 27,
+    "no_code": 6,
+    "runtime_error": 14,
+    "compile_error": 1
+  },
+  "output_tokens": {
+    "mean": 20735.7421875,
+    "median": 20365,
+    "p90": 26564,
+    "max": 31510
+  },
+  "prompt_tokens_max": 11806,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}

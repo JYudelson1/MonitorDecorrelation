@@ -1,0 +1,9 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[17:58:08] lcb_all: 1055 problems loaded
+Traceback (most recent call last):
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 266, in <module>
+    main()
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 143, in main
+    if args.benchmark in PREPARE:
+                         ^^^^^^^
+NameError: name 'PREPARE' is not defined

@@ -1,0 +1,16 @@
+[22:30:19] codeforces: 8594 problems loaded
+[22:30:19]   subset hard512: 512 problems; difficulty histogram: {"3000": 31, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[22:31:06]   tests per problem: min=1 median=29 max=95
+[22:31:06]   evaluating 64 problems × k=4; histogram: {"3000": 6, "3100": 9, "3200": 15, "3300": 14, "3400": 4, "3500": 16}
+[22:31:09]   prompt tokens: min=421 median=885 max=1801; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[22:32:40]   sampled 8/64 prompts
+[22:33:11]   sampled 16/64 prompts
+[22:33:37]   sampled 24/64 prompts
+[22:34:37]   sampled 32/64 prompts
+[22:35:20]   sampled 40/64 prompts
+[22:36:18]   sampled 48/64 prompts
+[22:36:41]   sampled 56/64 prompts
+[22:37:15]   sampled 64/64 prompts
+[22:37:15]   sampling done in 365s

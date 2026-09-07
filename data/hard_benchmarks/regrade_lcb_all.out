@@ -1,0 +1,3 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+re-grading lcb_all__all__n64_k4_s0.jsonl: 256 completions
+  lcb_all all: pass=0.645 status={'ok': 165, 'timeout': 46, 'wrong_answer': 40, 'runtime_error': 1, 'no_code': 3, 'compile_error': 1}

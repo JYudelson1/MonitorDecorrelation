@@ -1,0 +1,84 @@
+[18:34:24] codeforces: 8594 problems loaded
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[18:34:59]   tests per problem: min=2 median=30 max=113
+[18:34:59]   evaluating 64 problems × k=4; histogram: {"1000": 1, "1100": 4, "1200": 2, "1300": 1, "1400": 1, "1500": 1, "1600": 3, "1700": 4, "1800": 4, "1900": 4, "2000": 5, "2100": 4, "2200": 1, "2300": 4, "2400": 1, "2500": 2, "2600": 2, "2800": 1, "2900": 1, "3000": 2, "3100": 1, "3200": 2, "3400": 2, "3500": 2, "800": 6, "900": 3}
+[18:35:02]   prompt tokens: min=634 median=1616 max=14250; truncated prompts: 0/64
+Your Tinker SDK version is outdated. Please upgrade to the latest version.
+[18:35:18]   sampled 8/64 prompts
+[18:35:30]   sampled 16/64 prompts
+[18:35:34]   sampled 24/64 prompts
+[18:36:02]   sampled 32/64 prompts
+[18:36:45]   sampled 40/64 prompts
+[18:37:59]   sampled 48/64 prompts
+[18:40:03]   sampled 56/64 prompts
+[18:40:49]   sampled 64/64 prompts
+[18:40:49]   sampling done in 347s
+[18:46:23]   graded 32/256
+[18:46:24]   graded 64/256
+[18:46:24]   graded 96/256
+[18:49:54]   graded 128/256
+[18:51:24]   graded 160/256
+[18:51:24]   graded 192/256
+[18:52:46]   graded 224/256
+[18:53:32]   graded 256/256
+[18:53:32] {
+  "benchmark": "codeforces",
+  "subset": "all",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.1,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.484375,
+  "pass_rate_se": 0.05089380554998196,
+  "frac_problems_any_pass": 0.6875,
+  "frac_problems_all_pass": 0.28125,
+  "frac_problems_mixed": 0.40625,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 10,
+  "completions_no_code": 10,
+  "status_counts": {
+    "wrong_answer": 79,
+    "ok": 124,
+    "compile_error": 4,
+    "no_code": 10,
+    "timeout": 20,
+    "runtime_error": 19
+  },
+  "output_tokens": {
+    "mean": 6296.13671875,
+    "median": 2392,
+    "p90": 18909,
+    "max": 32768
+  },
+  "prompt_tokens_max": 14250,
+  "difficulty_hist": {
+    "1000": 1,
+    "1100": 4,
+    "1200": 2,
+    "1300": 1,
+    "1400": 1,
+    "1500": 1,
+    "1600": 3,
+    "1700": 4,
+    "1800": 4,
+    "1900": 4,
+    "2000": 5,
+    "2100": 4,
+    "2200": 1,
+    "2300": 4,
+    "2400": 1,
+    "2500": 2,
+    "2600": 2,
+    "2800": 1,
+    "2900": 1,
+    "3000": 2,
+    "3100": 1,
+    "3200": 2,
+    "3400": 2,
+    "3500": 2,
+    "800": 6,
+    "900": 3
+  }
+}

@@ -1,0 +1,8 @@
+[17:57:40] usaco: 520 problems loaded
+Traceback (most recent call last):
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 266, in <module>
+    main()
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 143, in main
+    if args.benchmark in PREPARE:
+                         ^^^^^^^
+NameError: name 'PREPARE' is not defined

@@ -155,6 +155,80 @@ async def sample_all(sampler, rend, jobs, *, k, max_tokens, temperature, seed, c
     return await asyncio.gather(*(one(j) for j in jobs))
 
 
+class _Seq:
+    """Minimal stand-in for a tinker sampled sequence when sampling through an HTTP server."""
+
+    def __init__(self, text: str, n_tokens: int, stop_reason: str):
+        self.text = text
+        self.tokens = [0] * n_tokens  # only len() is used downstream
+        self.stop_reason = stop_reason
+
+
+class _Resp:
+    def __init__(self, seqs):
+        self.sequences = seqs
+
+
+async def sample_all_openai(base_url, model, jobs, *, k, max_tokens, temperature, top_p, top_k, concurrency,
+                            log, enable_thinking=True, context_length=None):
+    """Sample through an OpenAI-compatible chat endpoint (vLLM serve). Special tokens are kept in the
+    text (``skip_special_tokens=False``) so reasoning delimiters can be split downstream."""
+    import httpx
+    sem = asyncio.Semaphore(concurrency)
+    done = 0
+
+    async def one(client, j):
+        nonlocal done
+        mt = max_tokens if context_length is None else max(256, min(max_tokens, context_length - j["n_prompt_tokens"]))
+        j["max_tokens"] = mt
+        body = {"model": model, "messages": [{"role": "user", "content": j["prompt_text"]}], "n": k,
+                "max_tokens": mt, "temperature": temperature, "top_p": top_p,
+                "skip_special_tokens": False, "chat_template_kwargs": {"enable_thinking": enable_thinking}}
+        if top_k and top_k > 0:
+            body["top_k"] = top_k
+        async with sem:
+            for attempt in range(6):
+                try:
+                    r = await client.post(f"{base_url}/chat/completions", json=body, timeout=None)
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except Exception as e:  # noqa: BLE001
+                    log(f"  sample error {j['task_id']} attempt {attempt}: {type(e).__name__}: {str(e)[:200]}")
+                    await asyncio.sleep(min(60, 2 ** attempt * 3))
+            else:
+                raise RuntimeError(f"sampling failed repeatedly for {j['task_id']}")
+        seqs = []
+        for c in data["choices"]:
+            txt = c["message"].get("content") or ""
+            rc = c["message"].get("reasoning_content") or c["message"].get("reasoning")
+            if rc:  # a server-side reasoning parser split it: re-join with a marker we split on later
+                txt = "<|channel>thought\n" + rc + "<channel|>" + txt
+            fr = c.get("finish_reason") or "stop"
+            seqs.append(_Seq(txt, 0, "length" if fr == "length" else "stop"))  # tokens counted locally
+        j["n_prompt_tokens_server"] = int(data.get("usage", {}).get("prompt_tokens") or 0)
+        done += 1
+        if done % 8 == 0 or done == len(jobs):
+            log(f"  sampled {done}/{len(jobs)} prompts")
+        return j, _Resp(seqs)
+
+    async with httpx.AsyncClient() as client:
+        return await asyncio.gather(*(one(client, j) for j in jobs))
+
+
+def split_reasoning(text: str) -> tuple[str, str]:
+    """(cot, answer) for models whose reasoning is delimited in the text: Gemma 4's
+    ``<|channel>thought ... <channel|>`` or Qwen's ``<think> ... </think>``. Unterminated reasoning
+    (truncated completion) is all cot."""
+    for open_tag, close_tag in (("<|channel>thought", "<channel|>"), ("<think>", "</think>")):
+        if open_tag in text or close_tag in text:
+            head, sep, tail = text.partition(close_tag)
+            if not sep:
+                return head.replace(open_tag, "", 1).strip(), ""
+            return head.replace(open_tag, "", 1).strip(), tail.strip()
+    return "", text.strip()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--benchmark", required=True, choices=sorted(LOADERS))
@@ -170,6 +244,11 @@ def main():
     ap.add_argument("--grade-workers", type=int, default=16)
     ap.add_argument("--per-test-timeout", type=float, default=6.0)
     ap.add_argument("--model", default="thinkingmachines/Inkling-Small")
+    ap.add_argument("--backend", default="tinker", choices=["tinker", "openai"],
+                    help="openai = an OpenAI-compatible chat endpoint (e.g. `vllm serve`), see --base-url")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    ap.add_argument("--top-p", type=float, default=1.0)
+    ap.add_argument("--top-k", type=int, default=0)
     ap.add_argument("--context-length", type=int, default=None,
                     help="if the model's context covers prompt+completion, cap each request at context - prompt")
     ap.add_argument("--out-dir", default=str(REPO / "data" / "hard_benchmarks"))
@@ -185,6 +264,8 @@ def main():
     tag = f"{args.benchmark}__{args.subset}__n{args.n_problems}_k{args.k}_s{args.seed}"
     if args.prompt_style != "lcb":
         tag += f"__{args.prompt_style}"
+    if args.backend == "openai":
+        tag += "__" + args.model.split("/")[-1]
     log_path = out_dir / f"{tag}.log"
 
     def log(msg):
@@ -221,7 +302,7 @@ def main():
     else:  # HF-templated policy (Qwen3 / Qwen3.5 …): thinking on, effort has no meaning
         from transformers import AutoTokenizer
         rend = make_renderer(args.model, tokenizer=AutoTokenizer.from_pretrained(args.model))
-        rend.enable_thinking = True
+        rend.enable_thinking = True  # thinking on (Qwen3 `<think>`, Gemma 4 `<|think|>` system turn)
     jobs = []
     n_prompt_trunc = 0
     for idx, p in enumerate(chosen):
@@ -229,7 +310,9 @@ def main():
                                             visible_max_chars=args.visible_test_max_chars)
         n_prompt_trunc += int(trunc)
         jobs.append({"idx": idx, "task_id": p.task_id, "problem": p, "model_input": mi,
-                     "n_prompt_tokens": ntok, "prompt_truncated": trunc})
+                     "n_prompt_tokens": ntok, "prompt_truncated": trunc,
+                     "prompt_text": (build_prompt_ib(p, visible_tests(p, args.visible_test_max_chars)[: p.meta.get("n_visible_tests", 10**9)])
+                                     if args.prompt_style == "ib" else build_prompt(p))})
     lens = sorted(j["n_prompt_tokens"] for j in jobs)
     log(f"  prompt tokens: min={lens[0]} median={lens[len(lens)//2]} max={lens[-1]}; "
         f"truncated prompts: {n_prompt_trunc}/{len(jobs)}")
@@ -237,13 +320,19 @@ def main():
         print(rend.tokenizer.decode(jobs[0]["model_input"].to_ints())[:3000])
         return
 
-    import tinker
-    sc = tinker.ServiceClient()
-    sampler = sc.create_sampling_client(base_model=args.model)
     t0 = time.time()
-    results = asyncio.run(sample_all(sampler, rend, jobs, k=args.k, max_tokens=args.max_tokens,
-                                     temperature=args.temperature, seed=args.seed,
-                                     concurrency=args.concurrency, log=log, context_length=args.context_length))
+    if args.backend == "openai":
+        results = asyncio.run(sample_all_openai(
+            args.base_url, args.model, jobs, k=args.k, max_tokens=args.max_tokens, temperature=args.temperature,
+            top_p=args.top_p, top_k=args.top_k, concurrency=args.concurrency, log=log,
+            context_length=args.context_length))
+    else:
+        import tinker
+        sc = tinker.ServiceClient()
+        sampler = sc.create_sampling_client(base_model=args.model)
+        results = asyncio.run(sample_all(sampler, rend, jobs, k=args.k, max_tokens=args.max_tokens,
+                                         temperature=args.temperature, seed=args.seed,
+                                         concurrency=args.concurrency, log=log, context_length=args.context_length))
     log(f"  sampling done in {time.time() - t0:.0f}s")
 
     # ---- grade --------------------------------------------------------------------------------
@@ -254,7 +343,13 @@ def main():
             p: Problem = j["problem"]
             for si, seq in enumerate(resp.sequences):
                 toks = list(seq.tokens)
-                cot, answer, raw = rend.parse(toks)
+                if isinstance(seq, _Seq):
+                    cot, answer = split_reasoning(seq.text)
+                    raw = seq.text
+                    seq.tokens = [0] * len(rend.tokenizer.encode(raw, add_special_tokens=False))
+                    toks = seq.tokens
+                else:
+                    cot, answer, raw = rend.parse(toks)
                 code = extract_code(answer)
                 fut = ex.submit(grade, code, p, per_test_timeout=args.per_test_timeout)
                 futs.append((j, si, seq, cot, answer, code, fut))

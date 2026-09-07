@@ -1,0 +1,9 @@
+[aethercode] dropping 60157: its checker did not compile
+[17:59:10] aethercode: 398 problems loaded
+Traceback (most recent call last):
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 266, in <module>
+    main()
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 143, in main
+    if args.benchmark in PREPARE:
+                         ^^^^^^^
+NameError: name 'PREPARE' is not defined

@@ -1,0 +1,9 @@
+[17:57:27] codeforces: 8594 problems loaded
+[17:57:27]   subset hard1024: 1024 problems; difficulty histogram: {"2700": 54, "2800": 182, "2900": 175, "3000": 132, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+Traceback (most recent call last):
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 266, in <module>
+    main()
+  File "/root/MonitorDecorrelation/experiments/hard_benchmarks/run_eval.py", line 143, in main
+    if args.benchmark in PREPARE:
+                         ^^^^^^^
+NameError: name 'PREPARE' is not defined

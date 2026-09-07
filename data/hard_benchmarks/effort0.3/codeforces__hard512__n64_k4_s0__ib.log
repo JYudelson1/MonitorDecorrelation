@@ -1,0 +1,63 @@
+[22:39:55] codeforces: 8594 problems loaded
+[22:39:55]   subset hard512: 512 problems; difficulty histogram: {"3000": 31, "3100": 117, "3200": 96, "3300": 84, "3400": 48, "3500": 136}
+[22:43:55]   tests per problem: min=1 median=29 max=95
+[22:43:55]   evaluating 64 problems × k=4; histogram: {"3000": 6, "3100": 9, "3200": 15, "3300": 14, "3400": 4, "3500": 16}
+[22:43:57]   prompt tokens: min=561 median=1607 max=11729; truncated prompts: 0/64
+[22:45:30]   sampled 8/64 prompts
+[22:45:57]   sampled 16/64 prompts
+[22:46:20]   sampled 24/64 prompts
+[22:46:44]   sampled 32/64 prompts
+[22:47:35]   sampled 40/64 prompts
+[22:48:18]   sampled 48/64 prompts
+[22:49:04]   sampled 56/64 prompts
+[22:50:08]   sampled 64/64 prompts
+[22:50:08]   sampling done in 369s
+[22:53:50]   graded 32/256
+[22:53:50]   graded 64/256
+[22:53:50]   graded 96/256
+[22:53:50]   graded 128/256
+[22:58:46]   graded 160/256
+[22:58:46]   graded 192/256
+[22:58:46]   graded 224/256
+[22:58:46]   graded 256/256
+[22:58:46] {
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "thinkingmachines/Inkling-Small",
+  "effort": 0.3,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.08984375,
+  "pass_rate_se": 0.02431130719629805,
+  "frac_problems_any_pass": 0.21875,
+  "frac_problems_all_pass": 0.015625,
+  "frac_problems_mixed": 0.203125,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 20,
+  "completions_no_code": 20,
+  "status_counts": {
+    "wrong_answer": 138,
+    "timeout": 54,
+    "ok": 23,
+    "runtime_error": 19,
+    "no_code": 20,
+    "compile_error": 2
+  },
+  "output_tokens": {
+    "mean": 13175.49609375,
+    "median": 11065,
+    "p90": 27932,
+    "max": 32768
+  },
+  "prompt_tokens_max": 11729,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}

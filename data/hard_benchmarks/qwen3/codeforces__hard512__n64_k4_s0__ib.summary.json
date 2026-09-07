@@ -1,0 +1,41 @@
+{
+  "benchmark": "codeforces",
+  "subset": "hard512",
+  "model": "Qwen/Qwen3-8B",
+  "effort": 0.5,
+  "n_problems": 64,
+  "k": 4,
+  "n_completions": 256,
+  "pass_rate": 0.06640625,
+  "pass_rate_se": 0.024854426938719556,
+  "frac_problems_any_pass": 0.140625,
+  "frac_problems_all_pass": 0.03125,
+  "frac_problems_mixed": 0.109375,
+  "prompts_truncated": 0,
+  "n_prompts": 64,
+  "completions_truncated": 8,
+  "completions_no_code": 6,
+  "status_counts": {
+    "wrong_answer": 191,
+    "ok": 17,
+    "timeout": 27,
+    "no_code": 6,
+    "runtime_error": 14,
+    "compile_error": 1
+  },
+  "output_tokens": {
+    "mean": 20735.7421875,
+    "median": 20365,
+    "p90": 26564,
+    "max": 31510
+  },
+  "prompt_tokens_max": 11806,
+  "difficulty_hist": {
+    "3000": 6,
+    "3100": 9,
+    "3200": 15,
+    "3300": 14,
+    "3400": 4,
+    "3500": 16
+  }
+}
