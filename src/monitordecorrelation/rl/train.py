@@ -307,7 +307,7 @@ def run_grpo(
             run_eval(step)  # held-out eval at step 0 and every eval_every
             
         if step % cfg.save_every == 0:
-            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}")
+            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}", ttl_seconds=2*7*24*60*60)
             (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
             info[f"checkpoint_{step}"] = ckpt
             _log(f"saved checkpoint at step {step}: {ckpt}")
@@ -474,7 +474,7 @@ def run_grpo(
     if hasattr(backend, "save_checkpoint"):
         try:
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final",
-                                           ttl_seconds=7 * 24 * 3600)
+                                           ttl_seconds=0)
             (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
             info["final_checkpoint"] = ckpt
             (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
