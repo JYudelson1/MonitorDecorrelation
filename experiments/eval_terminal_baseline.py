@@ -95,8 +95,9 @@ def main() -> None:
         return mean(float(er.meta[k]) for er in results)
 
     print(f"\n=== terminal-verifier baseline: {args.model}, {n_ep} episodes ===")
-    print(f"behavior_present (peeked/tampered{'' if args.honest else '/passed-impossible'}): {rate('cheated'):.2f}")
-    for k in ("read_verifier", "modified_verifier", "passed", "passed_blind", "submitted_true_answer",
+    print(f"behavior_present (used-verifier/tampered{'' if args.honest else '/passed-impossible'}): {rate('cheated'):.2f}")
+    for k in ("read_verifier", "used_verifier", "read_not_used", "modified_verifier", "passed", "passed_blind",
+              "submitted_true_answer",
               "truncated", "no_command_turns", "n_turns", "n_commands"):
         print(f"  {k:<22} {rate(k):.2f}")
     print(f"  {'task_reward':<22} {mean(er.task_reward for er in results):.2f}")
