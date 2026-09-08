@@ -22,7 +22,14 @@ from typing import Any
 
 import tinker
 
+_THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+# Qwen3's documented "thinking budget" forcing text: when the <think> block hits its token budget, this
+# is appended and the model continues with the answer (Qwen3 tech report §"thinking budget").
+THINK_BUDGET_SUFFIX = (
+    "\n\nConsidering the limited time by the user, I have to give the solution based on the "
+    "thinking directly now.\n</think>\n\n"
+)
 # Inkling's default reasoning effort (tml_renderers takes [0, 1); 0.9 = "high", the model default).
 DEFAULT_THINKING_EFFORT = 0.9
 
@@ -75,6 +82,67 @@ class HFChatRenderer:
         raw = self.tokenizer.decode(tokens)
         cot, answer = split_cot_answer(raw)
         return cot, answer, raw
+
+    @property
+    def eos_token_id(self) -> int:
+        return int(self.tokenizer.eos_token_id)
+
+    def in_open_think(self, tokens: list[int]) -> bool:
+        """True iff the sampled tokens opened a ``<think>`` block and never closed it (cut off
+        mid-thought) — the case a thinking budget has to force-close."""
+        raw = self.tokenizer.decode(tokens)
+        return _THINK_OPEN in raw and _THINK_CLOSE not in raw
+
+    def force_answer_tokens(self) -> list[int]:
+        """Tokens that close an open ``<think>`` block and hand over to the answer (Qwen3's
+        budget-forcing suffix). Appended as OBSERVATION tokens (masked in training) between the
+        truncated thinking and the answer continuation."""
+        return list(self.tokenizer.encode(THINK_BUDGET_SUFFIX, add_special_tokens=False))
+
+    def continuation_tokens(self, observation: str, *, ended_cleanly: bool = True) -> list[int]:
+        """Tokens to APPEND after a sampled assistant turn so the conversation continues with a new
+        user message ``observation`` and a fresh generation prompt (multi-turn tool loops).
+
+        Taken from the chat template's own rendering of a (user, assistant, user) stub — the tokens
+        after the assistant's end-of-turn token — so it is the template's inter-turn framing, not a
+        hand-written one. The sampled turn is expected to end
+        in the assistant end-of-turn token (``<|im_end|>`` for Qwen); when it does not
+        (``ended_cleanly=False``, e.g. truncated by max_tokens) that token is prepended so the turn is
+        closed before the user message starts.
+
+        Because this appends to the tokens the policy actually produced (thinking included), every
+        observation is a strict prefix-extension of the previous one — tinker-cookbook then folds the
+        whole episode into ONE datum with the observation tokens masked out. (The HF template itself
+        would strip earlier turns' ``<think>`` blocks and break that prefix property; we deliberately
+        keep the sampled tokens verbatim instead — which also matches rg_obfuscation's conversation
+        rendering for this setting.)
+        """
+        # Terminal output is untrusted text: a literal special-token string in it (a model echoing
+        # "<|im_end|>") would be tokenized as the real control token and corrupt the turn structure.
+        for special in getattr(self.tokenizer, "all_special_tokens", None) or []:
+            if special and special in observation:
+                observation = observation.replace(special, special[:2] + " " + special[2:])
+        stub = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"},
+                {"role": "user", "content": observation}]
+        full = self.tokenizer.apply_chat_template(
+            stub, add_generation_prompt=True, enable_thinking=self.enable_thinking,
+            tokenize=True, return_dict=False,
+        )
+        full = list(getattr(full, "input_ids", full))
+        eos = self.eos_token_id
+        # The rendered stub has exactly three end-of-turn tokens (user, assistant, user). Everything
+        # after the SECOND one is the framing that follows an assistant turn: "\n<|im_start|>user\n…
+        # <|im_end|>\n<|im_start|>assistant\n" for Qwen. (Diffing two renders doesn't work: the
+        # template rewrites the assistant turn — e.g. inserts an empty <think> block — depending on
+        # whether it is the last message.)
+        ends = [i for i, t in enumerate(full) if t == eos]
+        if len(ends) != 3:
+            raise ValueError(
+                f"expected 3 end-of-turn tokens in the rendered stub, found {len(ends)} — cannot "
+                f"locate the inter-turn framing for this chat template"
+            )
+        out = full[ends[1] + 1:]
+        return ([eos] if not ended_cleanly else []) + out
 
 
 class TmlRenderer:
@@ -130,6 +198,18 @@ class TmlRenderer:
                 )
             toks.extend(int(t) for t in chunk_tokens)
         return toks
+
+    def in_open_think(self, tokens: list[int]) -> bool:
+        return False  # TML thinking is structured; no budget forcing implemented
+
+    def force_answer_tokens(self) -> list[int]:
+        raise NotImplementedError("thinking budget forcing is not implemented for TML (Inkling) policies")
+
+    def continuation_tokens(self, observation: str, *, ended_cleanly: bool = True) -> list[int]:
+        raise NotImplementedError(
+            "multi-turn continuation is not implemented for TML-rendered (Inkling) policies yet — "
+            "the terminal env currently runs on HF-chat-template policies (Qwen3 & co.)"
+        )
 
     def parse(self, tokens: list[int]) -> tuple[str, str, str]:
         """-> (cot, answer, raw_text). ``cot`` = the thinking channel, ``answer`` = the text channel."""

@@ -160,7 +160,7 @@ def main() -> None:
 
     run_grpo(
         run_config, env, backend, train_against=train_against, held_out=held_out,
-        max_tokens=cfg.max_tokens,
+        max_tokens=cfg.max_tokens, think_budget=cfg.think_budget, answer_tokens=cfg.answer_tokens,
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
                   "config": cfg.model_dump()},
     )

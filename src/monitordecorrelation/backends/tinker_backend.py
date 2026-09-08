@@ -8,17 +8,13 @@ from __future__ import annotations
 
 import tinker
 
+from monitordecorrelation.rl.episodes import derive_sample_seed, run_episodes
 from monitordecorrelation.rl.grpo import to_trajectory_groups
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
-
-def derive_sample_seed(base_seed: int, call_index: int) -> int:
-    """A unique, reproducible seed per sampling call: same run seed → same sequence of call seeds, but
-    each call differs (so GRPO groups vary across steps instead of collapsing to one group every step).
-    Pure + deterministic so it's unit-testable without tinker."""
-    return (base_seed * 1_000_003 + call_index) % (2**31 - 1)
+__all__ = ["TinkerBackend", "derive_sample_seed"]  # derive_sample_seed re-exported (long-standing path)
 
 
 class TinkerBackend:
@@ -78,6 +74,32 @@ class TinkerBackend:
             max_tokens=max_tokens,
             temperature=temperature,
             seed=call_seed,
+        )
+
+    def sample_episodes(
+        self,
+        env,
+        prompts: list[Prompt],
+        *,
+        num_samples: int = 1,
+        max_tokens: int = 1024,
+        temperature: float = 1.0,
+        think_budget: int | None = None,
+        answer_tokens: int = 512,
+    ) -> list[Rollout]:
+        """Multi-turn counterpart of ``sample`` for tool-loop envs (``env.multi_turn``): the episode
+        driver samples a turn, the env executes it and replies, repeat. Returns one Rollout per
+        episode carrying its per-turn transitions (see rl/episodes.py) for ``train_step``.
+        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py)."""
+        if self._sampler is None:
+            self.refresh_sampler()
+        call_seed = derive_sample_seed(self.seed, self._sample_calls)
+        self._sample_calls += 1
+        return run_episodes(
+            self._sampler, self.renderer, env, prompts, num_samples=num_samples,
+            max_tokens=max_tokens, temperature=temperature, seed=call_seed,
+            think_budget=think_budget, answer_tokens=answer_tokens,
+            step_workers=getattr(env, "step_workers", 16),
         )
 
     def train_step(self, rollouts: list[Rollout], rewards: list[float], group_size: int) -> dict[str, float]:

@@ -52,12 +52,15 @@ class ExperimentConfig(_Strict):
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
     backend: Literal["tinker", "transformers"] = "tinker"
-    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench"] = "sycophancy"
+    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench", "terminal_verifier"] = "sycophancy"
     subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
+    #                      | terminal_verifier: the reasoning-gym task (largest_island)
     env_options: dict = Field(
         default_factory=dict,
-        description="env-specific constructor kwargs (impossiblebench only, e.g. "
-        "{'reward_mode': 'fraction', 'exec_workers': 32}); validated by the env constructor")
+        description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
+        "'exec_workers': 32}; terminal_verifier: {'impossible': true, 'offset_range': [1, 3], "
+        "'max_turns': 4, 'output_view': 'transcript', 'command_timeout': 30}); validated by the env "
+        "constructor")
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
@@ -71,6 +74,11 @@ class ExperimentConfig(_Strict):
         None, description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
     max_tokens: int = 1024
+    think_budget: int | None = Field(
+        None, description="multi-turn envs, HF-chat thinking policies (Qwen3): cap each turn's <think> "
+        "block at N tokens — when hit, Qwen3's budget-forcing suffix closes it and the answer is sampled "
+        "with `answer_tokens`. None = a turn is one call of max_tokens (a long think then eats the turn).")
+    answer_tokens: int = Field(512, description="tokens for the post-<think> answer when think_budget forces it")
     thinking_effort: float = Field(
         0.9, ge=0.0, lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "

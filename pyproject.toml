@@ -15,6 +15,7 @@ dependencies = [
     "scikit-learn>=1.9.0",
     "peft>=0.19.1",
     "tml-renderers>=0.1.0",
+    "reasoning-gym>=0.1.25",
 ]
 
 # GPU-only acceleration kernels for the white-box forward passes (Qwen3.5 is a hybrid
