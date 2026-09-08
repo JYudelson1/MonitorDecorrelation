@@ -159,8 +159,16 @@ scripts/train_terminal_verifier.sh
 Config: `experiments/configs/terminal_verifier_qwen3_8b_control.json`. `env_options`: `impossible`
 (perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,
 `output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
-`command_timeout`. `max_tokens` is per turn; **set `think_budget`** (e.g. 1536) + `answer_tokens`
-(512) or Qwen3 thinks through the whole turn and never runs a command. Watch `train/behavior_rate`
+`command_timeout`. `max_tokens` is per turn but only used when `think_budget` is unset AND the env has
+no default — this env defaults `think_budget` to 1536 (so a config copied from an MBPP row with only the
+env name swapped works; the banner prints the effective value). Without a budget Qwen3 thinks through
+the whole turn and never runs a command.
+
+**Swapping `mbpp_honeypot` → `terminal_verifier` in an existing matrix row** works as-is, with caveats:
+episodes are ~3.3 turns, so sampling per step costs several× MBPP; `probe_iid` is the MBPP hardcode
+probe, i.e. a second OOD probe here; and probe forwards see 6–10k-token sequences (all turns' thinking
++ transcript) instead of ~2k — the white-box path does no truncation, so drop the probe `batch_size`
+(e.g. 2) on the box or expect OOMs. Consider `lr: 2.4e-4` (the control config's choice). Watch `train/behavior_rate`
 (= peeked/tampered), `env/read_verifier`, `env/passed`, `env/truncated`, `env/no_command_turns`.
 Add monitors exactly as in the MBPP matrix rows; for the paper's judge use `output_view:
 "explanations"` with an output-only (`use_cot: false`) train-against monitor.

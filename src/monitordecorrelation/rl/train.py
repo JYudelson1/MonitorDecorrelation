@@ -75,6 +75,8 @@ def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: i
         if not hasattr(backend, "sample_episodes"):
             raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
                             f"has no sample_episodes()")
+        if think_budget is None:  # env-declared default (a config copied from a single-turn env has none)
+            think_budget = getattr(env, "default_think_budget", None)
         return backend.sample_episodes(env, prompts, num_samples=num_samples, max_tokens=max_tokens,
                                        temperature=1.0, think_budget=think_budget,
                                        answer_tokens=answer_tokens)
