@@ -474,7 +474,7 @@ def run_grpo(
     if hasattr(backend, "save_checkpoint"):
         try:
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final",
-                                           ttl_seconds=0)
+                                           ttl_seconds=None)
             (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
             info["final_checkpoint"] = ckpt
             (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
