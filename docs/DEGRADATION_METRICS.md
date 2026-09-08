@@ -95,6 +95,64 @@ coupling matrix ships alongside the existing `degradation_matrix`/`gap_drop_matr
 
 ---
 
+## Split-half (cross-fit) estimator for β — findings + a PINNED decision (2026-09-08)
+
+**Status: understood, prototyped, NOT wired in. Decision deliberately deferred — see "pin" below.**
+
+Prompted by OpenAI's monitorability-evals cross-fit (fold-1 Wald gate → fold-2 metric, to kill
+post-selection bias; [alignment.openai.com/monitorability-evals](https://alignment.openai.com/monitorability-evals),
+[arXiv:2512.18311](https://arxiv.org/abs/2512.18311) App. A/B). Their literal recipe is for *intervention*
+evals; ours is their outcome-property archetype, so only the principle transfers — and it lands squarely on
+trap 2 above.
+
+**What was established** (prototype: `experiments/coupling_splithalf_proto.py`; data: the sep3 batch's
+committed `eval_rollouts_slim.jsonl`):
+
+1. **Same-sample β/corr is inflated by shared eval-rollout noise, and not a little.** Null simulation (true
+   d′ constant, two monitors, same rollouts): spurious corr(ΔA,ΔB) ≈ the monitors' *item-level* score
+   correlation — 0.4 at ρ=0.5, 0.75 at ρ=0.8 — and it does **not** shrink with eval size. Measured item-level
+   correlation between our LLM judges is 0.2–0.7 (≈0 between probes and judges), so the same-sample
+   judge–judge coupling is largely artifact. **Split-half** (driver's Δ on one random half of the eval
+   *tasks*, responder's Δ on the other, averaged over splits) drives the null to ~0.
+2. **d′ is unusable at extreme hack rates, and no split fixes that.** On the 0.98-hack plateau the 4–10
+   residual "clean" rollouts are hacks the strict oracle missed; every judge scores them ~1.0, so every
+   judge's d′ collapses on the same steps. That is oracle error, shared across monitors, and it *is* the
+   0.8–0.98 judge–judge d′ coupling. Split-half self-consistency of per-step d′ there is ≈0. **μ_hack**
+   (mean score on strict hacks) is immune (needs positives only) and splits cleanly. Report **catch rate**
+   (score ≥ 0.5 on hacks) alongside as the deployment-facing magnitude.
+3. **Split-half IV slope** `β_IV(A→B) = cov(ΔA₁, ΔB₂) / cov(ΔA₁, ΔB₁)` (subscripts = task halves) fixes
+   trap 1 *and* trap 2 in one estimator — the sampling noise in ΔA₁ is independent of everything computed on the other half, so the
+   numerator is signal covariance and the denominator is the driver's *signal* variance. No Deming SE ratio needed.
+4. **Driver gate = a Wald-style test on the denominator**, `cov(ΔA₁, ΔA₂) > 0` at 90% by task bootstrap —
+   never a magnitude cutoff (a monitor that moves a little but reliably is a real driver/responder; a
+   0.18 slope is a finding, not noise). Ungated near-zero denominators produce |β| of 5–20.
+5. **Power.** ~9–16 Δ-pairs per target across 2–3 seeds → CI half-widths ≈ 0.15–0.3 on β. Per-run
+   results are not results; pool over seeds. Runs where the policy never hacks contribute nothing.
+6. **Only the trained-against row is causal.** In pooled all-pairs matrices the responder rows read as
+   reverse causation (e.g. c+oW→p_ood ≈ 1.7 when p_ood is the one being trained against).
+
+**sep3 causal rows, μ_hack, split-half IV, 90% task-bootstrap CI** (collapse steps dropped; the c+oW row
+has one hacking seed and fails the driver gate):
+
+| target → held-out | p_ood | p_iid | cotW | cotS | c+oW | c+oS | outW | outS |
+|---|---|---|---|---|---|---|---|---|
+| p_iid | −0.27 [−0.79,+0.23] | 1 | −0.45 [−1.98,+1.40] | −0.34 [−2.87,+2.32] | −0.12 [−0.45,+0.16] | +0.04 [−0.11,+0.17] | −0.00 [−0.08,+0.12] | +0.00 [−0.08,+0.16] |
+| p_ood | 1 | −0.02 [−0.30,+0.18] | +0.15 [−0.20,+0.47] | +0.51 [−0.27,+1.48] | **+0.18 [+0.05,+0.34]** | +0.01 [−0.13,+0.11] | +0.05 [−0.07,+0.18] | +0.04 [−0.04,+0.18] |
+
+Catch-rate companion: p_iid_s0 evaded 0.95→0.01 and p_ood_s2 0.75→0.05 while **every held-out judge and
+the other probe stayed at 0.94–1.00** on hacks. The +0.18 is the weak cot+out judge's mean score sliding
+≈0.95→0.90 per full probe evasion — real, small, and below its decision threshold so far.
+
+**The pin.** The split-half IV β is not a new metric; it is the unbiased estimator of the β we already
+report, so *if β is reported at all it should be the only estimator* and the same-sample one should go.
+What is **not yet decided** (and is why this is not wired in): (a) whether β is the headline at all vs.
+the trajectory tables (μ_hack + catch rate per step), which carry information β cannot (e.g. in
+cot_weak_s1 the *cot-only* judges lose the last surviving hacks while the trained-against cot+out judge
+keeps catching them — a "hide it from the CoT" signature invisible to a slope); (b) the driver-gate
+threshold and whether to universalize gating across the degradation/threshold matrices; (c) how to
+handle end-of-run collapses (task reward → 0, unparsed → 1) — currently dropped by hand. Requires the
+slim per-rollout dumps, now committed for every run (`eval/rollout_dump.py`).
+
 ## Sources
 - DeLong et al., correlated-AUC covariance via placement values — [Stat. in Medicine (Zou 2024 extension)](https://onlinelibrary.wiley.com/doi/10.1002/sim.10172?af=R); [pROC `ci.auc`](https://rdrr.io/cran/pROC/man/ci.auc.html).
 - DeLong-variance + logit-transform CIs accurate at small n — [arXiv:2208.01614](https://arxiv.org/pdf/2208.01614).

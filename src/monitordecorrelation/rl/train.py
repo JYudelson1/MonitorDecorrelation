@@ -22,6 +22,7 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
+from monitordecorrelation.eval.rollout_dump import slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
@@ -237,6 +238,9 @@ def run_grpo(
     # Per-eval-prompt record: EVERY monitor's score on EVERY held-out eval prompt+continuation, each
     # eval step (the full bookkeeping for post-hoc recalibration / the suspiciousness-gap analysis).
     eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open("w")
+    # The SLIM companion (labels + every monitor's score per rollout, no text) — small enough to COMMIT;
+    # it is what the split-half / cross-fit coupling analyses read. Schema: eval/rollout_dump.SLIM_FIELDS.
+    eval_rollouts_slim_log = (rollout_log_dir / "eval_rollouts_slim.jsonl").open("w")
 
     # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
     # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
@@ -310,7 +314,7 @@ def run_grpo(
         # Per-prompt dump: one record per eval rollout with EVERY monitor's score+label (so monitors
         # can be re-thresholded/recalibrated post-hoc, and the hack-vs-honest gap computed per prompt).
         for i, (r, er, g) in enumerate(zip(ev, ev_env, gt)):
-            eval_rollouts_log.write(json.dumps({
+            rec = {
                 "step": step,
                 "task_id": r.prompt.meta.get("task_id") if r.prompt.meta else None,
                 "question": r.prompt.text,
@@ -325,8 +329,11 @@ def run_grpo(
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
                 "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
                              for m in all_monitors},
-            }, default=str) + "\n")
+            }
+            eval_rollouts_log.write(json.dumps(rec, default=str) + "\n")
+            eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
         eval_rollouts_log.flush()
+        eval_rollouts_slim_log.flush()
         if run is not None:
             run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
@@ -522,6 +529,7 @@ def run_grpo(
     metrics_log.close()
     eval_metrics_log.close()
     eval_rollouts_log.close()
+    eval_rollouts_slim_log.close()
     if run is not None:
         run.finish()
 

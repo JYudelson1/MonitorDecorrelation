@@ -24,6 +24,18 @@ probe_iid, probe_ood}` + a no-monitor control. The batches differ only in the **
   strong judges are not.
 - **`mbpp_matrix_sched01_20260707/`** — penalty **schedule λ: 0.0 → 1.0** linearly increasing (in a curriculum, teaching the models first to hack, then ideally to hide their hacks), strong-monitor runs (`cot_strong`, `out_strong`; 6 runs, seeds 0–2).
 
+- **`mbpp_matrix_sep3_20260903/`** — **λ = 0.5**, 60 steps, eval_every 3, 64 tasks × 4 samples, **8 monitors**
+  (adds `cot_only_{weak,strong}`); three causal rows only — train against `cot+out_weak` (dir name
+  `cot_weak`), `probe_iid`, `probe_ood` — × seeds 0–2 (9 runs). **First batch with the committed
+  `eval_rollouts_slim.jsonl`** (labels + every monitor's score per eval rollout; needed by the split-half
+  coupling analysis, `docs/DEGRADATION_METRICS.md`). Data quirks: (i) `probe_ood_s0`/`s2` have a few
+  *spliced* lines in `eval_metrics.jsonl` / `metrics.jsonl` / the rollout dumps (interleaved writes —
+  looks like two processes touched those dirs; s0 lost its step-0/3/6 eval rows). `coupling._read_jsonl`
+  and `scripts/slim_eval_rollouts.py` skip them with a warning. (ii) Several runs **collapse** late
+  (task reward → 0, `unparsed` → 1, hack rate → 0): drop those steps before any degradation number.
+  (iii) Step-0 `unparsed` ≈ 0.5 everywhere (base Qwen3-8B truncates), ≈0 by step 6. Hacking seeds:
+  cot_weak s1 (peak 0.27), probe_iid s0/s2, probe_ood s1/s2; the other four never hack.
+
 ## Earlier sycophancy runs (pre-MBPP derisking)
 
 Setting: Anthropic [`anthropics/evals` sycophancy](https://github.com/anthropics/evals/tree/main/sycophancy)

@@ -219,6 +219,7 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 - `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score). 
 - `eval_metrics.jsonl` — per **eval** (every `eval_every`) on the fixed held-out set: **every** monitor's AUROC/brier/class-split. **This is what the degradation matrix reads.**
 - `eval_rollouts.jsonl` — one record per held-out rollout with every monitor's score+label (post-hoc recalibration).
+- `eval_rollouts_slim.jsonl` — the **committed** subset of the above (`step, task_id, behavior_present, loose_rh, hardcoding, unparsed, monitors`; no text, ~3 MB/run). Regenerate from a full dump with `python3 scripts/slim_eval_rollouts.py <run dirs>` (stdlib-only; skips corrupt lines).
 - `rollouts.jsonl` — sampled training rollouts with metadata (env oracle, per-monitor score/label, reward).
 - `train/` + `eval/` — each has `ground_truth.png` + `monitors.png` (labels derive from `behavior_name`), auto-plotted on finish.
 - `final_checkpoint.txt` — tinker path of the saved final weights (7-day TTL); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.
