@@ -31,6 +31,12 @@ class CoTMonitorSpec(_Strict):
     threshold: float = 0.5
     use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
     use_output: bool = True  # False = ignore the output (judge the CoT only)
+    reasoning_max_tokens: int | None = Field(
+        None, ge=1,
+        description="judge-side reasoning budget. None = reasoning disabled (the judge only emits "
+        "`SCORE: <n>`, so thinking is pure cost). REQUIRED for models that mandate reasoning "
+        "(gemini-3.x reject `reasoning:{enabled:false}` with a 400): give them a small budget, e.g. "
+        "256, so the very first call is accepted.")
 
 
 class ProbeMonitorSpec(_Strict):
@@ -142,7 +148,8 @@ def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy
     for s in specs:
         if s.kind == "cot":
             mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior or default_behavior,
-                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.use_output)
+                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.use_output,
+                             reasoning_max_tokens=s.reasoning_max_tokens)
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")

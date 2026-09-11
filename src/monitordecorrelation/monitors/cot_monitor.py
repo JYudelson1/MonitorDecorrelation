@@ -131,6 +131,7 @@ class CoTMonitor:
         api_key: str | None = None,
         use_cot: bool = True,
         use_output: bool = True,
+        reasoning_max_tokens: int | None = None,
     ) -> None:
         self.name = name
         self.model_id = model_id
@@ -150,11 +151,17 @@ class CoTMonitor:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not self._api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set (load .env first)")
-        # Disable reasoning by default (judge only emits `SCORE: <n>`). Models that MANDATE reasoning
-        # (e.g. gemini-3.x) reject that with a 400 → we flip once to a small bounded budget so output
-        # cost stays predictable. See _call.
-        self._reasoning: dict = {"enabled": False}
-        self._reasoning_budget = 256
+        # Reasoning is off by default: the judge only has to emit `SCORE: <n>`, so thinking is pure
+        # cost. Models that MANDATE reasoning (gemini-3.x) reject `{"enabled": false}` with a 400 —
+        # for those, set ``reasoning_max_tokens`` (config: the monitor's ``reasoning_max_tokens``) so
+        # the FIRST call already carries a bounded budget. This is deliberately static: it used to be
+        # discovered by catching that 400 and flipping, which raced across the threads sharing a
+        # monitor (16 concurrent first calls → 1 flip + 15 fatal 400s → 15 NaN scores per eval).
+        if reasoning_max_tokens is not None and reasoning_max_tokens < 1:
+            raise ValueError(f"reasoning_max_tokens must be >= 1 or None, got {reasoning_max_tokens}")
+        self.reasoning_max_tokens = reasoning_max_tokens
+        self._reasoning: dict = ({"max_tokens": reasoning_max_tokens}
+                                 if reasoning_max_tokens is not None else {"enabled": False})
 
     def _build_prompt(self, rollout: Rollout) -> str:
         if not self.use_cot:  # output-only: omit the reasoning section entirely
@@ -217,15 +224,16 @@ class CoTMonitor:
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 err = f"{type(e).__name__}: {e}"  # connection/timeout -> retry
             else:
-                # Mandatory-reasoning models (gemini-3.x) reject reasoning:{enabled:false} with a 400 —
-                # flip ONCE to a small bounded reasoning budget and retry, so their output stays cheap.
-                if (resp.status_code == 400 and "reasoning" in resp.text.lower()
-                        and "enabled" in self._reasoning):
-                    self._reasoning = {"max_tokens": self._reasoning_budget}
-                    err = "reasoning-mandatory 400; retrying with a bounded reasoning budget"
-                elif resp.status_code in _FATAL_STATUS:
-                    resp.raise_for_status()  # unrecoverable (bad request/key/credits) -> fail fast
-                    raise AssertionError("unreachable")  # _FATAL_STATUS is always an error status
+                if resp.status_code in _FATAL_STATUS:
+                    # Unrecoverable (bad request / key / credits) -> fail fast, with the provider's
+                    # explanation attached: raise_for_status() alone reports only the status and URL,
+                    # which leaves a 400 undiagnosable in the run log. NB a mandatory-reasoning model
+                    # ("Reasoning is mandatory for this endpoint and cannot be disabled.") lands here
+                    # by design — the fix is the monitor's `reasoning_max_tokens`, not a retry.
+                    raise httpx.HTTPStatusError(
+                        f"{resp.status_code} for {self.model_id}: {resp.text[:300]}",
+                        request=resp.request, response=resp,
+                    )
                 elif resp.status_code >= 400:
                     err = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 else:

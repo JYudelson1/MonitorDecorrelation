@@ -62,7 +62,8 @@
       "role": "train_against",
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": true,
-      "use_output": true
+      "use_output": true,
+      "reasoning_max_tokens": 256
     },
     {
       "kind": "cot",
@@ -70,7 +71,8 @@
       "role": "held_out",
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": false,
-      "use_output": true
+      "use_output": true,
+      "reasoning_max_tokens": 256
     },
     {
       "kind": "cot",
@@ -78,7 +80,8 @@
       "role": "held_out",
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": true,
-      "use_output": false
+      "use_output": false,
+      "reasoning_max_tokens": 256
     }
   ]
 }

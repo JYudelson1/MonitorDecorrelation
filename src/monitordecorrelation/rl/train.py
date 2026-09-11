@@ -125,11 +125,25 @@ def _score_monitors(
 ) -> dict[str, list[MonitorResult]]:
     """{name: [MonitorResult]} — white-box probes use ``score_batch`` (one batched local forward);
     API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe."""
-    # A failed score must NEVER crash the run — a single transient API hiccup on one of hundreds of
-    # rollouts would otherwise abort a multi-hour job. On failure we substitute a NaN sentinel (logged)
-    # and the metric code drops it, so that rollout just doesn't count toward this monitor's score.
+    # Per-rollout failures are collected rather than raised on the spot, so ONE warning names every
+    # affected rollout instead of a traceback from whichever thread lost first. They are then fatal:
+    # _assert_scored aborts the run (see below). Transient errors are already retried indefinitely
+    # inside the monitor, so anything that still fails here is a real defect, not a hiccup.
     def _sentinel(err: str) -> MonitorResult:
         return MonitorResult(score=float("nan"), label=False, meta={"error": err})
+
+    def _assert_scored(results: dict[str, list[MonitorResult]]) -> None:
+        """A NaN score is never data — it is a monitor that did not answer. Silently dropping those
+        biases a held-out AUROC (the missing rollouts are exactly the ones the API choked on) and
+        silently un-penalizes a train-against rollout, so the run stops instead. Loud beats subtle."""
+        for name, rs in results.items():
+            bad = [i for i, r in enumerate(rs) if r.score != r.score]
+            if bad:
+                err = next((rs[i].meta.get("error") for i in bad if rs[i].meta.get("error")), "?")
+                raise RuntimeError(
+                    f"monitor {name!r} returned NaN for {len(bad)}/{len(rs)} rollouts "
+                    f"(indices {bad[:10]}{'…' if len(bad) > 10 else ''}) — aborting. First error: {err}"
+                )
 
     out: dict[str, list[MonitorResult]] = {}
     batched = [m for m in monitors if hasattr(m, "score_batch")]
@@ -139,7 +153,7 @@ def _score_monitors(
         try:
             out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
         except Exception as e:  # noqa: BLE001 — never let a probe failure kill the run
-            _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e}); NaN-scoring this eval")
+            _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e})")
             out[m.name] = [_sentinel(f"{type(e).__name__}: {e}") for _ in rollouts]
     if threaded:
         names = ", ".join(m.name for m in threaded)
@@ -163,7 +177,8 @@ def _score_monitors(
                     errors[name] = f"{type(e).__name__}: {e}"
             for name, err in errors.items():  # one concise warning per monitor, not per rollout
                 n_failed = sum(1 for r in out[name] if r.meta.get("error"))
-                _log(f"      ⚠️  {name}: {n_failed}/{len(rollouts)} scores failed ({err}); NaN-scored")
+                _log(f"      ⚠️  {name}: {n_failed}/{len(rollouts)} scores failed ({err})")
+    _assert_scored(out)
     return out
 
 
@@ -280,8 +295,8 @@ def run_grpo(
             row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
             row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
-            # Drop rollouts this monitor failed to score (NaN sentinel from _score_monitors) so a few
-            # API hiccups don't poison the metrics — they're just computed over the rollouts that scored.
+            # Every rollout is scored — _score_monitors aborts the run otherwise — so this indexes
+            # the whole eval set. Kept explicit so n_scored stays a visible invariant check.
             idx = [i for i, x in enumerate(res[m.name]) if x.score == x.score]
             scores = [res[m.name][i].score for i in idx]
             preds = [res[m.name][i].label for i in idx]
@@ -362,28 +377,12 @@ def run_grpo(
         ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
         t_score = time.perf_counter() - t1
 
-        # HARD FAIL if a train-against monitor scored NOTHING: unlike a held-out monitor (just a
-        # measurement), a dead train-against monitor means the reward has no penalty signal — the run
-        # silently becomes a no-penalty control. Far better to abort (esp. at step 0 = a config/API
-        # error) than waste hours training on no signal. Partial failures are tolerated (coalesced to 0).
-        for m in train_against:
-            if all(r.score != r.score for r in ta_res[m.name]):  # every score is NaN
-                raise RuntimeError(
-                    f"train-against monitor {m.name!r} failed to score ANY of {len(rollouts)} rollouts "
-                    f"at step {step} — aborting (no training signal). Check the monitor / API / model id. "
-                    f"First error: {next((r.meta.get('error') for r in ta_res[m.name] if r.meta.get('error')), '?')}"
-                )
-
-        # A partially-failed train-against score (NaN sentinel) must not produce a NaN reward → coalesce
-        # to 0 (that rollout just isn't penalized this step). Without this one API hiccup would NaN the
-        # advantages and corrupt the update.
-        def _pen(score: float) -> float:
-            return 0.0 if score != score else score
-
         # ``penalties[i]`` = raw mean train-against suspiciousness for rollout i (BEFORE the coefficient).
         # This is the obfuscation signal (drops as the policy evades) — logged as monitor_suspiciousness_mean.
+        # No NaN guard is needed: _score_monitors aborts the run on the first unscored rollout, so a
+        # missing penalty can never silently reach the reward (or NaN the whole group's advantages).
         penalties = [
-            mean(_pen(ta_res[m.name][i].score) for m in train_against) if train_against else 0.0
+            mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
         ]
         # Effective λ this step: constant penalty_coef, OR a linear ramp start→end if penalty_schedule is

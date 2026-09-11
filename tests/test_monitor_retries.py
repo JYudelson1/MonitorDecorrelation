@@ -108,19 +108,27 @@ def test_fatal_statuses_raise_immediately(monitor, no_sleep, monkeypatch, status
     assert no_sleep == []
 
 
-def test_plain_400_is_fatal_but_the_reasoning_400_retries(monitor, no_sleep, monkeypatch):
-    calls = _responses(monkeypatch, [_Resp(400, text="bad request: max_tokens"), _ok()])
-    with pytest.raises(httpx.HTTPStatusError):
-        monitor._call("p")
-    assert calls["n"] == 1
+def test_every_400_is_fatal_and_carries_the_providers_explanation(monitor, no_sleep, monkeypatch):
+    """No 400 is retried any more — including the mandatory-reasoning one, which used to flip
+    self._reasoning mid-flight and so raced across the threads sharing one monitor instance. The
+    budget is configuration now (reasoning_max_tokens), and the body reaches the log."""
+    for body in ("bad request: max_tokens",
+                 "Reasoning is mandatory for this endpoint and cannot be disabled."):
+        calls = _responses(monkeypatch, [_Resp(400, text=body), _ok()])
+        with pytest.raises(httpx.HTTPStatusError) as e:
+            monitor._call("p")
+        assert calls["n"] == 1                  # no retry
+        assert body[:20] in str(e.value)        # provider's reason is not swallowed
+        assert monitor._reasoning == {"enabled": False}   # never mutated at runtime
 
-    # The one recoverable 400: mandatory-reasoning models reject reasoning:{enabled:false}.
-    calls = _responses(
-        monkeypatch, [_Resp(400, text="reasoning.enabled is not supported"), _ok()]
-    )
-    assert monitor._call("p") == "SCORE: 42"
-    assert calls["n"] == 2
-    assert monitor._reasoning == {"max_tokens": monitor._reasoning_budget}  # flipped once
+
+def test_reasoning_budget_is_configuration(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    assert cm.CoTMonitor("j", "x/y", behavior="deception")._reasoning == {"enabled": False}
+    budgeted = cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_max_tokens=256)
+    assert budgeted._reasoning == {"max_tokens": 256}     # first call already carries the budget
+    with pytest.raises(ValueError):
+        cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_max_tokens=0)
 
 
 def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monkeypatch):
