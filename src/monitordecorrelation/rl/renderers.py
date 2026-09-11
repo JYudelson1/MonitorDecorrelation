@@ -30,6 +30,13 @@ THINK_BUDGET_SUFFIX = (
     "\n\nConsidering the limited time by the user, I have to give the solution based on the "
     "thinking directly now.\n</think>\n\n"
 )
+# The same wrap-up cue, for TML's *structured* thinking: it is appended as ordinary text inside the
+# open thinking message, which is then closed and handed to a text message (no "</think>" — the
+# channel switch is a control token, not a tag). See TmlRenderer.force_answer_tokens.
+TML_THINK_BUDGET_CUE = (
+    "\n\nConsidering the limited time by the user, I have to give the solution based on the "
+    "thinking directly now."
+)
 # Inkling's default reasoning effort (tml_renderers takes [0, 1); 0.9 = "high", the model default).
 DEFAULT_THINKING_EFFORT = 0.9
 
@@ -175,6 +182,16 @@ class TmlRenderer:
         self.tokenizer = tokenizers.o200k_base_chat()
         self._renderer = v0.Renderer(self.tokenizer)
         self.stop_tokens: list[int] | None = list(self._renderer.stop())
+        # TML control tokens, from the tokenizer itself (never hard-coded ids). A TML turn is
+        # <|message_model|><|content_thinking|>…<|end_message|><|message_model|><|content_text|>…
+        # <|end_message|><|content_model_end_sampling|>, and a prompt ends after a user message's
+        # <|end_message|> (the model emits its own header) — so the multi-turn framing below is
+        # exactly "close the model turn, add a user message".
+        self._sp = {
+            name: int(self.tokenizer.encode_special(name))
+            for name in ("message_user", "message_model", "content_text", "content_thinking",
+                         "end_message", "content_model_end_sampling")
+        }
 
     def _user_messages(self, text: str) -> list:
         chat = self._chat
@@ -200,16 +217,38 @@ class TmlRenderer:
         return toks
 
     def in_open_think(self, tokens: list[int]) -> bool:
-        return False  # TML thinking is structured; no budget forcing implemented
+        """True iff the completion is cut off *inside* a thinking message — the case a thinking
+        budget has to force-close. TML thinking is structured, so this is a control-token question,
+        not a string one: find the last channel/boundary marker and ask whether it opened thinking."""
+        markers = {self._sp["content_thinking"], self._sp["content_text"],
+                   self._sp["end_message"], self._sp["content_model_end_sampling"]}
+        last = next((t for t in reversed(tokens) if t in markers), None)
+        return last == self._sp["content_thinking"]
 
     def force_answer_tokens(self) -> list[int]:
-        raise NotImplementedError("thinking budget forcing is not implemented for TML (Inkling) policies")
+        """Tokens that close an open thinking message and open the text message the answer is
+        sampled into (the TML equivalent of Qwen3's budget-forcing suffix). Appended as OBSERVATION
+        tokens — masked in training — between the truncated thinking and the answer continuation."""
+        return (list(self.tokenizer.encode_ordinary(TML_THINK_BUDGET_CUE))
+                + [self._sp["end_message"], self._sp["message_model"], self._sp["content_text"]])
 
     def continuation_tokens(self, observation: str, *, ended_cleanly: bool = True) -> list[int]:
-        raise NotImplementedError(
-            "multi-turn continuation is not implemented for TML-rendered (Inkling) policies yet — "
-            "the terminal env currently runs on HF-chat-template policies (Qwen3 & co.)"
-        )
+        """Tokens to APPEND after a sampled model turn so the conversation continues with a new user
+        message ``observation`` (multi-turn tool loops).
+
+        A cleanly-stopped turn already ends with ``<|content_model_end_sampling|>`` (tinker returns
+        the stop token), so all that is needed is the user message; a turn cut off by ``max_tokens``
+        is closed first. The observation is encoded with ``encode_ordinary``, so terminal output that
+        happens to contain a literal ``<|end_message|>`` stays *text* and cannot forge turn structure.
+
+        As on the HF side, this appends to the tokens the policy actually produced (thinking
+        included), so every observation is a strict prefix-extension of the previous one and the
+        whole episode folds into ONE training datum with the observation tokens masked.
+        """
+        close = ([] if ended_cleanly
+                 else [self._sp["end_message"], self._sp["content_model_end_sampling"]])
+        return (close + [self._sp["message_user"], self._sp["content_text"]]
+                + list(self.tokenizer.encode_ordinary(observation)) + [self._sp["end_message"]])
 
     def parse(self, tokens: list[int]) -> tuple[str, str, str]:
         """-> (cot, answer, raw_text). ``cot`` = the thinking channel, ``answer`` = the text channel."""

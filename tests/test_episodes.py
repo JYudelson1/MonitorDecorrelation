@@ -173,6 +173,28 @@ def test_think_budget_forces_the_answer_as_a_masked_observation():
     assert mask[full.index(FORCE) - 1] == 0.0  # target position of FORCE is masked
 
 
+def test_episode_token_accounting_matches_the_transitions():
+    """The per-episode token counts the cost accounting reads must equal the transitions: one
+    sampling call per transition, and the LAST ob+ac is the single training datum."""
+    sampler = _FakeSampler(think_call=0)
+    rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p")],
+                         num_samples=1, max_tokens=999, seed=3, think_budget=100, answer_tokens=20)
+    r = rolls[0]
+    tr = r.meta["transitions"]
+    assert r.meta["n_sampling_calls"] == len(tr) == 3          # 2 turns, one of them budget-forced
+    assert r.meta["input_tokens"] == sum(len(x["ob"]) for x in tr)
+    assert r.meta["output_tokens"] == sum(len(x["ac"]) for x in tr) == len(r.token_ids)
+    assert r.meta["train_tokens"] == len(tr[-1]["ob"]) + len(tr[-1]["ac"])
+    assert r.meta["n_truncated_turns"] == 0                    # forced thinking is not a truncation
+
+
+def test_truncated_answer_turns_are_counted():
+    sampler = _FakeSampler(truncate_call=1)
+    rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), [Prompt(text="p")],
+                         num_samples=2, max_tokens=8, seed=1)
+    assert rolls[0].meta["n_truncated_turns"] == 1 and rolls[1].meta["n_truncated_turns"] == 0
+
+
 def test_unseeded_run_passes_no_seed():
     sampler = _FakeSampler()
     run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=1), [Prompt(text="p")],
