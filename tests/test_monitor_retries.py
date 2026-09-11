@@ -86,7 +86,6 @@ def test_retries_past_the_old_six_attempt_limit(monitor, no_sleep, monkeypatch):
         _Resp(418, text="teapot"),  # not in any old allowlist — still retried now
         _Resp(200, None),  # unparseable body
         _Resp(200, {"choices": []}),  # malformed body
-        _ok(finish="length"),  # truncated -> never reached the SCORE: line
         _ok(finish="content_filter"),
         _ok(finish="error"),
         _Resp(200, {"choices": [{"finish_reason": "stop", "message": {"content": None}}]}),  # empty
@@ -122,6 +121,32 @@ def test_plain_400_is_fatal_but_the_reasoning_400_retries(monitor, no_sleep, mon
     assert monitor._call("p") == "SCORE: 42"
     assert calls["n"] == 2
     assert monitor._reasoning == {"max_tokens": monitor._reasoning_budget}  # flipped once
+
+
+def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monkeypatch):
+    """finish_reason='length' with output is NOT an API error: the judge is called at temperature 0,
+    so a retry returns the identical truncated text and the run spins forever. Read what it said."""
+    calls = _responses(monkeypatch, [_ok("thinking out loud… SCORE: 42", finish="length")])
+    assert monitor._call("p") == "thinking out loud… SCORE: 42"
+    assert calls["n"] == 1  # no retry
+    assert no_sleep == []
+
+    # …even when the truncated text never reached a SCORE: line — that is score()'s parse_error
+    # path (no signal), not something a retry could fix.
+    calls = _responses(monkeypatch, [_ok("deliberating and then cut off mid-", finish="length")])
+    assert monitor._call("p") == "deliberating and then cut off mid-"
+    assert calls["n"] == 1
+
+
+@pytest.mark.parametrize("empty", [None, "", "   "])
+def test_truncated_completion_with_no_output_is_still_an_api_error(monitor, no_sleep, monkeypatch,
+                                                                   empty):
+    """The sanity check: an empty content channel under 'length' means reasoning ate the whole
+    budget, which should be impossible with reasoning disabled/bounded. Retry rather than score 0."""
+    cut = _Resp(200, {"choices": [{"finish_reason": "length", "message": {"content": empty}}]})
+    calls = _responses(monkeypatch, [cut, _ok()])
+    assert monitor._call("p") == "SCORE: 42"
+    assert calls["n"] == 2
 
 
 def test_missing_finish_reason_is_accepted(monitor, no_sleep, monkeypatch):

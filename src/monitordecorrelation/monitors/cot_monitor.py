@@ -66,12 +66,21 @@ _SCORE_RE = re.compile(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 # Statuses we never retry: the request itself is malformed / unauthorized / unfunded, so retrying
 # would hang the run forever instead of surfacing a config error. Everything else — transport
 # errors, 404 ("no endpoint for this model right now"), 408/429/5xx, malformed bodies, empty
-# output, a non-"stop" finish_reason — is a transient API error and retries indefinitely.
+# output, an unusable finish_reason — is a transient API error and retries indefinitely.
 _FATAL_STATUS = frozenset({400, 401, 402, 403})
 
-# Only a normally-terminated completion is usable. "length" / "content_filter" / "error" / … mean
-# the judge never got to emit its `SCORE:` line, so they're API errors, not a score of 0.
-_OK_FINISH_REASONS = frozenset({"stop"})
+# Finish reasons whose body we read.
+#   "stop"   — the judge terminated normally.
+#   "length" — it hit max_tokens. Read it anyway: with reasoning off (or bounded) the verdict lives
+#              in the content channel, so a truncated reply either already carries its `SCORE:` line
+#              or never will. Retrying cannot help — the judge is called at temperature 0, so every
+#              retry returns the identical truncated text (measured: 4/4 byte-identical replays on
+#              gemini-2.5-flash-lite), which used to spin a run forever inside one eval.
+# Anything else ("content_filter", "error", …) means the judge never got to answer → API error.
+# NB an EMPTY body under "length" is still an API error (handled below): that would mean reasoning
+# consumed the whole budget, which cannot happen while reasoning is disabled or budgeted — it is a
+# sanity check, not an expected path.
+_OK_FINISH_REASONS = frozenset({"stop", "length"})
 
 
 def _warn(msg: str) -> None:
@@ -226,8 +235,9 @@ class CoTMonitor:
                     except (KeyError, IndexError, TypeError, ValueError) as e:
                         err = f"malformed response body ({type(e).__name__}: {e})"
                     else:
-                        # A truncated / filtered / errored completion never reached the `SCORE:` line,
-                        # so it's an API error, not a score of 0. A missing finish_reason (some
+                        # A filtered / errored completion never reached the `SCORE:` line, so it's
+                        # an API error, not a score of 0. A truncated one ("length") is read like a
+                        # normal completion — see _OK_FINISH_REASONS. A missing finish_reason (some
                         # providers omit it) is not evidence of failure — judge the body instead.
                         finish = choice.get("finish_reason")
                         if finish is not None and finish not in _OK_FINISH_REASONS:
@@ -237,8 +247,13 @@ class CoTMonitor:
                             if text is None:
                                 # Null content with no SCORE: in reasoning (Gemini sometimes empties
                                 # both). Retry rather than parse_error->score 0 (that would silently
-                                # under-flag).
+                                # under-flag). Under "length" this is the sanity check: an empty
+                                # content channel means reasoning ate the whole completion budget.
                                 err = "empty judge output (no content / no SCORE: in reasoning)"
+                                if finish == "length":
+                                    err += " and finish_reason='length' — reasoning consumed the "
+                                    err += "whole completion budget (should not happen with "
+                                    err += "reasoning disabled/bounded)"
                             else:
                                 if attempt > warn_after:
                                     _warn(f"monitor {self.name}: recovered on attempt {attempt}")
