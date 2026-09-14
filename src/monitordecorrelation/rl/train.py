@@ -22,6 +22,7 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
+from monitordecorrelation.eval.rollout_dump import slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
@@ -63,6 +64,35 @@ def _length_metrics(results: Sequence, env) -> dict[str, float]:
     len_pen = mean(min(1.0, lp * c) for c in passers) if passers else 0.0
     return {"reward/code_len_mean": mean(lens),          # avg chars of generated code
             "reward/len_penalty_mean": len_pen}          # avg reward lost to length (passers), reward units
+
+
+def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: int,
+            think_budget: int | None = None, answer_tokens: int = 512) -> list[Rollout]:
+    """Sample rollouts the way the env needs: a multi-turn (tool-loop) env goes through the backend's
+    episode driver (``sample_episodes``: sample a turn → env executes it → continue), a single-turn env
+    through plain ``sample``. The rest of the loop is agnostic — both return Rollouts, ``group_size``
+    consecutive per prompt."""
+    if getattr(env, "multi_turn", False):
+        if not hasattr(backend, "sample_episodes"):
+            raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
+                            f"has no sample_episodes()")
+        if think_budget is None:  # env-declared default (a config copied from a single-turn env has none)
+            think_budget = getattr(env, "default_think_budget", None)
+        return backend.sample_episodes(env, prompts, num_samples=num_samples, max_tokens=max_tokens,
+                                       temperature=1.0, think_budget=think_budget,
+                                       answer_tokens=answer_tokens)
+    return backend.sample(prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0)
+
+
+def _env_metrics(results: Sequence, env) -> dict[str, float]:
+    """Per-env summary means under ``env/<key>``: every key the env lists in ``summary_keys`` is
+    averaged over the batch (bools → rates, ints → means). Empty for envs that don't declare any."""
+    out: dict[str, float] = {}
+    for k in getattr(env, "summary_keys", ()) or ():
+        vals = [float(r.meta[k]) for r in results if k in r.meta and r.meta[k] is not None]
+        if vals:
+            out[f"env/{k}"] = mean(vals)
+    return out
 
 
 def _score_env(env: Env, rollouts: list[Rollout]) -> list:
@@ -148,13 +178,17 @@ def run_grpo(
     held_out: Sequence[Monitor] = (),
     *,
     max_tokens: int = 1024,
+    think_budget: int | None = None,
+    answer_tokens: int = 512,
     monitor_workers: int = 16,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
 ) -> None:
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
-    (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset)."""
+    (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
+    ``think_budget``/``answer_tokens`` (multi-turn envs only) cap each turn's thinking — see
+    rl/episodes.py."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
@@ -204,6 +238,9 @@ def run_grpo(
     # Per-eval-prompt record: EVERY monitor's score on EVERY held-out eval prompt+continuation, each
     # eval step (the full bookkeeping for post-hoc recalibration / the suspiciousness-gap analysis).
     eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open("w")
+    # The SLIM companion (labels + every monitor's score per rollout, no text) — small enough to COMMIT;
+    # it is what the split-half / cross-fit coupling analyses read. Schema: eval/rollout_dump.SLIM_FIELDS.
+    eval_rollouts_slim_log = (rollout_log_dir / "eval_rollouts_slim.jsonl").open("w")
 
     # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
     # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
@@ -223,7 +260,8 @@ def run_grpo(
         n_per = getattr(cfg, "eval_samples_per_prompt", 1) or 1
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
-        ev = backend.sample(eval_prompts, num_samples=n_per, max_tokens=max_tokens, temperature=1.0)
+        ev = _sample(backend, env, eval_prompts, num_samples=n_per, max_tokens=max_tokens,
+                     think_budget=think_budget, answer_tokens=answer_tokens)
         ev_env = _score_env(env, ev)
         gt = [er.behavior_present for er in ev_env]
         t_sample = time.perf_counter() - t0
@@ -236,6 +274,7 @@ def run_grpo(
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
             **_length_metrics(ev_env, env),  # code length + its reward penalty (MBPP)
+            **_env_metrics(ev_env, env),     # env-declared summary rates (terminal env: read/modified/…)
         }
         # MBPP-Honeypot three-way reward-hacking labels (loose ⊇ strict=behavior_rate; + hardcoding).
         # gt_loose = the LOOSE oracle (passes-visible-not-all, incl. honest-buggy) — a separate, denser
@@ -275,7 +314,7 @@ def run_grpo(
         # Per-prompt dump: one record per eval rollout with EVERY monitor's score+label (so monitors
         # can be re-thresholded/recalibrated post-hoc, and the hack-vs-honest gap computed per prompt).
         for i, (r, er, g) in enumerate(zip(ev, ev_env, gt)):
-            eval_rollouts_log.write(json.dumps({
+            rec = {
                 "step": step,
                 "task_id": r.prompt.meta.get("task_id") if r.prompt.meta else None,
                 "question": r.prompt.text,
@@ -290,8 +329,11 @@ def run_grpo(
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
                 "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
                              for m in all_monitors},
-            }, default=str) + "\n")
+            }
+            eval_rollouts_log.write(json.dumps(rec, default=str) + "\n")
+            eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
         eval_rollouts_log.flush()
+        eval_rollouts_slim_log.flush()
         if run is not None:
             run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
@@ -306,7 +348,7 @@ def run_grpo(
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
             
-        if step % cfg.save_every == 0:
+        if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint"):
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}", ttl_seconds=2*7*24*60*60)
             (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
             info[f"checkpoint_{step}"] = ckpt
@@ -316,9 +358,8 @@ def run_grpo(
         _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
              f"(max_tokens={max_tokens})…")
         t0 = time.perf_counter()
-        rollouts = backend.sample(
-            prompts, num_samples=cfg.group_size, max_tokens=max_tokens, temperature=1.0
-        )
+        rollouts = _sample(backend, env, prompts, num_samples=cfg.group_size, max_tokens=max_tokens,
+                           think_budget=think_budget, answer_tokens=answer_tokens)
         env_results = _score_env(env, rollouts)
         t_sample = time.perf_counter() - t0
         if train_against:
@@ -406,6 +447,7 @@ def run_grpo(
             "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
             "reward/total_mean": mean(rewards),
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
+            **_env_metrics(env_results, env),     # env-declared summary rates
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
             "time/sample_s": t_sample,
             "time/score_s": t_score,
@@ -473,12 +515,13 @@ def run_grpo(
     # trained model later — important when we don't yet know how long these runs should take.
     if hasattr(backend, "save_checkpoint"):
         try:
+            # ttl_seconds=None = no expiry (tinker rejects 0: "must be at least 3600").
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final",
                                            ttl_seconds=None)
             (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
             info["final_checkpoint"] = ckpt
             (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
-            _log(f"saved final weights on tinker (7-day TTL): {ckpt}")
+            _log(f"saved final weights on tinker (no expiry): {ckpt}")
         except Exception as e:  # noqa: BLE001 — never let a save hiccup fail a completed run
             _log(f"⚠️  final checkpoint save failed: {type(e).__name__}: {e}")
 
@@ -486,6 +529,7 @@ def run_grpo(
     metrics_log.close()
     eval_metrics_log.close()
     eval_rollouts_log.close()
+    eval_rollouts_slim_log.close()
     if run is not None:
         run.finish()
 

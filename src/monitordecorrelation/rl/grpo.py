@@ -13,6 +13,7 @@ into the cookbook's ``Trajectory``/``TrajectoryGroup`` so those primitives can t
 
 from __future__ import annotations
 
+import tinker
 from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.rl.types import Trajectory, Transition, TrajectoryGroup
 
@@ -41,6 +42,21 @@ def to_trajectory_groups(
     for start in range(0, len(rollouts), group_size):
         trajs: list[Trajectory] = []
         for r, rew in zip(rollouts[start : start + group_size], rewards[start : start + group_size]):
+            multi = (r.meta or {}).get("transitions")
+            if multi:
+                # Multi-turn episode (rl/episodes.py): one transition per turn, observation tokens
+                # recorded verbatim at sampling time. The scalar episode reward sits on the LAST
+                # transition (cookbook sums per-transition rewards into the trajectory reward), and
+                # because each ob prefix-extends the previous ob+ac the cookbook emits one datum.
+                trans = []
+                for i, tr in enumerate(multi):
+                    ob = tinker.ModelInput.from_ints(list(tr["ob"]))
+                    ac = TokensWithLogprobs(tokens=list(tr["ac"]), maybe_logprobs=list(tr["logprobs"]))
+                    last = i == len(multi) - 1
+                    trans.append(Transition(ob=ob, ac=ac, reward=float(rew) if last else 0.0,
+                                            episode_done=last))
+                trajs.append(Trajectory(transitions=trans, final_ob=trans[-1].ob))
+                continue
             if r.token_ids is None or r.logprobs is None:
                 raise ValueError("rollout needs token_ids + logprobs (sampling logprobs) for GRPO")
             ob = rend.model_input(r.prompt.text)

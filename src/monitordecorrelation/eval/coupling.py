@@ -41,8 +41,19 @@ _N = NormalDist()
 
 
 def _read_jsonl(path: Path) -> list[dict]:
+    """Parse a jsonl file, SKIPPING corrupt lines with a warning. Run dirs occasionally carry a spliced
+    line from an interrupted / concurrent write (seen in the sep3 probe_ood runs); one bad line must not
+    take the whole run out of the matrix, but it must not pass silently either."""
+    rows: list[dict] = []
     with path.open() as f:
-        return [json.loads(line) for line in f if line.strip()]
+        for i, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"⚠️  {path}: skipping corrupt line {i}")
+    return rows
 
 
 # Display labels — the ``cot_*`` monitors read CoT AND the final answer (``use_cot=True``); "cot" alone

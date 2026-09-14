@@ -1,0 +1,1 @@
+tinker://99382820-644e-52be-abe8-a301eb23b8b4:train:0/weights/tv_smoke-0

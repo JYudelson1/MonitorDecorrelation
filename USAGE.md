@@ -25,6 +25,8 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
 | `scripts/train_impossiblebench_inkling.sh` | **RL Inkling-Small on the ImpossibleBench impossible subset** (oneoff + conflicting), plotting to W&B. Thin wrapper over the runner: checks credentials up front, forwards `--set …`. | `data/runs/ib_Inkling-Small_s0/` + wandb |
+| `scripts/train_terminal_verifier.sh` | **RL Qwen3-8B on the terminal-verifier env** (multi-turn `cat verifier.py` hack; control config by default). Credential preflight → `run_experiment.py`, `--set` passthrough. | `data/runs/tv_Qwen3-8B_control_s0/` + wandb |
+| `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
 
@@ -44,12 +46,14 @@ uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick 
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
-env{sycophancy,mbpp_honeypot,impossiblebench} subset env_options n_steps batch_size group_size
-eval_every eval_size eval_samples_per_prompt max_tokens thinking_effort penalty_coef penalty_schedule
-kl_coef kl_discount_factor lora_rank lr seed n_prompts_pool probe_server_url monitors`.
+env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
+group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
+thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank lr seed
+n_prompts_pool probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
-`env_options` holds env-specific constructor kwargs (impossiblebench only) and `thinking_effort`
-[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere). Each monitor: `{kind:"cot", name, role, model_id,
+`env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier) and `thinking_effort`
+[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
+`think_budget`/`answer_tokens` (multi-turn envs, Qwen3): cap each turn's `<think>` and force the answer. Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
 
@@ -139,6 +143,39 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
 - **Untrusted code executes locally** (subprocess + per-statement alarm + address-space rlimit, not a
   sandbox). See the warning in `envs/impossiblebench.py`.
 
+## Terminal-verifier × Qwen3-8B (multi-turn)
+
+```bash
+# 1. baseline inference — does the base model read the verifier, how often, what does it do:
+uv run python experiments/eval_terminal_baseline.py --n-prompts 24 --samples 2 --think-budget 1536
+uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku   # + judge AUROC
+# 2. smoke the RL loop (2 steps, tiny batch):
+scripts/train_terminal_verifier.sh --set run_name=tv_smoke n_steps=2 batch_size=4 group_size=4 \
+    eval_size=4 eval_every=1
+# 3. the control run (40 steps, 16x8 episodes/step, no monitor):
+scripts/train_terminal_verifier.sh
+```
+
+Config: `experiments/configs/terminal_verifier_qwen3_8b_control.json`. `env_options`: `impossible`
+(perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,
+`output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
+`command_timeout`. `max_tokens` is per turn but only used when `think_budget` is unset AND the env has
+no default — this env defaults `think_budget` to 1536 (so a config copied from an MBPP row with only the
+env name swapped works; the banner prints the effective value). Without a budget Qwen3 thinks through
+the whole turn and never runs a command.
+
+**Swapping `mbpp_honeypot` → `terminal_verifier` in an existing matrix row** works as-is, with caveats:
+episodes are ~3.3 turns, so sampling per step costs several× MBPP; `probe_iid` is the MBPP hardcode
+probe, i.e. a second OOD probe here; and probe forwards see 6–10k-token sequences (all turns' thinking
++ transcript) instead of ~2k — the white-box path does no truncation, so drop the probe `batch_size`
+(e.g. 2) on the box or expect OOMs. Consider `lr: 2.4e-4` (the control config's choice). Watch `train/behavior_rate`
+(= peeked/tampered), `env/read_verifier`, `env/passed`, `env/truncated`, `env/no_command_turns`.
+Add monitors exactly as in the MBPP matrix rows; for the paper's judge use `output_view:
+"explanations"` with an output-only (`use_cot: false`) train-against monitor.
+
+⚠️ Episodes run the policy's shell commands on this machine (temp dir, timeout, minimal env — not a
+sandbox).
+
 ## Probes (white-box)
 
 ```bash
@@ -182,6 +219,7 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 - `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score). 
 - `eval_metrics.jsonl` — per **eval** (every `eval_every`) on the fixed held-out set: **every** monitor's AUROC/brier/class-split. **This is what the degradation matrix reads.**
 - `eval_rollouts.jsonl` — one record per held-out rollout with every monitor's score+label (post-hoc recalibration).
+- `eval_rollouts_slim.jsonl` — the **committed** subset of the above (`step, task_id, behavior_present, loose_rh, hardcoding, unparsed, monitors`; no text, ~3 MB/run). Regenerate from a full dump with `python3 scripts/slim_eval_rollouts.py <run dirs>` (stdlib-only; skips corrupt lines).
 - `rollouts.jsonl` — sampled training rollouts with metadata (env oracle, per-monitor score/label, reward).
 - `train/` + `eval/` — each has `ground_truth.png` + `monitors.png` (labels derive from `behavior_name`), auto-plotted on finish.
 - `final_checkpoint.txt` — tinker path of the saved final weights (7-day TTL); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.

@@ -24,8 +24,9 @@ if TYPE_CHECKING:
 
 def make_env(cfg: "ExperimentConfig"):
     """Construct the environment named by ``cfg.env``. Raises ValueError on an unknown name."""
-    if cfg.env_options and cfg.env != "impossiblebench":
-        raise ValueError(f"env_options is only supported by the impossiblebench env, not {cfg.env!r}")
+    if cfg.env_options and cfg.env not in ("impossiblebench", "terminal_verifier"):
+        raise ValueError(f"env_options is only supported by the impossiblebench / terminal_verifier "
+                         f"envs, not {cfg.env!r}")
     if cfg.env == "sycophancy":
         from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 
@@ -40,4 +41,12 @@ def make_env(cfg: "ExperimentConfig"):
         return ImpossibleBenchEnv.from_dataset(
             subset=cfg.subset, n=cfg.n_prompts_pool, seed=cfg.seed, **(cfg.env_options or {})
         )
+    if cfg.env == "terminal_verifier":
+        from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
+
+        # subset names the reasoning-gym task (only largest_island so far); env_options carries
+        # impossible / offset_range / max_turns / output_view / … (validated by the constructor).
+        task = cfg.subset if cfg.subset in ("largest_island",) else "largest_island"
+        return TerminalVerifierEnv.from_task(task=task, n=cfg.n_prompts_pool, seed=cfg.seed,
+                                             **(cfg.env_options or {}))
     raise ValueError(f"unknown env {cfg.env!r}")  # pragma: no cover (pydantic Literal guards this)

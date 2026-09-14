@@ -65,3 +65,14 @@ def test_default_behavior_falls_back_to_sycophancy():
     cfg = _cfg()
     train_against, _ = build_monitors(cfg.monitors)
     assert train_against[0].behavior == "sycophancy"
+
+
+def test_binary_judge_defaults_false_and_passes_through():
+    cfg = _cfg()
+    train_against, _ = build_monitors(cfg.monitors)
+    assert train_against[0].binary_judge is False
+
+    cfg = _cfg(monitors=[{"kind": "cot", "name": "m", "role": "train_against",
+                          "model_id": "x", "binary_judge": True}])
+    train_against, _ = build_monitors(cfg.monitors)
+    assert train_against[0].binary_judge is True

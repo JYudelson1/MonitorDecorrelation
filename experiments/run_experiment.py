@@ -157,10 +157,15 @@ def main() -> None:
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
+    if getattr(env, "multi_turn", False):
+        tb = cfg.think_budget if cfg.think_budget is not None else getattr(env, "default_think_budget", None)
+        src = "config" if cfg.think_budget is not None else "env default"
+        print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={tb} ({src}) "
+              f"answer_tokens={cfg.answer_tokens}" + ("" if tb else f" max_tokens/turn={cfg.max_tokens}"))
 
     run_grpo(
         run_config, env, backend, train_against=train_against, held_out=held_out,
-        max_tokens=cfg.max_tokens,
+        max_tokens=cfg.max_tokens, think_budget=cfg.think_budget, answer_tokens=cfg.answer_tokens,
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
                   "config": cfg.model_dump()},
     )
