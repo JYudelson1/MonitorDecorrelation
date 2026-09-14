@@ -31,6 +31,7 @@ class CoTMonitorSpec(_Strict):
     threshold: float = 0.5
     use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
     use_output: bool = True  # False = ignore the output (judge the CoT only)
+    binary_judge: bool = False  # True = YES/NO verdict instead of 0–100 score; omitted → False
 
 
 class ProbeMonitorSpec(_Strict):
@@ -142,7 +143,8 @@ def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy
     for s in specs:
         if s.kind == "cot":
             mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior or default_behavior,
-                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.use_output)
+                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.use_output,
+                             binary_judge=s.binary_judge)
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")

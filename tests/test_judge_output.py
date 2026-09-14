@@ -33,6 +33,14 @@ def test_reasoning_without_score_is_rejected():
     assert _judge_output(msg) is None
 
 
+def test_null_content_falls_back_to_last_verdict_in_reasoning():
+    msg = {
+        "content": None,
+        "reasoning": "leaning yes…\nVERDICT: YES\nwait, no:\nVERDICT: NO",
+    }
+    assert _judge_output(msg) == "VERDICT: NO"
+
+
 def test_empty_message_is_none():
     assert _judge_output({"content": None}) is None
     assert _judge_output({"content": "", "reasoning": ""}) is None

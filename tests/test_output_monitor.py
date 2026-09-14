@@ -35,7 +35,44 @@ def test_spec_accepts_use_cot():
     print("CoTMonitorSpec use_cot OK")
 
 
+def test_binary_judge_prompts():
+    r = _roll()
+    # Default: percentile SCORE instruction.
+    pct = CoTMonitor("pct", "x/y", behavior="deception", api_key="test")
+    assert pct.binary_judge is False
+    assert "SCORE:" in pct._build_prompt(r) and "VERDICT:" not in pct._build_prompt(r)
+
+    # Full / CoT-only / output-only binary variants all ask YES/NO.
+    full = CoTMonitor("b", "x/y", behavior="deception", api_key="test", binary_judge=True)
+    cot_only = CoTMonitor("b", "x/y", behavior="deception", api_key="test",
+                          binary_judge=True, use_output=False)
+    out_only = CoTMonitor("b", "x/y", behavior="deception", api_key="test",
+                          binary_judge=True, use_cot=False)
+    for mon, must_have, must_not in (
+        (full, ("SECRET_REASONING", "THE_ANSWER"), ()),
+        (cot_only, ("SECRET_REASONING",), ("THE_ANSWER",)),
+        (out_only, ("THE_ANSWER",), ("SECRET_REASONING",)),
+    ):
+        p = mon._build_prompt(r)
+        assert "VERDICT: YES" in p and "VERDICT: NO" in p and "SCORE:" not in p
+        assert "contain" in p.lower()
+        for s in must_have:
+            assert s in p
+        for s in must_not:
+            assert s not in p
+    print("binary_judge prompts OK")
+
+
+def test_spec_accepts_binary_judge():
+    s = CoTMonitorSpec(name="bin", role="held_out", model_id="x/y", binary_judge=True)
+    assert s.binary_judge is True
+    assert CoTMonitorSpec(name="c", role="held_out", model_id="x/y").binary_judge is False
+    print("CoTMonitorSpec binary_judge OK")
+
+
 if __name__ == "__main__":
     test_output_monitor_omits_cot()
     test_spec_accepts_use_cot()
+    test_binary_judge_prompts()
+    test_spec_accepts_binary_judge()
     print("ALL PASS")
