@@ -149,12 +149,24 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
 # 1. baseline inference — does the base model read the verifier, how often, what does it do:
 uv run python experiments/eval_terminal_baseline.py --n-prompts 24 --samples 2 --think-budget 1536
 uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku   # + judge AUROC
+# Inkling (TML rendering, reasoning effort instead of a thinking flag):
+uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5 \
+    --n-prompts 256 --think-budget 1536 --answer-tokens 512 --max-tokens 3072
 # 2. smoke the RL loop (2 steps, tiny batch):
 scripts/train_terminal_verifier.sh --set run_name=tv_smoke n_steps=2 batch_size=4 group_size=4 \
     eval_size=4 eval_every=1
 # 3. the control run (40 steps, 16x8 episodes/step, no monitor):
 scripts/train_terminal_verifier.sh
 ```
+
+The baseline also prints the **cost accounting** an RL run is budgeted from — prefill / sampled /
+training tokens per rollout (training = the size of the single GRPO datum the episode folds into),
+$ per rollout and $ per RL step (= `batch_size × group_size` rollouts) at tinker's published rates
+(`--step-rollouts`, `--price` to override)
+— and the failure-mode split the token budget hinges on: output truncated by `max_tokens`, thinking
+force-closed at `think_budget`, and turns with no parseable `<command>`. Every run writes
+`summary_<name>.json` next to its `episodes.jsonl`. Note the KL penalty (`kl_coef>0`) adds one base-model
+forward over each episode's datum on top of these numbers.
 
 Config: `experiments/configs/terminal_verifier_qwen3_8b_control.json`. `env_options`: `impossible`
 (perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,

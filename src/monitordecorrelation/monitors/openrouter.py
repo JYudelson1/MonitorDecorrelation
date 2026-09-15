@@ -1,7 +1,9 @@
 """Thin OpenRouter chat helper shared by LLM-judge callers (the MASK lie oracle, future judges).
 
-Single ``chat()`` POST with the same retry policy as ``CoTMonitor._call`` (retry rate-limits / 5xx,
-fail fast on 4xx). Kept dependency-light so envs can call a judge without importing the monitor stack.
+Single ``chat()`` POST with a bounded retry policy (retry rate-limits / 5xx a few times, fail fast
+on 4xx). Deliberately *not* ``CoTMonitor._call``'s policy — that one retries indefinitely because a
+dead judge silently kills a training run's reward signal; a one-shot oracle call should give up.
+Kept dependency-light so envs can call a judge without importing the monitor stack.
 """
 
 from __future__ import annotations

@@ -60,6 +60,8 @@ def _resolve_wandb_mode() -> str:
 
 
 def _coerce(v: str):
+    if v.lower() in ("null", "none", ""):
+        return None  # e.g. --set think_budget=null → no thinking budget (one call per turn)
     for cast in (int, float):
         try:
             return cast(v)
@@ -70,6 +72,20 @@ def _coerce(v: str):
     return v
 
 
+def apply_overrides(cfg, sets: list[str]):
+    """Apply ``--set key=value`` overrides and RE-VALIDATE. ``model_copy(update=…)`` skips validation,
+    so a typo'd key or an out-of-range value would sail through and fail deep inside the run (or, worse,
+    train something subtly different); round-tripping through the schema keeps ``--set`` as strict as
+    the config file itself."""
+    if not sets:
+        return cfg
+    overrides = {k: _coerce(v) for k, v in (kv.split("=", 1) for kv in sets)}
+    unknown = set(overrides) - set(type(cfg).model_fields)
+    if unknown:
+        raise SystemExit(f"--set: unknown config field(s) {sorted(unknown)}")
+    return type(cfg).model_validate({**cfg.model_dump(), **overrides})
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="path to a JSON or YAML experiment config")
@@ -77,10 +93,7 @@ def main() -> None:
                     help="override top-level config fields (e.g. --set run_name=quick n_steps=2)")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
-    if args.set:
-        overrides = {k: _coerce(v) for k, v in (kv.split("=", 1) for kv in args.set)}
-        cfg = cfg.model_copy(update=overrides)
+    cfg = apply_overrides(load_config(args.config), args.set)
 
     # LR: the config's explicit value, else TM's LoRA-LR heuristic. That heuristic is only calibrated
     # for some families (it refuses Inkling outright), so translate its exception into instructions

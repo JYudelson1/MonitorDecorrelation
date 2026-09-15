@@ -9,6 +9,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from monitordecorrelation.config import LoggingConfig, RunConfig
 from monitordecorrelation.rl.train import run_grpo
 from monitordecorrelation.types import EnvResult, MonitorResult, Prompt, Rollout
@@ -95,8 +97,6 @@ def test_run_grpo_control_smoke():
 def test_run_grpo_aborts_on_dead_train_against_monitor():
     """A train-against monitor that scores nothing = no penalty signal → the run must ABORT (not
     silently train as a no-penalty control), unlike a held-out monitor which is tolerated."""
-    import pytest
-
     run_dir = Path("data/runs/smoke_test_loop_ta")
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -107,7 +107,7 @@ def test_run_grpo_aborts_on_dead_train_against_monitor():
         logging=LoggingConfig(run_name="smoke_test_loop_ta", use_wandb=False, log_fraction=1.0),
     )
     try:
-        with pytest.raises(RuntimeError, match="no training signal"):
+        with pytest.raises(RuntimeError, match=r"monitor 'bad_ta' returned NaN for 2/2 rollouts"):
             run_grpo(cfg, _FakeEnv(), _FakeBackend(),
                      train_against=[_ExplodingMonitor("bad_ta")], held_out=[])
     finally:
@@ -115,9 +115,10 @@ def test_run_grpo_aborts_on_dead_train_against_monitor():
             shutil.rmtree(run_dir)
 
 
-def test_run_grpo_survives_failing_monitor():
-    """A held-out monitor that always raises (transient API failure) must not crash the run; it gets
-    NaN-scored and the eval still completes."""
+def test_run_grpo_aborts_when_a_monitor_cannot_score():
+    """A monitor that cannot score a rollout must stop the run. Dropping those silently biases a
+    held-out AUROC (the missing rollouts are the ones the API choked on) and silently un-penalizes a
+    train-against rollout — both invisible in the metrics, so the run dies loudly instead."""
     run_dir = Path("data/runs/smoke_test_loop_fail")
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -128,13 +129,9 @@ def test_run_grpo_survives_failing_monitor():
         logging=LoggingConfig(run_name="smoke_test_loop_fail", use_wandb=False, log_fraction=1.0),
     )
     try:
-        run_grpo(cfg, _FakeEnv(), _FakeBackend(),
-                 train_against=[], held_out=[_FakeMonitor("ok"), _ExplodingMonitor("bad")])
-        ev = [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
-        assert ev  # run completed despite the exploding monitor
-        # the bad monitor scored 0 rollouts; the good one scored all of them
-        assert ev[0]["monitor/bad/n_scored"] == 0
-        assert ev[0]["monitor/ok/n_scored"] == cfg.eval_size
+        with pytest.raises(RuntimeError, match=r"monitor 'bad' returned NaN for 2/2 rollouts"):
+            run_grpo(cfg, _FakeEnv(), _FakeBackend(),
+                     train_against=[], held_out=[_FakeMonitor("ok"), _ExplodingMonitor("bad")])
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)

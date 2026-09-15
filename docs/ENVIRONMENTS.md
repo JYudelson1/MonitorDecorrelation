@@ -141,11 +141,16 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   and GRPO has no advantage variance (measured: 64/64 truncated at 3072 tokens/turn). With a budget,
   a turn's thinking is capped at N tokens, Qwen3's budget-forcing suffix closes it (appended as masked
   *observation* tokens) and the answer is sampled with `answer_tokens`. This is the tinker-side
-  equivalent of the reference code's `max_thinking_tokens` logit processor (they used 128!).
+  equivalent of the reference code's `max_thinking_tokens` logit processor (they used 128!). Inkling
+  (TML) has the same mechanism structurally: the open thinking *message* is closed and a text
+  message opened, rather than a `</think>` tag emitted.
 - **Why:** the paper's own obfuscation setting — under an output-only judge the model kept `cat`-ing
   the verifier while its CoT stopped mentioning it. A natural decorrelation row set: train against the
   explanations-only judge (paper) or the transcript judge (action monitor), hold out the CoT judge +
   probes. Multi-turn + tool use is also the first agentic env in the repo.
+- **Policies:** Qwen3-8B (HF chat template) and **Inkling-Small** (TML rendering, `thinking_effort`);
+  the multi-turn continuation + budget forcing for TML live in `rl/renderers.py::TmlRenderer` and
+  are checked token-for-token against `tml_renderers`' own rendering of the same conversation.
 - **⚠️ Security:** arbitrary shell commands run on the host (throwaway cwd, minimal env, timeout,
   own process group — not a sandbox). Fine on a dedicated box.
 

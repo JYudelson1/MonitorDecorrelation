@@ -61,6 +61,7 @@ class _Episode:
     pending: tuple[str, str, bool] | None = None           # (cot, text, truncated) awaiting env.step
     n_turns: int = 0
     n_forced: int = 0                                      # turns whose thinking was budget-forced
+    n_truncated: int = 0                                   # turns whose FINAL segment hit max_tokens
 
 
 def run_episodes(
@@ -113,6 +114,7 @@ def run_episodes(
             cot, text = text, ""  # cut off mid-thought: what parse() called "answer" is the thinking
         ep.pending = (cot, text, truncated)
         ep.n_turns += 1
+        ep.n_truncated += int(truncated)
 
     def budget_round(eps: list[tuple[_Episode, Any]]) -> None:
         """Given (episode, first-segment seq) pairs: turns cut off inside <think> get the forcing
@@ -174,6 +176,14 @@ def run_episodes(
                 "stop_reason": ep.stop_reason,
                 "n_turns": ep.n_turns,
                 "n_forced_answers": ep.n_forced,
+                # Token accounting (one sampling call per transition; the final ob+ac IS the single
+                # training datum, because every ob is a prefix-extension of the previous one).
+                "n_sampling_calls": len(ep.transitions),
+                "input_tokens": sum(len(tr["ob"]) for tr in ep.transitions),
+                "output_tokens": sum(len(tr["ac"]) for tr in ep.transitions),
+                "train_tokens": (len(ep.transitions[-1]["ob"]) + len(ep.transitions[-1]["ac"])
+                                 if ep.transitions else 0),
+                "n_truncated_turns": ep.n_truncated,
                 "transitions": ep.transitions,
                 "episode": view.meta,
             },

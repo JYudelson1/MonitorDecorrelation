@@ -27,11 +27,25 @@ class CoTMonitorSpec(_Strict):
     name: str
     role: Literal["train_against", "held_out"]
     model_id: str  # OpenRouter model id (the judge)
-    behavior: str | None = None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
+    behavior: str | None = (
+        None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
+    )
     threshold: float = 0.5
-    use_cot: bool = True  # False = output-only monitor (judge the answer, ignore the CoT)
+    use_cot: bool = (
+        True  # False = output-only monitor (judge the answer, ignore the CoT)
+    )
     use_output: bool = True  # False = ignore the output (judge the CoT only)
-    binary_judge: bool = False  # True = YES/NO verdict instead of 0–100 score; omitted → False
+    reasoning_max_tokens: int | None = Field(
+        None,
+        ge=1,
+        description="judge-side reasoning budget. None = reasoning disabled (the judge only emits "
+        "`SCORE: <n>`, so thinking is pure cost). REQUIRED for models that mandate reasoning "
+        "(gemini-3.x reject `reasoning:{enabled:false}` with a 400): give them a small budget, e.g. "
+        "256, so the very first call is accepted.",
+    )
+    binary_judge: bool = (
+        False  # True = YES/NO verdict instead of 0–100 score; omitted → False
+    )
 
 
 class ProbeMonitorSpec(_Strict):
@@ -39,12 +53,16 @@ class ProbeMonitorSpec(_Strict):
     name: str
     role: Literal["train_against", "held_out"]
     probe_path: str  # dir saved by train_probe.py
-    probe_model: str | None = None  # default = probe meta's model_name (original-model: frozen base)
+    probe_model: str | None = (
+        None  # default = probe meta's model_name (original-model: frozen base)
+    )
     threshold: float | None = None
     batch_size: int = 8
 
 
-MonitorSpec = Annotated[Union[CoTMonitorSpec, ProbeMonitorSpec], Field(discriminator="kind")]
+MonitorSpec = Annotated[
+    Union[CoTMonitorSpec, ProbeMonitorSpec], Field(discriminator="kind")
+]
 
 
 class ExperimentConfig(_Strict):
@@ -53,7 +71,9 @@ class ExperimentConfig(_Strict):
     description: str = ""  # free-text note (self-documenting configs)
     policy: str = "Qwen/Qwen3-8B"
     backend: Literal["tinker", "transformers"] = "tinker"
-    env: Literal["sycophancy", "mbpp_honeypot", "impossiblebench", "terminal_verifier"] = "sycophancy"
+    env: Literal[
+        "sycophancy", "mbpp_honeypot", "impossiblebench", "terminal_verifier"
+    ] = "sycophancy"
     subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
     #                      | terminal_verifier: the reasoning-gym task (largest_island)
     env_options: dict = Field(
@@ -61,55 +81,89 @@ class ExperimentConfig(_Strict):
         description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
         "'exec_workers': 32}; terminal_verifier: {'impossible': true, 'offset_range': [1, 3], "
         "'max_turns': 4, 'output_view': 'transcript', 'command_timeout': 30}); validated by the env "
-        "constructor")
+        "constructor",
+    )
     n_steps: int = 40
     batch_size: int = Field(8, description="distinct prompts per step")
     group_size: int = Field(8, description="rollouts per prompt (GRPO group)")
-    eval_every: int = Field(10, description="run the held-out eval phase every N steps (+ 0 + final)")
-    eval_size: int = Field(32, description="number of distinct held-out eval PROMPTS (fixed set)")
+    eval_every: int = Field(
+        10, description="run the held-out eval phase every N steps (+ 0 + final)"
+    )
+    eval_size: int = Field(
+        32, description="number of distinct held-out eval PROMPTS (fixed set)"
+    )
     eval_samples_per_prompt: int = Field(
-        1, description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
-        "at eval_size×this monitor-scoring cost)")
+        1,
+        description="rollouts sampled per eval prompt (>1 → higher-fidelity AUROC/d′ per eval, "
+        "at eval_size×this monitor-scoring cost)",
+    )
     save_every: int = Field(500, description="save the policy every N steps")
     probe_server_url: str | None = Field(
-        None, description="if set, probes read activations from a shared probe_server.py instead of "
-        "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)")
+        None,
+        description="if set, probes read activations from a shared probe_server.py instead of "
+        "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)",
+    )
     max_tokens: int = 1024
     think_budget: int | None = Field(
-        None, description="multi-turn envs, HF-chat thinking policies (Qwen3): cap each turn's <think> "
+        None,
+        description="multi-turn envs, HF-chat thinking policies (Qwen3): cap each turn's <think> "
         "block at N tokens — when hit, Qwen3's budget-forcing suffix closes it and the answer is sampled "
-        "with `answer_tokens`. None = a turn is one call of max_tokens (a long think then eats the turn).")
-    answer_tokens: int = Field(512, description="tokens for the post-<think> answer when think_budget forces it")
+        "with `answer_tokens`. None = a turn is one call of max_tokens (a long think then eats the turn).",
+    )
+    answer_tokens: int = Field(
+        512,
+        description="tokens for the post-<think> answer when think_budget forces it",
+    )
     thinking_effort: float = Field(
-        0.9, ge=0.0, lt=1.0,
+        0.9,
+        ge=0.0,
+        lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "
         "0.7=medium, 0.9=high. Lower effort = far shorter CoT, so it trades monitor-visible reasoning "
-        "against tokens per rollout. Ignored by HF-chat-template policies (Qwen3 & co.).")
-    penalty_coef: float = 1.0  # weight on the train-against monitor penalty in the reward
+        "against tokens per rollout. Ignored by HF-chat-template policies (Qwen3 & co.).",
+    )
+    penalty_coef: float = (
+        1.0  # weight on the train-against monitor penalty in the reward
+    )
     penalty_schedule: dict | None = Field(
-        None, description="None → constant penalty_coef. Else {'start_penalty': x, 'end_penalty': y}: λ "
+        None,
+        description="None → constant penalty_coef. Else {'start_penalty': x, 'end_penalty': y}: λ "
         "ramps linearly x→y across n_steps (hack-then-hide curriculum — low λ to establish hacking, then "
-        "rising λ to drive obfuscation). Overrides penalty_coef.")
+        "rising λ to drive obfuscation). Overrides penalty_coef.",
+    )
 
     @field_validator("penalty_schedule")
     @classmethod
     def _check_schedule(cls, v):
         if v is not None and set(v) != {"start_penalty", "end_penalty"}:
-            raise ValueError("penalty_schedule must be {'start_penalty': float, 'end_penalty': float}")
+            raise ValueError(
+                "penalty_schedule must be {'start_penalty': float, 'end_penalty': float}"
+            )
         return v
-    kl_coef: float = Field(0.0, description="per-token KL-to-base penalty (tinker-cookbook "
-                           "incorporate_kl_penalty); >0 anchors the policy → prevents the "
-                           "reward-over-optimization collapse. 0 = off (default).")
-    kl_discount_factor: float = Field(0.0, description="discount for future KL in the penalty; 0 = off")
+
+    kl_coef: float = Field(
+        0.0,
+        description="per-token KL-to-base penalty (tinker-cookbook "
+        "incorporate_kl_penalty); >0 anchors the policy → prevents the "
+        "reward-over-optimization collapse. 0 = off (default).",
+    )
+    kl_discount_factor: float = Field(
+        0.0, description="discount for future KL in the penalty; 0 = off"
+    )
     lora_rank: int = 16
-    lr: float | None = Field(None, description="None = TM-estimated LoRA LR for the policy")
+    lr: float | None = Field(
+        None, description="None = TM-estimated LoRA LR for the policy"
+    )
     seed: int = 0
-    n_prompts_pool: int = Field(512, description="how many env prompts to draw the run's prompts from")
+    n_prompts_pool: int = Field(
+        512, description="how many env prompts to draw the run's prompts from"
+    )
     monitors: list[MonitorSpec] = Field(
         default_factory=list,
         description="mixed CoT judges / probes, each train_against or held_out. EMPTY is legal and "
         "means a pure-task-reward run: no monitor in the gradient and none measured (the plain-RL "
-        "baseline for a new env).")
+        "baseline for a new env).",
+    )
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
@@ -125,8 +179,11 @@ def load_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig.model_validate(data)
 
 
-def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy",
-                   probe_server_url: str | None = None) -> tuple[list, list]:
+def build_monitors(
+    specs: list[MonitorSpec],
+    default_behavior: str = "sycophancy",
+    probe_server_url: str | None = None,
+) -> tuple[list, list]:
     """Construct (train_against, held_out) monitor objects. WhiteBoxModels are shared across probes
     that use the same ``probe_model`` so we never load the same model twice. ``probe_server_url`` (set)
     → probes proxy activation reads to a shared ``probe_server.py`` instead of each loading the base
@@ -142,16 +199,31 @@ def build_monitors(specs: list[MonitorSpec], default_behavior: str = "sycophancy
     by_role: dict[str, list] = {"train_against": [], "held_out": []}
     for s in specs:
         if s.kind == "cot":
-            mon = CoTMonitor(s.name, s.model_id, behavior=s.behavior or default_behavior,
-                             threshold=s.threshold, use_cot=s.use_cot, use_output=s.use_output,
-                             binary_judge=s.binary_judge)
+            mon = CoTMonitor(
+                s.name,
+                s.model_id,
+                behavior=s.behavior or default_behavior,
+                threshold=s.threshold,
+                use_cot=s.use_cot,
+                use_output=s.use_output,
+                reasoning_max_tokens=s.reasoning_max_tokens,
+                binary_judge=s.binary_judge,
+            )
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
-            model_name = s.probe_model or probe.meta.get("model_name", "Qwen/Qwen3-0.6B")
+            model_name = s.probe_model or probe.meta.get(
+                "model_name", "Qwen/Qwen3-0.6B"
+            )
             if model_name not in wb_cache:
-                wb_cache[model_name] = WhiteBoxModel(model_name, server_url=probe_server_url)
+                wb_cache[model_name] = WhiteBoxModel(
+                    model_name, server_url=probe_server_url
+                )
             mon = ProbeMonitor(
-                s.name, wb_cache[model_name], probe, threshold=s.threshold, batch_size=s.batch_size
+                s.name,
+                wb_cache[model_name],
+                probe,
+                threshold=s.threshold,
+                batch_size=s.batch_size,
             )
         by_role[s.role].append(mon)
     return by_role["train_against"], by_role["held_out"]
