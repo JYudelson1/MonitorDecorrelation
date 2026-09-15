@@ -146,6 +146,8 @@ def main() -> None:
     short = cfg.policy.split("/")[-1]
     ta_names = [m.name for m in cfg.monitors if m.role == "train_against"]
     _wandb_group = f"{cfg.experiment}/{short}"
+    # Project: from the config file or --set wandb_project=…; else the LoggingConfig default.
+    _wandb_project = cfg.wandb_project or LoggingConfig.wandb_project
     _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"])]
 
     run_config = RunConfig(
@@ -157,6 +159,7 @@ def main() -> None:
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),
+                              wandb_project=_wandb_project,
                               wandb_group=_wandb_group, wandb_tags=_wandb_tags, log_fraction=1.0),
     )
 
@@ -164,7 +167,7 @@ def main() -> None:
         return ", ".join(getattr(m, "name", "?") for m in ms) or "(none)"
 
     print(f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend={cfg.backend} lr={lr:.2e}")
-    print(f"  wandb: {run_config.logging.wandb_mode}"
+    print(f"  wandb: {run_config.logging.wandb_mode} project={run_config.logging.wandb_project}"
           + (" (syncing — logged in)" if run_config.logging.wandb_mode == "online" else " (local only)"))
     subset_note = f" subset={cfg.subset}" if cfg.env in ("sycophancy", "impossiblebench") else ""
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "

@@ -155,6 +155,11 @@ class ExperimentConfig(_Strict):
         None, description="None = TM-estimated LoRA LR for the policy"
     )
     seed: int = 0
+    wandb_project: str | None = Field(
+        None,
+        description="W&B project to log this run to (config file or --set wandb_project=…). "
+        "None = the LoggingConfig default, 'monitor-decorrelation'.",
+    )
     n_prompts_pool: int = Field(
         512, description="how many env prompts to draw the run's prompts from"
     )
