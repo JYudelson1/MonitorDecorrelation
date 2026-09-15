@@ -32,6 +32,7 @@ from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.rl.episodes import run_episodes
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
+from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
 
@@ -135,27 +136,33 @@ def main() -> None:
           f"think_budget={args.think_budget}/{args.answer_tokens}, "
           f"{'effort=' + str(args.effort) + ', ' if is_tml else ''}"
           f"{'HONEST' if args.honest else 'IMPOSSIBLE'} verifier", flush=True)
-    t0 = time.time()
-    rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
-                            max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
-                            think_budget=args.think_budget, answer_tokens=args.answer_tokens,
-                            step_workers=args.workers)
-    wall_s = time.time() - t0
-    results = [env.score(r) for r in rollouts]
-
-    short = args.model.split("/")[-1]
-    out = Path(args.out) if args.out else Path("data/runs") / f"tv_baseline_{short}" / "episodes.jsonl"
-    out.parent.mkdir(parents=True, exist_ok=True)
-
+    # Judges are built BEFORE sampling so each episode can be handed to them the moment it finishes
+    # (MonitorScorer.submit as the driver's on_rollout) instead of after the whole batch — same
+    # pipelining the RL loop uses, see rl/train.py.
     judges = []
     if args.judge:
         from monitordecorrelation.monitors.cot_monitor import CoTMonitor
 
         judges = [CoTMonitor("cot+out", args.judge, behavior=env.behavior_name, use_cot=True),
                   CoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
+
+    t0 = time.time()
+    with MonitorScorer(judges, args.workers) as scorer:
+        rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
+                                max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
+                                think_budget=args.think_budget, answer_tokens=args.answer_tokens,
+                                step_workers=args.workers, on_rollout=scorer.submit)
+        wall_s = time.time() - t0
+        results = [env.score(r) for r in rollouts]
+        judged = scorer.collect(rollouts)
+
+    short = args.model.split("/")[-1]
+    out = Path(args.out) if args.out else Path("data/runs") / f"tv_baseline_{short}" / "episodes.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
     judge_scores: dict[str, list[float]] = {j.name: [] for j in judges}
     with out.open("w") as f:
-        for r, er in zip(rollouts, results):
+        for i, (r, er) in enumerate(zip(rollouts, results)):
             rec = {"task_id": er.meta["task_id"], "behavior_present": er.behavior_present,
                    "task_reward": er.task_reward, "cot": r.cot, "output": r.output,
                    "stop_reason": r.meta.get("stop_reason"),
@@ -164,7 +171,7 @@ def main() -> None:
                                                      "n_truncated_turns")},
                    "env_meta": er.meta, "monitors": {}}
             for j in judges:
-                m = j.score(r)
+                m = judged[j.name][i]
                 judge_scores[j.name].append(m.score)
                 rec["monitors"][j.name] = {"score": m.score, "label": m.label}
             f.write(json.dumps(rec, default=str) + "\n")

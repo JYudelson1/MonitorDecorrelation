@@ -1,9 +1,17 @@
 """The multi-turn episode driver + its GRPO datum path, offline: a fake sampler, a fake renderer and
 a fake tool env. Checks the token bookkeeping the training step depends on — every observation is a
 prefix-extension of the previous ob+ac, so tinker-cookbook folds an episode into ONE datum with
-observation tokens masked — plus seeding, group order, and truncation handling."""
+observation tokens masked — plus seeding, group order, truncation handling, and the fact that
+episodes really do run independently (no per-turn barrier across the batch).
+
+Episodes run concurrently, so the fakes are addressed by (turn, episode) rather than by call index:
+which call happens Nth is not deterministic any more, but WHAT each episode is handed is.
+"""
 
 from __future__ import annotations
+
+import threading
+import time
 
 import tinker
 from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
@@ -24,10 +32,17 @@ class _Seq:
 
 
 class _Fut:
-    def __init__(self, seqs):
+    """A stub sampling future. ``delay`` is paid in ``result()``, not at submission — that is where a
+    real (tinker) future's latency lives, so a slow generation blocks only whoever waits on it."""
+
+    def __init__(self, seqs, delay: float = 0.0):
         self._seqs = seqs
+        self._delay = delay
 
     def result(self):
+        if self._delay:
+            time.sleep(self._delay)
+
         class _R:
             sequences = self._seqs
         return _R()
@@ -37,29 +52,49 @@ THINK, FORCE = 80, 81
 
 
 class _FakeSampler:
-    """Turn t of episode k emits [t, k, EOS] (k = the k-th sequence of the *first* call for that
-    prompt). ``truncate_call`` makes that call return a length-truncated answer; ``think_call`` makes
-    it return a length-truncated OPEN THINK block ([THINK, t, k], no close)."""
+    """Turn t of episode k emits ``[t, k, EOS]``.
 
-    def __init__(self, truncate_call: int | None = None, think_call: int | None = None):
+    ``truncate`` / ``think`` are sets of ``(turn, k)``: that turn returns a length-truncated answer,
+    or a length-truncated OPEN THINK block (``[t, k, THINK]``, no close) that the budget must force.
+    Keyed by (turn, episode) rather than call index because episodes run concurrently — the order
+    calls are issued in is not deterministic. ``think`` applies to a turn's FIRST segment only, so
+    the forced-answer continuation that follows it is an ordinary completion.
+
+    ``turn0_delay`` maps a prompt's index -> seconds its turn-0 generation takes, for the decoupling
+    test (turn-0 calls are issued from the caller's thread, in prompt order, before any episode runs).
+    """
+
+    def __init__(self, truncate=(), think=(), turn0_delay=None):
         self.calls: list[tuple[list[int], int, int | None, int]] = []
-        self.truncate_call = truncate_call
-        self.think_call = think_call
+        self.truncate = set(truncate)
+        self.think = set(think)
+        self.turn0_delay = dict(turn0_delay or {})
+        self._n_turn0 = 0
+        self._lock = threading.Lock()
 
     def sample(self, model_input, num_samples, params):
         ob = list(model_input.chunks[0].tokens)
-        idx = len(self.calls)
-        self.calls.append((ob, num_samples, params.seed, params.max_tokens))
+        # A turn-0 call is the one still sitting on the bare prompt tokens; it fans out into the
+        # whole group, so k is the sequence index. Every later call is one episode's own, and that
+        # episode's k is the second token of its first action segment.
+        first_turn = len(ob) == 3
+        with self._lock:  # called from every episode's thread
+            self.calls.append((ob, num_samples, params.seed, params.max_tokens))
+            delay = 0.0
+            if first_turn:
+                delay = self.turn0_delay.get(self._n_turn0, 0.0)
+                self._n_turn0 += 1
         turn = ob.count(GEN)  # one generation prompt per turn so far
         seqs = []
-        for k in range(num_samples):
-            if self.truncate_call == idx:
+        for i in range(num_samples):
+            k = i if first_turn else ob[4]
+            if (turn, k) in self.truncate:
                 seqs.append(_Seq([turn, k], stop="length"))  # no EOS
-            elif self.think_call == idx:
-                seqs.append(_Seq([THINK, turn, k], stop="length"))  # open think, cut off
+            elif (turn, k) in self.think and FORCE not in ob:
+                seqs.append(_Seq([turn, k, THINK], stop="length"))  # open think, cut off
             else:
                 seqs.append(_Seq([turn, k, EOS]))
-        return _Fut(seqs)
+        return _Fut(seqs, delay=delay)
 
 
 class _FakeRenderer:
@@ -137,9 +172,9 @@ def test_episodes_transitions_are_prefix_chained_and_grouped():
 
 
 def test_done_episodes_stop_sampling_and_truncation_closes_the_turn():
-    # call 0 = prompt turn 0 (2 samples) → both continue; call 1 = ep0 turn 1 TRUNCATED → ends;
-    # call 2 = ep1 turn 1 → env says done after 2 turns anyway.
-    sampler = _FakeSampler(truncate_call=1)
+    # one turn-0 call (2 samples) → both episodes continue; ep0's turn-1 answer is TRUNCATED → it
+    # ends there; ep1 runs turns 1 and 2 → 4 sampling calls in all, none of them a resample of ep0.
+    sampler = _FakeSampler(truncate={(2, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), [Prompt(text="p")],
                          num_samples=2, max_tokens=8, seed=1)
     ep0, ep1 = rolls
@@ -151,7 +186,7 @@ def test_done_episodes_stop_sampling_and_truncation_closes_the_turn():
 def test_think_budget_forces_the_answer_as_a_masked_observation():
     # call 0: prompt turn 0 (1 sample) → open think cut at the budget → forced suffix appended as
     # observation, answer sampled with answer_tokens (call 1); turn 1 (call 2) completes normally.
-    sampler = _FakeSampler(think_call=0)
+    sampler = _FakeSampler(think={(1, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p")],
                          num_samples=1, max_tokens=999, seed=3, think_budget=100, answer_tokens=20)
     r = rolls[0]
@@ -176,7 +211,7 @@ def test_think_budget_forces_the_answer_as_a_masked_observation():
 def test_episode_token_accounting_matches_the_transitions():
     """The per-episode token counts the cost accounting reads must equal the transitions: one
     sampling call per transition, and the LAST ob+ac is the single training datum."""
-    sampler = _FakeSampler(think_call=0)
+    sampler = _FakeSampler(think={(1, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p")],
                          num_samples=1, max_tokens=999, seed=3, think_budget=100, answer_tokens=20)
     r = rolls[0]
@@ -189,7 +224,7 @@ def test_episode_token_accounting_matches_the_transitions():
 
 
 def test_truncated_answer_turns_are_counted():
-    sampler = _FakeSampler(truncate_call=1)
+    sampler = _FakeSampler(truncate={(2, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), [Prompt(text="p")],
                          num_samples=2, max_tokens=8, seed=1)
     assert rolls[0].meta["n_truncated_turns"] == 1 and rolls[1].meta["n_truncated_turns"] == 0
@@ -249,3 +284,36 @@ def test_hf_renderer_continuation_tokens_on_qwen3():
     cut = tok.encode("<think>\nhm", add_special_tokens=False)
     text2 = tok.decode(ob + cut + rend.continuation_tokens("OBS", ended_cleanly=False))
     assert "<think>\nhm<|im_end|>\n<|im_start|>user\nOBS<|im_end|>\n<|im_start|>assistant\n" in text2
+
+
+def test_episodes_do_not_wait_for_each_other():
+    """The point of the driver: no per-turn barrier. Episode 0 stalls for SLOW seconds on its first
+    generation; every other episode must still get all the way through max_turns while it waits —
+    under the old lockstep driver none of them could start turn 1 until episode 0 returned."""
+    SLOW, N = 1.0, 6
+    order: list[tuple[str, float]] = []
+    lock = threading.Lock()
+
+    class _TimedEnv(_FakeEnv):
+        max_turns = 3
+
+        def finish(self, state):
+            with lock:
+                order.append((state["prompt"].text, time.perf_counter()))
+            return super().finish(state)
+
+    sampler = _FakeSampler(turn0_delay={0: SLOW})
+    prompts = [Prompt(text=f"p{i}") for i in range(N)]
+    t0 = time.perf_counter()
+    rolls = run_episodes(sampler, _FakeRenderer(), _TimedEnv(done_after=3), prompts,
+                         num_samples=1, max_tokens=8, seed=0)
+    elapsed = time.perf_counter() - t0
+
+    assert len(rolls) == N and [r.prompt.text for r in rolls] == [p.text for p in prompts]
+    assert all(r.meta["n_turns"] == 3 for r in rolls)  # everyone ran the full episode
+    # p0 is the straggler (it slept); everyone else finished long before it did.
+    finished = dict(order)
+    assert order[-1][0] == "p0"
+    assert all(finished[f"p{i}"] - t0 < SLOW for i in range(1, N))
+    # and the batch costs ~one stall, not one per turn per episode
+    assert elapsed < SLOW * 2

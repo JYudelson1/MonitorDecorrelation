@@ -259,7 +259,7 @@ class CoTMonitor:
 
         The exceptions are ``_FATAL_STATUS`` (400/401/402/403): a malformed request, a bad key, no
         credits, or a forbidden model never fixes itself, so those raise immediately. That surfaces
-        as a NaN sentinel per rollout in ``_score_monitors`` — and, for a train-against monitor,
+        as a NaN sentinel per rollout in ``rl.train.MonitorScorer`` — and, for a train-against
         aborts the run (the intended behaviour for a config error).
 
         Note the one recoverable 400: models that MANDATE reasoning (gemini-3.x) reject

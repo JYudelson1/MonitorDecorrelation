@@ -6,6 +6,32 @@ which is rendered and appended to the SAME token sequence the policy just produc
 continues. This module is that loop, generic over any env implementing the ``MultiTurnEnv`` protocol
 (``start`` / ``step`` / ``finish`` — see ``envs/base.py``).
 
+Concurrency: **every episode runs free**
+--------------------------------------
+Each episode gets its own driver thread and advances as fast as its own turns resolve — it never
+waits for any other episode. An episode that finishes its command in 20 ms issues its next
+generation immediately, while a sibling is still blocked on a 30-second command timeout or a long
+generation. (The earlier driver advanced the whole batch in lockstep — sample every episode's turn,
+wait for all of them, run every env step, wait for all of those, then start the next turn — so the
+per-turn cost of a batch was the cost of its slowest episode, ~max_turns times over.)
+
+What that means for the pieces:
+
+- **generations** — ``sampling_client.sample`` schedules onto tinker's background event loop and
+  returns a ``concurrent.futures.Future``, so calling it from many threads (and awaiting from many
+  threads) is safe and genuinely parallel. Turn 0 is still ONE call per prompt (it returns the whole
+  ``num_samples`` GRPO group); every later turn is one call per episode, issued by that episode.
+- **env steps** (command execution) — run in the episode's own thread, bounded by a semaphore of
+  ``step_workers`` permits so the box never sees more than that many concurrent commands. A
+  semaphore is a resource cap, not a barrier: an episode waits for a free slot, never for its peers
+  to reach the same turn.
+- **monitors** — ``on_rollout(index, rollout)`` fires the moment an episode is graded and flattened,
+  from that episode's thread, so a caller (``rl/train.py``) can start its judge API calls for a
+  finished episode while the rest of the batch is still generating.
+
+The returned list keeps the original order (prompt-major, ``num_samples`` consecutive per prompt)
+regardless of who finished first, so GRPO grouping downstream is unchanged.
+
 What comes out is an ordinary ``Rollout`` with two extras in ``meta``:
 
 - ``transitions``: ``[{"ob": [tokens], "ac": [tokens], "logprobs": [...]}, …]``. Each ``ob`` is a
@@ -26,16 +52,20 @@ sampled with ``answer_tokens`` more. This is Qwen3's documented thinking-budget 
 tinker-side equivalent of rg_obfuscation's ``max_thinking_tokens`` logit processor. Without a budget
 a turn is a single call with ``max_tokens``.
 
-Seeding: every sampling call gets its own derived seed (prompt index at turn 0, then per-episode per
-call), so two episodes that reached an identical context never get identical continuations — which
-would silently collapse a GRPO group's advantage variance.
+Seeding: every sampling call gets its own seed, derived from a **position-addressed** slot — the
+prompt index for a turn-0 call, then ``(episode index, call index within that episode)`` — rather
+than from the order calls happen to be issued in. So the seeds are identical whatever the thread
+interleaving, two episodes that reached an identical context still get different continuations
+(which would otherwise silently collapse a GRPO group's advantage variance), and a run stays
+reproducible from ``cfg.seed`` alone.
 """
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import tinker
 
@@ -51,6 +81,7 @@ def derive_sample_seed(base_seed: int, call_index: int) -> int:
 
 @dataclass
 class _Episode:
+    index: int                           # position in the returned list (prompt-major, group-consecutive)
     prompt: Prompt
     state: Any
     ob: list[int]                        # the observation tokens the NEXT sampling call starts from
@@ -58,10 +89,39 @@ class _Episode:
     done: bool = False
     stop_reason: str = ""
     turn_tokens: list[int] = field(default_factory=list)   # this turn's tokens (all segments)
-    pending: tuple[str, str, bool] | None = None           # (cot, text, truncated) awaiting env.step
     n_turns: int = 0
     n_forced: int = 0                                      # turns whose thinking was budget-forced
     n_truncated: int = 0                                   # turns whose FINAL segment hit max_tokens
+    n_calls: int = 0                                       # sampling calls this episode issued itself
+
+
+class _SharedFuture:
+    """One API future consumed by the whole GRPO group.
+
+    Turn 0 is a single ``sample(..., num_samples=G)`` call whose G sequences seed G episodes, each of
+    which then runs in its own thread. This memoizes the result (and any exception) behind a lock so
+    every one of those threads can wait on it independently, whatever kind of future the sampler
+    returned — tinker hands back a ``concurrent.futures.Future``, the offline tests hand back a stub.
+    """
+
+    def __init__(self, future: Any) -> None:
+        self._future = future
+        self._lock = threading.Lock()
+        self._done = False
+        self._value: Any = None
+        self._exc: BaseException | None = None
+
+    def result(self) -> Any:
+        with self._lock:
+            if not self._done:
+                try:
+                    self._value = self._future.result()
+                except BaseException as e:  # noqa: BLE001 — re-raised to every waiter below
+                    self._exc = e
+                self._done = True
+        if self._exc is not None:
+            raise self._exc
+        return self._value
 
 
 def run_episodes(
@@ -78,11 +138,23 @@ def run_episodes(
     think_budget: int | None = None,
     answer_tokens: int = 512,
     step_workers: int = 16,
+    episode_workers: int | None = None,
+    on_rollout: Callable[[int, Rollout], None] | None = None,
 ) -> list[Rollout]:
     """Run ``num_samples`` episodes per prompt (the GRPO group, kept consecutive in the output) and
-    return one ``Rollout`` per episode. ``max_turns`` defaults to ``env.max_turns``. With
+    return one ``Rollout`` per episode. Every episode runs in its own thread and advances
+    independently (see the module docstring). ``max_turns`` defaults to ``env.max_turns``. With
     ``think_budget`` set, each turn's thinking is capped at that many tokens (then force-closed) and
-    the answer gets ``answer_tokens``; otherwise a turn is one call of ``max_tokens``."""
+    the answer gets ``answer_tokens``; otherwise a turn is one call of ``max_tokens``.
+
+    ``step_workers`` caps how many env steps (command executions) run at once. ``episode_workers``
+    caps how many episodes are in flight; the default — one thread per episode — is what makes the
+    batch fully decoupled, and is what you want unless the env's steps are expensive in a way
+    ``step_workers`` doesn't already bound. ``on_rollout(index, rollout)`` is called from the
+    episode's own thread as soon as that episode is finished and flattened, so callers can start
+    per-rollout work (monitor API calls) without waiting for the batch; ``index`` is the rollout's
+    position in the returned list.
+    """
     max_turns = max_turns or getattr(env, "max_turns", None)
     if not max_turns or max_turns < 1:
         raise ValueError("run_episodes needs max_turns >= 1 (from the env or the argument)")
@@ -90,83 +162,90 @@ def run_episodes(
         raise ValueError("think_budget must be >= 1 (or None for no budget)")
     base_seed = 0 if seed is None else seed
     first_call_tokens = think_budget if think_budget else max_tokens
-    calls = 0
+    n_episodes = len(prompts) * num_samples
+    # Seed slots are addressed by POSITION, never by issue order, so threading can't move them:
+    # slots [0, len(prompts)) are the per-prompt turn-0 calls, then episode e owns the contiguous
+    # block [len(prompts) + e*per_ep, … + per_ep). An episode issues at most one call per turn after
+    # turn 0, plus one forced-answer call per turn — hence 2*max_turns, which is a strict bound.
+    per_ep_calls = 2 * max_turns
+    step_sem = threading.Semaphore(max(1, step_workers))
 
-    def params(n_tokens: int) -> tinker.SamplingParams:
-        nonlocal calls
-        calls += 1
+    def params(slot: int, n_tokens: int) -> tinker.SamplingParams:
         return tinker.SamplingParams(
             max_tokens=n_tokens, temperature=temperature,
-            seed=None if seed is None else derive_sample_seed(base_seed, calls - 1),
+            seed=None if seed is None else derive_sample_seed(base_seed, slot),
             **({"stop": renderer.stop_tokens} if getattr(renderer, "stop_tokens", None) else {}),
         )
 
     def sample_one(ep: _Episode, n_tokens: int):
-        return sampling_client.sample(tinker.ModelInput.from_ints(ep.ob), 1, params(n_tokens))
+        """One continuation call for ``ep`` from its current observation, on its own seed slot."""
+        if ep.n_calls >= per_ep_calls:
+            raise RuntimeError(
+                f"episode {ep.index} issued more than {per_ep_calls} sampling calls "
+                f"(max_turns={max_turns}) — the per-episode seed block would overflow"
+            )
+        slot = len(prompts) + ep.index * per_ep_calls + ep.n_calls
+        ep.n_calls += 1
+        return sampling_client.sample(tinker.ModelInput.from_ints(ep.ob), 1, params(slot, n_tokens))
 
-    def finish_turn(ep: _Episode, seq) -> None:
+    def record(ep: _Episode, seq) -> None:
+        """Record one sampled segment as a transition from the episode's current observation."""
+        tokens = list(seq.tokens)
+        if seq.logprobs is None:
+            raise RuntimeError("sampler returned no logprobs — GRPO needs sampling logprobs")
+        ep.transitions.append({"ob": list(ep.ob), "ac": tokens, "logprobs": list(seq.logprobs)})
+        ep.turn_tokens.extend(tokens)
+
+    def finish_turn(ep: _Episode, seq) -> tuple[str, str, bool]:
         """Absorb the LAST segment of a turn: record it, then parse the whole turn for the env."""
-        _record(ep, seq)
+        record(ep, seq)
         ep.stop_reason = str(seq.stop_reason)
         truncated = ep.stop_reason != "stop"
         cot, text, raw = renderer.parse(ep.turn_tokens)
         if truncated and not cot and "<think>" in raw and "</think>" not in raw:
             cot, text = text, ""  # cut off mid-thought: what parse() called "answer" is the thinking
-        ep.pending = (cot, text, truncated)
         ep.n_turns += 1
         ep.n_truncated += int(truncated)
+        return cot, text, truncated
 
-    def budget_round(eps: list[tuple[_Episode, Any]]) -> None:
-        """Given (episode, first-segment seq) pairs: turns cut off inside <think> get the forcing
-        suffix + an answer continuation; the rest are complete."""
-        second = []
-        for ep, seq in eps:
+    def step_env(ep: _Episode, cot: str, text: str, truncated: bool) -> bool:
+        """Hand the turn to the env and extend the observation; returns False when the episode ends.
+
+        The env step is the out-of-process part (running the policy's command), so it is the one
+        thing held under a semaphore — ``step_workers`` concurrent commands across the whole batch.
+        """
+        with step_sem:
+            obs, done = env.step(ep.state, cot, text, truncated=truncated)
+        ep.turn_tokens = []
+        if done or obs is None:
+            ep.done = True
+            return False
+        ac = ep.transitions[-1]["ac"]
+        ep.ob = ep.ob + ac + list(renderer.continuation_tokens(obs, ended_cleanly=not truncated))
+        return True
+
+    def drive(ep: _Episode, first_seq) -> Rollout:
+        """The whole life of ONE episode: turn → env step → turn → … → finish. Runs in its own
+        thread, touching nothing another episode owns."""
+        seq = first_seq
+        for turn in range(max_turns):
+            if turn:
+                seq = sample_one(ep, first_call_tokens).result().sequences[0]
             tokens = list(seq.tokens)
             if think_budget and str(seq.stop_reason) != "stop" and renderer.in_open_think(tokens):
-                _record(ep, seq)
-                ep.ob = ep.ob + tokens + list(renderer.force_answer_tokens())  # forced = observation
-                ep.turn_tokens.extend(renderer.force_answer_tokens())
+                # Cut off inside <think>: close it with the renderer's forcing suffix (appended as
+                # OBSERVATION tokens, masked in training) and sample the answer with a fresh budget.
+                record(ep, seq)
+                forced = list(renderer.force_answer_tokens())
+                ep.ob = ep.ob + tokens + forced
+                ep.turn_tokens.extend(forced)
                 ep.n_forced += 1
-                second.append((ep, sample_one(ep, answer_tokens)))
-            else:
-                finish_turn(ep, seq)
-        for ep, fut in second:
-            finish_turn(ep, list(fut.result().sequences)[0])
-
-    # -- turn 0: one call per prompt, num_samples sequences → num_samples episodes (the group) --------
-    episodes: list[_Episode] = []
-    futures = []
-    for p in prompts:
-        ob = list(renderer.prompt_tokens(p.text))
-        futures.append((p, ob, sampling_client.sample(renderer.model_input(p.text), num_samples,
-                                                      params(first_call_tokens))))
-    first_round = []
-    for p, ob, fut in futures:
-        seqs = list(fut.result().sequences)
-        if len(seqs) != num_samples:
-            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
-        for seq in seqs:
-            ep = _Episode(prompt=p, state=env.start(p), ob=ob)
-            episodes.append(ep)
-            first_round.append((ep, seq))
-    budget_round(first_round)
-
-    # Command execution is out-of-process work → run the env steps of a turn concurrently.
-    with ThreadPoolExecutor(max_workers=max(1, step_workers)) as ex:
-        _run_pending_steps(episodes, env, renderer, ex)
-        for _turn in range(1, max_turns):
-            active = [ep for ep in episodes if not ep.done]
-            if not active:
+                seq = sample_one(ep, answer_tokens).result().sequences[0]
+            cot, text, truncated = finish_turn(ep, seq)
+            if not step_env(ep, cot, text, truncated):
                 break
-            futs = [(ep, sample_one(ep, first_call_tokens)) for ep in active]
-            budget_round([(ep, list(fut.result().sequences)[0]) for ep, fut in futs])
-            _run_pending_steps(episodes, env, renderer, ex)
-
-    # -- finish: anything still open hit max_turns; flatten to Rollouts ------------------------------
-    out: list[Rollout] = []
-    for ep in episodes:
         view = env.finish(ep.state)
-        out.append(Rollout(
+        return Rollout(
             prompt=ep.prompt,
             cot=view.cot,
             output=view.output,
@@ -187,34 +266,43 @@ def run_episodes(
                 "transitions": ep.transitions,
                 "episode": view.meta,
             },
-        ))
-    return out
+        )
 
+    # -- turn 0: one call per prompt, issued up front so the whole batch is in flight at once ------
+    # (num_samples sequences per call → num_samples episodes, the GRPO group).
+    group_futures = [
+        _SharedFuture(sampling_client.sample(renderer.model_input(p.text), num_samples,
+                                             params(i, first_call_tokens)))
+        for i, p in enumerate(prompts)
+    ]
+    prompt_tokens = [list(renderer.prompt_tokens(p.text)) for p in prompts]
 
-def _record(ep: _Episode, seq) -> None:
-    """Record one sampled segment as a transition from the episode's current observation."""
-    tokens = list(seq.tokens)
-    if seq.logprobs is None:
-        raise RuntimeError("sampler returned no logprobs — GRPO needs sampling logprobs")
-    ep.transitions.append({"ob": list(ep.ob), "ac": tokens, "logprobs": list(seq.logprobs)})
-    ep.turn_tokens.extend(tokens)
+    out: list[Rollout | None] = [None] * n_episodes
 
+    def run_one(index: int) -> None:
+        """Entry point of one episode's thread: take its slice of the group's turn-0 call, then drive
+        it to completion and publish it."""
+        p_i, k = divmod(index, num_samples)
+        seqs = list(group_futures[p_i].result().sequences)
+        if len(seqs) != num_samples:
+            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
+        ep = _Episode(index=index, prompt=prompts[p_i], state=env.start(prompts[p_i]),
+                      ob=list(prompt_tokens[p_i]))
+        rollout = drive(ep, seqs[k])
+        out[index] = rollout
+        if on_rollout is not None:
+            on_rollout(index, rollout)
 
-def _run_pending_steps(episodes: list[_Episode], env, renderer, ex: ThreadPoolExecutor) -> None:
-    """Env-step every episode with a pending turn (concurrently — commands run out of process), then
-    extend the observation of the ones that continue: ob ← ob + sampled turn + inter-turn framing."""
-    pending = [ep for ep in episodes if ep.pending is not None]
+    if n_episodes:
+        workers = n_episodes if episode_workers is None else max(1, min(episode_workers, n_episodes))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="episode") as ex:
+            # Collected rather than raised on the spot so every already-running episode finishes (and
+            # closes its terminal session) before the first failure is re-raised. Failures are still
+            # fatal — a broken episode is never quietly dropped from the batch.
+            for fut in [ex.submit(run_one, i) for i in range(n_episodes)]:
+                fut.result()
 
-    def _step(ep: _Episode):
-        cot, text, truncated = ep.pending
-        ep.pending = None
-        obs, done = env.step(ep.state, cot, text, truncated=truncated)
-        return ep, obs, done, truncated
-
-    for ep, obs, done, truncated in ex.map(_step, pending):
-        ep.turn_tokens = []
-        if done or obs is None:
-            ep.done = True
-            continue
-        ac = ep.transitions[-1]["ac"]
-        ep.ob = ep.ob + ac + list(renderer.continuation_tokens(obs, ended_cleanly=not truncated))
+    missing = [i for i, r in enumerate(out) if r is None]
+    if missing:
+        raise RuntimeError(f"episodes {missing[:10]} produced no rollout")
+    return [r for r in out if r is not None]

@@ -9,6 +9,8 @@ model-family specific — prompt framing and CoT/answer parsing — lives in ``r
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
 import tinker
 
@@ -68,6 +70,7 @@ def sample_rollouts(
     temperature: float = 1.0,
     enable_thinking: bool = True,
     seed: int | None = None,
+    on_rollout: Callable[[int, Rollout], None] | None = None,
 ) -> list[Rollout]:
     """Sample ``num_samples`` completions per prompt; returns a flat list of Rollouts.
 
@@ -78,6 +81,11 @@ def sample_rollouts(
     still differ across steps. NOTE: relies on a seeded call returning ``num_samples`` *distinct*
     sequences (standard n-sampling) — verify GRPO group advantages have non-zero variance on the
     first real run.
+
+    ``on_rollout(index, rollout)`` (optional) is called as each prompt's completions come back, so a
+    caller can start per-rollout work (monitor API calls) on the prompts that already landed instead
+    of waiting for the slowest one. Given it, each prompt is awaited in its own thread so no prompt
+    holds back another's callbacks; the returned list keeps prompt order either way.
     """
     rend = as_renderer(renderer)
     if hasattr(rend, "enable_thinking"):  # HF-chat only; TML conditions on effort, not a flag
@@ -91,19 +99,42 @@ def sample_rollouts(
     for p in prompts:
         futures.append((p, sampling_client.sample(rend.model_input(p.text), num_samples, params)))
 
-    rollouts: list[Rollout] = []
-    for prompt, fut in futures:
-        resp = fut.result()
-        for seq in resp.sequences:
-            cot, answer, text = rend.parse(list(seq.tokens))
-            rollouts.append(
-                Rollout(
-                    prompt=prompt,
-                    cot=cot,
-                    output=answer,
-                    token_ids=list(seq.tokens),
-                    logprobs=list(seq.logprobs) if seq.logprobs is not None else None,
-                    meta={"stop_reason": str(seq.stop_reason), "full_text": text},
-                )
-            )
-    return rollouts
+    def _to_rollout(prompt: Prompt, seq) -> Rollout:
+        cot, answer, text = rend.parse(list(seq.tokens))
+        return Rollout(
+            prompt=prompt,
+            cot=cot,
+            output=answer,
+            token_ids=list(seq.tokens),
+            logprobs=list(seq.logprobs) if seq.logprobs is not None else None,
+            meta={"stop_reason": str(seq.stop_reason), "full_text": text},
+        )
+
+    if on_rollout is None:
+        rollouts: list[Rollout] = []
+        for prompt, fut in futures:
+            for seq in fut.result().sequences:
+                rollouts.append(_to_rollout(prompt, seq))
+        return rollouts
+
+    # Streaming path: a thread per prompt, writing into pre-allocated slots so the output order is
+    # the same prompt-major, group-consecutive layout GRPO expects. It needs a fixed stride to index
+    # those slots, hence the group-size check (tinker's n-sampling always returns what was asked).
+    slots: list[Rollout | None] = [None] * (len(prompts) * num_samples)
+
+    def _collect(i: int) -> None:
+        prompt, fut = futures[i]
+        seqs = list(fut.result().sequences)
+        if len(seqs) != num_samples:
+            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
+        for k, seq in enumerate(seqs):
+            idx = i * num_samples + k
+            r = _to_rollout(prompt, seq)
+            slots[idx] = r
+            on_rollout(idx, r)
+
+    if prompts:
+        with ThreadPoolExecutor(max_workers=len(prompts), thread_name_prefix="sample") as ex:
+            for fut in [ex.submit(_collect, i) for i in range(len(prompts))]:
+                fut.result()
+    return [r for r in slots if r is not None]

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import inspect
 import json
 import random
 import re
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from statistics import mean
 from typing import Callable, Sequence
@@ -66,22 +68,44 @@ def _length_metrics(results: Sequence, env) -> dict[str, float]:
             "reward/len_penalty_mean": len_pen}          # avg reward lost to length (passers), reward units
 
 
+def _accepts(fn, name: str) -> bool:
+    """Does ``fn`` take a keyword argument called ``name``? Used to stay compatible with backends
+    that predate ``on_rollout`` (and with test doubles) instead of guessing from a TypeError."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # builtins / C callables have no introspectable signature
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: int,
-            think_budget: int | None = None, answer_tokens: int = 512) -> list[Rollout]:
+            think_budget: int | None = None, answer_tokens: int = 512,
+            on_rollout: Callable[[int, Rollout], None] | None = None) -> tuple[list[Rollout], bool]:
     """Sample rollouts the way the env needs: a multi-turn (tool-loop) env goes through the backend's
     episode driver (``sample_episodes``: sample a turn → env executes it → continue), a single-turn env
     through plain ``sample``. The rest of the loop is agnostic — both return Rollouts, ``group_size``
-    consecutive per prompt."""
+    consecutive per prompt.
+
+    Returns ``(rollouts, streamed)``. When the backend supports it, ``on_rollout(index, rollout)`` is
+    called as each rollout lands — from the thread that finished it — so per-rollout work (the judge
+    API calls) overlaps the rest of the batch instead of queueing behind it. ``streamed`` says whether
+    that happened; a backend without the hook returns False and the caller submits after the fact."""
+    stream = on_rollout is not None
     if getattr(env, "multi_turn", False):
         if not hasattr(backend, "sample_episodes"):
             raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
                             f"has no sample_episodes()")
         if think_budget is None:  # env-declared default (a config copied from a single-turn env has none)
             think_budget = getattr(env, "default_think_budget", None)
-        return backend.sample_episodes(env, prompts, num_samples=num_samples, max_tokens=max_tokens,
-                                       temperature=1.0, think_budget=think_budget,
-                                       answer_tokens=answer_tokens)
-    return backend.sample(prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0)
+        stream = stream and _accepts(backend.sample_episodes, "on_rollout")
+        return backend.sample_episodes(
+            env, prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
+            think_budget=think_budget, answer_tokens=answer_tokens,
+            **({"on_rollout": on_rollout} if stream else {}),
+        ), stream
+    stream = stream and _accepts(backend.sample, "on_rollout")
+    return backend.sample(prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
+                          **({"on_rollout": on_rollout} if stream else {})), stream
 
 
 def _env_metrics(results: Sequence, env) -> dict[str, float]:
@@ -123,66 +147,112 @@ def _monitor_info(m: Monitor, role: str) -> dict:
     }
 
 
-def _score_monitors(
-    monitors: Sequence[Monitor], rollouts: list[Rollout], workers: int
-) -> dict[str, list[MonitorResult]]:
-    """{name: [MonitorResult]} — white-box probes use ``score_batch`` (one batched local forward);
-    API judges are scored per-rollout concurrently. Threading a single torch model is pointless/unsafe."""
-    # Per-rollout failures are collected rather than raised on the spot, so ONE warning names every
-    # affected rollout instead of a traceback from whichever thread lost first. They are then fatal:
-    # _assert_scored aborts the run (see below). Transient errors are already retried indefinitely
-    # inside the monitor, so anything that still fails here is a real defect, not a hiccup.
-    def _sentinel(err: str) -> MonitorResult:
-        return MonitorResult(score=float("nan"), label=False, meta={"error": err})
+# Per-rollout monitor failures are collected rather than raised on the spot, so ONE warning names
+# every affected rollout instead of a traceback from whichever thread lost first. They are then
+# fatal: _assert_scored aborts the run. Transient errors are already retried indefinitely inside the
+# monitor, so anything that still fails here is a real defect, not a hiccup.
+def _sentinel(err: str) -> MonitorResult:
+    return MonitorResult(score=float("nan"), label=False, meta={"error": err})
 
-    def _assert_scored(results: dict[str, list[MonitorResult]]) -> None:
-        """A NaN score is never data — it is a monitor that did not answer. Silently dropping those
-        biases a held-out AUROC (the missing rollouts are exactly the ones the API choked on) and
-        silently un-penalizes a train-against rollout, so the run stops instead. Loud beats subtle."""
-        for name, rs in results.items():
-            bad = [i for i, r in enumerate(rs) if r.score != r.score]
-            if bad:
-                err = next((rs[i].meta.get("error") for i in bad if rs[i].meta.get("error")), "?")
-                raise RuntimeError(
-                    f"monitor {name!r} returned NaN for {len(bad)}/{len(rs)} rollouts "
-                    f"(indices {bad[:10]}{'…' if len(bad) > 10 else ''}) — aborting. First error: {err}"
-                )
 
-    out: dict[str, list[MonitorResult]] = {}
-    batched = [m for m in monitors if hasattr(m, "score_batch")]
-    threaded = [m for m in monitors if not hasattr(m, "score_batch")]
-    for m in batched:
-        _log(f"      · scoring {m.name} (probe, {len(rollouts)} local fwd)…")
-        try:
-            out[m.name] = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
-        except Exception as e:  # noqa: BLE001 — never let a probe failure kill the run
-            _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e})")
-            out[m.name] = [_sentinel(f"{type(e).__name__}: {e}") for _ in rollouts]
-    if threaded:
-        names = ", ".join(m.name for m in threaded)
-        _log(f"      · scoring {len(threaded)} API monitor(s) [{names}] × {len(rollouts)} "
-             f"rollouts concurrently…")
-        for m in threaded:
-            out[m.name] = [None] * len(rollouts)  # type: ignore[list-item]
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {
-                ex.submit(m.score, rollouts[i]): (m.name, i)
-                for m in threaded
-                for i in range(len(rollouts))
-            }
-            errors: dict[str, str] = {}
-            for fut in futs:
-                name, i = futs[fut]
+def _assert_scored(results: dict[str, list[MonitorResult]]) -> None:
+    """A NaN score is never data — it is a monitor that did not answer. Silently dropping those
+    biases a held-out AUROC (the missing rollouts are exactly the ones the API choked on) and
+    silently un-penalizes a train-against rollout, so the run stops instead. Loud beats subtle."""
+    for name, rs in results.items():
+        bad = [i for i, r in enumerate(rs) if r.score != r.score]
+        if bad:
+            err = next((rs[i].meta.get("error") for i in bad if rs[i].meta.get("error")), "?")
+            raise RuntimeError(
+                f"monitor {name!r} returned NaN for {len(bad)}/{len(rs)} rollouts "
+                f"(indices {bad[:10]}{'…' if len(bad) > 10 else ''}) — aborting. First error: {err}"
+            )
+
+
+class MonitorScorer:
+    """Scores a set of monitors over a batch of rollouts, **starting each rollout's work the moment
+    that rollout exists** rather than after the whole batch has been sampled.
+
+    Two monitor families, deliberately treated differently:
+
+    - **API judges** (no ``score_batch``): one thread-pool task per (monitor, rollout), submitted by
+      whichever thread finished the rollout — the episode's own driver thread. This is what decouples
+      a fast episode's judge latency from the slowest episode in the batch: by the time sampling ends,
+      most judge calls are already done.
+    - **White-box probes** (``score_batch``): ONE batched local forward over the whole set, run in
+      ``collect`` once every rollout is in. This keeps the batch barrier **on purpose** — a probe is a
+      single local torch model, so N one-rollout forwards would be strictly slower than one batched
+      forward of N, and threading one torch model is pointless (GIL/CUDA-stream serialized) and
+      unsafe. Nothing else waits on the probe: the judges have already run.
+
+    Usage: ``with MonitorScorer(monitors, workers) as sc:`` → ``sc.submit(i, rollout)`` per rollout
+    (thread-safe, any order) → ``sc.collect(rollouts)`` → ``{name: [MonitorResult]}`` indexed exactly
+    like ``rollouts``.
+    """
+
+    def __init__(self, monitors: Sequence[Monitor], workers: int) -> None:
+        self.monitors = list(monitors)
+        self.batched = [m for m in self.monitors if hasattr(m, "score_batch")]
+        self.threaded = [m for m in self.monitors if not hasattr(m, "score_batch")]
+        self._ex = (ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="monitor")
+                    if self.threaded else None)
+        self._futs: dict[tuple[str, int], Future] = {}
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> "MonitorScorer":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._ex is not None:
+            # cancel_futures: on an aborted step, don't keep paying for judge calls nobody will read.
+            self._ex.shutdown(wait=True, cancel_futures=True)
+            self._ex = None
+
+    def submit(self, index: int, rollout: Rollout) -> None:
+        """Queue every API judge on one rollout. Called from the sampling threads, so it only touches
+        ``_futs`` under the lock; ``ThreadPoolExecutor.submit`` is itself thread-safe."""
+        if self._ex is None:
+            return
+        with self._lock:
+            for m in self.threaded:
+                key = (m.name, index)
+                if key in self._futs:
+                    raise RuntimeError(f"rollout {index} submitted twice to monitor {m.name!r}")
+                self._futs[key] = self._ex.submit(m.score, rollout)
+
+    def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult]]:
+        """Drain the judge futures and run the probes; aborts the run if anything failed to score."""
+        n = len(rollouts)
+        out: dict[str, list[MonitorResult]] = {}
+        for m in self.batched:
+            _log(f"      · scoring {m.name} (probe, {n} local fwd, one batched pass)…")
+            try:
+                res = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
+                if len(res) != n:
+                    raise RuntimeError(f"score_batch returned {len(res)} results for {n} rollouts")
+                out[m.name] = res
+            except Exception as e:  # noqa: BLE001 — never let a probe failure kill the run
+                _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e})")
+                out[m.name] = [_sentinel(f"{type(e).__name__}: {e}") for _ in range(n)]
+        for m in self.threaded:
+            res, err = [], None
+            for i in range(n):
+                fut = self._futs.get((m.name, i))
+                if fut is None:
+                    raise RuntimeError(
+                        f"monitor {m.name!r}: rollout {i}/{n} was never submitted for scoring"
+                    )
                 try:
-                    out[name][i] = fut.result()
+                    res.append(fut.result())
                 except Exception as e:  # noqa: BLE001 — one bad API call shouldn't abort the run
-                    out[name][i] = _sentinel(f"{type(e).__name__}: {e}")
-                    errors[name] = f"{type(e).__name__}: {e}"
-            for name, err in errors.items():  # one concise warning per monitor, not per rollout
-                n_failed = sum(1 for r in out[name] if r.meta.get("error"))
-                _log(f"      ⚠️  {name}: {n_failed}/{len(rollouts)} scores failed ({err})")
-    _assert_scored(out)
-    return out
+                    res.append(_sentinel(f"{type(e).__name__}: {e}"))
+                    err = f"{type(e).__name__}: {e}"
+            out[m.name] = res
+            if err is not None:  # one concise warning per monitor, not per rollout
+                n_failed = sum(1 for r in res if r.meta.get("error"))
+                _log(f"      ⚠️  {m.name}: {n_failed}/{n} scores failed ({err})")
+        _assert_scored(out)
+        return out
 
 
 def run_grpo(
@@ -195,7 +265,12 @@ def run_grpo(
     max_tokens: int = 1024,
     think_budget: int | None = None,
     answer_tokens: int = 512,
-    monitor_workers: int = 16,
+    # Concurrent judge API calls, shared across ALL monitors × rollouts. Now that scoring is
+    # pipelined into sampling this is the binding constraint on how much of it can overlap: one eval
+    # is len(monitors) × eval rollouts of calls (6 × 64 = 384 on the terminal matrix), so 16 meant 24
+    # serial waves. Sized to drain an eval in a handful of waves while leaving headroom for several
+    # runs sharing one OpenRouter key (queue_runs.sh -j 4 → 4 × this).
+    monitor_workers: int = 64,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
 ) -> None:
@@ -275,15 +350,23 @@ def run_grpo(
         n_per = getattr(cfg, "eval_samples_per_prompt", 1) or 1
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
         t0 = time.perf_counter()
-        ev = _sample(backend, env, eval_prompts, num_samples=n_per, max_tokens=max_tokens,
-                     think_budget=think_budget, answer_tokens=answer_tokens)
-        ev_env = _score_env(env, ev)
-        gt = [er.behavior_present for er in ev_env]
-        t_sample = time.perf_counter() - t0
-        _log(f"  [eval @ {step}] scoring {len(all_monitors)} monitors…")
-        t1 = time.perf_counter()
-        res = _score_monitors(all_monitors, ev, monitor_workers)
-        t_score = time.perf_counter() - t1
+        # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
+        # instant its episode finishes, so `sample_s` already contains most of the scoring and
+        # `score_s` is only whatever was still in flight when the last episode landed.
+        with MonitorScorer(all_monitors, monitor_workers) as scorer:
+            ev, streamed = _sample(backend, env, eval_prompts, num_samples=n_per,
+                                   max_tokens=max_tokens, think_budget=think_budget,
+                                   answer_tokens=answer_tokens, on_rollout=scorer.submit)
+            if not streamed:  # backend has no per-rollout hook — score the finished batch
+                for i, r in enumerate(ev):
+                    scorer.submit(i, r)
+            ev_env = _score_env(env, ev)
+            gt = [er.behavior_present for er in ev_env]
+            t_sample = time.perf_counter() - t0
+            _log(f"  [eval @ {step}] draining {len(all_monitors)} monitors…")
+            t1 = time.perf_counter()
+            res = scorer.collect(ev)
+            t_score = time.perf_counter() - t1
         row: dict = {
             "step": step,
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
@@ -301,7 +384,7 @@ def run_grpo(
             row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
             row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
-            # Every rollout is scored — _score_monitors aborts the run otherwise — so this indexes
+            # Every rollout is scored — MonitorScorer.collect aborts the run otherwise — so this indexes
             # the whole eval set. Kept explicit so n_scored stays a visible invariant check.
             idx = [i for i, x in enumerate(res[m.name]) if x.score == x.score]
             scores = [res[m.name][i].score for i in idx]
@@ -321,6 +404,9 @@ def run_grpo(
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
             if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
                 row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
+        # sample_s now COVERS the judge calls that ran concurrently with sampling; score_s is only
+        # the tail still in flight when the last episode landed (plus the probes' batched forward).
+        # Their sum is still the true wall clock of the sample+score phase.
         row["time/sample_s"] = t_sample
         row["time/score_s"] = t_score
         row["time/total_s"] = t_sample + t_score
@@ -373,22 +459,28 @@ def run_grpo(
         _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
              f"(max_tokens={max_tokens})…")
         t0 = time.perf_counter()
-        rollouts = _sample(backend, env, prompts, num_samples=cfg.group_size, max_tokens=max_tokens,
-                           think_budget=think_budget, answer_tokens=answer_tokens)
-        env_results = _score_env(env, rollouts)
-        t_sample = time.perf_counter() - t0
-        if train_against:
-            _log(f"step {step}: scoring train-against monitor(s)…")
-
         # Only the TRAIN-AGAINST monitors are scored every step (they form the reward penalty).
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
-        t1 = time.perf_counter()
-        ta_res = _score_monitors(train_against, rollouts, monitor_workers) if train_against else {}
-        t_score = time.perf_counter() - t1
+        # As in run_eval, their calls are pipelined into sampling: a rollout is handed to the judges
+        # the moment its episode finishes, so t_score below is only the tail still in flight.
+        with MonitorScorer(train_against, monitor_workers) as scorer:
+            rollouts, streamed = _sample(backend, env, prompts, num_samples=cfg.group_size,
+                                         max_tokens=max_tokens, think_budget=think_budget,
+                                         answer_tokens=answer_tokens, on_rollout=scorer.submit)
+            if not streamed:  # backend has no per-rollout hook — score the finished batch
+                for i, r in enumerate(rollouts):
+                    scorer.submit(i, r)
+            env_results = _score_env(env, rollouts)
+            t_sample = time.perf_counter() - t0
+            if train_against:
+                _log(f"step {step}: draining train-against monitor(s)…")
+            t1 = time.perf_counter()
+            ta_res = scorer.collect(rollouts) if train_against else {}
+            t_score = time.perf_counter() - t1
 
         # ``penalties[i]`` = raw mean train-against suspiciousness for rollout i (BEFORE the coefficient).
         # This is the obfuscation signal (drops as the policy evades) — logged as monitor_suspiciousness_mean.
-        # No NaN guard is needed: _score_monitors aborts the run on the first unscored rollout, so a
+        # No NaN guard is needed: MonitorScorer.collect aborts the run on the first unscored rollout, so a
         # missing penalty can never silently reach the reward (or NaN the whole group's advantages).
         penalties = [
             mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
@@ -448,8 +540,8 @@ def run_grpo(
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(env_results, env),     # env-declared summary rates
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
-            "time/sample_s": t_sample,
-            "time/score_s": t_score,
+            "time/sample_s": t_sample,   # includes the judge calls pipelined into sampling
+            "time/score_s": t_score,     # only the monitor tail left after the last rollout landed
             "time/optim_s": t_optim,
             "time/total_s": t_sample + t_score + t_optim,
             "kl/mean": step_metrics.get("kl/mean", 0.0),  # per-token KL to base (0 if kl_coef=0)

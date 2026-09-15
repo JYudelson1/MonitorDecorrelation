@@ -6,6 +6,8 @@ sampling client -> forward_backward("importance_sampling") + optim_step. No tink
 
 from __future__ import annotations
 
+from typing import Callable
+
 import tinker
 
 from monitordecorrelation.rl.episodes import derive_sample_seed, run_episodes
@@ -61,7 +63,10 @@ class TinkerBackend:
         num_samples: int = 1,
         max_tokens: int = 1024,
         temperature: float = 1.0,
+        on_rollout: Callable[[int, Rollout], None] | None = None,
     ) -> list[Rollout]:
+        """``on_rollout(index, rollout)`` (optional) fires as each prompt's completions land, so the
+        caller can start per-rollout work (monitor calls) without waiting for the whole batch."""
         if self._sampler is None:
             self.refresh_sampler()
         call_seed = derive_sample_seed(self.seed, self._sample_calls)
@@ -74,6 +79,7 @@ class TinkerBackend:
             max_tokens=max_tokens,
             temperature=temperature,
             seed=call_seed,
+            on_rollout=on_rollout,
         )
 
     def sample_episodes(
@@ -86,11 +92,14 @@ class TinkerBackend:
         temperature: float = 1.0,
         think_budget: int | None = None,
         answer_tokens: int = 512,
+        on_rollout: Callable[[int, Rollout], None] | None = None,
     ) -> list[Rollout]:
         """Multi-turn counterpart of ``sample`` for tool-loop envs (``env.multi_turn``): the episode
         driver samples a turn, the env executes it and replies, repeat. Returns one Rollout per
         episode carrying its per-turn transitions (see rl/episodes.py) for ``train_step``.
-        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py)."""
+        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py).
+        Every episode runs in its own thread and never waits on its peers; ``on_rollout(index,
+        rollout)`` fires from that thread the moment an episode is done."""
         if self._sampler is None:
             self.refresh_sampler()
         call_seed = derive_sample_seed(self.seed, self._sample_calls)
@@ -100,6 +109,8 @@ class TinkerBackend:
             max_tokens=max_tokens, temperature=temperature, seed=call_seed,
             think_budget=think_budget, answer_tokens=answer_tokens,
             step_workers=getattr(env, "step_workers", 16),
+            episode_workers=getattr(env, "episode_workers", None),
+            on_rollout=on_rollout,
         )
 
     def train_step(self, rollouts: list[Rollout], rewards: list[float], group_size: int) -> dict[str, float]:
