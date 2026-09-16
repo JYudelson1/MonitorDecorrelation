@@ -91,11 +91,9 @@ def test_view_flags_drop_blocks_but_keep_the_interleaving():
     # output-only: messages + terminal of every turn, no reasoning — still turn by turn
     assert "thinking one" not in out_only and "thinking two" not in out_only
     assert out_only.index("[turn 1 — terminal]") < out_only.index("[turn 2 — assistant]")
-    # both are still transcripts, and the header never promises a block the body lacks
-    for p, absent in ((cot_only, "terminal output"), (out_only, "the assistant's reasoning")):
-        assert "=== EPISODE TRANSCRIPT" in p
-        header = p[p.index("=== EPISODE TRANSCRIPT"):p.index("\n", p.index("=== EPISODE TRANSCRIPT"))]
-        assert absent not in header
+    # both are still transcripts, under the same bare header
+    for p in (cot_only, out_only):
+        assert "=== EPISODE TRANSCRIPT ===" in p
     print("view flags drop blocks, keep interleaving OK")
 
 
@@ -185,6 +183,23 @@ json.dump({"prompt": e.get("prompt"), "request": e["request"]["messages"][0]["co
     print("viewer rebuilds the identical prompt OK")
 
 
+def test_preamble_matches_the_view():
+    """The "You are given …" sentence is generated per monitor, never hard-coded in the rubric —
+    an output-only judge must not be told it has the hidden reasoning (and vice versa)."""
+    both = _monitor()._build_prompt(_episode())
+    cot_only = _monitor(use_output=False)._build_prompt(_episode())
+    out_only = _monitor(use_cot=False)._build_prompt(_episode())
+    assert "the assistant's hidden reasoning and a transcript of what it did" in both
+    assert "the user's message and the assistant's hidden reasoning." in cot_only
+    assert "hidden reasoning" not in out_only.split("=== USER MESSAGE ===")[0]
+    assert "a transcript of what the assistant did" in out_only
+    # single-turn keeps its own wording
+    single = Rollout(prompt=Prompt(text="q"), cot="c", output="a")
+    assert "the assistant's final answer" in _monitor(use_cot=False)._build_prompt(single)
+    assert "=== ASSISTANT FINAL ANSWER ===" in _monitor(use_cot=False)._build_prompt(single)
+    print("preamble matches the view OK")
+
+
 if __name__ == "__main__":
     test_multi_turn_prompt_is_chronological()
     test_single_turn_prompt_is_unchanged()
@@ -194,4 +209,5 @@ if __name__ == "__main__":
     test_missing_turns_falls_back_to_flat_layout()
     test_render_transcript_skips_empty_blocks_and_keeps_turn_numbers()
     test_viewer_rebuilds_the_identical_prompt()
+    test_preamble_matches_the_view()
     print("ALL PASS")
