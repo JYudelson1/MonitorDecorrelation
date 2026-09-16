@@ -6,9 +6,9 @@ Two things are pinned here.
    turn 1 terminal → turn 2 CoT → …, not as "every thought" followed by "every action" (what the
    env's flattened ``cot``/``output`` fields would give). Single-turn rollouts keep the old
    two-section layout.
-2. **One implementation.** The viewer (``visualize_transcripts.py``) must not re-derive the layout:
-   the prompt it shows under "what the monitors saw" is compared byte-for-byte against the one the
-   live ``CoTMonitor`` would POST.
+2. **One implementation.** ``CoTMonitor._build_prompt`` is the only place the layout exists; what
+   a judge was actually sent is persisted per rollout as ``monitors.<name>.call`` (see
+   ``tests/test_monitor_call_record.py``) — nothing downstream rebuilds it.
 
 Offline — ``_build_prompt`` is pure, no API call.
 
@@ -17,17 +17,10 @@ Run: uv run python -m pytest tests/test_transcript_prompt.py -q
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-from pathlib import Path
-
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv, make_island_items
 from monitordecorrelation.monitors.cot_monitor import CoTMonitor
 from monitordecorrelation.transcript import episode_turns, render_transcript
 from monitordecorrelation.types import Prompt, Rollout
-
-REPO = Path(__file__).resolve().parents[1]
 
 _TURNS = [
     ("thinking one: let me see the grader", 'Looking.\n<command>cat verifier.py</command>'),
@@ -135,52 +128,6 @@ def test_render_transcript_skips_empty_blocks_and_keeps_turn_numbers():
     assert out.startswith("[turn 2 — assistant reasoning (chain of thought)]\nt2")
     assert "[turn 2 — terminal]\n$ ls\na.py" in out  # numbering stays absolute
     print("empty-block handling OK")
-
-
-def test_viewer_rebuilds_the_identical_prompt():
-    """The site and the judge share ONE builder: the prompts must match byte for byte.
-
-    Runs the viewer in a subprocess so its stdlib-only loader takes its real path (synthetic
-    packages, stubbed httpx/numpy) instead of reusing this process's already-imported package.
-    """
-    roll = _episode("transcript")
-    mon = _monitor()
-    ep = roll.meta["episode"]
-    rec = {"step": 3, "question": roll.prompt.text, "cot": roll.cot, "answer": roll.output,
-           "env_meta": {"unparsed": False, **ep},
-           "monitors": {"m": {"score": 0.9, "label": True}}}
-    payload = json.dumps({"rec": rec, "expected": mon._build_prompt(roll)}, default=str)
-
-    driver = '''
-import json, sys, importlib.util
-from pathlib import Path
-repo = Path(sys.argv[1])
-spec = importlib.util.spec_from_file_location("viz", repo / "visualize_transcripts.py")
-viz = importlib.util.module_from_spec(spec)
-sys.modules["viz"] = viz
-spec.loader.exec_module(viz)
-case = json.loads(sys.stdin.read())
-class FakeRun:
-    run_info = {"env": {"behavior_name": "reward_hacking"}}
-specs = [{"name": "m", "kind": "cot", "role": "held_out", "model_id": "x/y",
-          "threshold": 0.5, "behavior": "reward_hacking"}]
-out = viz.monitor_views(repo, FakeRun(), specs, case["rec"])
-assert not out.get("error"), out["error"]
-e = out["monitors"][0]
-assert not e.get("error"), e["error"]
-json.dump({"prompt": e.get("prompt"), "request": e["request"]["messages"][0]["content"],
-           "view": e.get("view"), "source": e.get("source")}, sys.stdout)
-'''
-    r = subprocess.run([sys.executable, "-c", driver, str(REPO)], input=payload,
-                       capture_output=True, text=True, timeout=120)
-    assert r.returncode == 0, f"viewer driver failed:\n{r.stderr}"
-    got = json.loads(r.stdout)
-    expected = json.loads(payload)["expected"]
-    assert got["prompt"] == expected, "viewer prompt differs from the judge's"
-    assert got["request"] == expected, "viewer request body differs from the judge's"
-    assert "_build_prompt" in (got["source"] or "")
-    assert got["view"].startswith("chronological episode transcript")
-    print("viewer rebuilds the identical prompt OK")
 
 
 def test_preamble_matches_the_view():

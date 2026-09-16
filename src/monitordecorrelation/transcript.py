@@ -14,12 +14,11 @@ This module rebuilds the real order from the per-turn record the env already sto
 
     prompt → turn 1 CoT → turn 1 assistant message → turn 1 terminal output → turn 2 CoT → …
 
-``CoTMonitor._build_prompt`` renders the judge prompt from here, and ``visualize_transcripts.py``
-calls that same builder, so what the site shows under "what the monitors saw" is what the judge was
-actually sent — by construction, not by two implementations agreeing.
+``CoTMonitor._build_prompt`` renders the judge prompt from here; the prompt a judge was actually
+sent is then persisted with the rollout (``monitors.<name>.call`` in the dumps), so nothing
+downstream — the viewer included — needs to rebuild it.
 
-Stdlib-only and dependency-light on purpose (like ``types``): the viewer loads this module straight
-from its file, without executing the package ``__init__``.
+Stdlib-only and dependency-light on purpose (like ``types``).
 """
 
 from __future__ import annotations

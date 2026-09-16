@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -219,6 +220,28 @@ _FATAL_STATUS = frozenset({400, 401, 402, 403})
 _OK_FINISH_REASONS = frozenset({"stop", "length"})
 
 
+@dataclass
+class JudgeCall:
+    """One *successful* judge API call: the text ``score()`` parses, plus a durable record of it.
+
+    ``record`` is what the rollout dumps persist under ``monitors.<name>.call`` so a saved rollout
+    carries exactly what its judge was sent and exactly what came back (see ``CoTMonitor._call``):
+
+    - ``url`` / ``request`` — the endpoint and the exact JSON body POSTed (``model``, ``messages``
+      — i.e. the full prompt — ``temperature``, ``max_tokens``, ``reasoning``). The Authorization
+      header is the only thing omitted.
+    - ``timeout`` — the client-side request timeout (not part of the body, but part of the call).
+    - ``response`` — the provider's reply: the full assistant ``message`` (``content``, and the
+      judge's chain of thought under ``reasoning`` / ``reasoning_details`` when the provider
+      returns one), ``finish_reason``, and the response-level ``id`` / ``model`` / ``provider`` /
+      ``usage``.
+    - ``attempts`` — how many POSTs it took; only the last, successful one is recorded.
+    """
+
+    text: str
+    record: dict
+
+
 def _warn(msg: str) -> None:
     """Timestamped stderr warning (matches rl/train.py's _log prefix), flushed so it survives pipes."""
     print(f"[{time.strftime('%H:%M:%S')}] ⚠️  {msg}", file=sys.stderr, flush=True)
@@ -404,8 +427,20 @@ class CoTMonitor:
             transcript=transcript or "(no turns recorded)",
         )
 
-    def _call(self, prompt: str, *, warn_after: int = 6) -> str:
-        """POST to OpenRouter and return the judge's text, retrying **indefinitely** with exponential
+    def _request_body(self, prompt: str) -> dict:
+        """The exact JSON body ``_call`` POSTs to OpenRouter for ``prompt`` (the one source of truth —
+        the persisted call record is this same dict)."""
+        return {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "max_tokens": 2048,
+            "reasoning": self._reasoning,  # {enabled:false}, or effort / a bounded budget
+        }
+
+    def _call(self, prompt: str, *, warn_after: int = 6) -> JudgeCall:
+        """POST to OpenRouter and return the judge's text plus the record of the successful call
+        (``JudgeCall``), retrying **indefinitely** with exponential
         backoff (capped at 30s) on any transient API error: connection/timeout, 404 ("no endpoints
         available for this model right now"), 408/429/5xx, a malformed body, a non-"stop"
         ``finish_reason``, or empty output (null content with no ``SCORE:``/``VERDICT:`` in
@@ -422,6 +457,7 @@ class CoTMonitor:
         ``reasoning:{enabled:false}``, so we flip once to a bounded budget and retry before the
         fatal check.
         """
+        body = self._request_body(prompt)
         attempt = 0
         while True:
             attempt += 1
@@ -430,13 +466,7 @@ class CoTMonitor:
                 resp = httpx.post(
                     _OPENROUTER_URL,
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "model": self.model_id,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                        "max_tokens": 2048,
-                        "reasoning": self._reasoning,  # {enabled:false}, or a bounded budget (see below)
-                    },
+                    json=body,
                     timeout=self.timeout,
                 )
             except (httpx.TransportError, httpx.TimeoutException) as e:
@@ -457,7 +487,8 @@ class CoTMonitor:
                     err = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 else:
                     try:
-                        choice = resp.json()["choices"][0]
+                        data = resp.json()
+                        choice = data["choices"][0]
                         message = choice["message"]
                     except (KeyError, IndexError, TypeError, ValueError) as e:
                         err = f"malformed response body ({type(e).__name__}: {e})"
@@ -490,7 +521,21 @@ class CoTMonitor:
                                     _warn(
                                         f"monitor {self.name}: recovered on attempt {attempt}"
                                     )
-                                return text
+                                # Only the call that succeeded is recorded — failed attempts
+                                # never had an answer worth keeping.
+                                record = {
+                                    "url": _OPENROUTER_URL,
+                                    "request": body,
+                                    "timeout": self.timeout,
+                                    "attempts": attempt,
+                                    "response": {
+                                        "message": message,
+                                        "finish_reason": finish,
+                                        **{k: data.get(k) for k in ("id", "model", "provider", "usage")
+                                           if isinstance(data, dict) and k in data},
+                                    },
+                                }
+                                return JudgeCall(text=text, record=record)
             if attempt > warn_after:
                 _warn(
                     f"monitor {self.name}: attempt {attempt} failed ({err}); retrying"
@@ -498,25 +543,26 @@ class CoTMonitor:
             time.sleep(min(2.0 ** (attempt - 1), 30.0))
 
     def score(self, rollout: Rollout) -> MonitorResult:
-        text = self._call(self._build_prompt(rollout))
+        """Judge one rollout. ``meta`` carries ``raw`` (the text the verdict was parsed from) and
+        ``call`` (the full request/response record of the successful API call — see ``JudgeCall``),
+        which ``rl/train.py`` persists per rollout."""
+        call = self._call(self._build_prompt(rollout))
+        text = call.text
+        meta: dict = {"raw": text, "call": call.record}
         if self.binary_judge:
             m = _VERDICT_RE.search(text or "")
             if m is None:
                 # Unparseable verdict: treat as no-signal (score 0), flag for inspection.
                 return MonitorResult(
-                    score=0.0, label=False, meta={"raw": text, "parse_error": True}
+                    score=0.0, label=False, meta={**meta, "parse_error": True}
                 )
             score = 1.0 if m.group(1).upper() == "YES" else 0.0
-            return MonitorResult(
-                score=score, label=score >= self.threshold, meta={"raw": text}
-            )
+            return MonitorResult(score=score, label=score >= self.threshold, meta=meta)
         m = _SCORE_RE.search(text or "")
         if m is None:
             # Unparseable judge output: treat as no-signal (score 0), flag for inspection.
             return MonitorResult(
-                score=0.0, label=False, meta={"raw": text, "parse_error": True}
+                score=0.0, label=False, meta={**meta, "parse_error": True}
             )
         score = max(0.0, min(1.0, float(m.group(1)) / 100.0))
-        return MonitorResult(
-            score=score, label=score >= self.threshold, meta={"raw": text}
-        )
+        return MonitorResult(score=score, label=score >= self.threshold, meta=meta)

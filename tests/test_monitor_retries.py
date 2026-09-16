@@ -69,7 +69,7 @@ def _responses(monkeypatch, items):
 def test_retries_past_the_old_six_attempt_limit(monitor, no_sleep, monkeypatch):
     # 20 straight 503s used to exhaust max_retries=6 and NaN the rollout; now it keeps going.
     calls = _responses(monkeypatch, [_Resp(503, text="overloaded")] * 20 + [_ok()])
-    assert monitor._call("p") == "SCORE: 42"
+    assert monitor._call("p").text == "SCORE: 42"
     assert calls["n"] == 21
 
 
@@ -95,7 +95,7 @@ def test_retries_past_the_old_six_attempt_limit(monitor, no_sleep, monkeypatch):
 )
 def test_transient_errors_are_retried(monitor, no_sleep, monkeypatch, bad):
     calls = _responses(monkeypatch, [bad, _ok()])
-    assert monitor._call("p") == "SCORE: 42"
+    assert monitor._call("p").text == "SCORE: 42"
     assert calls["n"] == 2
 
 
@@ -150,14 +150,14 @@ def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monke
     """finish_reason='length' with output is NOT an API error: the judge is called at temperature 0,
     so a retry returns the identical truncated text and the run spins forever. Read what it said."""
     calls = _responses(monkeypatch, [_ok("thinking out loud… SCORE: 42", finish="length")])
-    assert monitor._call("p") == "thinking out loud… SCORE: 42"
+    assert monitor._call("p").text == "thinking out loud… SCORE: 42"
     assert calls["n"] == 1  # no retry
     assert no_sleep == []
 
     # …even when the truncated text never reached a SCORE: line — that is score()'s parse_error
     # path (no signal), not something a retry could fix.
     calls = _responses(monkeypatch, [_ok("deliberating and then cut off mid-", finish="length")])
-    assert monitor._call("p") == "deliberating and then cut off mid-"
+    assert monitor._call("p").text == "deliberating and then cut off mid-"
     assert calls["n"] == 1
 
 
@@ -168,14 +168,14 @@ def test_truncated_completion_with_no_output_is_still_an_api_error(monitor, no_s
     budget, which should be impossible with reasoning disabled/bounded. Retry rather than score 0."""
     cut = _Resp(200, {"choices": [{"finish_reason": "length", "message": {"content": empty}}]})
     calls = _responses(monkeypatch, [cut, _ok()])
-    assert monitor._call("p") == "SCORE: 42"
+    assert monitor._call("p").text == "SCORE: 42"
     assert calls["n"] == 2
 
 
 def test_missing_finish_reason_is_accepted(monitor, no_sleep, monkeypatch):
     # Some providers omit finish_reason; absence is not evidence of failure.
     _responses(monkeypatch, [_Resp(200, {"choices": [{"message": {"content": "SCORE: 7"}}]})])
-    assert monitor._call("p") == "SCORE: 7"
+    assert monitor._call("p").text == "SCORE: 7"
 
 
 def test_warns_only_after_the_sixth_retry(monitor, no_sleep, monkeypatch, capsys):

@@ -17,6 +17,12 @@ What it shows, per run:
     the complete answer/transcript, the per-turn breakdown for multi-turn envs, the env grading
     record and every monitor's score. **Nothing is truncated** — what you see is exactly what was
     written to the jsonl (a rollout that the *sampler* truncated shows as it was truncated).
+    For every LLM-judge monitor whose API call the run saved (``monitors.<name>.call`` in the
+    record — written by rl/train.py since call recording was added), the exact prompt it was sent,
+    the other request parameters, and its response including the chain of thought when the
+    provider returned one. Older dumps carry no call record; the viewer says so rather than
+    reconstructing a prompt from the run config (a reconstruction can differ from what the judge
+    was really sent if the repo changed since the run).
   * **Plots / Log** — the PNGs the training loop rendered, and ``run.log``.
 
 Rollout dumps run to ~100 MB per run, so they are never loaded whole: each ``*.jsonl`` gets a
@@ -321,9 +327,8 @@ class Run:
 
 
 class Store:
-    def __init__(self, root: Path, cache_dir: Optional[Path], repo_root: Optional[Path] = None):
+    def __init__(self, root: Path, cache_dir: Optional[Path]):
         self.root = root
-        self.repo_root = repo_root or Path(__file__).resolve().parent
         self.runs: dict[str, Run] = {}
         self.cache = IndexCache(cache_dir)
         self.lock = threading.RLock()
@@ -417,7 +422,6 @@ class Store:
                 "use_output": m.get("use_output"),
                 "binary_judge": m.get("binary_judge"),
                 "behavior": m.get("behavior"),
-                # carried for the judge-prompt rebuild (reasoning budget / probe file)
                 "reasoning_max_tokens": m.get("reasoning_max_tokens"),
                 "reasoning_effort": m.get("reasoning_effort"),
                 "probe_path": m.get("probe_path"),
@@ -470,194 +474,6 @@ class Store:
         with self.lock:
             runs = list(self.runs.values())
         return sorted((self.run_card(r) for r in runs), key=lambda c: (c["group"], c["name"]))
-
-
-# --------------------------------------------------------------------------------------------
-# what the monitors see: the exact judge prompt, rebuilt with the repo's own code
-# --------------------------------------------------------------------------------------------
-#
-# The rollout dumps persist only ``{score, label}`` per monitor — the judge's own text lives in
-# ``MonitorResult.meta["raw"]`` and is dropped by ``rl/train.py``. The prompt, though, is a pure
-# function of (monitor spec, rollout), so we rebuild it *with the repo's own builder* rather than
-# reimplementing it: ``CoTMonitor._build_prompt`` is the source of truth and stays so as the rubrics
-# and templates change.
-#
-# The catch is that this viewer runs stdlib-only. Importing ``monitordecorrelation.monitors.cot_monitor``
-# the normal way would execute the package ``__init__`` (config/env/tinker) and pull httpx + numpy. So
-# we register synthetic namespace packages, load the three modules we need straight from their files,
-# and stub the two third-party imports they make at module scope but never touch while building a
-# prompt. If any of that fails the API returns the error and the UI says so — it never guesses.
-
-_REPO_API: Any = None  # (types_mod, cot_mod, whitebox_mod | None) | Exception, cached after first try
-
-
-def _stub_module(name: str) -> None:
-    import types as _t
-    if name in sys.modules:
-        return
-    try:
-        __import__(name)
-        return
-    except Exception:
-        pass
-    m = _t.ModuleType(name)
-    if name == "httpx":  # only referenced inside _call(), never while building a prompt
-        for exc in ("TransportError", "TimeoutException", "HTTPStatusError", "HTTPError"):
-            setattr(m, exc, type(exc, (Exception,), {}))
-        m.post = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("viewer: network disabled"))
-    sys.modules[name] = m
-
-
-def repo_api(repo_root: Path) -> Any:
-    """(types, cot_monitor, whitebox.model|None) loaded from ``src/``, or the Exception that stopped us."""
-    global _REPO_API
-    if _REPO_API is not None:
-        return _REPO_API
-    try:
-        import importlib.util
-        import types as _t
-        src = repo_root / "src"
-        pkg_dir = src / "monitordecorrelation"
-        if not (pkg_dir / "monitors" / "cot_monitor.py").is_file():
-            raise FileNotFoundError(f"no monitordecorrelation package under {src}")
-        for dep in ("httpx", "numpy"):
-            _stub_module(dep)
-        # synthetic packages → the real __init__.py (pydantic/tinker/…) never runs
-        for dotted, path in (("monitordecorrelation", pkg_dir),
-                             ("monitordecorrelation.monitors", pkg_dir / "monitors"),
-                             ("monitordecorrelation.whitebox", pkg_dir / "whitebox")):
-            if dotted not in sys.modules:
-                m = _t.ModuleType(dotted)
-                m.__path__ = [str(path)]  # type: ignore[attr-defined]
-                sys.modules[dotted] = m
-
-        def load(dotted: str, path: Path):
-            if dotted in sys.modules and getattr(sys.modules[dotted], "__file__", None):
-                return sys.modules[dotted]
-            spec = importlib.util.spec_from_file_location(dotted, path)
-            mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-            sys.modules[dotted] = mod
-            spec.loader.exec_module(mod)  # type: ignore[union-attr]
-            return mod
-
-        types_mod = load("monitordecorrelation.types", pkg_dir / "types.py")
-        # The chronological multi-turn layout the judge prompt uses — loaded here for the same
-        # reason rubrics is: cot_monitor imports it at module scope.
-        load("monitordecorrelation.transcript", pkg_dir / "transcript.py")
-        load("monitordecorrelation.monitors.rubrics", pkg_dir / "monitors" / "rubrics.py")
-        cot_mod = load("monitordecorrelation.monitors.cot_monitor", pkg_dir / "monitors" / "cot_monitor.py")
-        try:
-            wb_mod = load("monitordecorrelation.whitebox.model", pkg_dir / "whitebox" / "model.py")
-        except Exception:
-            wb_mod = None
-        _REPO_API = (types_mod, cot_mod, wb_mod)
-    except Exception as e:  # cached: don't re-attempt a broken import on every rollout click
-        _REPO_API = e
-    return _REPO_API
-
-
-def monitor_views(repo_root: Path, run: Run, monitors: list[dict], rec: dict) -> dict:
-    """For one rollout: every monitor's exact input, plus its saved answer if the dump has one."""
-    api = repo_api(repo_root)
-    if isinstance(api, Exception):
-        return {"error": f"{type(api).__name__}: {api}", "monitors": []}
-    types_mod, cot_mod, wb_mod = api
-    behavior_default = ((run.run_info or {}).get("env") or {}).get("behavior_name") or "sycophancy"
-    question, cot, answer = (rec.get("question") or ""), (rec.get("cot") or ""), (rec.get("answer") or "")
-    # Multi-turn runs: hand the builder the per-turn record too (eval dumps put the episode under
-    # `env_meta`, the training dump under `env.meta`). CoTMonitor._build_prompt keys off exactly this
-    # to switch from the two-section layout to the chronological transcript — so passing it is what
-    # makes the viewer show the interleaved prompt the judge really got, with no layout code here.
-    env = rec.get("env") if isinstance(rec.get("env"), dict) else {}
-    episode = rec.get("env_meta")
-    if not isinstance(episode, dict):
-        episode = env.get("meta") if isinstance(env.get("meta"), dict) else None
-    roll = types_mod.Rollout(prompt=types_mod.Prompt(text=question, meta={}), cot=cot, output=answer,
-                             meta={"episode": episode} if episode else {})
-    saved = rec.get("monitors") if isinstance(rec.get("monitors"), dict) else {}
-    # A slim dump has scores but no text, so a rebuilt prompt would be all-empty sections — say so
-    # instead of showing a prompt that was never sent.
-    if not (question or cot or answer or (episode or {}).get("turns")):
-        return {"monitors": [{"name": s.get("name"), "kind": s.get("kind"), "role": s.get("role"),
-                              "model_id": s.get("model_id"), "threshold": s.get("threshold"),
-                              "score": _nan_safe((saved.get(s.get("name")) or {}).get("score")),
-                              "label": (saved.get(s.get("name")) or {}).get("label"),
-                              "answer": {k: v for k, v in (saved.get(s.get("name")) or {}).items()
-                                         if k not in ("score", "label")} or None}
-                             for s in monitors],
-                "no_text": True, "behavior_default": behavior_default}
-    out = []
-    for spec in monitors:
-        name = spec.get("name")
-        entry: dict = {"name": name, "kind": spec.get("kind"), "role": spec.get("role"),
-                       "model_id": spec.get("model_id"), "threshold": spec.get("threshold")}
-        rec_mon = saved.get(name) if isinstance(saved.get(name), dict) else {}
-        entry["score"] = _nan_safe(rec_mon.get("score"))
-        entry["label"] = rec_mon.get("label")
-        # anything the dump kept beyond score/label IS the monitor's own answer (meta["raw"], …)
-        entry["answer"] = {k: v for k, v in rec_mon.items() if k not in ("score", "label")} or None
-        kind = (spec.get("kind") or ("probe" if spec.get("probe_path") else "cot"))
-        try:
-            if kind == "probe":
-                entry.update(_probe_view(repo_root, wb_mod, spec, question, cot, answer))
-            else:
-                behavior = spec.get("behavior") or behavior_default
-                m = cot_mod.CoTMonitor(
-                    name=name or "monitor", model_id=spec.get("model_id") or "?",
-                    behavior=behavior, threshold=spec.get("threshold", 0.5) or 0.5,
-                    use_cot=spec.get("use_cot", True) is not False,
-                    use_output=spec.get("use_output", True) is not False,
-                    reasoning_max_tokens=spec.get("reasoning_max_tokens"),
-                    reasoning_effort=spec.get("reasoning_effort"),
-                    binary_judge=bool(spec.get("binary_judge")),
-                    api_key="(not used)",
-                )
-                turns = cot_mod.episode_turns(roll)
-                if turns:  # multi-turn: label it from the same helper that writes the prompt header
-                    view = "chronological episode transcript — " + cot_mod.describe_contents(
-                        include_cot=m.use_cot, include_output=m.use_output,
-                        output_view=cot_mod.episode_output_view(roll))
-                else:
-                    view = ("CoT + final answer" if m.use_cot and m.use_output
-                            else "final answer only (no CoT)" if not m.use_cot else "CoT only (no answer)")
-                entry.update({
-                    "behavior": behavior, "view": view, "binary_judge": m.binary_judge,
-                    "rubric": {"adjective": m.rubric.adjective, "description": m.rubric.description},
-                    "prompt": m._build_prompt(roll),
-                    # exactly the body CoTMonitor._call POSTs to OpenRouter (key omitted)
-                    "request": {"url": cot_mod._OPENROUTER_URL, "model": m.model_id,
-                                "messages": [{"role": "user", "content": m._build_prompt(roll)}],
-                                "temperature": 0.0, "max_tokens": 2048, "reasoning": m._reasoning},
-                    "source": "monitordecorrelation.monitors.cot_monitor.CoTMonitor._build_prompt",
-                })
-        except Exception as e:
-            entry["error"] = f"{type(e).__name__}: {e}"
-        out.append(entry)
-    return {"monitors": out, "behavior_default": behavior_default}
-
-
-def _probe_view(repo_root: Path, wb_mod: Any, spec: dict, question: str, cot: str, answer: str) -> dict:
-    """What a white-box probe reads: the rollout conversation + the Atlas follow-up turn."""
-    probe_path = spec.get("probe_path") or spec.get("model_id") or ""
-    meta = _read_json(Path(probe_path) / "meta.json") if probe_path else None
-    if meta is None and probe_path:
-        meta = _read_json(repo_root / probe_path / "meta.json")
-    follow_up = (meta or {}).get("follow_up") or (list(wb_mod.DEFAULT_FOLLOWUP) if wb_mod else None)
-    assistant = wb_mod.fold_assistant(cot, answer) if wb_mod else (cot + "\n" + answer)
-    msgs = [{"role": "user", "content": question}, {"role": "assistant", "content": assistant}]
-    if follow_up:
-        msgs += [{"role": "user", "content": follow_up[0]}, {"role": "assistant", "content": follow_up[1]}]
-    return {
-        "view": "activations over the rollout + follow-up turn (read on the BASE model)",
-        "probe_path": probe_path,
-        "probe_meta": {k: (meta or {}).get(k) for k in ("model_name", "datasets", "preset", "threshold",
-                                                        "n_train", "follow_up") if meta},
-        "messages": msgs,
-        "prompt": "\n\n".join(f"<{m['role']}>\n{m['content']}" for m in msgs),
-        "source": "monitordecorrelation.whitebox.model.WhiteBoxModel._build_messages "
-                  "(the text is then rendered by the tokenizer's chat template; the probe reads the "
-                  "residual stream at the final token)",
-    }
 
 
 # --------------------------------------------------------------------------------------------
@@ -725,8 +541,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_rollouts(q)
             elif route == "/api/rollout":
                 self._route_rollout(q)
-            elif route == "/api/monitor_views":
-                self._route_monitor_views(q)
             elif route == "/api/file":
                 self._route_file(q)
             else:
@@ -869,24 +683,6 @@ class Handler(BaseHTTPRequestHandler):
         if rec is None:
             return self._err("no such rollout", 404)
         self._json({"i": i, "record": _nan_safe(rec)})
-
-    def _route_monitor_views(self, q: dict) -> None:
-        """Every monitor's exact input for one rollout (+ its saved answer, if the dump kept one)."""
-        run = self._run(q)
-        if run is None:
-            return
-        source = (q.get("source") or ["eval"])[0]
-        idx = self.store.index(run, source)
-        if idx is None:
-            return self._err("no such rollout dump", 404)
-        try:
-            i = int((q.get("i") or ["0"])[0])
-        except ValueError:
-            return self._err("bad index")
-        rec = idx.read(i)
-        if rec is None:
-            return self._err("no such rollout", 404)
-        self._json(monitor_views(self.store.repo_root, run, self.store._monitors(run), rec))
 
     def _route_file(self, q: dict) -> None:
         """Serve a file from inside a run dir (plots, run.log, raw configs). Path-escape guarded."""
@@ -1118,7 +914,7 @@ const S = {
   runs: [], filter: '', sel: null, tab: 'overview', detail: null,
   changed: new Set(),                 // runs that grew since the last poll
   ro: { source:'eval', step:'', behavior:'', unparsed:'', q:'', mon:'', mon_min:'', mon_max:'',
-        offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false, mviews:null },
+        offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false },
   metricSel: { train:null, eval:null }, hidden: {}, foldThinking: false,
 };
 $('#rootpath').textContent = BOOT.root;
@@ -1531,16 +1327,12 @@ async function loadRollouts() {
   if (S.tab === 'rollouts') renderTab();
 }
 async function openRollout(i) {
-  S.ro.sel = i; S.ro.mviews = null;
+  S.ro.sel = i;
   const want = S.sel, src = S.ro.source;
   try {
-    // the record and "what each monitor saw" are independent — fetch them together
-    const [j, mv] = await Promise.all([
-      api('/api/rollout', {id:want, source:src, i}),
-      api('/api/monitor_views', {id:want, source:src, i}).catch(e => ({error:e.message, monitors:[]})),
-    ]);
+    const j = await api('/api/rollout', {id:want, source:src, i});
     if (S.sel !== want) return;
-    S.ro.rec = j.record; S.ro.mviews = mv;
+    S.ro.rec = j.record;
   } catch (e) { toast('rollout: ' + e.message); return; }
   if (S.tab === 'rollouts') renderTab();
 }
@@ -1617,78 +1409,101 @@ function renderEpisode(turns, meta) {
   }
   return card;
 }
-/* What each monitor actually received for THIS rollout, and what it answered (when the dump kept it). */
-function renderMonitorViews(mv) {
+/* The LLM-judge API calls saved WITH this rollout (monitors.<name>.call, written by rl/train.py):
+   the exact prompt, the other request parameters, and the response — content plus the judge's
+   chain of thought when the provider returned one. Only monitors whose call was saved are listed;
+   nothing is reconstructed from the run config. */
+function monitorSpec(name) {
+  return ((S.detail && S.detail.monitors) || []).find(m => m.name === name) || {};
+}
+function renderMonitorCalls(rec) {
   const card = el('div', {class:'card'});
-  card.appendChild(el('h3', {}, 'What the monitors saw — exact judge prompt, and the answer if it was saved'));
-  if (!mv) { card.appendChild(el('div', {class:'muted small'}, el('span', {class:'spin'}), ' building…')); return card; }
-  if (mv.error) {
-    card.appendChild(el('div', {class:'small'},
-      'Could not load the repo’s monitor code to rebuild the prompts — ',
-      el('span', {class:'mono'}, mv.error),
-      '. The prompt is built by monitordecorrelation.monitors.cot_monitor.CoTMonitor._build_prompt; ' +
-      'run the viewer from the repo root so src/ is importable.'));
+  card.appendChild(el('h3', {}, 'Monitor API calls — the exact prompt, request parameters and response saved with this rollout'));
+  const mons = rec.monitors && typeof rec.monitors === 'object' ? Object.entries(rec.monitors) : [];
+  const withCall = mons.filter(([, m]) => m && typeof m === 'object' && m.call && typeof m.call === 'object');
+  const without = mons.filter(([n]) => !withCall.some(([w]) => w === n));
+  if (!mons.length) {
+    card.appendChild(el('div', {class:'muted small'}, 'this rollout records no monitor verdicts'));
     return card;
   }
-  if (mv.no_text) card.appendChild(el('div', {class:'small muted', style:'margin-bottom:8px'},
-    'This dump stores no rollout text, so the judge prompt cannot be reconstructed — scores and labels only. ' +
-    'Switch the source to eval_rollouts.jsonl / rollouts.jsonl.'));
-  for (const m of (mv.monitors || [])) {
+  if (!withCall.length) {
+    card.appendChild(el('div', {class:'small'},
+      'Unavailable — no monitor API call was saved with this rollout. ',
+      el('span', {class:'muted'},
+        'Dumps written before call recording was added (and slim dumps) keep only {score, label} per monitor. ' +
+        'The prompt is deliberately not reconstructed from the run config: a reconstruction can differ from what ' +
+        'the judge was actually sent if the repo changed since the run.')));
+    return card;
+  }
+  for (const [name, m] of withCall) {
+    const spec = monitorSpec(name), call = m.call;
+    const req = call.request && typeof call.request === 'object' ? call.request : {};
+    const resp = call.response && typeof call.response === 'object' ? call.response : {};
+    const msg = resp.message && typeof resp.message === 'object' ? resp.message : {};
+    const content = typeof msg.content === 'string' ? msg.content : (msg.content == null ? '' : JSON.stringify(msg.content, null, 2));
+    const reasoning = typeof msg.reasoning === 'string' && msg.reasoning.trim() ? msg.reasoning : null;
+    const details = Array.isArray(msg.reasoning_details) && msg.reasoning_details.length ? msg.reasoning_details : null;
     const badges = [
-      el('span', {class:'flag ' + (m.role === 'train_against' ? 'yes' : 'n'),
-        title:'train_against monitors are in the gradient'}, m.role || '—'),
-      m.model_id ? el('span', {class:'badge mono'}, m.model_id) : null,
+      el('span', {class:'flag ' + (spec.role === 'train_against' ? 'yes' : 'n'),
+        title:'train_against monitors are in the gradient'}, spec.role || '—'),
+      req.model ? el('span', {class:'badge mono'}, req.model) : null,
       m.score !== null && m.score !== undefined ? el('span', {class:'badge'}, 'score ' + fmt(m.score)) : null,
       el('span', {class:'flag ' + (m.label === true ? 'yes' : m.label === false ? 'no' : 'n')}, 'label ' + fmt(m.label)),
-      m.view ? el('span', {class:'badge'}, m.view) : null,
-      m.binary_judge ? el('span', {class:'badge'}, 'binary YES/NO judge') : null,
+      m.parse_error ? el('span', {class:'flag yes', title:'the judge answered, but not in the instructed SCORE:/VERDICT: format — scored as 0'}, 'parse error') : null,
+      resp.finish_reason ? el('span', {class:'badge'}, 'finish: ' + resp.finish_reason) : null,
+      call.attempts ? el('span', {class:'badge', title:'POSTs it took; only the successful one is recorded'},
+        call.attempts + (call.attempts === 1 ? ' attempt' : ' attempts')) : null,
     ].filter(Boolean);
-    const d = el('details', {class:'msg msg-mon'});
-    d.appendChild(el('summary', {}, m.name || '(unnamed)', el('span', {class:'grow'}), badges));
+    const d = el('details', {class:'msg msg-mon', open:''});
+    d.appendChild(el('summary', {}, name, el('span', {class:'grow'}), badges));
     const body = el('div', {class:'inner'});
-    if (m.error) body.appendChild(el('div', {class:'small', style:'color:var(--bad)'}, m.error));
-    if (m.prompt) {
-      body.appendChild(el('div', {class:'lbl'}, `exact prompt · ${m.prompt.length.toLocaleString()} chars`,
-        el('button', {class:'btn small', style:'margin-left:8px;padding:0 6px',
-          onclick:() => navigator.clipboard && navigator.clipboard.writeText(m.prompt)}, 'copy')));
-      body.appendChild(el('pre', {class:'text'}, m.prompt));
-      if (m.source) body.appendChild(el('div', {class:'muted small mono', style:'margin-top:5px'}, 'built by ' + m.source));
-    } else if (!mv.no_text && !m.error) {
-      body.appendChild(el('div', {class:'empty'}, 'no prompt could be built for this monitor kind'));
+
+    // -- the prompt: every message in the request, in order (one user message for our judges)
+    const msgs = Array.isArray(req.messages) ? req.messages : [];
+    if (msgs.length) msgs.forEach((mm, i) => {
+      const c = mm && typeof mm.content === 'string' ? mm.content : JSON.stringify(mm && mm.content, null, 2);
+      body.appendChild(msgBlock('mon', `prompt sent to the judge · message ${i + 1} / ${msgs.length} · role ${(mm && mm.role) || '?'}`, c));
+    });
+    else body.appendChild(el('div', {class:'empty'}, 'the saved request carries no messages'));
+
+    // -- the response: chain of thought (if the provider returned one), then the content
+    if (reasoning) body.appendChild(msgBlock('think', 'judge chain of thought (response.message.reasoning)', reasoning));
+    else if (details) body.appendChild(msgBlock('think', 'judge reasoning details (response.message.reasoning_details)', details));
+    else body.appendChild(el('div', {class:'msg msg-think'}, el('div', {class:'inner'},
+      el('div', {class:'empty'}, 'no chain of thought in the response' +
+        (req.reasoning && req.reasoning.enabled === false ? ' (reasoning was requested off)' : '')))));
+    body.appendChild(msgBlock('ans', 'judge response (response.message.content)', content,
+      {emptyNote: 'the content channel was empty — the verdict was read from the reasoning channel'}));
+
+    // -- everything else in the request, and the response metadata
+    const params = Object.entries(req).filter(([k]) => k !== 'messages')
+      .map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v]);
+    if (call.url) params.push(['url', call.url]);
+    if (call.timeout !== undefined) params.push(['timeout (client, s)', call.timeout]);
+    const pd = el('details', {style:'margin-top:8px', open:''});
+    pd.appendChild(el('summary', {class:'small'}, 'request parameters (everything posted besides the messages)'));
+    pd.appendChild(kv(params));
+    body.appendChild(pd);
+    const meta = Object.entries(resp).filter(([k]) => k !== 'message')
+      .map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v]);
+    const other = Object.entries(msg).filter(([k]) => !['content','reasoning','reasoning_details'].includes(k))
+      .map(([k, v]) => ['message.' + k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v]);
+    if (meta.length || other.length) {
+      const rd = el('details', {style:'margin-top:8px'});
+      rd.appendChild(el('summary', {class:'small'}, 'response metadata'));
+      rd.appendChild(kv([...meta, ...other]));
+      body.appendChild(rd);
     }
-    // the monitor's own answer — persisted only if the dump kept more than {score, label}
-    const ans = m.answer && Object.keys(m.answer).length ? m.answer : null;
-    const raw = ans && typeof ans.raw === 'string' ? ans.raw : null;
-    const a = el('details', {class:'msg msg-ans', style:'margin-top:10px'});
-    if (ans) a.setAttribute('open', '');
-    a.appendChild(el('summary', {}, 'monitor’s answer', el('span', {class:'grow'}),
-      ans ? el('span', {class:'badge'}, 'saved in the dump')
-          : el('span', {class:'badge'}, 'not saved')));
-    const ab = el('div', {class:'inner'});
-    if (raw) ab.appendChild(el('pre', {class:'text'}, raw));
-    const extra = ans ? Object.fromEntries(Object.entries(ans).filter(([k]) => k !== 'raw')) : null;
-    if (extra && Object.keys(extra).length) ab.appendChild(el('pre', {class:'text', style:'margin-top:8px'}, JSON.stringify(extra, null, 2)));
-    if (!ans) ab.appendChild(el('div', {class:'small muted'},
-      'This run’s dump stores only {score, label} for each monitor. The judge’s text is produced as ',
-      el('span', {class:'mono'}, 'MonitorResult.meta["raw"]'),
-      ' and dropped when rl/train.py writes the rollout; if a dump does carry it (or any other field), it shows up here.'));
-    a.appendChild(ab);
-    body.appendChild(a);
-    for (const [label, val] of [['request body posted to the judge', m.request],
-                                ['rubric', m.rubric], ['probe meta', m.probe_meta],
-                                ['messages the probe reads', m.messages]]) {
-      if (!val) continue;
-      const f = el('details', {style:'margin-top:8px'});
-      f.appendChild(el('summary', {class:'small'}, label));
-      f.appendChild(el('pre', {class:'text', style:'margin-top:6px'},
-        typeof val === 'string' ? val : JSON.stringify(val, null, 2)));
-      body.appendChild(f);
-    }
+    const raw = el('details', {style:'margin-top:8px'});
+    raw.appendChild(el('summary', {class:'small'}, 'full call record (JSON)'));
+    raw.appendChild(el('pre', {class:'text', style:'margin-top:6px'}, JSON.stringify(call, null, 2)));
+    body.appendChild(raw);
     d.appendChild(body);
     card.appendChild(d);
   }
-  if (!(mv.monitors || []).length) card.appendChild(el('div', {class:'muted small'},
-    'this run declares no monitors (monitors: [] — a pure task-reward run)'));
+  if (without.length) card.appendChild(el('div', {class:'muted small', style:'margin-top:6px'},
+    'no API call saved for: ' + without.map(([n, m]) => n + (m && typeof m === 'object' && m.error ? ` (error: ${m.error})` : '')).join(', ') +
+    ' — probes make no API call; an LLM judge without one predates call recording or never answered.'));
   return card;
 }
 function renderRolloutDetail(box, rec) {
@@ -1739,10 +1554,10 @@ function renderRolloutDetail(box, rec) {
     box.appendChild(renderEpisode(turns, meta));
     // The concatenated views the MONITORS actually read, kept verbatim but folded away.
     const cc = el('div', {class:'card'});
-    cc.appendChild(el('h3', {}, 'Concatenated views (what the monitors read)'));
+    cc.appendChild(el('h3', {}, 'Concatenated flat fields (cot / answer as stored in the dump)'));
     for (const [label, val, note] of [
-      ['cot', rec.cot, 'every turn’s thinking, turn-tagged — the CoT judge’s input'],
-      ['answer / output', rec.answer, 'the env’s output_view — the output judge’s input'],
+      ['cot', rec.cot, 'every turn’s thinking, turn-tagged — what the probes read'],
+      ['answer / output', rec.answer, 'the env’s output_view — the flat field the dumps and probes consume'],
     ]) {
       if (!val) continue;
       const d = el('details', {style:'margin-bottom:6px'});
@@ -1758,7 +1573,7 @@ function renderRolloutDetail(box, rec) {
     box.appendChild(texts);
   }
 
-  box.appendChild(renderMonitorViews(S.ro.mviews));
+  box.appendChild(renderMonitorCalls(rec));
 
   const skip = turns && turns.length ? ['turns','commands'] : ['turns'];
   const metaScalar = Object.entries(meta).filter(([k, v]) => !skip.includes(k) && (v === null || typeof v !== 'object'));

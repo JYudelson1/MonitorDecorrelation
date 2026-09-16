@@ -24,7 +24,7 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
-from monitordecorrelation.eval.rollout_dump import slim_record
+from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
@@ -428,8 +428,9 @@ def run_grpo(
                 "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
-                "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
-                             for m in all_monitors},
+                # {score, label} + for every LLM judge its `call`: the exact request (prompt + API
+                # parameters) and response (content + chain of thought) of the successful API call.
+                "monitors": {m.name: monitor_record(res[m.name][i]) for m in all_monitors},
             }
             eval_rollouts_log.write(json.dumps(rec, default=str) + "\n")
             eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
@@ -584,13 +585,9 @@ def run_grpo(
                             # be re-analysed without re-running the env.
                             "meta": er.meta,
                         },
-                        "monitors": {
-                            m.name: {
-                                "score": ta_res[m.name][i].score,
-                                "label": ta_res[m.name][i].label,
-                            }
-                            for m in train_against
-                        },
+                        # {score, label} + each LLM judge's `call` (exact request + response) —
+                        # see eval.rollout_dump.monitor_record.
+                        "monitors": {m.name: monitor_record(ta_res[m.name][i]) for m in train_against},
                         "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
                     },

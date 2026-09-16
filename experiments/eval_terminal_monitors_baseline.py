@@ -29,6 +29,7 @@ import tinker
 
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
+from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.monitors.cot_monitor import CoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
@@ -145,8 +146,8 @@ def main() -> None:
         "rollouts": [{"task_id": er.meta["task_id"], "behavior_present": er.behavior_present,
                       "question": r.prompt.text, "cot": r.cot, "output": r.output,
                       "env_meta": er.meta,
-                      "monitors": {j.name: {"score": judged[j.name][i].score,
-                                            "label": judged[j.name][i].label} for j in judges}}
+                      # score/label + each judge's exact request/response (monitor_record)
+                      "monitors": {j.name: monitor_record(judged[j.name][i]) for j in judges}}
                      for i, (r, er) in enumerate(zip(rollouts, results))],
     }, indent=1, default=str))
     print(f"\nwrote {out}")

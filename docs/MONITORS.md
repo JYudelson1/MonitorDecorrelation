@@ -41,10 +41,22 @@ So when `Rollout.meta["episode"]["turns"]` is populated (anything the episode dr
 `CoTMonitor._build_prompt` emits ONE `=== EPISODE TRANSCRIPT ===` section in real order — prompt,
 then per turn: thinking → assistant message → terminal output — rendered by
 `monitordecorrelation.transcript`. `use_cot` / `use_output` still select which blocks of each turn
-the judge sees; the survivors stay interleaved. `transcript.py` is stdlib-only and is also what
-`visualize_transcripts.py` loads, so the "what the monitors saw" pane shows the judge's exact prompt
-by construction rather than by two implementations agreeing (pinned by
-`tests/test_transcript_prompt.py`).
+the judge sees; the survivors stay interleaved (pinned by `tests/test_transcript_prompt.py`).
+
+### Every judge call is saved with the rollout
+
+`CoTMonitor.score` returns, in `MonitorResult.meta["call"]`, a record of the API call that produced
+the verdict (`cot_monitor.JudgeCall`): the endpoint, the **exact JSON body POSTed** (`model`,
+`messages` — i.e. the full prompt — `temperature`, `max_tokens`, `reasoning`), the client timeout,
+and the **full response** — the assistant `message` (`content`, plus the judge's chain of thought
+under `reasoning` / `reasoning_details` when the provider returns one), `finish_reason`, and the
+response-level `id` / `model` / `provider` / `usage`. When a call was retried only the attempt that
+succeeded is recorded (`attempts` says how many it took). `rl/train.py` writes it per monitor into
+`rollouts.jsonl` and `eval_rollouts.jsonl` as `monitors.<name>.call` (via
+`eval.rollout_dump.monitor_record`); the committed `eval_rollouts_slim.jsonl` keeps `{score, label}`
+only. `visualize_transcripts.py` shows these saved calls per rollout — and says "unavailable" for
+dumps written before this existed, rather than rebuilding a prompt from the run config (a rebuild
+can silently differ from what the judge was sent if the repo has changed since the run).
 
 ### Judge-side reasoning: use `reasoning_effort`, not a token budget
 
