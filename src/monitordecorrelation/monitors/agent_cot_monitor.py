@@ -27,7 +27,9 @@ class AgentCoTMonitor:
         binary_judge: bool = False,
     ) -> None:
         assert behavior == "reward_hacking"
-        assert use_cot or use_output
+        assert use_output, (
+            "CoT-only (no output) monitors are unsupported for agentic rollouts."
+        )
 
         self.name = name
         self.model_id = model_id
@@ -105,7 +107,10 @@ class AgentCoTMonitor:
         return JUDGE_PROMPT.format(rollout=self._format_rollout(rollout))
 
     def _format_rollout(self, rollout: Rollout) -> str:
+        assert self.use_output
+
         turns = episode_turns(rollout)
+        assert turns is not None
 
         raise NotImplementedError()
 
