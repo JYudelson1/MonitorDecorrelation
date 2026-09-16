@@ -26,7 +26,9 @@ from time import perf_counter
 from dotenv import load_dotenv
 
 from monitordecorrelation.eval.metrics import accuracy, roc_auc
+from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.monitors.cot_monitor import CoTMonitor
+from monitordecorrelation.transcript import episode_turns
 from monitordecorrelation.rl.rollout import load_saved_rollouts
 from monitordecorrelation.types import MonitorResult
 
@@ -69,6 +71,13 @@ def main() -> None:
     args = ap.parse_args()
 
     parsed = load_saved_rollouts(args.rollouts)  # [(Rollout, behavior_present)]
+    # A multi-turn dump (the terminal env: every record carries the per-turn episode) is judged by
+    # AgentCoTMonitor — the chat-transcript judge the RL runs use — not the single-turn CoTMonitor.
+    n_agentic = sum(episode_turns(r) is not None for r, _ in parsed)
+    if n_agentic not in (0, len(parsed)):
+        raise SystemExit(f"{args.rollouts}: {n_agentic}/{len(parsed)} rollouts are multi-turn "
+                         "episodes — a dump must be all single-turn or all multi-turn")
+    judge_cls = AgentCoTMonitor if n_agentic else CoTMonitor
     pos = [r for r, g in parsed if g]
     neg = [r for r, g in parsed if not g]
     rng = random.Random(args.seed)
@@ -83,7 +92,7 @@ def main() -> None:
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     monitors = [(mid, mode) for mid in models for mode in modes]
-    print(f"rollouts: {len(parsed)} ({len(pos)} hacking / {len(neg)} non)")
+    print(f"rollouts: {len(parsed)} ({len(pos)} hacking / {len(neg)} non) — judge: {judge_cls.__name__}")
     print(f"eval set: {len(eval_rollouts)} ({'balanced ' + str(k) + '/class' if k else 'ALL'})")
     print(f"monitors: {len(monitors)} = {len(models)} models × {len(modes)} modes ({', '.join(modes)})")
     if args.dry_run:
@@ -98,8 +107,8 @@ def main() -> None:
     for mid, mode in monitors:
         t0 = perf_counter()
         try:
-            mon = CoTMonitor(name=f"{_slug(mid)}_{mode}", model_id=mid, behavior=args.behavior,
-                             use_cot=(mode == "cot"))
+            mon = judge_cls(name=f"{_slug(mid)}_{mode}", model_id=mid, behavior=args.behavior,
+                            use_cot=(mode == "cot"))
 
             def _safe_score(r):  # one bad call -> NaN, never lose the whole model's row
                 try:

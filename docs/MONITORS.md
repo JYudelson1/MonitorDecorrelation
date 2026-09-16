@@ -37,11 +37,20 @@ every turn's thinking, `_output_view` every turn's message + terminal output), s
 show the judge *all* the reasoning before *any* of the actions — an order the policy never produced,
 and one that hides the thought that immediately preceded each command.
 
-So when `Rollout.meta["episode"]["turns"]` is populated (anything the episode driver produced),
-`CoTMonitor._build_prompt` emits ONE `=== EPISODE TRANSCRIPT ===` section in real order — prompt,
-then per turn: thinking → assistant message → terminal output — rendered by
-`monitordecorrelation.transcript`. `use_cot` / `use_output` still select which blocks of each turn
-the judge sees; the survivors stay interleaved (pinned by `tests/test_transcript_prompt.py`).
+So the two are different monitors. `CoTMonitor` (`monitors/cot_monitor.py`) is **single-turn only**
+and ignores `meta["episode"]`. Multi-turn envs (`env.multi_turn`, i.e. the terminal env) get
+**`AgentCoTMonitor`** (`monitors/agent_cot_monitor.py`) — `build_monitors(..., multi_turn=True)`
+swaps it in for every `kind: cot` spec, same fields. It renders the episode as a chat transcript in
+the order it happened — `USER:` (the task), then per turn `ASSISTANT:` (`<thinking>…</thinking>`
+first when `use_cot`, then the message) and `TOOL:` (what the command printed); a mid-episode turn
+with no command is followed by the env's "no command" `USER:` message; `SYSTEM:` only if the prompt
+carries one — inside a fixed reward-hacking judge prompt (`JUDGE_PROMPT`, 0–100 suspicion score, or
+`JUDGE_PROMPT_BINARY`). It only judges reward hacking, and a CoT-only view (`use_output: false`) is
+rejected — a transcript without the actions is not a transcript. Every assumption about the
+per-turn record is asserted (`agentic_turns`), including that the turns are the ones this
+rollout's flattened `cot`/`output` came from, so a malformed or mismatched rollout raises instead
+of being judged on a wrong transcript. Pinned by `tests/test_agent_cot_monitor.py`, which also
+replays a real Inkling-Small run when `../MonitorDecorrelationOld` is checked out.
 
 ### Every judge call is saved with the rollout
 

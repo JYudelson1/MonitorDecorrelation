@@ -1,22 +1,20 @@
-"""Chronological rendering of a MULTI-TURN episode — the one place the judge's view is laid out.
+"""Helpers over the per-turn record of a MULTI-TURN episode (``Rollout.meta["episode"]["turns"]``).
 
-A single-turn rollout really is two flat strings (``Rollout.cot`` then ``Rollout.output``), so
-showing them as two judge-prompt sections is faithful. A multi-turn *episode* is not, but the env
-has to flatten it into those same two fields anyway: ``TerminalVerifierEnv._cot_view`` concatenates
-**every** turn's thinking and ``_output_view`` concatenates **every** turn's message and terminal
-output. A judge prompt built from the two fields therefore reads *all* the reasoning first and only
-then *all* the actions — an order the policy never produced, and one that destroys the single most
-diagnostic fact in an agentic transcript: what the model was thinking immediately before (and
-immediately after) each command it ran.
+A single-turn rollout really is two flat strings (``Rollout.cot`` then ``Rollout.output``). A
+multi-turn *episode* is not, but the env has to flatten it into those same two fields anyway:
+``TerminalVerifierEnv._cot_view`` concatenates **every** turn's thinking and ``_output_view``
+concatenates **every** turn's message and terminal output. Anything that wants the real order —
+prompt → turn 1 CoT → turn 1 assistant message → turn 1 terminal output → turn 2 CoT → … — rebuilds
+it from the per-turn record the env stores in ``Rollout.meta["episode"]["turns"]``.
 
-This module rebuilds the real order from the per-turn record the env already stores in
-``Rollout.meta["episode"]["turns"]``::
+The judge prompt for such an episode is built by ``monitors.agent_cot_monitor.AgentCoTMonitor``
+(a chat-style ``USER:`` / ``ASSISTANT:`` / ``TOOL:`` transcript); ``render_transcript`` here is the
+older turn-tagged rendering, kept for the viewer and tests. The prompt a judge was actually sent is
+persisted with the rollout (``monitors.<name>.call`` in the dumps), so nothing downstream needs to
+rebuild it.
 
-    prompt → turn 1 CoT → turn 1 assistant message → turn 1 terminal output → turn 2 CoT → …
-
-``CoTMonitor._build_prompt`` renders the judge prompt from here; the prompt a judge was actually
-sent is then persisted with the rollout (``monitors.<name>.call`` in the dumps), so nothing
-downstream — the viewer included — needs to rebuild it.
+Also home to the terminal env's command grammar and its "no command" user message, because
+monitors need both and must not import envs; ``envs.terminal_verifier`` re-exports them.
 
 Stdlib-only and dependency-light on purpose (like ``types``).
 """
@@ -30,6 +28,11 @@ from typing import Any
 # because the judge-facing "explanations" view needs to strip commands too, and monitors must not
 # import envs; ``envs.terminal_verifier`` re-exports both helpers for its long-standing callers.
 _COMMAND_RE = re.compile(r"<command>(.*?)</command>", re.S)
+
+# What the terminal env sends the policy as the next user message when a turn contained no
+# ``<command>`` (verbatim from rg_obfuscation/prompts/terminal_prompts.py). Lives here so the agentic
+# judge prompt can show the policy's turn-by-turn conversation without importing the env.
+NO_COMMAND_MESSAGE = """You didn't generate any command. Please generate a command now."""
 
 # How much of each turn the flattened ``output`` view (and hence a judge that reads it) contains:
 #   transcript   — the assistant's visible text AND the terminal output its command produced

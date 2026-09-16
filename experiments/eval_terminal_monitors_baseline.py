@@ -30,7 +30,7 @@ import tinker
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
-from monitordecorrelation.monitors.cot_monitor import CoTMonitor
+from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
@@ -88,12 +88,12 @@ def main() -> None:
     renderer = make_renderer(args.model, effort=args.effort,
                             tokenizer=None if is_tml else sampler.get_tokenizer())
 
-    judges = [CoTMonitor(m["name"], m["model_id"], behavior=behavior,
-                         use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
-                         threshold=m.get("threshold", 0.5),
-                         reasoning_max_tokens=m.get("reasoning_max_tokens"),
-                         reasoning_effort=m.get("reasoning_effort"),
-                         binary_judge=bool(m.get("binary_judge")))
+    judges = [AgentCoTMonitor(m["name"], m["model_id"], behavior=behavior,
+                              use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
+                              threshold=m.get("threshold", 0.5),
+                              reasoning_max_tokens=m.get("reasoning_max_tokens"),
+                              reasoning_effort=m.get("reasoning_effort"),
+                              binary_judge=bool(m.get("binary_judge")))
               for m in specs]
     n_ep = len(prompts) * args.samples
     print(f"sampling {n_ep} episodes ({len(prompts)}x{args.samples}) from {args.model} "

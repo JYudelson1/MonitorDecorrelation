@@ -142,10 +142,10 @@ def main() -> None:
     # pipelining the RL loop uses, see rl/train.py.
     judges = []
     if args.judge:
-        from monitordecorrelation.monitors.cot_monitor import CoTMonitor
+        from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 
-        judges = [CoTMonitor("cot+out", args.judge, behavior=env.behavior_name, use_cot=True),
-                  CoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
+        judges = [AgentCoTMonitor("cot+out", args.judge, behavior=env.behavior_name, use_cot=True),
+                  AgentCoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
 
     t0 = time.time()
     with MonitorScorer(judges, args.workers) as scorer:

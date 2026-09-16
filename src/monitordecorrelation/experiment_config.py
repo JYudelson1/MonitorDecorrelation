@@ -224,23 +224,32 @@ def build_monitors(
     specs: list[MonitorSpec],
     default_behavior: str = "sycophancy",
     probe_server_url: str | None = None,
+    *,
+    multi_turn: bool = False,
 ) -> tuple[list, list]:
     """Construct (train_against, held_out) monitor objects. WhiteBoxModels are shared across probes
     that use the same ``probe_model`` so we never load the same model twice. ``probe_server_url`` (set)
     → probes proxy activation reads to a shared ``probe_server.py`` instead of each loading the base
     model locally (see experiments/probe_server.py). A CoT monitor with no
     explicit ``behavior`` inherits ``default_behavior`` (the env's ``behavior_name``) so a config's
-    monitors target the right rubric (sycophancy vs reward_hacking) without repeating it per monitor."""
+    monitors target the right rubric (sycophancy vs reward_hacking) without repeating it per monitor.
+
+    ``multi_turn`` (the env's ``multi_turn`` flag — the terminal env) makes every ``kind: cot`` spec an
+    ``AgentCoTMonitor`` (chat-transcript judge over the per-turn episode record) instead of a
+    ``CoTMonitor`` (the single-turn two-section judge). Same spec fields either way; a CoT-only
+    (``use_output: false``) spec is rejected for agentic rollouts by the monitor itself."""
+    from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
     from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
     from monitordecorrelation.whitebox.model import WhiteBoxModel
     from monitordecorrelation.whitebox.probe import LinearProbe
 
+    judge_cls = AgentCoTMonitor if multi_turn else CoTMonitor
     wb_cache: dict[str, WhiteBoxModel] = {}
     by_role: dict[str, list] = {"train_against": [], "held_out": []}
     for s in specs:
         if s.kind == "cot":
-            mon = CoTMonitor(
+            mon = judge_cls(
                 s.name,
                 s.model_id,
                 behavior=s.behavior or default_behavior,

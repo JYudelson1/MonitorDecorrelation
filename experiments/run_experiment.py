@@ -187,8 +187,11 @@ def main() -> None:
 
     env = make_env(cfg)
     probe_server_url = cfg.probe_server_url or os.environ.get("PROBE_SERVER_URL")
+    # Multi-turn (agentic) envs get AgentCoTMonitor judges — a chat transcript of the episode — in
+    # place of the single-turn CoTMonitor; every other env is unchanged.
     train_against, held_out = build_monitors(cfg.monitors, default_behavior=env.behavior_name,
-                                             probe_server_url=probe_server_url)
+                                             probe_server_url=probe_server_url,
+                                             multi_turn=bool(getattr(env, "multi_turn", False)))
     if probe_server_url:
         print(f"  probes → shared server {probe_server_url}")
 
