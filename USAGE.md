@@ -28,6 +28,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `scripts/train_terminal_verifier.sh` | **RL Qwen3-8B on the terminal-verifier env** (multi-turn `cat verifier.py` hack; control config by default). Credential preflight → `run_experiment.py`, `--set` passthrough. | `data/runs/tv_Qwen3-8B_control_s0/` + wandb |
 | `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
+| `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score). Re-scans on refresh, so new runs and new steps appear while a run is training. Stdlib-only. | `http://127.0.0.1:8000` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
 
 ## The experiment runner (config-driven)
