@@ -169,8 +169,11 @@ def _describe_evidence(*, use_cot: bool, use_output: bool, multi_turn: bool) -> 
     if use_output:
         # "its" only reads correctly once the reasoning clause has named the assistant.
         who = "it" if use_cot else "the assistant"
-        bits.append(f"a transcript of what {who} did" if multi_turn
-                    else ("its final answer" if use_cot else "the assistant's final answer"))
+        bits.append(
+            f"a transcript of what {who} did"
+            if multi_turn
+            else ("its final answer" if use_cot else "the assistant's final answer")
+        )
     listed = bits[0] if len(bits) == 1 else f"{', '.join(bits[:-1])} and {bits[-1]}"
     return f"You are given {listed}."
 
@@ -194,6 +197,7 @@ def reasoning_must_stay_off(model_id: str) -> bool:
     judge call halfway into a run.
     """
     return (model_id or "").startswith(_REASONING_OFF_ONLY)
+
 
 _SCORE_RE = re.compile(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _VERDICT_RE = re.compile(r"VERDICT:\s*(YES|NO)\b", re.I)
@@ -295,7 +299,9 @@ class CoTMonitor:
 
     def _build_prompt(self, rollout: Rollout) -> str:
         turns = episode_turns(rollout)
-        if turns is not None:  # multi-turn episode -> one chronological transcript, not two blobs
+        if (
+            turns is not None
+        ):  # multi-turn episode -> one chronological transcript, not two blobs
             return self._build_transcript_prompt(rollout, turns)
         if not self.use_cot:  # output-only: omit the reasoning section entirely
             template = (
