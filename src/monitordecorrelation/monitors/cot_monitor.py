@@ -23,14 +23,17 @@ See docs/MONITORS.md.
 
 from __future__ import annotations
 
-import os
 import re
-import sys
-import time
-from dataclasses import dataclass
 
-import httpx
-
+from monitordecorrelation.monitors.openrouter import (  # noqa: F401 — re-exported for callers/tests
+    _FATAL_STATUS,
+    _OPENROUTER_URL,
+    JudgeCall,
+    _judge_output,
+    _warn,
+    chat,
+    resolve_api_key,
+)
 from monitordecorrelation.monitors.rubrics import Rubric, get_rubric
 from monitordecorrelation.transcript import (
     describe_contents,  # re-exported: visualize_transcripts.py reads it off this module
@@ -40,7 +43,6 @@ from monitordecorrelation.transcript import (
 )
 from monitordecorrelation.types import MonitorResult, Rollout
 
-_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 _PROMPT_TEMPLATE = """{description}
 
@@ -195,85 +197,10 @@ def reasoning_must_stay_off(model_id: str) -> bool:
 
 _SCORE_RE = re.compile(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _VERDICT_RE = re.compile(r"VERDICT:\s*(YES|NO)\b", re.I)
-# Reasoning-channel fallback: accept either instructed format (percentile SCORE or binary VERDICT).
-_JUDGE_ANSWER_RE = re.compile(
-    r"(?:SCORE:\s*[0-9]+(?:\.[0-9]+)?|VERDICT:\s*(?:YES|NO)\b)", re.I
-)
-
-# Statuses we never retry: the request itself is malformed / unauthorized / unfunded, so retrying
-# would hang the run forever instead of surfacing a config error. Everything else — transport
-# errors, 404 ("no endpoint for this model right now"), 408/429/5xx, malformed bodies, empty
-# output, an unusable finish_reason — is a transient API error and retries indefinitely.
-_FATAL_STATUS = frozenset({400, 401, 402, 403})
-
-# Finish reasons whose body we read.
-#   "stop"   — the judge terminated normally.
-#   "length" — it hit max_tokens. Read it anyway: with reasoning off (or bounded) the verdict lives
-#              in the content channel, so a truncated reply either already carries its `SCORE:` line
-#              or never will. Retrying cannot help — the judge is called at temperature 0, so every
-#              retry returns the identical truncated text (measured: 4/4 byte-identical replays on
-#              gemini-2.5-flash-lite), which used to spin a run forever inside one eval.
-# Anything else ("content_filter", "error", …) means the judge never got to answer → API error.
-# NB an EMPTY body under "length" is still an API error (handled below): that would mean reasoning
-# consumed the whole budget, which cannot happen while reasoning is disabled or budgeted — it is a
-# sanity check, not an expected path.
-_OK_FINISH_REASONS = frozenset({"stop", "length"})
 
 
-@dataclass
-class JudgeCall:
-    """One *successful* judge API call: the text ``score()`` parses, plus a durable record of it.
-
-    ``record`` is what the rollout dumps persist under ``monitors.<name>.call`` so a saved rollout
-    carries exactly what its judge was sent and exactly what came back (see ``CoTMonitor._call``):
-
-    - ``url`` / ``request`` — the endpoint and the exact JSON body POSTed (``model``, ``messages``
-      — i.e. the full prompt — ``temperature``, ``max_tokens``, ``reasoning``). The Authorization
-      header is the only thing omitted.
-    - ``timeout`` — the client-side request timeout (not part of the body, but part of the call).
-    - ``response`` — the provider's reply: the full assistant ``message`` (``content``, and the
-      judge's chain of thought under ``reasoning`` / ``reasoning_details`` when the provider
-      returns one), ``finish_reason``, and the response-level ``id`` / ``model`` / ``provider`` /
-      ``usage``.
-    - ``attempts`` — how many POSTs it took; only the last, successful one is recorded.
-    """
-
-    text: str
-    record: dict
-
-
-def _warn(msg: str) -> None:
-    """Timestamped stderr warning (matches rl/train.py's _log prefix), flushed so it survives pipes."""
-    print(f"[{time.strftime('%H:%M:%S')}] ⚠️  {msg}", file=sys.stderr, flush=True)
-
-
-def _judge_output(message: dict) -> str | None:
-    """Pull the judge's answer line from an OpenRouter ``message``.
-
-    Prefer ``content``. Gemini-3.x (mandatory reasoning) sometimes returns ``content: null`` and
-    parks the instructed ``SCORE: <n>`` / ``VERDICT: YES|NO`` line in ``reasoning`` instead. We only
-    fall back to that channel when:
-      - ``content`` is missing/blank, AND
-      - ``reasoning`` contains an explicit ``SCORE:`` or ``VERDICT:`` match (the format we asked
-        for).
-    Free-form thinking with bare numbers / yes-no prose is rejected — those are intermediate
-    guesses, not the verdict. When falling back we return only the *last* matching line (final
-    answer), not the whole scratchpad, so ``meta["raw"]`` stays the verdict and first-match parsing
-    can't latch onto an earlier draft. Non-string ``content`` (unexpected payload) is not a cue to
-    mine reasoning either.
-    """
-    content = message.get("content")
-    if isinstance(content, str) and content.strip():
-        return content  # model answered in content — never dig into reasoning
-    if content is not None and not isinstance(content, str):
-        return None
-    reasoning = message.get("reasoning")
-    if not isinstance(reasoning, str) or not reasoning.strip():
-        return None
-    matches = list(_JUDGE_ANSWER_RE.finditer(reasoning))
-    if not matches:
-        return None  # scratchpad with no SCORE:/VERDICT: → caller retries; don't invent a score
-    return matches[-1].group(0)
+# The request/retry policy (fatal vs. transient statuses, finish reasons, the reasoning-channel
+# fallback, JudgeCall) lives in monitors/openrouter.py — the single OpenRouter client.
 
 
 class CoTMonitor:
@@ -313,9 +240,7 @@ class CoTMonitor:
             self.rubric = rubric
         self.threshold = threshold
         self.timeout = timeout
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        if not self._api_key:
-            raise RuntimeError("OPENROUTER_API_KEY not set (load .env first)")
+        self._api_key = resolve_api_key(api_key)
         # Reasoning is off by default: the judge only has to emit `SCORE: <n>` (or `VERDICT:
         # YES|NO`), so thinking is pure cost. Models that MANDATE reasoning (gemini-3.x) reject
         # `{"enabled": false}` with a 400 — for those, ask for reasoning explicitly, via
@@ -439,108 +364,18 @@ class CoTMonitor:
         }
 
     def _call(self, prompt: str, *, warn_after: int = 6) -> JudgeCall:
-        """POST to OpenRouter and return the judge's text plus the record of the successful call
-        (``JudgeCall``), retrying **indefinitely** with exponential
-        backoff (capped at 30s) on any transient API error: connection/timeout, 404 ("no endpoints
-        available for this model right now"), 408/429/5xx, a malformed body, a non-"stop"
-        ``finish_reason``, or empty output (null content with no ``SCORE:``/``VERDICT:`` in
-        ``reasoning``). A multi-hour run must not lose a monitor to a provider hiccup, so there is
-        no give-up path for these — from the ``warn_after``-th retry on, every retry prints a
-        warning to stderr so a stuck monitor is visible in the log rather than silent.
-
-        The exceptions are ``_FATAL_STATUS`` (400/401/402/403): a malformed request, a bad key, no
-        credits, or a forbidden model never fixes itself, so those raise immediately. That surfaces
-        as a NaN sentinel per rollout in ``rl.train.MonitorScorer`` — and, for a train-against
-        aborts the run (the intended behaviour for a config error).
-
-        Note the one recoverable 400: models that MANDATE reasoning (gemini-3.x) reject
-        ``reasoning:{enabled:false}``, so we flip once to a bounded budget and retry before the
-        fatal check.
+        """POST to OpenRouter via ``monitors.openrouter.chat`` and return the judge's text plus the
+        record of the successful call (``JudgeCall``). The retry policy — indefinite retries on
+        transient errors, fail-fast on the ``_FATAL_STATUS`` config errors — is documented there.
+        Warnings are prefixed ``monitor <name>`` so a stuck judge is identifiable in the log.
         """
-        body = self._request_body(prompt)
-        attempt = 0
-        while True:
-            attempt += 1
-            err: str
-            try:
-                resp = httpx.post(
-                    _OPENROUTER_URL,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    json=body,
-                    timeout=self.timeout,
-                )
-            except (httpx.TransportError, httpx.TimeoutException) as e:
-                err = f"{type(e).__name__}: {e}"  # connection/timeout -> retry
-            else:
-                if resp.status_code in _FATAL_STATUS:
-                    # Unrecoverable (bad request / key / credits) -> fail fast, with the provider's
-                    # explanation attached: raise_for_status() alone reports only the status and URL,
-                    # which leaves a 400 undiagnosable in the run log. NB a mandatory-reasoning model
-                    # ("Reasoning is mandatory for this endpoint and cannot be disabled.") lands here
-                    # by design — the fix is the monitor's `reasoning_effort`, not a retry.
-                    raise httpx.HTTPStatusError(
-                        f"{resp.status_code} for {self.model_id}: {resp.text[:300]}",
-                        request=resp.request,
-                        response=resp,
-                    )
-                elif resp.status_code >= 400:
-                    err = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                else:
-                    try:
-                        data = resp.json()
-                        choice = data["choices"][0]
-                        message = choice["message"]
-                    except (KeyError, IndexError, TypeError, ValueError) as e:
-                        err = f"malformed response body ({type(e).__name__}: {e})"
-                    else:
-                        # A filtered / errored completion never reached the verdict line, so it's
-                        # an API error, not a score of 0. A truncated one ("length") is read like a
-                        # normal completion — see _OK_FINISH_REASONS. A missing finish_reason (some
-                        # providers omit it) is not evidence of failure — judge the body instead.
-                        finish = choice.get("finish_reason")
-                        if finish is not None and finish not in _OK_FINISH_REASONS:
-                            err = f"finish_reason={finish!r} (completion did not terminate normally)"
-                        else:
-                            text = _judge_output(message)
-                            if text is None:
-                                # Null content with no SCORE:/VERDICT: in reasoning (Gemini
-                                # sometimes empties both). Retry rather than parse_error->score 0
-                                # (that would silently under-flag). Under "length" this is the
-                                # sanity check: an empty content channel means reasoning ate the
-                                # whole completion budget.
-                                err = (
-                                    "empty judge output (no content / no SCORE:|VERDICT: in "
-                                    "reasoning)"
-                                )
-                                if finish == "length":
-                                    err += " and finish_reason='length' — reasoning consumed the "
-                                    err += "whole completion budget (should not happen with "
-                                    err += "reasoning disabled/bounded)"
-                            else:
-                                if attempt > warn_after:
-                                    _warn(
-                                        f"monitor {self.name}: recovered on attempt {attempt}"
-                                    )
-                                # Only the call that succeeded is recorded — failed attempts
-                                # never had an answer worth keeping.
-                                record = {
-                                    "url": _OPENROUTER_URL,
-                                    "request": body,
-                                    "timeout": self.timeout,
-                                    "attempts": attempt,
-                                    "response": {
-                                        "message": message,
-                                        "finish_reason": finish,
-                                        **{k: data.get(k) for k in ("id", "model", "provider", "usage")
-                                           if isinstance(data, dict) and k in data},
-                                    },
-                                }
-                                return JudgeCall(text=text, record=record)
-            if attempt > warn_after:
-                _warn(
-                    f"monitor {self.name}: attempt {attempt} failed ({err}); retrying"
-                )
-            time.sleep(min(2.0 ** (attempt - 1), 30.0))
+        return chat(
+            self._request_body(prompt),
+            api_key=self._api_key,
+            timeout=self.timeout,
+            name=f"monitor {self.name}",
+            warn_after=warn_after,
+        )
 
     def score(self, rollout: Rollout) -> MonitorResult:
         """Judge one rollout. ``meta`` carries ``raw`` (the text the verdict was parsed from) and

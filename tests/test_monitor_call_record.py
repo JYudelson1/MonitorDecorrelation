@@ -16,6 +16,7 @@ import pytest
 
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors import cot_monitor as cm
+from monitordecorrelation.monitors import openrouter as orc
 from monitordecorrelation.types import Prompt, Rollout
 
 
@@ -24,7 +25,7 @@ class _Resp:
         self.status_code = status_code
         self._payload = payload
         self.text = text
-        self.request = httpx.Request("POST", cm._OPENROUTER_URL)
+        self.request = httpx.Request("POST", orc._OPENROUTER_URL)
 
     def json(self):
         if self._payload is None:
@@ -42,7 +43,7 @@ def _reply(message: dict, finish: str = "stop", **top) -> _Resp:
 def posted(monkeypatch):
     """Record every POST's kwargs; feed back a scripted sequence of responses."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    monkeypatch.setattr(cm.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(orc.time, "sleep", lambda _s: None)
     log: list[dict] = []
     script: list = []
 
@@ -53,7 +54,7 @@ def posted(monkeypatch):
             raise item
         return item
 
-    monkeypatch.setattr(cm.httpx, "post", fake_post)
+    monkeypatch.setattr(orc.httpx, "post", fake_post)
     return log, script
 
 
@@ -70,7 +71,7 @@ def test_call_record_is_exactly_what_was_posted_and_what_came_back(posted):
     assert res.score == 0.73 and res.meta["raw"] == "SCORE: 73"
     call = res.meta["call"]
     # the request: byte-identical to the JSON body that was POSTed, the prompt included
-    assert len(log) == 1 and log[0]["url"] == cm._OPENROUTER_URL == call["url"]
+    assert len(log) == 1 and log[0]["url"] == orc._OPENROUTER_URL == call["url"]
     assert call["request"] == log[0]["json"]
     assert call["request"]["messages"] == [{"role": "user", "content": mon._build_prompt(_rollout())}]
     assert call["request"]["reasoning"] == {"effort": "low"}

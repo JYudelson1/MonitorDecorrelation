@@ -1,4 +1,5 @@
-"""Offline: CoTMonitor._call retry policy — what is a (retried) API error vs. a fatal config error.
+"""Offline: the shared OpenRouter client (monitors/openrouter.py, reached via CoTMonitor._call) retry
+policy — what is a (retried) API error vs. a fatal config error.
 
 No network: httpx.post and time.sleep are monkeypatched, so every test is instant.
 """
@@ -9,6 +10,7 @@ import httpx
 import pytest
 
 from monitordecorrelation.monitors import cot_monitor as cm
+from monitordecorrelation.monitors import openrouter as orc
 
 
 class _Resp:
@@ -18,7 +20,7 @@ class _Resp:
         self.status_code = status_code
         self._payload = payload
         self.text = text
-        self.request = httpx.Request("POST", cm._OPENROUTER_URL)
+        self.request = httpx.Request("POST", orc._OPENROUTER_URL)
 
     def json(self):
         if self._payload is None:
@@ -46,7 +48,7 @@ def monitor(monkeypatch):
 def no_sleep(monkeypatch):
     """Skip the backoff and record how long _call *would* have slept."""
     slept: list[float] = []
-    monkeypatch.setattr(cm.time, "sleep", slept.append)
+    monkeypatch.setattr(orc.time, "sleep", slept.append)
     return slept
 
 
@@ -62,7 +64,7 @@ def _responses(monkeypatch, items):
             raise item
         return item
 
-    monkeypatch.setattr(cm.httpx, "post", fake_post)
+    monkeypatch.setattr(orc.httpx, "post", fake_post)
     return calls
 
 
@@ -99,7 +101,7 @@ def test_transient_errors_are_retried(monitor, no_sleep, monkeypatch, bad):
     assert calls["n"] == 2
 
 
-@pytest.mark.parametrize("status", sorted(cm._FATAL_STATUS - {400}))
+@pytest.mark.parametrize("status", sorted(orc._FATAL_STATUS - {400}))
 def test_fatal_statuses_raise_immediately(monitor, no_sleep, monkeypatch, status):
     calls = _responses(monkeypatch, [_Resp(status, text="nope"), _ok()])
     with pytest.raises(httpx.HTTPStatusError):
@@ -209,3 +211,74 @@ def _rollout():
     from monitordecorrelation.types import Prompt, Rollout
 
     return Rollout(prompt=Prompt(text="q"), cot="c", output="a")
+
+
+_IN_FLIGHT_402 = {
+    "error": {
+        "message": "This request would exceed your available credits given your current in-flight "
+                   "requests. Retry after in-flight requests settle, or add credits.",
+        "code": 402,
+        "metadata": {"reason": "in_flight_budget_exhausted",
+                     "limit_source": "openrouter_in_flight_budget",
+                     "remedy_hint": "Retry after your in-flight requests settle."},
+    }
+}
+
+
+def _json_resp(status: int, payload: dict) -> _Resp:
+    import json
+
+    return _Resp(status, payload, text=json.dumps(payload))
+
+
+def test_in_flight_budget_402_is_retried(monitor, no_sleep, monkeypatch):
+    """The one transient 402: OpenRouter reserves credit against in-flight requests, so a burst of
+    concurrent judge calls trips this even with a funded account. It crashed a run (33/128 calls
+    in one eval) — now it backs off and retries like a 429."""
+    calls = _responses(monkeypatch, [_json_resp(402, _IN_FLIGHT_402)] * 3 + [_ok()])
+    assert monitor._call("p").text == "SCORE: 42"
+    assert calls["n"] == 4
+    assert no_sleep == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": {"message": "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+               "code": 402}},                                   # the genuine no-credits 402
+    {"error": {"message": "x", "code": 402, "metadata": {"reason": "insufficient_credits"}}},
+    {"error": {"message": "x", "code": 402, "metadata": {}}},
+    {"error": "not a dict"},
+])
+def test_every_other_402_stays_fatal(monitor, no_sleep, monkeypatch, payload):
+    calls = _responses(monkeypatch, [_json_resp(402, payload), _ok()])
+    with pytest.raises(httpx.HTTPStatusError):
+        monitor._call("p")
+    assert calls["n"] == 1 and no_sleep == []
+
+
+def test_fatal_error_carries_the_whole_provider_body(monitor, no_sleep, monkeypatch):
+    """The body used to be clipped to 300 chars, which cut the in-flight-budget explanation off at
+    'Retry after yo' in the run log. Nothing is truncated any more."""
+    body = "E" * 2000 + " <end of a long provider explanation>"
+    _responses(monkeypatch, [_Resp(401, text=body), _ok()])
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        monitor._call("p")
+    assert body in str(e.value) and "x/y" in str(e.value)
+
+
+def test_retry_warning_carries_the_whole_provider_body(monitor, no_sleep, monkeypatch, capsys):
+    body = "E" * 2000 + " <end of a long provider explanation>"
+    _responses(monkeypatch, [_Resp(503, text=body)] * 7 + [_ok()])
+    monitor._call("p")
+    assert body in capsys.readouterr().err
+
+
+def test_mask_oracle_uses_the_same_client(no_sleep, monkeypatch):
+    """envs/mask.py's lie oracle goes through the same chat() — same retries, same record."""
+    from monitordecorrelation.envs.mask import MaskEnv
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    calls = _responses(monkeypatch, [_Resp(503), _json_resp(402, _IN_FLIGHT_402), _ok("VERDICT: B")])
+    env = MaskEnv([{"proposition": "p", "ground_truth": "A", "pressure_prompt": "q"}],
+                  judge_model="x/y")
+    assert env._extract("resp", "p") == "B"
+    assert calls["n"] == 3
