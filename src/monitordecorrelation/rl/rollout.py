@@ -50,11 +50,18 @@ def load_saved_rollouts(path: str, *, keep_unparsed: bool = False) -> list[tuple
                 continue
             # tolerate pre-refactor rollouts that used the old "ground_truth_misbehavior" key
             beh = r["env"].get("behavior_present", r["env"].get("ground_truth_misbehavior"))
+            # Multi-turn runs also persist the per-turn episode record; carry it so a re-scored
+            # rollout gets the SAME chronological judge prompt the run itself used (see
+            # monitordecorrelation.transcript) instead of the flat two-section fallback.
+            env_meta = r["env"].get("meta") if isinstance(r["env"].get("meta"), dict) else None
+            meta = {"step": r.get("step")}
+            if env_meta and isinstance(env_meta.get("turns"), list):
+                meta["episode"] = env_meta
             rollout = Rollout(
                 prompt=Prompt(text=r["question"]),
                 cot=r.get("cot", ""),
                 output=r.get("answer", ""),
-                meta={"step": r.get("step")},
+                meta=meta,
             )
             out.append((rollout, bool(beh)))
     return out

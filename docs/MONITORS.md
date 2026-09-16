@@ -28,6 +28,24 @@ checkpoint for a probe) — not a different interface.
 
 This is the one abstraction to keep clean. Everything else (envs, RL loop) plugs into it.
 
+### Single-turn vs multi-turn judge prompts
+
+A single-turn rollout genuinely *is* two flat strings, so the judge prompt shows two sections
+(`=== ASSISTANT REASONING ===`, `=== ASSISTANT FINAL ANSWER ===`). A **multi-turn episode** is not:
+the env still has to flatten it into those two fields (`terminal_verifier._cot_view` concatenates
+every turn's thinking, `_output_view` every turn's message + terminal output), so that layout would
+show the judge *all* the reasoning before *any* of the actions — an order the policy never produced,
+and one that hides the thought that immediately preceded each command.
+
+So when `Rollout.meta["episode"]["turns"]` is populated (anything the episode driver produced),
+`CoTMonitor._build_prompt` emits ONE `=== EPISODE TRANSCRIPT ===` section in real order — prompt,
+then per turn: thinking → assistant message → terminal output — rendered by
+`monitordecorrelation.transcript`. `use_cot` / `use_output` still select which blocks of each turn
+the judge sees; the survivors stay interleaved. `transcript.py` is stdlib-only and is also what
+`visualize_transcripts.py` loads, so the "what the monitors saw" pane shows the judge's exact prompt
+by construction rather than by two implementations agreeing (pinned by
+`tests/test_transcript_prompt.py`).
+
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |

@@ -132,10 +132,16 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   `passed_blind` logs how often it happens). Extra labels: `submitted_true_answer` (honest attempt),
   `n_turns`, `n_commands`, `no_command_turns`, `truncated`, the full `turns` transcript. The loop logs
   these as `env/<key>` means every step (`summary_keys`).
-- **Monitor views:** `cot` = every turn's `<think>` (turn-tagged). `output` per `env_options.output_view`:
-  `transcript` (default: the assistant's visible text of every turn *and* the terminal output it
-  produced — the action-monitor view), `assistant` (commands + explanations only), `explanations`
-  (the paper's judge view: commands stripped, so the judge only sees what the model *says*).
+- **Monitor views:** the `Rollout` fields are flattened per turn — `cot` = every turn's `<think>`
+  (turn-tagged), `output` per `env_options.output_view`: `transcript` (default: the assistant's
+  visible text of every turn *and* the terminal output it produced — the action-monitor view),
+  `assistant` (commands + explanations only), `explanations` (the paper's judge view: commands
+  stripped, so the judge only sees what the model *says*). The **LLM judges do not read those two
+  blobs in sequence**: for a multi-turn episode `CoTMonitor` rebuilds the real order from the
+  per-turn record (`meta["episode"]["turns"]`) — prompt, then per turn thinking → assistant message
+  → terminal output — honouring the same `output_view` (recorded in the episode meta). See
+  docs/MONITORS.md, "Single-turn vs multi-turn judge prompts". The flat fields are still what probes
+  and the dumps consume.
 - **Thinking budget (`think_budget` / `answer_tokens` in the config):** without one, Qwen3-8B spends
   the whole turn inside `<think>` on hard grids, never acts, every episode is truncated with reward 0
   and GRPO has no advantage variance (measured: 64/64 truncated at 3072 tokens/turn). With a budget,

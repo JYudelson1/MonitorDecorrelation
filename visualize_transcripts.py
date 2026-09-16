@@ -540,6 +540,9 @@ def repo_api(repo_root: Path) -> Any:
             return mod
 
         types_mod = load("monitordecorrelation.types", pkg_dir / "types.py")
+        # The chronological multi-turn layout the judge prompt uses — loaded here for the same
+        # reason rubrics is: cot_monitor imports it at module scope.
+        load("monitordecorrelation.transcript", pkg_dir / "transcript.py")
         load("monitordecorrelation.monitors.rubrics", pkg_dir / "monitors" / "rubrics.py")
         cot_mod = load("monitordecorrelation.monitors.cot_monitor", pkg_dir / "monitors" / "cot_monitor.py")
         try:
@@ -560,11 +563,20 @@ def monitor_views(repo_root: Path, run: Run, monitors: list[dict], rec: dict) ->
     types_mod, cot_mod, wb_mod = api
     behavior_default = ((run.run_info or {}).get("env") or {}).get("behavior_name") or "sycophancy"
     question, cot, answer = (rec.get("question") or ""), (rec.get("cot") or ""), (rec.get("answer") or "")
-    roll = types_mod.Rollout(prompt=types_mod.Prompt(text=question, meta={}), cot=cot, output=answer)
+    # Multi-turn runs: hand the builder the per-turn record too (eval dumps put the episode under
+    # `env_meta`, the training dump under `env.meta`). CoTMonitor._build_prompt keys off exactly this
+    # to switch from the two-section layout to the chronological transcript — so passing it is what
+    # makes the viewer show the interleaved prompt the judge really got, with no layout code here.
+    env = rec.get("env") if isinstance(rec.get("env"), dict) else {}
+    episode = rec.get("env_meta")
+    if not isinstance(episode, dict):
+        episode = env.get("meta") if isinstance(env.get("meta"), dict) else None
+    roll = types_mod.Rollout(prompt=types_mod.Prompt(text=question, meta={}), cot=cot, output=answer,
+                             meta={"episode": episode} if episode else {})
     saved = rec.get("monitors") if isinstance(rec.get("monitors"), dict) else {}
     # A slim dump has scores but no text, so a rebuilt prompt would be all-empty sections — say so
     # instead of showing a prompt that was never sent.
-    if not (question or cot or answer):
+    if not (question or cot or answer or (episode or {}).get("turns")):
         return {"monitors": [{"name": s.get("name"), "kind": s.get("kind"), "role": s.get("role"),
                               "model_id": s.get("model_id"), "threshold": s.get("threshold"),
                               "score": _nan_safe((saved.get(s.get("name")) or {}).get("score")),
@@ -598,8 +610,14 @@ def monitor_views(repo_root: Path, run: Run, monitors: list[dict], rec: dict) ->
                     binary_judge=bool(spec.get("binary_judge")),
                     api_key="(not used)",
                 )
-                view = ("CoT + final answer" if m.use_cot and m.use_output
-                        else "final answer only (no CoT)" if not m.use_cot else "CoT only (no answer)")
+                turns = cot_mod.episode_turns(roll)
+                if turns:  # multi-turn: label it from the same helper that writes the prompt header
+                    view = "chronological episode transcript — " + cot_mod.describe_contents(
+                        include_cot=m.use_cot, include_output=m.use_output,
+                        output_view=cot_mod.episode_output_view(roll))
+                else:
+                    view = ("CoT + final answer" if m.use_cot and m.use_output
+                            else "final answer only (no CoT)" if not m.use_cot else "CoT only (no answer)")
                 entry.update({
                     "behavior": behavior, "view": view, "binary_judge": m.binary_judge,
                     "rubric": {"adjective": m.rubric.adjective, "description": m.rubric.description},
