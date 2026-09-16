@@ -85,7 +85,7 @@ unsatisfiable, so *passing ⇒ cheating* is the oracle. Note it breaks the usual
 separation by construction (the reward IS the cheat measurement) — read the module docstring and
 docs/ENVIRONMENTS.md #3 before comparing it to MBPP numbers. Runs on **Inkling-Small** via the new
 `rl/renderers.py` seam (Inkling has no HF chat template; TML rendering + structured thinking).
-Launch: `scripts/train_impossiblebench_inkling.sh`.
+Launch: `uv run python experiments/run_experiment.py --config experiments/configs/impossiblebench_inkling_small.json`.
 
 **Also available: Terminal-verifier (multi-turn)** — `envs/terminal_verifier.py`, a port of the terminal
 setting from *Output Supervision Can Obfuscate the CoT* (`rg_obfuscation`): Qwen3-8B in a directory with
@@ -93,5 +93,6 @@ a `verifier.py` whose embedded answer is perturbed, so the only route to reward 
 with the grader. `behavior_present` = used (read it AND submitted its value) ∨ modified ∨ (impossible ∧ passed), from the transcript.
 Multi-turn plumbing: `rl/episodes.py` (episode driver, prefix-chained tokens → one GRPO datum),
 `renderers.continuation_tokens`, `think_budget` (Qwen3 budget forcing — needed, else the model never
-acts). Baseline: `experiments/eval_terminal_baseline.py`; RL: `scripts/train_terminal_verifier.sh`.
+acts). Baseline: `experiments/eval_terminal_baseline.py`; RL: `run_experiment.py --config
+experiments/configs/terminal_verifier_*.json`.
 See docs/ENVIRONMENTS.md #5.

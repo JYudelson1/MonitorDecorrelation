@@ -63,7 +63,7 @@
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": true,
       "use_output": true,
-      "reasoning_max_tokens": 256
+      "reasoning_effort": "low"
     },
     {
       "kind": "cot",
@@ -72,7 +72,7 @@
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": false,
       "use_output": true,
-      "reasoning_max_tokens": 256
+      "reasoning_effort": "low"
     },
     {
       "kind": "cot",
@@ -81,7 +81,7 @@
       "model_id": "google/gemini-3.5-flash-lite",
       "use_cot": true,
       "use_output": false,
-      "reasoning_max_tokens": 256
+      "reasoning_effort": "low"
     }
   ]
 }

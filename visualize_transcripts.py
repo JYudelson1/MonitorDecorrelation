@@ -419,6 +419,7 @@ class Store:
                 "behavior": m.get("behavior"),
                 # carried for the judge-prompt rebuild (reasoning budget / probe file)
                 "reasoning_max_tokens": m.get("reasoning_max_tokens"),
+                "reasoning_effort": m.get("reasoning_effort"),
                 "probe_path": m.get("probe_path"),
                 "probe_model": m.get("probe_model"),
             })
@@ -607,6 +608,7 @@ def monitor_views(repo_root: Path, run: Run, monitors: list[dict], rec: dict) ->
                     use_cot=spec.get("use_cot", True) is not False,
                     use_output=spec.get("use_output", True) is not False,
                     reasoning_max_tokens=spec.get("reasoning_max_tokens"),
+                    reasoning_effort=spec.get("reasoning_effort"),
                     binary_judge=bool(spec.get("binary_judge")),
                     api_key="(not used)",
                 )

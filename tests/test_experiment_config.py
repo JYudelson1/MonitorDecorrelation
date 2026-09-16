@@ -146,3 +146,82 @@ def test_set_overrides_are_validated_not_just_assigned():
         run.apply_overrides(_cfg(), ["thinking_effort=1.5"])
     with pytest.raises(ValidationError):  # wrong type
         run.apply_overrides(_cfg(), ["n_steps=lots"])
+
+
+def _gemini_cfg() -> ExperimentConfig:
+    """A terminal-matrix-shaped config: gemini-2.5 judges (reasoning off) + gemini-3.5 (effort)."""
+    return ExperimentConfig.model_validate(
+        dict(
+            run_name="t",
+            monitors=[
+                {"kind": "cot", "name": "g25_out", "role": "held_out",
+                 "model_id": "google/gemini-2.5-flash-lite"},
+                {"kind": "cot", "name": "g35_out", "role": "train_against",
+                 "model_id": "google/gemini-3.5-flash-lite", "reasoning_effort": "low"},
+                {"kind": "cot", "name": "g35_cot", "role": "held_out",
+                 "model_id": "google/gemini-3.5-flash-lite", "reasoning_effort": "low"},
+            ],
+        )
+    )
+
+
+def test_gemini_25_may_not_be_given_judge_side_reasoning():
+    """gemini-2.5 answers the SCORE line with reasoning off; turning it on would silently change what
+    a held-out judge measures mid-matrix, so it's rejected at LOAD rather than ignored."""
+    from pydantic import ValidationError
+
+    for knob in ({"reasoning_effort": "low"}, {"reasoning_max_tokens": 256}):
+        with pytest.raises(ValidationError, match="must run with reasoning OFF"):
+            ExperimentConfig.model_validate(
+                dict(run_name="t", monitors=[
+                    {"kind": "cot", "name": "g25_out", "role": "train_against",
+                     "model_id": "google/gemini-2.5-flash-lite", **knob}])
+            )
+    # …and the same rule guards a hand-built monitor, not just a config.
+    from monitordecorrelation.monitors.cot_monitor import CoTMonitor
+
+    with pytest.raises(ValueError, match="must run with reasoning OFF"):
+        CoTMonitor("g25_out", "google/gemini-2.5-flash-lite", reasoning_effort="low")
+
+
+def test_reasoning_effort_and_budget_are_mutually_exclusive():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ExperimentConfig.model_validate(
+            dict(run_name="t", monitors=[
+                {"kind": "cot", "name": "g35_out", "role": "train_against",
+                 "model_id": "google/gemini-3.5-flash-lite",
+                 "reasoning_effort": "low", "reasoning_max_tokens": 256}])
+        )
+
+
+def test_set_overrides_a_single_monitor_field():
+    """``--set monitors.<name>.<field>`` makes per-judge settings a launch flag, not a forked config."""
+    run = _runner()
+    cfg = run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effort=medium"])
+    assert [m.reasoning_effort for m in cfg.monitors] == [None, "medium", "low"]
+
+
+def test_set_overrides_every_monitor_of_a_model_family():
+    run = _runner()
+    cfg = run.apply_overrides(
+        _gemini_cfg(), ["monitors.model:gemini-3.5.reasoning_effort=medium"]
+    )
+    assert [m.reasoning_effort for m in cfg.monitors] == [None, "medium", "medium"]
+    assert cfg.monitors[0].model_id == "google/gemini-2.5-flash-lite"  # untouched
+
+
+def test_monitor_overrides_are_validated_like_any_other():
+    from pydantic import ValidationError
+
+    run = _runner()
+    with pytest.raises(SystemExit, match="matched no monitor"):
+        run.apply_overrides(_gemini_cfg(), ["monitors.g35_nope.reasoning_effort=low"])
+    with pytest.raises(SystemExit, match="has no field"):
+        run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effrt=low"])
+    with pytest.raises(ValidationError):  # not one of low/medium/high
+        run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effort=lowish"])
+    # a wildcard that would switch reasoning on for the gemini-2.5 judges is refused, by name
+    with pytest.raises(ValidationError, match="g25_out"):
+        run.apply_overrides(_gemini_cfg(), ["monitors.*.reasoning_effort=medium"])

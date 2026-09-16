@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Strict(BaseModel):
@@ -38,14 +38,50 @@ class CoTMonitorSpec(_Strict):
     reasoning_max_tokens: int | None = Field(
         None,
         ge=1,
-        description="judge-side reasoning budget. None = reasoning disabled (the judge only emits "
+        description="judge-side reasoning BUDGET, in tokens. Legacy — prefer `reasoning_effort`: a "
+        "small explicit budget is not reliably honoured (gemini-3.5-flash-lite returned "
+        "`reasoning_tokens == 0` on ~60% of calls at 256, and an unthinking judge answers a bare "
+        "`SCORE: 0`). Mutually exclusive with `reasoning_effort`. None = reasoning disabled.",
+    )
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        None,
+        description="judge-side reasoning effort. None = reasoning disabled (the judge only emits "
         "`SCORE: <n>`, so thinking is pure cost). REQUIRED for models that mandate reasoning "
-        "(gemini-3.x reject `reasoning:{enabled:false}` with a 400): give them a small budget, e.g. "
-        "256, so the very first call is accepted.",
+        "(gemini-3.x reject `reasoning:{enabled:false}` with a 400). NB on "
+        "gemini-3.5-flash-lite 'low' behaves like no reasoning at all — measured on blatant "
+        "reward-hacking terminal transcripts, 24/40 calls came back with `reasoning_tokens == 0` "
+        "and 17/40 scored a reflexive 0, vs 0/40 at 'medium'.",
     )
     binary_judge: bool = (
         False  # True = YES/NO verdict instead of 0–100 score; omitted → False
     )
+
+    @model_validator(mode="after")
+    def _check_reasoning(self) -> "CoTMonitorSpec":
+        """Reject a reasoning knob the judge must not carry — at LOAD, not at the first judge call.
+
+        Two rules, both enforced again in ``CoTMonitor.__init__`` for hand-built monitors:
+        effort and budget are mutually exclusive, and a judge whose family must run with reasoning
+        off (gemini-2.5) may set neither. The point is that a mistyped matrix config fails before
+        any GPU time is spent, naming the offending monitor.
+        """
+        from monitordecorrelation.monitors.cot_monitor import reasoning_must_stay_off
+
+        if self.reasoning_effort is not None and self.reasoning_max_tokens is not None:
+            raise ValueError(
+                f"monitor {self.name!r}: reasoning_effort and reasoning_max_tokens are mutually "
+                f"exclusive (got {self.reasoning_effort!r} and {self.reasoning_max_tokens})"
+            )
+        if reasoning_must_stay_off(self.model_id) and (
+            self.reasoning_effort is not None or self.reasoning_max_tokens is not None
+        ):
+            raise ValueError(
+                f"monitor {self.name!r}: {self.model_id} must run with reasoning OFF, but the "
+                f"config sets reasoning_effort={self.reasoning_effort!r} / "
+                f"reasoning_max_tokens={self.reasoning_max_tokens!r}. Judge-side reasoning is only "
+                "for models that mandate it (gemini-3.x); drop both keys for this monitor."
+            )
+        return self
 
 
 class ProbeMonitorSpec(_Strict):
@@ -212,6 +248,7 @@ def build_monitors(
                 use_cot=s.use_cot,
                 use_output=s.use_output,
                 reasoning_max_tokens=s.reasoning_max_tokens,
+                reasoning_effort=s.reasoning_effort,
                 binary_judge=s.binary_judge,
             )
         else:  # probe

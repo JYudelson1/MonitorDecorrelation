@@ -24,8 +24,6 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
-| `scripts/train_impossiblebench_inkling.sh` | **RL Inkling-Small on the ImpossibleBench impossible subset** (oneoff + conflicting), plotting to W&B. Thin wrapper over the runner: checks credentials up front, forwards `--set …`. | `data/runs/ib_Inkling-Small_s0/` + wandb |
-| `scripts/train_terminal_verifier.sh` | **RL Qwen3-8B on the terminal-verifier env** (multi-turn `cat verifier.py` hack; control config by default). Credential preflight → `run_experiment.py`, `--set` passthrough. | `data/runs/tv_Qwen3-8B_control_s0/` + wandb |
 | `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score). Re-scans on refresh, so new runs and new steps appear while a run is training. Stdlib-only. | `http://127.0.0.1:8000` |
@@ -44,6 +42,9 @@ uv run python experiments/run_experiment.py --config experiments/configs/mbpp_ma
 uv run python experiments/run_experiment.py --config experiments/configs/train_against_cot.json
 # quick one-off overrides of top-level fields:
 uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2 batch_size=2
+# per-monitor overrides: monitors.<name|model:substr|*>.<field>
+uv run python experiments/run_experiment.py --config <cfg> \
+    --set monitors.model:gemini-3.5.reasoning_effort=medium run_name=<...>_eff-medium
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
@@ -55,8 +56,25 @@ n_prompts_pool probe_server_url monitors`.
 `env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier) and `thinking_effort`
 [0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
 `think_budget`/`answer_tokens` (multi-turn envs, Qwen3): cap each turn's `<think>` and force the answer. Each monitor: `{kind:"cot", name, role, model_id,
-use_cot?, behavior?, threshold?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
+use_cot?, behavior?, threshold?, reasoning_effort?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
+
+**Judge-side reasoning (`reasoning_effort`).** Judges answer in one line, so reasoning is **off** by
+default and must stay off for gemini-2.5 — setting `reasoning_effort`/`reasoning_max_tokens` on a
+`google/gemini-2.5-*` monitor is rejected at config load, naming the monitor. Models that *mandate*
+reasoning (gemini-3.x, which reject `reasoning:{enabled:false}` with a 400) need
+`reasoning_effort: "low"|"medium"|"high"`. Pick it per run without forking the config:
+
+```bash
+--set monitors.g35_out.reasoning_effort=medium            # one judge, by name
+--set monitors.model:gemini-3.5.reasoning_effort=medium   # every gemini-3.5 judge (keeps the matrix
+                                                          # rows comparable — see docs/MONITORS.md)
+```
+
+⚠️ On `gemini-3.5-flash-lite`, `low` is **not** a working setting: ~60% of calls come back with
+`reasoning_tokens == 0` and the unthinking judge answers a reflexive bare `SCORE: 0`, which parses as
+a real verdict (17/40 on blatant hacks, vs 0/40 at `medium`). Table + failure signature in
+[`docs/MONITORS.md`](docs/MONITORS.md).
 
 For running the full matrix across seeds, use `scripts/queue_runs.sh` (next section) rather than a
 hand-rolled loop.
@@ -118,16 +136,21 @@ run's banner. Offline runs lose nothing — upload later with `wandb sync wandb/
 ## ImpossibleBench × Inkling-Small
 
 ```bash
-# full run (40 steps, 16x8 rollouts/step) — plots to W&B, aborts up front if credentials are missing
-scripts/train_impossiblebench_inkling.sh
+IB=experiments/configs/impossiblebench_inkling_small.json
+
+# full run (40 steps, 16x8 rollouts/step)
+uv run python experiments/run_experiment.py --config $IB
 
 # smoke test first (2 steps, tiny batch, short completions) — same code path, minutes not hours
-scripts/train_impossiblebench_inkling.sh --set run_name=ib_smoke n_steps=2 batch_size=2 group_size=4 \
-    eval_size=2 eval_every=1 max_tokens=2048 thinking_effort=0.1
+uv run python experiments/run_experiment.py --config $IB --set run_name=ib_smoke n_steps=2 \
+    batch_size=2 group_size=4 eval_size=2 eval_every=1 max_tokens=2048 thinking_effort=0.1
 ```
 
-Everything after the script name is forwarded to `run_experiment.py`. Config:
-`experiments/configs/impossiblebench_inkling_small.json`.
+Config: `experiments/configs/impossiblebench_inkling_small.json`. It pins `lr=2e-4` by hand —
+tinker-cookbook's LoRA-LR heuristic explicitly refuses Inkling ("not yet calibrated"); see the config
+for the rationale. This run is meant to plot to W&B, and the runner falls back to **offline** logging
+without complaint when the box is logged out — check the banner's `wandb: …` line, or force the
+intent with `WANDB_MODE=online`.
 
 - **The setting.** `subset: "impossible"` = `oneoff` + `conflicting`, the two mutated splits where no
   correct implementation can pass — so `behavior_present` ("passed the tests") *is* the cheating oracle.
@@ -147,6 +170,8 @@ Everything after the script name is forwarded to `run_experiment.py`. Config:
 ## Terminal-verifier × Qwen3-8B (multi-turn)
 
 ```bash
+TV_CONTROL=experiments/configs/terminal_verifier_qwen3_8b_control.json
+
 # 1. baseline inference — does the base model read the verifier, how often, what does it do:
 uv run python experiments/eval_terminal_baseline.py --n-prompts 24 --samples 2 --think-budget 1536
 uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku   # + judge AUROC
@@ -154,10 +179,20 @@ uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-h
 uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5 \
     --n-prompts 256 --think-budget 1536 --answer-tokens 512 --max-tokens 3072
 # 2. smoke the RL loop (2 steps, tiny batch):
-scripts/train_terminal_verifier.sh --set run_name=tv_smoke n_steps=2 batch_size=4 group_size=4 \
-    eval_size=4 eval_every=1
+uv run python experiments/run_experiment.py --config $TV_CONTROL --set run_name=tv_smoke n_steps=2 \
+    batch_size=4 group_size=4 eval_size=4 eval_every=1
 # 3. the control run (40 steps, 16x8 episodes/step, no monitor):
-scripts/train_terminal_verifier.sh
+uv run python experiments/run_experiment.py --config $TV_CONTROL
+# 4. a monitored row — train against the output-only gemini-3.5 judge, judge effort chosen per run
+#    (run_name must differ, or the two runs share data/runs/<name>/):
+uv run python experiments/run_experiment.py \
+    --config experiments/configs/terminal_verifier_gemini35_out.json --set \
+    monitors.model:gemini-3.5.reasoning_effort=low \
+    run_name=tv_g35out_eff-low_s0 seed=0
+uv run python experiments/run_experiment.py \
+    --config experiments/configs/terminal_verifier_gemini35_out.json --set \
+    monitors.model:gemini-3.5.reasoning_effort=medium \
+    run_name=tv_g35out_eff-medium_s0 seed=0
 ```
 
 The baseline also prints the **cost accounting** an RL run is budgeted from — prefill / sampled /

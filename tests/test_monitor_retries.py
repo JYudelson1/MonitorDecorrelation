@@ -131,6 +131,21 @@ def test_reasoning_budget_is_configuration(monkeypatch):
         cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_max_tokens=0)
 
 
+def test_reasoning_effort_is_configuration(monkeypatch):
+    """``reasoning_effort`` is the preferred way to satisfy a mandatory-reasoning judge: same
+    static-at-construction rule as the budget, and the two cannot both be set."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    for effort in ("low", "medium", "high"):
+        mon = cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_effort=effort)
+        assert mon._reasoning == {"effort": effort}       # first call already asks for reasoning
+        assert mon.reasoning_effort == effort
+    with pytest.raises(ValueError):
+        cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_effort="lowish")
+    with pytest.raises(ValueError):  # mutually exclusive — one knob, not two
+        cm.CoTMonitor("j", "x/y", behavior="deception",
+                      reasoning_effort="low", reasoning_max_tokens=256)
+
+
 def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monkeypatch):
     """finish_reason='length' with output is NOT an API error: the judge is called at temperature 0,
     so a retry returns the identical truncated text and the run spins forever. Read what it said."""

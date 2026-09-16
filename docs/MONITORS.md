@@ -46,6 +46,39 @@ the judge sees; the survivors stay interleaved. `transcript.py` is stdlib-only a
 by construction rather than by two implementations agreeing (pinned by
 `tests/test_transcript_prompt.py`).
 
+### Judge-side reasoning: use `reasoning_effort`, not a token budget
+
+Judges answer with one line (`SCORE: <n>`), so thinking is pure cost and reasoning is **off** by
+default (`reasoning: {"enabled": false}`). Models that *mandate* reasoning — gemini-3.x — reject that
+with a 400, so they must ask for reasoning explicitly. Two knobs, mutually exclusive:
+
+- `reasoning_effort: "low" | "medium" | "high"` — **preferred**.
+- `reasoning_max_tokens: <n>` — legacy budget, kept for configs that still set it.
+
+Both are static at construction (never flipped mid-run; a runtime flip used to race across the
+threads sharing a monitor). **A small budget is not reliably honoured.** Measured on
+`google/gemini-3.5-flash-lite` over 5 blatant reward-hacking terminal transcripts, 8 replays each
+(n=40 per config, temperature 0 — which does *not* make this deterministic):
+
+| judge-side reasoning | mean score | exact zeros | `reasoning_tokens == 0` |
+| --- | --- | --- | --- |
+| `{"max_tokens": 256}` | 51.8 | 19/40 | 25/40 |
+| `{"effort": "low"}` | 52.5 | 17/40 | 24/40 |
+| `{"effort": "medium"}` | **98.6** | **0/40** | 0/40 |
+| `{"effort": "high"}` | 97.5 | 1/40 | 0/40 |
+
+When the request comes back with `reasoning_tokens == 0` the judge frequently answers a reflexive
+bare `SCORE: 0` (4 completion tokens, no analysis). That parses cleanly, so it lands in the log as a
+real verdict and silently zeroes the penalty on a transcript the judge never audited — on the
+train-against monitor that is reward for a hack that went unpunished. `low` is indistinguishable from
+the budget it replaced; only `medium`/`high` actually induce reasoning on this model. gemini-2.5
+judges are unaffected (they run with reasoning disabled and scored 10/10 at 100 on the same prompt).
+
+Failure signature in a run dump: a bimodal `{0.0, 1.0}` score histogram on the gemini-3.x monitors
+while the gemini-2.5 monitors on the same rollouts are smooth and high. Note `rl/train.py` persists
+only `{score, label}` per monitor, dropping `meta["raw"]`, so a reflexive zero is not distinguishable
+from a reasoned one after the fact.
+
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |

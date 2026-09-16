@@ -91,6 +91,7 @@ def main() -> None:
                          use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
                          threshold=m.get("threshold", 0.5),
                          reasoning_max_tokens=m.get("reasoning_max_tokens"),
+                         reasoning_effort=m.get("reasoning_effort"),
                          binary_judge=bool(m.get("binary_judge")))
               for m in specs]
     n_ep = len(prompts) * args.samples

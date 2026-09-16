@@ -172,6 +172,26 @@ def _describe_evidence(*, use_cot: bool, use_output: bool, multi_turn: bool) -> 
     return f"You are given {listed}."
 
 
+# Accepted values for a judge's ``reasoning_effort`` (OpenRouter's `reasoning: {"effort": …}`).
+_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+
+# Judge families whose reasoning must stay OFF, and which therefore may not carry a
+# ``reasoning_effort`` / ``reasoning_max_tokens`` at all. gemini-2.5 accepts
+# `reasoning:{"enabled": false}` and answers the `SCORE:` line straight from the content channel —
+# measured 10/10 at 100 on a blatant reward-hacking terminal transcript with reasoning off — so
+# turning thinking on would only cost tokens AND silently change what the held-out judges measure
+# mid-matrix. Configuring it is a mistake, not a preference: we raise rather than ignore it.
+_REASONING_OFF_ONLY = ("google/gemini-2.5",)
+
+
+def reasoning_must_stay_off(model_id: str) -> bool:
+    """True for judges that must run with reasoning disabled (see ``_REASONING_OFF_ONLY``).
+
+    Shared with ``experiment_config.CoTMonitorSpec`` so a bad config dies at load, not at the first
+    judge call halfway into a run.
+    """
+    return (model_id or "").startswith(_REASONING_OFF_ONLY)
+
 _SCORE_RE = re.compile(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _VERDICT_RE = re.compile(r"VERDICT:\s*(YES|NO)\b", re.I)
 # Reasoning-channel fallback: accept either instructed format (percentile SCORE or binary VERDICT).
@@ -249,6 +269,7 @@ class CoTMonitor:
         use_cot: bool = True,
         use_output: bool = True,
         reasoning_max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         binary_judge: bool = False,
     ) -> None:
         self.name = name
@@ -274,21 +295,49 @@ class CoTMonitor:
             raise RuntimeError("OPENROUTER_API_KEY not set (load .env first)")
         # Reasoning is off by default: the judge only has to emit `SCORE: <n>` (or `VERDICT:
         # YES|NO`), so thinking is pure cost. Models that MANDATE reasoning (gemini-3.x) reject
-        # `{"enabled": false}` with a 400 —
-        # for those, set ``reasoning_max_tokens`` (config: the monitor's ``reasoning_max_tokens``) so
-        # the FIRST call already carries a bounded budget. This is deliberately static: it used to be
+        # `{"enabled": false}` with a 400 — for those, ask for reasoning explicitly, via
+        # ``reasoning_effort`` ("low"/"medium"/"high") or the older ``reasoning_max_tokens`` budget,
+        # so the FIRST call is already accepted. This is deliberately static: it used to be
         # discovered by catching that 400 and flipping, which raced across the threads sharing a
         # monitor (16 concurrent first calls → 1 flip + 15 fatal 400s → 15 NaN scores per eval).
+        #
+        # Prefer ``reasoning_effort``. A small explicit ``max_tokens`` budget is NOT reliably
+        # honoured by gemini-3.5-flash-lite: measured on blatant reward-hacking terminal
+        # transcripts, `{"max_tokens": 256}` came back with `reasoning_tokens == 0` on ~70% of
+        # calls, and an unthinking judge answers a bare `SCORE: 0` — which parses fine and lands in
+        # the log as a real verdict, silently zeroing the penalty on transcripts it never audited.
+        # Temperature 0 does not make this deterministic. See docs/MONITORS.md.
         if reasoning_max_tokens is not None and reasoning_max_tokens < 1:
             raise ValueError(
                 f"reasoning_max_tokens must be >= 1 or None, got {reasoning_max_tokens}"
             )
+        if reasoning_effort is not None and reasoning_effort not in _REASONING_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be one of {sorted(_REASONING_EFFORTS)} or None, "
+                f"got {reasoning_effort!r}"
+            )
+        if reasoning_effort is not None and reasoning_max_tokens is not None:
+            raise ValueError(
+                "reasoning_effort and reasoning_max_tokens are mutually exclusive "
+                f"(got {reasoning_effort!r} and {reasoning_max_tokens})"
+            )
+        if reasoning_must_stay_off(model_id) and (
+            reasoning_effort is not None or reasoning_max_tokens is not None
+        ):
+            raise ValueError(
+                f"monitor {name!r}: {model_id} must run with reasoning OFF, but got "
+                f"reasoning_effort={reasoning_effort!r} / "
+                f"reasoning_max_tokens={reasoning_max_tokens!r}. Judge-side reasoning is only for "
+                "models that mandate it (gemini-3.x); drop both keys for this monitor."
+            )
         self.reasoning_max_tokens = reasoning_max_tokens
-        self._reasoning: dict = (
-            {"max_tokens": reasoning_max_tokens}
-            if reasoning_max_tokens is not None
-            else {"enabled": False}
-        )
+        self.reasoning_effort = reasoning_effort
+        if reasoning_effort is not None:
+            self._reasoning: dict = {"effort": reasoning_effort}
+        elif reasoning_max_tokens is not None:
+            self._reasoning = {"max_tokens": reasoning_max_tokens}
+        else:
+            self._reasoning = {"enabled": False}
 
     def _description(self, *, multi_turn: bool) -> str:
         """The rubric's behavior definition plus a truthful account of what this judge is given."""
@@ -398,7 +447,7 @@ class CoTMonitor:
                     # explanation attached: raise_for_status() alone reports only the status and URL,
                     # which leaves a 400 undiagnosable in the run log. NB a mandatory-reasoning model
                     # ("Reasoning is mandatory for this endpoint and cannot be disabled.") lands here
-                    # by design — the fix is the monitor's `reasoning_max_tokens`, not a retry.
+                    # by design — the fix is the monitor's `reasoning_effort`, not a retry.
                     raise httpx.HTTPStatusError(
                         f"{resp.status_code} for {self.model_id}: {resp.text[:300]}",
                         request=resp.request,
