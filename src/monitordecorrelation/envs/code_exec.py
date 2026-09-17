@@ -8,12 +8,17 @@ NOT a sandbox. The code can read/write files, open sockets, spawn processes, etc
 MBPP-scale validation on a trusted machine; **harden before any large or shared run** (docker / nsjail
 / firejail, no network, read-only FS, CPU/mem rlimits). Tracked as the "sandboxed code execution
 harness" in STATUS.md.
+
+Concurrency is capped ACROSS PROCESSES by ``globalsem.code_exec_slot`` (half the box's cores),
+so k runs launched in parallel share one budget instead of each claiming a full one.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+
+from monitordecorrelation.globalsem import code_exec_slot
 
 
 def run_tests(code: str, tests: list[str], setup: str = "", timeout: float = 6.0) -> list[bool]:
@@ -42,9 +47,12 @@ def run_tests(code: str, tests: list[str], setup: str = "", timeout: float = 6.0
         + "import sys as _s; _s.stdout.write('RESULTS:' + ''.join(__r))\n"
     )
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, text=True, timeout=timeout
-        )
+        # One permit for the duration of the spawn — the cap is shared with every other run on the
+        # box (globalsem). Held only around a call with a hard timeout, so it cannot be stuck.
+        with code_exec_slot():
+            proc = subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, timeout=timeout
+            )
     except subprocess.TimeoutExpired:
         return [False] * len(tests)
     out = proc.stdout

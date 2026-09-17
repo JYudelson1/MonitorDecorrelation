@@ -26,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 from dotenv import load_dotenv
 
+from monitordecorrelation.globalsem import openrouter_slot
+
 load_dotenv(".env")
 _URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -52,10 +54,13 @@ def _opus_verdict(model: str, key: str, row: dict, max_retries: int = 5):
                              answer=row.get("answer", ""))
     for attempt in range(max_retries):
         try:
-            resp = httpx.post(_URL, headers={"Authorization": f"Bearer {key}"},
-                              json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                                    "temperature": 0.0, "max_tokens": 256, "reasoning": {"enabled": False}},
-                              timeout=120)
+            # Same cross-process in-flight cap as every other OpenRouter call (globalsem);
+            # per attempt, so the backoff sleep below doesn't sit on a permit.
+            with openrouter_slot():
+                resp = httpx.post(_URL, headers={"Authorization": f"Bearer {key}"},
+                                  json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                                        "temperature": 0.0, "max_tokens": 256, "reasoning": {"enabled": False}},
+                                  timeout=120)
             if resp.status_code == 200:
                 txt = resp.json()["choices"][0]["message"]["content"] or ""
                 up = txt.upper()

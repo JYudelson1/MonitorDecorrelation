@@ -101,6 +101,27 @@ scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an al
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
 
+#### Shared resource caps across parallel runs
+
+Two caps are **cross-process**, so they hold whether you fan out with `queue_runs.sh` or just start
+runs by hand in separate terminals / tmux windows — you do *not* need to divide the per-run worker
+counts by the number of runs:
+
+| Resource | Cap | Set in |
+| --- | --- | --- |
+| Concurrent model-code subprocesses | half this box's cores | `CODE_EXEC_MAX_CONCURRENT` in `src/monitordecorrelation/globalsem.py` |
+| Concurrent in-flight OpenRouter calls | 256 | `OPENROUTER_MAX_CONCURRENT` in the same file |
+
+Change either number at that one assignment; nothing else reads a copy. The same two semaphores
+cover training and evaluation (every judge call goes through `openrouter.chat`; every code execution
+through `code_exec.run_tests`, `TerminalSession.run` or the ImpossibleBench executor).
+
+A permit is an exclusive `flock` on a slot file under `$MD_GLOBAL_SEM_DIR` (default
+`/tmp/monitordecorrelation-sem` — keep it on a local filesystem). That means the kernel takes the
+permit back however a run ends: `Ctrl-C`, a crash, `kill -9`, the OOM killer, or the machine losing
+power. There is no stale state to clean up, and nothing to reset after a bad batch. If you *do* want
+two groups of runs to have independent budgets, give them different `MD_GLOBAL_SEM_DIR` values.
+
 A run is marked done by a `data/runs/<run>/QUEUE_DONE` sentinel (written on success) — that's what `-s`
 checks. Follow a single live job with `tail -f data/runs/<run>/run.log`. With `-D`, the plan still
 prints to your terminal, then the batch re-execs under `nohup` into `data/runs/_batch_<ts>.log` and

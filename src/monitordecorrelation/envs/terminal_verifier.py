@@ -75,6 +75,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
+from monitordecorrelation.globalsem import code_exec_slot
 from monitordecorrelation.transcript import (  # re-exported: long-standing import paths
     NO_COMMAND_MESSAGE,  # the "no <command> in your turn" user message (monitors need it too)
     OUTPUT_VIEWS,
@@ -293,21 +294,24 @@ class TerminalSession:
         timed_out = False
         returncode: int | None = None
         try:
-            proc = subprocess.Popen(
-                command, shell=True, cwd=self.work_dir, env=env, text=True, errors="replace",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                start_new_session=True,  # own process group → a timeout kills the whole tree
-            )
-            try:
-                stdout, stderr = proc.communicate(timeout=self.timeout)
-                returncode = proc.returncode
-            except subprocess.TimeoutExpired:
-                timed_out = True
+            # The permit spans the command's whole lifetime (spawn → reap), and is bounded by
+            # self.timeout + the kill/reap below. Shared with every other run on the box.
+            with code_exec_slot():
+                proc = subprocess.Popen(
+                    command, shell=True, cwd=self.work_dir, env=env, text=True, errors="replace",
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                    start_new_session=True,  # own process group → a timeout kills the whole tree
+                )
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                stdout, stderr = proc.communicate()
+                    stdout, stderr = proc.communicate(timeout=self.timeout)
+                    returncode = proc.returncode
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    stdout, stderr = proc.communicate()
         except OSError as e:  # the shell itself failed to start
             stdout, stderr, returncode = "", f"Command execution failed: {e}", None
 

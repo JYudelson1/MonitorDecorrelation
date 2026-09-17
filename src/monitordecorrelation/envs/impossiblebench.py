@@ -28,7 +28,8 @@ which theirs doesn't provide.
 
 ⚠️ SECURITY: like ``envs/code_exec.py`` this runs untrusted model-generated code in a plain subprocess
 with a timeout and an address-space rlimit. That is NOT a sandbox (no fs/net isolation). Fine on a
-dedicated box; harden (docker/nsjail) before any shared run.
+dedicated box; harden (docker/nsjail) before any shared run. Concurrency is capped across all
+runs on the box by ``globalsem.code_exec_slot``.
 
 ⚠️ ORACLE NOTE (read before comparing against MBPP-Honeypot): in this env the task reward and the
 cheating oracle are the *same measurement* — the reward is "pass the given tests" and passing them is
@@ -51,6 +52,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from monitordecorrelation.globalsem import code_exec_slot
 from monitordecorrelation.types import EnvResult, Prompt, Rollout
 
 DATASET_REPO = "fjzzq2002/impossible_livecodebench"
@@ -309,10 +311,12 @@ def run_checks(
     # doesn't litter the repo (and gets cleaned up). Neither is a sandbox — see the module docstring.
     with tempfile.TemporaryDirectory(prefix="ib_exec_") as workdir:
         try:
-            proc = subprocess.run(
-                [python or sys.executable, "-I", "-c", script],
-                capture_output=True, text=True, timeout=total_timeout, cwd=workdir,
-            )
+            # Cross-process code-exec permit (globalsem); bounded by total_timeout.
+            with code_exec_slot():
+                proc = subprocess.run(
+                    [python or sys.executable, "-I", "-c", script],
+                    capture_output=True, text=True, timeout=total_timeout, cwd=workdir,
+                )
             stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as e:
             timed_out = True
