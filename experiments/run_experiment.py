@@ -36,6 +36,7 @@ from monitordecorrelation.experiment_config import (
     ProbeMonitorSpec,
     build_monitors,
     load_config,
+    resolve_think_budget,
 )
 from monitordecorrelation.hyperparams import get_lr
 from monitordecorrelation.rl.train import run_grpo
@@ -71,7 +72,7 @@ def _resolve_wandb_mode() -> str:
 
 def _coerce(v: str):
     if v.lower() in ("null", "none", ""):
-        return None  # e.g. --set think_budget=null → no thinking budget (one call per turn)
+        return None  # e.g. --set think_budget=null → NO thinking budget (one call per turn, no env default)
     for cast in (int, float):
         try:
             return cast(v)
@@ -241,16 +242,18 @@ def main() -> None:
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
+    think_budget = resolve_think_budget(cfg.think_budget, env)  # int | None from here on
     if getattr(env, "multi_turn", False):
-        tb = cfg.think_budget if cfg.think_budget is not None else getattr(env, "default_think_budget", None)
-        src = "config" if cfg.think_budget is not None else "env default"
-        print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={tb} ({src}) "
-              f"answer_tokens={cfg.answer_tokens}" + ("" if tb else f" max_tokens/turn={cfg.max_tokens}"))
+        src = "env default" if cfg.think_budget == "auto" else "config"
+        print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={think_budget} ({src}) "
+              f"answer_tokens={cfg.answer_tokens}"
+              + ("" if think_budget else f" — NO thinking budget: max_tokens/turn={cfg.max_tokens}"))
 
     run_grpo(
         run_config, env, backend, train_against=train_against, held_out=held_out,
-        max_tokens=cfg.max_tokens, think_budget=cfg.think_budget, answer_tokens=cfg.answer_tokens,
+        max_tokens=cfg.max_tokens, think_budget=think_budget, answer_tokens=cfg.answer_tokens,
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
+                  "think_budget": think_budget,  # the RESOLVED value (config.json may say "auto")
                   "config": cfg.model_dump()},
     )
     print(f"\n{cfg.experiment} finished OK")

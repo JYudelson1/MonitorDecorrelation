@@ -95,8 +95,8 @@ def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: i
         if not hasattr(backend, "sample_episodes"):
             raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
                             f"has no sample_episodes()")
-        if think_budget is None:  # env-declared default (a config copied from a single-turn env has none)
-            think_budget = getattr(env, "default_think_budget", None)
+        # think_budget arrives RESOLVED (experiment_config.resolve_think_budget): None means no budget,
+        # full stop — the env's default_think_budget is the config layer's business, not the loop's.
         stream = stream and _accepts(backend.sample_episodes, "on_rollout")
         return backend.sample_episodes(
             env, prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
@@ -278,7 +278,8 @@ def run_grpo(
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
     ``think_budget``/``answer_tokens`` (multi-turn envs only) cap each turn's thinking — see
-    rl/episodes.py."""
+    rl/episodes.py. ``think_budget=None`` is taken literally (no budget); resolve the env default
+    before calling (``experiment_config.resolve_think_budget``)."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);

@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 import tinker
 
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
+from monitordecorrelation.experiment_config import resolve_think_budget
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
@@ -103,7 +104,7 @@ def main() -> None:
     with MonitorScorer(judges, args.workers) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=cfg.get("max_tokens", 3072), temperature=1.0,
-                                seed=args.seed, think_budget=cfg.get("think_budget"),
+                                seed=args.seed, think_budget=resolve_think_budget(cfg.get("think_budget", "auto"), env),
                                 answer_tokens=cfg.get("answer_tokens", 512),
                                 step_workers=args.workers, on_rollout=scorer.submit)
         wall_s = time.time() - t0

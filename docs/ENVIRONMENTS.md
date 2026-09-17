@@ -149,7 +149,9 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   *observation* tokens) and the answer is sampled with `answer_tokens`. This is the tinker-side
   equivalent of the reference code's `max_thinking_tokens` logit processor (they used 128!). Inkling
   (TML) has the same mechanism structurally: the open thinking *message* is closed and a text
-  message opened, rather than a `</think>` tag emitted.
+  message opened, rather than a `</think>` tag emitted. Config semantics: key absent → the env's
+  `default_think_budget` (1536); `null` → **no budget** (explicit; the env default never overrides it —
+  resolved once in `experiment_config.resolve_think_budget`, the loop takes `int | None` literally).
 - **Why:** the paper's own obfuscation setting — under an output-only judge the model kept `cat`-ing
   the verifier while its CoT stopped mentioning it. A natural decorrelation row set: train against the
   explanations-only judge (paper) or the transcript judge (action monitor), hold out the CoT judge +

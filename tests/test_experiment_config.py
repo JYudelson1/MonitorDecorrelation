@@ -132,6 +132,34 @@ def test_set_null_clears_the_thinking_budget():
     assert run.apply_overrides(_cfg(), ["think_budget=None"]).think_budget is None
 
 
+class _EnvWithDefault:
+    default_think_budget = 1536
+
+
+class _EnvWithoutDefault:
+    pass
+
+
+def test_think_budget_resolution_null_means_no_budget_auto_means_env_default():
+    """The bug this guards: `--set think_budget=null` used to be silently replaced by the env's
+    default_think_budget (1536) in the training loop, so 'no budget' was unreachable on the terminal
+    env. Now: absent key → "auto" → env default; explicit null → None → no budget; int → int."""
+    from monitordecorrelation.experiment_config import resolve_think_budget
+
+    run = _runner()
+    assert _cfg().think_budget == "auto"  # the key absent from a config == env default
+    assert _cfg(think_budget=None).think_budget is None  # "think_budget": null in a config
+    assert resolve_think_budget("auto", _EnvWithDefault()) == 1536
+    assert resolve_think_budget("auto", _EnvWithoutDefault()) is None
+    assert resolve_think_budget(None, _EnvWithDefault()) is None
+    assert resolve_think_budget(1024, _EnvWithDefault()) == 1024
+    # end to end through the CLI override path
+    cfg = run.apply_overrides(_cfg(think_budget=1536), ["think_budget=null"])
+    assert resolve_think_budget(cfg.think_budget, _EnvWithDefault()) is None
+    cfg = run.apply_overrides(_cfg(think_budget=None), ["think_budget=auto"])
+    assert resolve_think_budget(cfg.think_budget, _EnvWithDefault()) == 1536
+
+
 def test_set_overrides_are_validated_not_just_assigned():
     import pytest
     from pydantic import ValidationError

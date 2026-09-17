@@ -140,11 +140,14 @@ class ExperimentConfig(_Strict):
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)",
     )
     max_tokens: int = 1024
-    think_budget: int | None = Field(
-        None,
-        description="multi-turn envs, HF-chat thinking policies (Qwen3): cap each turn's <think> "
-        "block at N tokens — when hit, Qwen3's budget-forcing suffix closes it and the answer is sampled "
-        "with `answer_tokens`. None = a turn is one call of max_tokens (a long think then eats the turn).",
+    think_budget: int | None | Literal["auto"] = Field(
+        "auto",
+        description="multi-turn envs, thinking policies (Qwen3, Inkling): cap each turn's thinking at "
+        "N tokens — when hit, the renderer's budget-forcing suffix closes it and the answer is sampled "
+        "with `answer_tokens`. 'auto' (the default, i.e. the key is absent) = the env's "
+        "`default_think_budget` (None for envs without one). null/None = NO budget: a turn is one call "
+        "of max_tokens (a long think then eats the turn) — explicit, never overridden by the env default. "
+        "Resolved once by `resolve_think_budget`; the training loop only ever sees int | None.",
     )
     answer_tokens: int = Field(
         512,
@@ -218,6 +221,19 @@ def load_config(path: str | Path) -> ExperimentConfig:
     else:
         data = json.loads(text)
     return ExperimentConfig.model_validate(data)
+
+
+def resolve_think_budget(think_budget: int | None | Literal["auto"], env) -> int | None:
+    """The ONE place the config's ``think_budget`` becomes the ``int | None`` the sampling code takes.
+
+    ``"auto"`` (the field default) → the env's ``default_think_budget`` (None if the env declares
+    none, e.g. any single-turn env); an int → that int; ``None`` (``"think_budget": null`` in the
+    config, ``--set think_budget=null``, or ``None`` in code) → **no budget**. The env default is a
+    fallback for configs that don't mention the key, never an override of an explicit null — that
+    was the bug where ``--set think_budget=null`` still ran with the env's 1536."""
+    if think_budget == "auto":
+        return getattr(env, "default_think_budget", None)
+    return think_budget
 
 
 def build_monitors(
