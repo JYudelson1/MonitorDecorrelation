@@ -30,6 +30,7 @@ import tinker
 
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import roc_auc
+from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.rl.episodes import run_episodes
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
@@ -141,10 +142,10 @@ def main() -> None:
     # pipelining the RL loop uses, see rl/train.py.
     judges = []
     if args.judge:
-        from monitordecorrelation.monitors.cot_monitor import CoTMonitor
+        from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 
-        judges = [CoTMonitor("cot+out", args.judge, behavior=env.behavior_name, use_cot=True),
-                  CoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
+        judges = [AgentCoTMonitor("cot+out", args.judge, behavior=env.behavior_name, use_cot=True),
+                  AgentCoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
 
     t0 = time.time()
     with MonitorScorer(judges, args.workers) as scorer:
@@ -173,7 +174,7 @@ def main() -> None:
             for j in judges:
                 m = judged[j.name][i]
                 judge_scores[j.name].append(m.score)
-                rec["monitors"][j.name] = {"score": m.score, "label": m.label}
+                rec["monitors"][j.name] = monitor_record(m)  # score/label + the judge's exact call
             f.write(json.dumps(rec, default=str) + "\n")
 
     def rate(k: str) -> float:

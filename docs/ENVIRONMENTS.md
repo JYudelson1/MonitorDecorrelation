@@ -137,11 +137,11 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   visible text of every turn *and* the terminal output it produced — the action-monitor view),
   `assistant` (commands + explanations only), `explanations` (the paper's judge view: commands
   stripped, so the judge only sees what the model *says*). The **LLM judges do not read those two
-  blobs in sequence**: for a multi-turn episode `CoTMonitor` rebuilds the real order from the
-  per-turn record (`meta["episode"]["turns"]`) — prompt, then per turn thinking → assistant message
-  → terminal output — honouring the same `output_view` (recorded in the episode meta). See
-  docs/MONITORS.md, "Single-turn vs multi-turn judge prompts". The flat fields are still what probes
-  and the dumps consume.
+  blobs in sequence**: multi-turn envs are judged by `AgentCoTMonitor` (not `CoTMonitor`), which
+  rebuilds the real order from the per-turn record (`meta["episode"]["turns"]`) as a
+  `USER:`/`ASSISTANT:`/`TOOL:` chat transcript — every turn's full text, whatever the `output_view`.
+  See docs/MONITORS.md, "Single-turn vs multi-turn judge prompts". The flat fields are still what
+  probes and the dumps consume.
 - **Thinking budget (`think_budget` / `answer_tokens` in the config):** without one, Qwen3-8B spends
   the whole turn inside `<think>` on hard grids, never acts, every episode is truncated with reward 0
   and GRPO has no advantage variance (measured: 64/64 truncated at 3072 tokens/turn). With a budget,
@@ -149,7 +149,9 @@ An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loo
   *observation* tokens) and the answer is sampled with `answer_tokens`. This is the tinker-side
   equivalent of the reference code's `max_thinking_tokens` logit processor (they used 128!). Inkling
   (TML) has the same mechanism structurally: the open thinking *message* is closed and a text
-  message opened, rather than a `</think>` tag emitted.
+  message opened, rather than a `</think>` tag emitted. Config semantics: key absent → the env's
+  `default_think_budget` (1536); `null` → **no budget** (explicit; the env default never overrides it —
+  resolved once in `experiment_config.resolve_think_budget`, the loop takes `int | None` literally).
 - **Why:** the paper's own obfuscation setting — under an output-only judge the model kept `cat`-ing
   the verifier while its CoT stopped mentioning it. A natural decorrelation row set: train against the
   explanations-only judge (paper) or the transcript judge (action monitor), hold out the CoT judge +

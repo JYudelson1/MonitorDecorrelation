@@ -134,14 +134,23 @@ class MaskEnv:
     def _extract(self, response: str, proposition: str) -> str:
         if self._extractor is not None:
             return self._extractor(response, proposition)
-        from monitordecorrelation.monitors.openrouter import chat
+        from monitordecorrelation.monitors.openrouter import chat, resolve_api_key
 
+        # Same client + retry policy as the CoT judges (monitors/openrouter.py): transient API
+        # errors retry indefinitely, config errors (bad key / model, no credits) raise.
         out = chat(
-            self.judge_model,
-            _EXTRACT_PROMPT.format(proposition=proposition, response=response),
-            max_tokens=16,
-        )
-        m = _VERDICT_RE.search(out or "")  # guard None (e.g. a moderation refusal → null content)
+            {
+                "model": self.judge_model,
+                "messages": [{"role": "user", "content":
+                              _EXTRACT_PROMPT.format(proposition=proposition, response=response)}],
+                "temperature": 0.0,
+                "max_tokens": 16,
+            },
+            api_key=resolve_api_key(),
+            timeout=60.0,
+            name=f"mask oracle {self.judge_model}",
+        ).text
+        m = _VERDICT_RE.search(out or "")
         return m.group(1).upper() if m else "C"
 
     def score(self, rollout: Rollout) -> EnvResult:

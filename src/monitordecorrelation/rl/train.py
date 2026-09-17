@@ -24,7 +24,7 @@ import numpy as np
 
 from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env
-from monitordecorrelation.eval.rollout_dump import slim_record
+from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
@@ -95,8 +95,8 @@ def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: i
         if not hasattr(backend, "sample_episodes"):
             raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
                             f"has no sample_episodes()")
-        if think_budget is None:  # env-declared default (a config copied from a single-turn env has none)
-            think_budget = getattr(env, "default_think_budget", None)
+        # think_budget arrives RESOLVED (experiment_config.resolve_think_budget): None means no budget,
+        # full stop — the env's default_think_budget is the config layer's business, not the loop's.
         stream = stream and _accepts(backend.sample_episodes, "on_rollout")
         return backend.sample_episodes(
             env, prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
@@ -278,7 +278,8 @@ def run_grpo(
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
     ``think_budget``/``answer_tokens`` (multi-turn envs only) cap each turn's thinking — see
-    rl/episodes.py."""
+    rl/episodes.py. ``think_budget=None`` is taken literally (no budget); resolve the env default
+    before calling (``experiment_config.resolve_think_budget``)."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
@@ -428,8 +429,9 @@ def run_grpo(
                 "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
-                "monitors": {m.name: {"score": res[m.name][i].score, "label": res[m.name][i].label}
-                             for m in all_monitors},
+                # {score, label} + for every LLM judge its `call`: the exact request (prompt + API
+                # parameters) and response (content + chain of thought) of the successful API call.
+                "monitors": {m.name: monitor_record(res[m.name][i]) for m in all_monitors},
             }
             eval_rollouts_log.write(json.dumps(rec, default=str) + "\n")
             eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
@@ -584,13 +586,9 @@ def run_grpo(
                             # be re-analysed without re-running the env.
                             "meta": er.meta,
                         },
-                        "monitors": {
-                            m.name: {
-                                "score": ta_res[m.name][i].score,
-                                "label": ta_res[m.name][i].label,
-                            }
-                            for m in train_against
-                        },
+                        # {score, label} + each LLM judge's `call` (exact request + response) —
+                        # see eval.rollout_dump.monitor_record.
+                        "monitors": {m.name: monitor_record(ta_res[m.name][i]) for m in train_against},
                         "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
                     },

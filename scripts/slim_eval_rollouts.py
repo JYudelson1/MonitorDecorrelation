@@ -22,7 +22,12 @@ except ImportError:  # bare box without the package installed: keep this copy in
     SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "monitors")
 
     def slim_record(full: dict) -> dict:
-        return {k: full.get(k) for k in SLIM_FIELDS}
+        out = {k: full.get(k) for k in SLIM_FIELDS}
+        mons = out["monitors"]
+        if isinstance(mons, dict):  # {score, label} only — never the judge's call record
+            out["monitors"] = {n: ({"score": m.get("score"), "label": m.get("label")} if isinstance(m, dict) else m)
+                               for n, m in mons.items()}
+        return out
 
 
 def slim_file(src: Path, dst: Path) -> tuple[int, int]:

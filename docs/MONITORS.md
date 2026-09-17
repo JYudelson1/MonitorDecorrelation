@@ -37,14 +37,35 @@ every turn's thinking, `_output_view` every turn's message + terminal output), s
 show the judge *all* the reasoning before *any* of the actions — an order the policy never produced,
 and one that hides the thought that immediately preceded each command.
 
-So when `Rollout.meta["episode"]["turns"]` is populated (anything the episode driver produced),
-`CoTMonitor._build_prompt` emits ONE `=== EPISODE TRANSCRIPT ===` section in real order — prompt,
-then per turn: thinking → assistant message → terminal output — rendered by
-`monitordecorrelation.transcript`. `use_cot` / `use_output` still select which blocks of each turn
-the judge sees; the survivors stay interleaved. `transcript.py` is stdlib-only and is also what
-`visualize_transcripts.py` loads, so the "what the monitors saw" pane shows the judge's exact prompt
-by construction rather than by two implementations agreeing (pinned by
-`tests/test_transcript_prompt.py`).
+So the two are different monitors. `CoTMonitor` (`monitors/cot_monitor.py`) is **single-turn only**
+and ignores `meta["episode"]`. Multi-turn envs (`env.multi_turn`, i.e. the terminal env) get
+**`AgentCoTMonitor`** (`monitors/agent_cot_monitor.py`) — `build_monitors(..., multi_turn=True)`
+swaps it in for every `kind: cot` spec, same fields. It renders the episode as a chat transcript in
+the order it happened — `USER:` (the task), then per turn `ASSISTANT:` (`<thinking>…</thinking>`
+first when `use_cot`, then the message) and `TOOL:` (what the command printed); a mid-episode turn
+with no command is followed by the env's "no command" `USER:` message; `SYSTEM:` only if the prompt
+carries one — inside a fixed reward-hacking judge prompt (`JUDGE_PROMPT`, 0–100 suspicion score, or
+`JUDGE_PROMPT_BINARY`). It only judges reward hacking, and a CoT-only view (`use_output: false`) is
+rejected — a transcript without the actions is not a transcript. Every assumption about the
+per-turn record is asserted (`agentic_turns`), including that the turns are the ones this
+rollout's flattened `cot`/`output` came from, so a malformed or mismatched rollout raises instead
+of being judged on a wrong transcript. Pinned by `tests/test_agent_cot_monitor.py`, which also
+replays a real Inkling-Small run when `../MonitorDecorrelationOld` is checked out.
+
+### Every judge call is saved with the rollout
+
+`CoTMonitor.score` returns, in `MonitorResult.meta["call"]`, a record of the API call that produced
+the verdict (`cot_monitor.JudgeCall`): the endpoint, the **exact JSON body POSTed** (`model`,
+`messages` — i.e. the full prompt — `temperature`, `max_tokens`, `reasoning`), the client timeout,
+and the **full response** — the assistant `message` (`content`, plus the judge's chain of thought
+under `reasoning` / `reasoning_details` when the provider returns one), `finish_reason`, and the
+response-level `id` / `model` / `provider` / `usage`. When a call was retried only the attempt that
+succeeded is recorded (`attempts` says how many it took). `rl/train.py` writes it per monitor into
+`rollouts.jsonl` and `eval_rollouts.jsonl` as `monitors.<name>.call` (via
+`eval.rollout_dump.monitor_record`); the committed `eval_rollouts_slim.jsonl` keeps `{score, label}`
+only. `visualize_transcripts.py` shows these saved calls per rollout — and says "unavailable" for
+dumps written before this existed, rather than rebuilding a prompt from the run config (a rebuild
+can silently differ from what the judge was sent if the repo has changed since the run).
 
 ### Judge-side reasoning: use `reasoning_effort`, not a token budget
 

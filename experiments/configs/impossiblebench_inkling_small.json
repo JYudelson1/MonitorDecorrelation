@@ -20,6 +20,7 @@
   "eval_size": 32,
   "eval_samples_per_prompt": 2,
   "max_tokens": 8192,
+  "think_budget": null,
   "thinking_effort": 0.5,
   "penalty_coef": 0.0,
   "kl_coef": 0.0001,

@@ -26,7 +26,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
 | `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
-| `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score). Re-scans on refresh, so new runs and new steps appear while a run is training. Stdlib-only. | `http://127.0.0.1:8000` |
+| `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score, and — for every LLM judge whose call the run saved — the exact prompt, request parameters and response incl. the judge's chain of thought; older dumps show "unavailable"). Re-scans on refresh, so new runs and new steps appear while a run is training. Stdlib-only. | `http://127.0.0.1:8000` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
 
 ## The experiment runner (config-driven)
@@ -55,7 +55,7 @@ n_prompts_pool probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
 `env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier) and `thinking_effort`
 [0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
-`think_budget`/`answer_tokens` (multi-turn envs, Qwen3): cap each turn's `<think>` and force the answer. Each monitor: `{kind:"cot", name, role, model_id,
+`think_budget`/`answer_tokens` (multi-turn envs): cap each turn's thinking and force the answer; absent = env default, `null` = no budget. Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?, reasoning_effort?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
 
@@ -207,10 +207,13 @@ forward over each episode's datum on top of these numbers.
 Config: `experiments/configs/terminal_verifier_qwen3_8b_control.json`. `env_options`: `impossible`
 (perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,
 `output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
-`command_timeout`. `max_tokens` is per turn but only used when `think_budget` is unset AND the env has
-no default — this env defaults `think_budget` to 1536 (so a config copied from an MBPP row with only the
-env name swapped works; the banner prints the effective value). Without a budget Qwen3 thinks through
-the whole turn and never runs a command.
+`command_timeout`. `think_budget` has three states: **absent** from the config (= `"auto"`) → the env's
+default, 1536 here (so a config copied from an MBPP row with only the env name swapped works);
+an **int** → that cap; **`null`** (or `--set think_budget=null`) → **no budget at all**, each turn is one
+call of `max_tokens` (the env default never overrides an explicit null). The banner prints the
+effective value, and `run_info.json` records it as `think_budget`. Without a budget Qwen3 thinks
+through the whole turn and never runs a command; Inkling-Small mostly copes but ~10–90% of episodes
+hit a 1536 budget late in RL, so the choice is a real hyperparameter.
 
 **Swapping `mbpp_honeypot` → `terminal_verifier` in an existing matrix row** works as-is, with caveats:
 episodes are ~3.3 turns, so sampling per step costs several× MBPP; `probe_iid` is the MBPP hardcode
