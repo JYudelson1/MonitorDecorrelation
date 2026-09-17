@@ -294,7 +294,7 @@ class TerminalSession:
         returncode: int | None = None
         try:
             proc = subprocess.Popen(
-                command, shell=True, cwd=self.work_dir, env=env, text=True,
+                command, shell=True, cwd=self.work_dir, env=env, text=True, errors="replace",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
                 start_new_session=True,  # own process group → a timeout kills the whole tree
             )
