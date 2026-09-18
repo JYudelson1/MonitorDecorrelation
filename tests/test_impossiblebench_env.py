@@ -232,6 +232,14 @@ def test_holdout_is_disjoint_from_the_train_pool():
     other = IbItem(task_id="t1", split="conflicting", stub=STUB, test=TEST,
                    original_test=ORIGINAL_TEST, entry_point="add")
     env = ImpossibleBenchEnv([ITEM], eval_items=[other])
-    held = env.holdout(5)
+    held = env.holdout(1)
     assert [p.meta["task_id"] for p in held] == ["t1"]
     assert [it.task_id for it in env.items] == ["t0"]  # train pool untouched
+
+
+def test_holdout_larger_than_the_eval_pool_raises():
+    other = IbItem(task_id="t1", split="conflicting", stub=STUB, test=TEST,
+                   original_test=ORIGINAL_TEST, entry_point="add")
+    env = ImpossibleBenchEnv([ITEM], eval_items=[other])
+    with pytest.raises(ValueError, match="eval pool"):
+        env.holdout(5)

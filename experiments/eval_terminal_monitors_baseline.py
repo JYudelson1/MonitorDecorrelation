@@ -74,6 +74,10 @@ def main() -> None:
     specs = cfg["monitors"]
     if args.only:
         want = {s.strip() for s in args.only.split(",")}
+        unknown = want - {m["name"] for m in specs}
+        if unknown:
+            raise SystemExit(f"--only: no monitor named {sorted(unknown)} in {args.config} "
+                             f"(it has: {[m['name'] for m in specs]})")
         specs = [m for m in specs if m["name"] in want]
     behavior = "reward_hacking"
 

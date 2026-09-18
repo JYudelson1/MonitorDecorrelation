@@ -142,7 +142,9 @@ class SycophancyQAEnv:
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
         """Pull a FIXED held-out eval set of ``n`` items and **remove them from the training pool**,
         so eval and train prompts are disjoint. Returns the eval prompts."""
-        n = min(n, len(self.items) - 1)  # keep at least one training item
+        if n > len(self.items) - 1:  # keep at least one training item
+            raise ValueError(f"holdout({n}) would leave no training item: the pool has only "
+                             f"{len(self.items)} — lower the eval size or grow the pool")
         idxs = set(random.Random(seed).sample(range(len(self.items)), n))
         held = [self.items[i] for i in sorted(idxs)]
         self.items = [it for i, it in enumerate(self.items) if i not in idxs]

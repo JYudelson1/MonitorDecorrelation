@@ -516,9 +516,14 @@ class TerminalVerifierEnv:
         """``n`` fixed held-out prompts from the disjoint eval pool (no mutation of the train pool);
         falls back to carving them out of the train pool for directly-built envs."""
         if self.eval_items:
-            picks = random.Random(seed).sample(self.eval_items, min(n, len(self.eval_items)))
+            if n > len(self.eval_items):
+                raise ValueError(f"holdout({n}) asked for more prompts than the eval pool has "
+                                 f"({len(self.eval_items)}) — lower the eval size")
+            picks = random.Random(seed).sample(self.eval_items, n)
             return [self._to_prompt(it) for it in picks]
-        n = min(n, len(self.items) - 1)
+        if n > len(self.items) - 1:  # keep at least one training item
+            raise ValueError(f"holdout({n}) would leave no training item: the pool has only "
+                             f"{len(self.items)} — lower the eval size or grow the pool")
         idxs = set(random.Random(seed).sample(range(len(self.items)), n))
         held = [self.items[i] for i in sorted(idxs)]
         self.items = [it for i, it in enumerate(self.items) if i not in idxs]

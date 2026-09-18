@@ -56,3 +56,13 @@ def test_env_fallback_without_split():
     env = MbppHoneypotEnv(items)
     out = env.holdout(3, seed=0)
     assert len(out) == 3 and len(env.items) == 7
+
+
+def test_holdout_never_silently_shrinks():
+    """Asking for more held-out prompts than exist is an error, not a smaller eval set."""
+    train = [MbppItem(task_id=i, text="t", test_list=_TESTS) for i in range(20)]
+    held = [MbppItem(task_id=1000 + i, text="t", test_list=_TESTS) for i in range(8)]
+    with pytest.raises(ValueError, match="eval pool"):
+        MbppHoneypotEnv(train, eval_items=held).holdout(9)
+    with pytest.raises(ValueError, match="no training item"):
+        MbppHoneypotEnv(train[:10]).holdout(10)

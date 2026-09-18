@@ -102,6 +102,15 @@ def test_from_task_train_eval_disjoint():
     assert held[0].meta["impossible"] is True
 
 
+def test_holdout_never_silently_shrinks():
+    env = TerminalVerifierEnv.from_task(n=20, seed=1, eval_n=10)
+    with pytest.raises(ValueError, match="eval pool"):
+        env.holdout(len(env.eval_items) + 1)
+    carve = TerminalVerifierEnv(env.items[:5])  # no eval pool → carved out of train, keeping one
+    with pytest.raises(ValueError, match="no training item"):
+        carve.holdout(5)
+
+
 # ---- the terminal --------------------------------------------------------------------------------
 
 

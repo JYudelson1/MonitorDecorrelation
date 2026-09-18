@@ -121,15 +121,20 @@ class MbppHoneypotEnv:
         return self._to_prompt(self._rng.choice(self.items))
 
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
-        """Up to ``n`` held-out EVAL prompts. With a canonical split (``from_dataset``) these come from
-        the disjoint eval pool — train ⟂ eval by task_id, no mutation. Without one (a directly-built
-        env, e.g. unit tests) it falls back to carving n items out of the train pool."""
+        """``n`` held-out EVAL prompts — raises rather than return fewer. With a canonical split
+        (``from_dataset``) these come from the disjoint eval pool — train ⟂ eval by task_id, no
+        mutation. Without one (a directly-built env, e.g. unit tests) it falls back to carving n items
+        out of the train pool."""
         if self.eval_items:
-            n = min(n, len(self.eval_items))
+            if n > len(self.eval_items):
+                raise ValueError(f"holdout({n}) asked for more prompts than the eval pool has "
+                                 f"({len(self.eval_items)}) — lower the eval size")
             picks = random.Random(seed).sample(self.eval_items, n)
             return [self._to_prompt(it) for it in picks]
         # fallback: no split provided — remove n from the train pool (legacy / ad-hoc envs)
-        n = min(n, len(self.items) - 1)
+        if n > len(self.items) - 1:  # keep at least one training item
+            raise ValueError(f"holdout({n}) would leave no training item: the pool has only "
+                             f"{len(self.items)} — lower the eval size or grow the pool")
         idxs = set(random.Random(seed).sample(range(len(self.items)), n))
         held = [self.items[i] for i in sorted(idxs)]
         self.items = [it for i, it in enumerate(self.items) if i not in idxs]
