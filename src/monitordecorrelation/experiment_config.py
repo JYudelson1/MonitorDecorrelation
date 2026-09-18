@@ -223,6 +223,122 @@ def load_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig.model_validate(data)
 
 
+def _coerce(v: str):
+    if v.lower() in ("null", "none", ""):
+        return None  # e.g. --set think_budget=null → NO thinking budget (one call per turn, no env default)
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    return v
+
+
+def _monitor_matches(mon: dict, selector: str) -> bool:
+    """Does ``selector`` pick this monitor? ``*`` = all, ``model:<substr>`` = by model id, else by name."""
+    if selector == "*":
+        return True
+    if selector.startswith("model:"):
+        return selector[len("model:"):] in (mon.get("model_id") or "")
+    return mon.get("name") == selector
+
+
+def apply_overrides(
+    cfg: ExperimentConfig,
+    sets: list[str],
+    *,
+    allowed_fields: set[str] | None = None,
+    allowed_monitor_fields: set[str] | None = None,
+    not_allowed_hint: str = "",
+) -> ExperimentConfig:
+    """Apply ``--set key=value`` overrides and RE-VALIDATE. ``model_copy(update=…)`` skips validation,
+    so a typo'd key or an out-of-range value would sail through and fail deep inside the run (or, worse,
+    train something subtly different); round-tripping through the schema keeps ``--set`` as strict as
+    the config file itself.
+
+    A key of the form ``monitors.<selector>.<field>`` overrides a field on the matching monitor(s)
+    instead of a top-level field — so per-run judge settings (notably ``reasoning_effort`` for the
+    gemini-3.x judges) are a launch flag, not a forked config file. The selector is a monitor
+    ``name``, ``model:<substring of model_id>``, or ``*`` for every monitor::
+
+        --set monitors.g35_out.reasoning_effort=medium          # one judge, by name
+        --set monitors.model:gemini-3.5.reasoning_effort=medium # every gemini-3.5 judge
+        --set monitors.*.threshold=0.6                          # all of them
+
+    Nothing is ever silently dropped — each of these is a SystemExit naming the offending item: an
+    item without ``=``, an unknown field, a selector that matches no monitor (a silently-ignored
+    override is how you end up analysing a run that trained against something else), and the same
+    field set twice (on one monitor, possibly via two different selectors), where one value would
+    silently lose. The result is re-validated like any other override, so e.g. pointing
+    ``reasoning_effort`` at a gemini-2.5 judge fails loudly right here.
+
+    ``allowed_fields`` / ``allowed_monitor_fields`` are for scripts that read only part of the config
+    (e.g. an eval that never trains): a valid field the script would never look at is refused too,
+    with ``not_allowed_hint`` appended to the error. None = every schema field is allowed.
+    """
+    if not sets:
+        return cfg
+    overrides: dict = {}
+    monitor_overrides: list[tuple[str, str, str, object]] = []  # (the --set item, selector, field, value)
+    for kv in sets:
+        key, eq, value = kv.partition("=")
+        if not eq or not key:
+            raise SystemExit(f"--set: {kv!r} is not of the form key=value")
+        if key.startswith("monitors."):
+            selector, _, field = key[len("monitors."):].rpartition(".")
+            if not selector or not field:
+                raise SystemExit(
+                    f"--set: {key!r} is not a monitor override; expected "
+                    "monitors.<name|model:substr|*>.<field>=<value>"
+                )
+            monitor_overrides.append((kv, selector, field, _coerce(value)))
+        else:
+            if key in overrides:
+                raise SystemExit(f"--set: {key!r} is set more than once")
+            overrides[key] = _coerce(value)
+    unknown = set(overrides) - set(type(cfg).model_fields)
+    if unknown:
+        raise SystemExit(f"--set: unknown config field(s) {sorted(unknown)}")
+    if allowed_fields is not None and (ignored := set(overrides) - allowed_fields):
+        raise SystemExit(
+            f"--set: this script never reads {sorted(ignored)}, so the override would be silently "
+            f"ignored. Overridable here: {sorted(allowed_fields)}. {not_allowed_hint}".rstrip()
+        )
+    data = cfg.model_dump()
+    set_by: dict[tuple[str, str], str] = {}  # (monitor name, field) → the --set item that set it
+    for kv, selector, field, value in monitor_overrides:
+        matched = [m for m in data["monitors"] if _monitor_matches(m, selector)]
+        if not matched:
+            names = ", ".join(f"{m['name']} ({m.get('model_id') or m.get('probe_path')})"
+                              for m in data["monitors"]) or "(none)"
+            raise SystemExit(
+                f"--set: monitor selector {selector!r} matched no monitor. Configured: {names}"
+            )
+        for mon in matched:
+            spec = ProbeMonitorSpec if mon.get("kind") == "probe" else CoTMonitorSpec
+            if field not in spec.model_fields:
+                raise SystemExit(
+                    f"--set: monitor {mon['name']!r} ({mon.get('kind', 'cot')}) has no field "
+                    f"{field!r}; known: {sorted(spec.model_fields)}"
+                )
+            if allowed_monitor_fields is not None and field not in allowed_monitor_fields:
+                raise SystemExit(
+                    f"--set: this script never reads the monitor field {field!r}, so {kv!r} would be "
+                    f"silently ignored. Overridable here: {sorted(allowed_monitor_fields)}. "
+                    f"{not_allowed_hint}".rstrip()
+                )
+            if (mon["name"], field) in set_by:
+                raise SystemExit(
+                    f"--set: {kv!r} and {set_by[mon['name'], field]!r} both set {field!r} on monitor "
+                    f"{mon['name']!r}; only one can win — pass one"
+                )
+            set_by[mon["name"], field] = kv
+            mon[field] = value
+    return type(cfg).model_validate({**data, **overrides})
+
+
 def resolve_think_budget(think_budget: int | None | Literal["auto"], env) -> int | None:
     """The ONE place the config's ``think_budget`` becomes the ``int | None`` the sampling code takes.
 

@@ -32,8 +32,7 @@ from dotenv import load_dotenv
 from monitordecorrelation.config import LoggingConfig, RunConfig
 from monitordecorrelation.envs.factory import make_env
 from monitordecorrelation.experiment_config import (
-    CoTMonitorSpec,
-    ProbeMonitorSpec,
+    apply_overrides,
     build_monitors,
     load_config,
     resolve_think_budget,
@@ -68,86 +67,6 @@ def _resolve_wandb_mode() -> str:
     """Sync to wandb iff this machine is logged in — otherwise stay offline. An explicit ``WANDB_MODE``
     env var (online/offline/disabled) always wins, as a power-user override / escape hatch."""
     return os.environ.get("WANDB_MODE") or ("online" if _wandb_logged_in() else "offline")
-
-
-def _coerce(v: str):
-    if v.lower() in ("null", "none", ""):
-        return None  # e.g. --set think_budget=null → NO thinking budget (one call per turn, no env default)
-    for cast in (int, float):
-        try:
-            return cast(v)
-        except ValueError:
-            pass
-    if v.lower() in ("true", "false"):
-        return v.lower() == "true"
-    return v
-
-
-def _monitor_matches(mon: dict, selector: str) -> bool:
-    """Does ``selector`` pick this monitor? ``*`` = all, ``model:<substr>`` = by model id, else by name."""
-    if selector == "*":
-        return True
-    if selector.startswith("model:"):
-        return selector[len("model:"):] in (mon.get("model_id") or "")
-    return mon.get("name") == selector
-
-
-def apply_overrides(cfg, sets: list[str]):
-    """Apply ``--set key=value`` overrides and RE-VALIDATE. ``model_copy(update=…)`` skips validation,
-    so a typo'd key or an out-of-range value would sail through and fail deep inside the run (or, worse,
-    train something subtly different); round-tripping through the schema keeps ``--set`` as strict as
-    the config file itself.
-
-    A key of the form ``monitors.<selector>.<field>`` overrides a field on the matching monitor(s)
-    instead of a top-level field — so per-run judge settings (notably ``reasoning_effort`` for the
-    gemini-3.x judges) are a launch flag, not a forked config file. The selector is a monitor
-    ``name``, ``model:<substring of model_id>``, or ``*`` for every monitor::
-
-        --set monitors.g35_out.reasoning_effort=medium          # one judge, by name
-        --set monitors.model:gemini-3.5.reasoning_effort=medium # every gemini-3.5 judge
-        --set monitors.*.threshold=0.6                          # all of them
-
-    A selector that matches nothing is an error (a silently-ignored override is how you end up
-    analysing a run that trained against something else). The result is re-validated like any other
-    override, so e.g. pointing ``reasoning_effort`` at a gemini-2.5 judge fails loudly right here.
-    """
-    if not sets:
-        return cfg
-    overrides: dict = {}
-    monitor_overrides: list[tuple[str, str, object]] = []
-    for kv in sets:
-        key, value = kv.split("=", 1)
-        if key.startswith("monitors."):
-            selector, _, field = key[len("monitors."):].rpartition(".")
-            if not selector or not field:
-                raise SystemExit(
-                    f"--set: {key!r} is not a monitor override; expected "
-                    "monitors.<name|model:substr|*>.<field>=<value>"
-                )
-            monitor_overrides.append((selector, field, _coerce(value)))
-        else:
-            overrides[key] = _coerce(value)
-    unknown = set(overrides) - set(type(cfg).model_fields)
-    if unknown:
-        raise SystemExit(f"--set: unknown config field(s) {sorted(unknown)}")
-    data = cfg.model_dump()
-    for selector, field, value in monitor_overrides:
-        matched = [m for m in data["monitors"] if _monitor_matches(m, selector)]
-        if not matched:
-            names = ", ".join(f"{m['name']} ({m.get('model_id') or m.get('probe_path')})"
-                              for m in data["monitors"]) or "(none)"
-            raise SystemExit(
-                f"--set: monitor selector {selector!r} matched no monitor. Configured: {names}"
-            )
-        for mon in matched:
-            spec = ProbeMonitorSpec if mon.get("kind") == "probe" else CoTMonitorSpec
-            if field not in spec.model_fields:
-                raise SystemExit(
-                    f"--set: monitor {mon['name']!r} ({mon.get('kind', 'cot')}) has no field "
-                    f"{field!r}; known: {sorted(spec.model_fields)}"
-                )
-            mon[field] = value
-    return type(cfg).model_validate({**data, **overrides})
 
 
 def main() -> None:

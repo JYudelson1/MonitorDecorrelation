@@ -13,6 +13,9 @@ pre-RL headroom (AUROC ~1.0, gap ~1.0) has nothing to degrade, so the matrix cel
   uv run python experiments/eval_terminal_monitors_baseline.py \
       --config experiments/configs/terminal_verifier_gemini25_out.json \
       --model thinkingmachines/Inkling-Small --n-prompts 96 --samples 2
+
+  # config overrides, same syntax as run_experiment.py — but only for fields this script reads:
+      --set max_tokens=4096 monitors.model:gemini-3.5.reasoning_effort=medium
 """
 
 from __future__ import annotations
@@ -31,15 +34,21 @@ import tinker
 
 from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
-from monitordecorrelation.experiment_config import resolve_think_budget
+from monitordecorrelation.experiment_config import apply_overrides, load_config, resolve_think_budget
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
-from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
+from monitordecorrelation.rl.renderers import make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
+
+# The only config fields this script reads. --set on anything else (policy, seed, n_steps, …) would be
+# silently ignored, so apply_overrides refuses it; the policy and seed are the --model / --seed flags.
+READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
+READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
+                       "reasoning_max_tokens", "reasoning_effort", "binary_judge"}
 
 
 def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -83,14 +92,24 @@ def main() -> None:
     ap.add_argument("--effort", type=float, default=None,
                     help="TML thinking effort (default: the config's thinking_effort)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
+                    help="override config fields, as in run_experiment.py (e.g. --set max_tokens=4096 "
+                         "monitors.model:gemini-3.5.reasoning_effort=medium); only fields this script "
+                         f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}")
     args = ap.parse_args()
 
-    cfg = json.loads(Path(args.config).read_text())
+    if args.effort is not None and any(kv.partition("=")[0] == "thinking_effort" for kv in args.set):
+        raise SystemExit("--effort and --set thinking_effort=… both given; pass one")
+    cfg = apply_overrides(load_config(args.config), args.set, allowed_fields=READ_FIELDS,
+                          allowed_monitor_fields=READ_MONITOR_FIELDS,
+                          not_allowed_hint="Use --model / --seed for the policy / seed.").model_dump()
     # Match the RL runs: the policy must be sampled the way training samples it.
     if args.effort is None:
-        args.effort = cfg.get("thinking_effort") or DEFAULT_THINKING_EFFORT
-    opts = cfg.get("env_options", {})
+        args.effort = cfg["thinking_effort"]
+    opts = cfg["env_options"]
     specs = cfg["monitors"]
+    if probes := [m["name"] for m in specs if m["kind"] != "cot"]:
+        raise SystemExit(f"this script evaluates CoT/output judges only; the config has probe(s) {probes}")
     if args.only:
         want = {s.strip() for s in args.only.split(",")}
         unknown = want - {m["name"] for m in specs}
@@ -143,9 +162,9 @@ def main() -> None:
     with MonitorScorer([_Ticking(j, judge_bar) for j in judges], args.workers,
                        skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
-                                max_tokens=cfg.get("max_tokens", 3072), temperature=1.0,
-                                seed=args.seed, think_budget=resolve_think_budget(cfg.get("think_budget", "auto"), env),
-                                answer_tokens=cfg.get("answer_tokens", 512),
+                                max_tokens=cfg["max_tokens"], temperature=1.0,
+                                seed=args.seed, think_budget=resolve_think_budget(cfg["think_budget"], env),
+                                answer_tokens=cfg["answer_tokens"],
                                 step_workers=args.workers, on_rollout=on_rollout)
         wall_s = time.time() - t0
         results = [env.score(r) for r in rollouts]
@@ -195,7 +214,8 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "model": args.model, "policy": args.model, "experiment": "tv_monitor_baseline",
-        "config_path": args.config, "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
+        "config_path": args.config, "config_overrides": args.set,
+        "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
         "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
         "held_out": [{"kind": "cot", **m} for m in specs],

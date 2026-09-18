@@ -253,3 +253,46 @@ def test_monitor_overrides_are_validated_like_any_other():
     # a wildcard that would switch reasoning on for the gemini-2.5 judges is refused, by name
     with pytest.raises(ValidationError, match="g25_out"):
         run.apply_overrides(_gemini_cfg(), ["monitors.*.reasoning_effort=medium"])
+
+
+def test_malformed_or_conflicting_set_items_fail_loudly():
+    """Nothing passed to --set may be silently dropped: no '=', an empty key, a key given twice, or one
+    monitor field set by two selectors (one value would silently lose) are all SystemExit."""
+    from monitordecorrelation.experiment_config import apply_overrides
+
+    for bad, msg in [
+        (["n_steps"], "not of the form key=value"),
+        (["=3"], "not of the form key=value"),
+        (["n_steps=3", "n_steps=4"], "more than once"),
+        (["monitors.g35_out.threshold=0.6", "monitors.g35_out.threshold=0.7"], "only one can win"),
+        (["monitors.*.threshold=0.6", "monitors.g35_out.threshold=0.7"], "only one can win"),
+        (["monitors.threshold=0.6"], "not a monitor override"),
+        (["monitors..threshold=0.6"], "not a monitor override"),
+    ]:
+        with pytest.raises(SystemExit, match=msg):
+            apply_overrides(_gemini_cfg(), bad)
+    # an empty value is null, not dropped: a required string field then fails validation
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        apply_overrides(_gemini_cfg(), ["run_name="])
+    # distinct fields on the same monitor, or the same field on different monitors, are fine
+    cfg = apply_overrides(_gemini_cfg(), ["monitors.g35_out.threshold=0.6",
+                                          "monitors.g35_cot.threshold=0.7",
+                                          "monitors.g35_out.reasoning_effort=high"])
+    assert [m.threshold for m in cfg.monitors] == [0.5, 0.6, 0.7]
+
+
+def test_set_refuses_fields_the_script_never_reads():
+    """An eval that reads only part of the config must refuse a --set it would silently ignore."""
+    from monitordecorrelation.experiment_config import apply_overrides
+
+    kw = dict(allowed_fields={"max_tokens", "monitors"}, allowed_monitor_fields={"threshold"},
+              not_allowed_hint="Use --model.")
+    assert apply_overrides(_gemini_cfg(), ["max_tokens=99", "monitors.*.threshold=0.9"], **kw).max_tokens == 99
+    with pytest.raises(SystemExit, match=r"never reads \['policy'\].*Use --model"):
+        apply_overrides(_gemini_cfg(), ["policy=foo"], **kw)
+    with pytest.raises(SystemExit, match="never reads the monitor field 'role'"):
+        apply_overrides(_gemini_cfg(), ["monitors.g35_out.role=held_out"], **kw)
+    with pytest.raises(SystemExit, match="unknown config field"):  # typos still read as typos
+        apply_overrides(_gemini_cfg(), ["max_tokns=99"], **kw)
