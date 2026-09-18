@@ -59,16 +59,19 @@ from urllib.parse import parse_qs, urlparse
 # run discovery
 # --------------------------------------------------------------------------------------------
 
-# A directory is a RUN if it holds any of these. Batch directories (mbpp_matrix_*/) hold only
-# sub-runs and are used purely as a grouping label.
-RUN_MARKERS = ("run_info.json", "metrics.jsonl", "eval_metrics.jsonl", "config.json")
-
 # rollout dumps, in the order the UI offers them
 SOURCES = {
     "train": ("rollouts.jsonl", "train rollouts (sampled fraction, train-against monitors only)"),
     "eval": ("eval_rollouts.jsonl", "eval rollouts (fixed held-out set, ALL monitors)"),
     "eval_slim": ("eval_rollouts_slim.jsonl", "eval rollouts, slim (labels + scores, no text)"),
 }
+
+# A directory (at any depth under --runs-dir) is a RUN if it holds any of these — including a bare
+# rollout dump with no metrics/config (e.g. runs copied back with only their rollouts). Batch
+# directories (mbpp_matrix_*/) hold only sub-runs and are used purely as a grouping label.
+RUN_MARKERS = ("run_info.json", "metrics.jsonl", "eval_metrics.jsonl", "config.json") + tuple(
+    f for f, _ in SOURCES.values()
+)
 
 SKIP_DIRS = {"__pycache__", ".git", ".cache"}
 
