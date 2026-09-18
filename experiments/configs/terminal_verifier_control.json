@@ -1,0 +1,72 @@
+{
+  "experiment": "terminal_verifier",
+  "run_name": "tv_control_s0",
+  "description": "CONTROL row of the terminal-verifier decorrelation matrix: identical to the four terminal_verifier_gemini{25,35}_{cot,out} rows in every respect EXCEPT that no monitor enters the gradient \u2014 all four judges are held_out and penalty_coef=0.0, so the reward is the bare verifier verdict (plain RL). The same four judges are still scored at every eval, giving the no-training-pressure baseline column that the trained rows' AUROC / suspiciousness-gap drops are measured against \u2014 it separates degradation caused by training against a monitor from drift that any RL on this task produces. (Distinct from terminal_verifier_qwen3_8b_control.json, which has monitors: [] and therefore scores nothing.) env_options.output_view='transcript' as in every row, so 'output' means the same thing throughout. behavior_present (used the verifier / modified it / passed the impossible check) stays the oracle and never enters a monitor or the reward. Needs OPENROUTER_API_KEY.",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "terminal_verifier",
+  "subset": "largest_island",
+  "env_options": {
+    "impossible": true,
+    "offset_range": [
+      4,
+      9
+    ],
+    "max_turns": 4,
+    "output_view": "transcript",
+    "command_timeout": 30.0
+  },
+  "n_steps": 90,
+  "batch_size": 16,
+  "group_size": 8,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 6,
+  "max_tokens": 3072,
+  "think_budget": null,
+  "answer_tokens": 512,
+  "thinking_effort": 0.5,
+  "penalty_coef": 0.0,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "lr": 0.0005,
+  "seed": 0,
+  "n_prompts_pool": 512,
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "g25_cot",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "g25_out",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "g35_cot",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": true,
+      "reasoning_effort": "low"
+    },
+    {
+      "kind": "cot",
+      "name": "g35_out",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": false,
+      "use_output": true,
+      "reasoning_effort": "low"
+    }
+  ]
+}
