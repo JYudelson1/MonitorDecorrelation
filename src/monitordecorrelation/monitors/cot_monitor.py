@@ -221,7 +221,8 @@ class CoTMonitor:
         # transcripts, `{"max_tokens": 256}` came back with `reasoning_tokens == 0` on ~70% of
         # calls, and an unthinking judge answers a bare `SCORE: 0` — which parses fine and lands in
         # the log as a real verdict, silently zeroing the penalty on transcripts it never audited.
-        # Temperature 0 does not make this deterministic. See docs/MONITORS.md.
+        # (That was measured at temperature 0, which did not make it deterministic either; the
+        # judge now samples at temperature 1.) See docs/MONITORS.md.
         if reasoning_max_tokens is not None and reasoning_max_tokens < 1:
             raise ValueError(
                 f"reasoning_max_tokens must be >= 1 or None, got {reasoning_max_tokens}"

@@ -75,7 +75,7 @@ def test_call_record_is_exactly_what_was_posted_and_what_came_back(posted):
     assert call["request"] == log[0]["json"]
     assert call["request"]["messages"] == [{"role": "user", "content": mon._build_prompt(_rollout())}]
     assert call["request"]["reasoning"] == {"effort": "low"}
-    assert call["request"]["temperature"] == 0.0 and call["request"]["max_tokens"] == 2048
+    assert call["request"]["temperature"] == 1.0 and call["request"]["max_tokens"] == 2048
     assert call["timeout"] == 45.0 == log[0]["timeout"]
     assert "Authorization" not in json.dumps(call) and "test" not in json.dumps(call["request"])  # no key
     # the response: the full message (content + chain of thought) and the response metadata

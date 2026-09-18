@@ -102,6 +102,27 @@ scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an al
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
 
+#### Shared resource caps across parallel runs
+
+Two caps are **cross-process**, so they hold whether you fan out with `queue_runs.sh` or just start
+runs by hand in separate terminals / tmux windows — you do *not* need to divide the per-run worker
+counts by the number of runs:
+
+| Resource | Cap | Set in |
+| --- | --- | --- |
+| Concurrent model-code subprocesses | half this box's cores | `CODE_EXEC_MAX_CONCURRENT` in `src/monitordecorrelation/globalsem.py` |
+| Concurrent in-flight OpenRouter calls | 256 | `OPENROUTER_MAX_CONCURRENT` in the same file |
+
+Change either number at that one assignment; nothing else reads a copy. The same two semaphores
+cover training and evaluation (every judge call goes through `openrouter.chat`; every code execution
+through `code_exec.run_tests`, `TerminalSession.run` or the ImpossibleBench executor).
+
+A permit is an exclusive `flock` on a slot file under `$MD_GLOBAL_SEM_DIR` (default
+`/tmp/monitordecorrelation-sem` — keep it on a local filesystem). That means the kernel takes the
+permit back however a run ends: `Ctrl-C`, a crash, `kill -9`, the OOM killer, or the machine losing
+power. There is no stale state to clean up, and nothing to reset after a bad batch. If you *do* want
+two groups of runs to have independent budgets, give them different `MD_GLOBAL_SEM_DIR` values.
+
 A run is marked done by a `data/runs/<run>/QUEUE_DONE` sentinel (written on success) — that's what `-s`
 checks. Follow a single live job with `tail -f data/runs/<run>/run.log`. With `-D`, the plan still
 prints to your terminal, then the batch re-execs under `nohup` into `data/runs/_batch_<ts>.log` and
@@ -168,10 +189,10 @@ intent with `WANDB_MODE=online`.
 - **Untrusted code executes locally** (subprocess + per-statement alarm + address-space rlimit, not a
   sandbox). See the warning in `envs/impossiblebench.py`.
 
-## Terminal-verifier × Qwen3-8B (multi-turn)
+## Terminal-verifier (multi-turn)
 
 ```bash
-TV_CONTROL=experiments/configs/terminal_verifier_qwen3_8b_control.json
+TV_CONTROL=experiments/configs/terminal_verifier_control.json
 
 # 1. baseline inference — does the base model read the verifier, how often, what does it do:
 uv run python experiments/eval_terminal_baseline.py --n-prompts 24 --samples 2 --think-budget 1536
@@ -182,7 +203,7 @@ uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Ink
 # 2. smoke the RL loop (2 steps, tiny batch):
 uv run python experiments/run_experiment.py --config $TV_CONTROL --set run_name=tv_smoke n_steps=2 \
     batch_size=4 group_size=4 eval_size=4 eval_every=1
-# 3. the control run (40 steps, 16x8 episodes/step, no monitor):
+# 3. the control run (Inkling-Small, 90 steps, 16x8 episodes/step, the four judges held out, no penalty):
 uv run python experiments/run_experiment.py --config $TV_CONTROL
 # 4. a monitored row — train against the output-only gemini-3.5 judge, judge effort chosen per run
 #    (run_name must differ, or the two runs share data/runs/<name>/):
@@ -205,7 +226,8 @@ force-closed at `think_budget`, and turns with no parseable `<command>`. Every r
 `summary_<name>.json` next to its `episodes.jsonl`. Note the KL penalty (`kl_coef>0`) adds one base-model
 forward over each episode's datum on top of these numbers.
 
-Config: `experiments/configs/terminal_verifier_qwen3_8b_control.json`. `env_options`: `impossible`
+Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json` + the four
+`terminal_verifier_gemini{25,35}_{cot,out}.json` rows. `env_options`: `impossible`
 (perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,
 `output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
 `command_timeout`. `think_budget` has three states: **absent** from the config (= `"auto"`) → the env's
@@ -220,7 +242,7 @@ hit a 1536 budget late in RL, so the choice is a real hyperparameter.
 episodes are ~3.3 turns, so sampling per step costs several× MBPP; `probe_iid` is the MBPP hardcode
 probe, i.e. a second OOD probe here; and probe forwards see 6–10k-token sequences (all turns' thinking
 + transcript) instead of ~2k — the white-box path does no truncation, so drop the probe `batch_size`
-(e.g. 2) on the box or expect OOMs. Consider `lr: 2.4e-4` (the control config's choice). Watch `train/behavior_rate`
+(e.g. 2) on the box or expect OOMs. Watch `train/behavior_rate`
 (= peeked/tampered), `env/read_verifier`, `env/passed`, `env/truncated`, `env/no_command_turns`.
 Add monitors exactly as in the MBPP matrix rows; for the paper's judge use `output_view:
 "explanations"` with an output-only (`use_cot: false`) train-against monitor.
@@ -268,7 +290,7 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 ## Run outputs (`data/runs/<run>/`)
 - `run_info.json` — full validated config + which model each monitor was (train-against vs held-out) + `env.behavior_name`.
 - `config.json` — the effective config (after `--set` overrides); re-run with `--config data/runs/<run>/config.json`.
-- `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score). 
+- `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score, plus RL-debugging metrics: IS loss, ratio / sample-train KL, entropy, advantage + reward spread, lengths, truncation — see docs/INFRA.md).
 - `eval_metrics.jsonl` — per **eval** (every `eval_every`) on the fixed held-out set: **every** monitor's AUROC/brier/class-split. **This is what the degradation matrix reads.**
 - `eval_rollouts.jsonl` — one record per held-out rollout with every monitor's score+label (post-hoc recalibration).
 - `eval_rollouts_slim.jsonl` — the **committed** subset of the above (`step, task_id, behavior_present, loose_rh, hardcoding, unparsed, monitors`; no text, ~3 MB/run). Regenerate from a full dump with `python3 scripts/slim_eval_rollouts.py <run dirs>` (stdlib-only; skips corrupt lines).

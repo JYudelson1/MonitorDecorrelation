@@ -9,6 +9,10 @@ Policy (see ``chat``): retry **indefinitely** with capped exponential backoff on
 API error; fail fast only on the ``_FATAL_STATUS`` config errors, raising with the provider's
 *full* explanation attached (never truncated — a clipped body is exactly what made the last such
 failure undiagnosable from the run log).
+
+Every attempt takes a permit from the cross-process OpenRouter semaphore
+(``globalsem.openrouter_slot``), so the in-flight cap holds across all runs on the box, not
+just this process — that is what keeps a fan-out of parallel runs from 402-storming.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ import time
 from dataclasses import dataclass
 
 import httpx
+
+from monitordecorrelation.globalsem import openrouter_slot
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -41,9 +47,10 @@ _RETRYABLE_402_REASON = "in_flight_budget_exhausted"
 #   "stop"   — the judge terminated normally.
 #   "length" — it hit max_tokens. Read it anyway: with reasoning off (or bounded) the verdict lives
 #              in the content channel, so a truncated reply either already carries its `SCORE:` line
-#              or never will. Retrying cannot help — the judge is called at temperature 0, so every
-#              retry returns the identical truncated text (measured: 4/4 byte-identical replays on
-#              gemini-2.5-flash-lite), which used to spin a run forever inside one eval.
+#              or never will. Retrying does not help — back when the judge was called at
+#              temperature 0 every retry returned the identical truncated text (measured: 4/4
+#              byte-identical replays on gemini-2.5-flash-lite), which used to spin a run forever
+#              inside one eval; at temperature 1 a retry would just be a fresh, costlier sample.
 # Anything else ("content_filter", "error", …) means the judge never got to answer → API error.
 # NB an EMPTY body under "length" is still an API error (handled below): that would mean reasoning
 # consumed the whole completion budget, which cannot happen while reasoning is disabled or budgeted — it is a
@@ -155,12 +162,16 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
         attempt += 1
         err: str
         try:
-            resp = httpx.post(
-                _OPENROUTER_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=body,
-                timeout=timeout,
-            )
+            # The permit covers ONE attempt, not the retry-forever loop around it: its hold time is
+            # then bounded by `timeout`, so a wedged judge can never starve the other runs sharing
+            # the box. The backoff sleep below happens with the permit released.
+            with openrouter_slot():
+                resp = httpx.post(
+                    _OPENROUTER_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=body,
+                    timeout=timeout,
+                )
         except (httpx.TransportError, httpx.TimeoutException) as e:
             err = f"{type(e).__name__}: {e}"  # connection/timeout -> retry
         else:

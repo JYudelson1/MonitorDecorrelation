@@ -149,8 +149,8 @@ def test_reasoning_effort_is_configuration(monkeypatch):
 
 
 def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monkeypatch):
-    """finish_reason='length' with output is NOT an API error: the judge is called at temperature 0,
-    so a retry returns the identical truncated text and the run spins forever. Read what it said."""
+    """finish_reason='length' with output is NOT an API error: retrying cannot fix it (at temperature
+    0 a retry returned the identical truncated text and the run spun forever). Read what it said."""
     calls = _responses(monkeypatch, [_ok("thinking out loud… SCORE: 42", finish="length")])
     assert monitor._call("p").text == "thinking out loud… SCORE: 42"
     assert calls["n"] == 1  # no retry

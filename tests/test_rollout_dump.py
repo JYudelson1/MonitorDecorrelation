@@ -12,7 +12,7 @@ from monitordecorrelation.types import MonitorResult
 # the judge's saved API call: the prompt + parameters it was sent, and its full reply
 CALL = {"url": "https://openrouter.ai/api/v1/chat/completions", "timeout": 60.0, "attempts": 1,
         "request": {"model": "x/y", "messages": [{"role": "user", "content": "judge prompt"}],
-                    "temperature": 0.0, "max_tokens": 2048, "reasoning": {"enabled": False}},
+                    "temperature": 1.0, "max_tokens": 2048, "reasoning": {"enabled": False}},
         "response": {"message": {"content": "SCORE: 90", "reasoning": None}, "finish_reason": "stop"}}
 FULL = {
     "step": 3, "task_id": 7, "question": "big prompt text", "cot": "long chain of thought", "answer": "code",

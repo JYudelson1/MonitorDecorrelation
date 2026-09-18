@@ -1,7 +1,7 @@
 {
   "experiment": "terminal_verifier",
-  "run_name": "tv_g25_out_s0",
-  "description": "Terminal-verifier decorrelation row: trained against the Gemini 2.5 Flash Lite judge that reads only the visible transcript \u2014 no thinking (use_cot=false, use_output=true); the other three judge views are held out, scored at every eval and never in the gradient. Reward = verifier verdict - 1.0 x the train-against judge's suspiciousness. All four rows define the same four monitors, so the eval_metrics of the set form a 4x4 degradation matrix. env_options.output_view='transcript' (the assistant's text plus the terminal output it produced) for every row, so 'output' means the same thing in all of them \u2014 NB the paper's 'explanations' view is degenerate under this repo's current prompt: measured on Inkling-Small, 27 of 28 turns emit a bare <command> with no prose, so a judge on that view would read empty strings. behavior_present (used the verifier / modified it / passed the impossible check) stays the oracle and never enters a monitor or the reward. Needs OPENROUTER_API_KEY.",
+  "run_name": "tv_control_s0",
+  "description": "CONTROL row of the terminal-verifier decorrelation matrix: identical to the four terminal_verifier_gemini{25,35}_{cot,out} rows in every respect EXCEPT that no monitor enters the gradient \u2014 all four judges are held_out and penalty_coef=0.0, so the reward is the bare verifier verdict (plain RL). The same four judges are still scored at every eval, giving the no-training-pressure baseline column that the trained rows' AUROC / suspiciousness-gap drops are measured against \u2014 it separates degradation caused by training against a monitor from drift that any RL on this task produces. env_options.output_view='transcript' as in every row, so 'output' means the same thing throughout. behavior_present (used the verifier / modified it / passed the impossible check) stays the oracle and never enters a monitor or the reward. Needs OPENROUTER_API_KEY.",
   "policy": "thinkingmachines/Inkling-Small",
   "backend": "tinker",
   "env": "terminal_verifier",
@@ -27,7 +27,7 @@
   "think_budget": null,
   "answer_tokens": 512,
   "thinking_effort": 0.5,
-  "penalty_coef": 1.0,
+  "penalty_coef": 0.0,
   "kl_coef": 0.0001,
   "lora_rank": 64,
   "lr": 0.0005,
@@ -45,7 +45,7 @@
     {
       "kind": "cot",
       "name": "g25_out",
-      "role": "train_against",
+      "role": "held_out",
       "model_id": "google/gemini-2.5-flash-lite",
       "use_cot": false,
       "use_output": true

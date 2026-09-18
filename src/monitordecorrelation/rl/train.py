@@ -1,7 +1,8 @@
 """GRPO training loop for the decorrelation experiments.
 
-reward = task_reward − penalty_coef · mean(train_against monitor scores). Held-out monitors are
-scored every step but never enter the reward. The ground-truth behavior rate is logged as the
+reward = task_reward − penalty_coef · mean(train_against monitor scores), unless the env sets
+``EnvResult.reward_override`` (then that is the reward; monitors are still scored and logged). Held-out
+monitors are scored every step but never enter the reward. The ground-truth behavior rate is logged as the
 primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
 """
 
@@ -50,6 +51,33 @@ def _label_metrics(prefix: str, scores: list[float], preds: list[bool], labels: 
         f"{prefix}/mean_score_present": _mean_for_class(scores, labels, True),
         f"{prefix}/mean_score_absent": _mean_for_class(scores, labels, False),
     }
+
+
+def _rollout_metrics(rollouts: Sequence[Rollout], rewards: Sequence[float], group_size: int) -> dict[str, float]:
+    """Batch-shape diagnostics for RL debugging: the reward distribution (incl. how much of it varies
+    WITHIN a GRPO group — only that part produces a gradient), how long completions are, and how
+    often sampling hit the token limit (truncation → length collapse / blow-up shows up here first).
+    For multi-turn episodes ``token_ids`` is every sampled token of the episode, and ``stop_reason``
+    is the last turn's."""
+    out: dict[str, float] = {}
+    if rewards:
+        arr = np.asarray(rewards, dtype=float)
+        out["reward/total_std"] = float(arr.std())
+        out["reward/total_min"] = float(arr.min())
+        out["reward/total_max"] = float(arr.max())
+        if group_size > 0 and len(arr) % group_size == 0:
+            grp = arr.reshape(-1, group_size)
+            out["reward/group_std_mean"] = float(grp.std(axis=1).mean())
+            out["reward/frac_constant_groups"] = float((grp.std(axis=1) == 0).mean())
+    lens = [len(r.token_ids) for r in rollouts if r.token_ids is not None]
+    if lens:
+        out["rollout/output_tokens_mean"] = float(np.mean(lens))
+        out["rollout/output_tokens_max"] = float(np.max(lens))
+        out["rollout/output_tokens_min"] = float(np.min(lens))
+    stops = [(r.meta or {}).get("stop_reason") for r in rollouts]
+    if any(s is not None for s in stops):
+        out["rollout/truncated_rate"] = mean(float(s is not None and s != "stop") for s in stops)
+    return out
 
 
 def _length_metrics(results: Sequence, env) -> dict[str, float]:
@@ -516,7 +544,12 @@ def run_grpo(
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac
-        rewards = [er.task_reward - pen_coef * pen for er, pen in zip(env_results, penalties)]
+        # An env-set ``reward_override`` (e.g. a terminal episode truncated by max_tokens → -1) IS the
+        # reward: the monitor penalty is not applied to it, though its monitor scores are still logged.
+        applied = [0.0 if er.reward_override is not None else pen_coef * pen
+                   for er, pen in zip(env_results, penalties)]
+        rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
+                   for er, ap in zip(env_results, applied)]
         t2 = time.perf_counter()
         # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
         # layer (advantage centering, mask/datum assembly, KL penalty, forward_backward) via cookbook
@@ -544,8 +577,7 @@ def run_grpo(
             mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
             if gt_train_loose is not None:
                 mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, gt_train_loose))
-        loss_keys = [k for k in step_metrics if "loss" in k.lower() and "logprob" not in k.lower()]
-        loss_val = step_metrics[loss_keys[0]] if loss_keys else float("nan")
+        loss_val = step_metrics.get("loss", float("nan"))
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
         row = {
             "step": step,
@@ -557,8 +589,10 @@ def run_grpo(
             # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ:
             "reward/monitor_suspiciousness_mean": mean(penalties),
             "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
-            "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
+            "reward/penalty_mean": mean(applied),  # APPLIED penalty = λ · suspiciousness (0 where overridden)
+            "reward/override_rate": mean(float(er.reward_override is not None) for er in env_results),
             "reward/total_mean": mean(rewards),
+            **_rollout_metrics(rollouts, rewards, cfg.group_size),  # reward spread, lengths, truncation
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(env_results, env),     # env-declared summary rates
             "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
@@ -576,8 +610,11 @@ def run_grpo(
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
-        # cookbook train_step surfaces no loss metric; show mean training logprob as the proxy signal.
+        # The IS loss (tinker's loss:sum, recomputed in rl/grpo.optim_metrics); fall back to the mean
+        # training logprob for a backend that reports no loss.
         train_note = f"loss={loss_val:.1f}" if loss_val == loss_val else f"logp={logp_mean:.2f}"
+        if "entropy" in step_metrics:
+            train_note += f" ent={step_metrics['entropy']:.2f}"
         _log(
             f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
             f"penalty={row['reward/penalty_mean']:.2f} {train_note}{kl_note} "
@@ -599,6 +636,7 @@ def run_grpo(
                         "answer": r.output,
                         "env": {
                             "task_reward": er.task_reward,
+                            "reward_override": er.reward_override,
                             "behavior_present": er.behavior_present,
                             "choice": er.meta.get("choice"),
                             "unparsed": er.meta.get("unparsed"),

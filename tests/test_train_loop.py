@@ -135,3 +135,47 @@ def test_run_grpo_aborts_when_a_monitor_cannot_score():
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
+
+
+class _TruncatingEnv(_FakeEnv):
+    """Alternates truncated (reward_override=-1) and normal rollouts, like the terminal env."""
+
+    def __init__(self):
+        self._n = 0
+
+    def score(self, rollout):
+        self._n += 1
+        over = -1.0 if self._n % 2 else None
+        return EnvResult(task_reward=0.5, behavior_present=False, meta={"unparsed": False},
+                         reward_override=over)
+
+
+def test_run_grpo_reward_override_bypasses_monitor_penalty():
+    """A rollout with ``reward_override`` gets exactly that reward (no λ·suspiciousness), yet its
+    train-against monitor score is still computed and saved."""
+    run_dir = Path("data/runs/smoke_test_loop_override")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_override", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, _TruncatingEnv(), _FakeBackend(), train_against=[_FakeMonitor("ta")], held_out=[])
+        rows = [json.loads(l) for l in (run_dir / "rollouts.jsonl").open() if l.strip()]
+        assert len(rows) == 4
+        for r in rows:
+            assert r["monitors"]["ta"]["score"] == pytest.approx(0.3)  # scored either way
+            if r["env"]["reward_override"] is not None:
+                assert r["reward"] == -1.0
+            else:
+                assert r["reward"] == pytest.approx(0.5 - 1.0 * 0.3)
+        m = json.loads((run_dir / "metrics.jsonl").read_text().splitlines()[0])
+        assert m["reward/override_rate"] == 0.5
+        assert m["reward/penalty_mean"] == pytest.approx(0.15)          # applied only to the 2 normal ones
+        assert m["reward/monitor_suspiciousness_mean"] == pytest.approx(0.3)  # over all 4
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)

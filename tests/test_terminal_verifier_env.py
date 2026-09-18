@@ -226,6 +226,19 @@ def test_no_command_turn_gets_the_nudge_and_truncation_ends_the_episode():
     assert m["n_commands"] == 0
     r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
     assert r.meta["unparsed"] and r.task_reward == 0.0 and not r.behavior_present
+    assert r.reward_override == -1.0  # fixed reward, independent of any monitor's score
+
+
+def test_untruncated_episode_has_no_reward_override():
+    env = _env(truncation_reward=-2.5)
+    st = env.start(env._to_prompt(ITEM))
+    env.step(st, "", _turn('python verifier.py "4"'))
+    m = env.finish(st).meta
+    r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
+    assert r.reward_override is None
+    m = {**m, "truncated": True}
+    r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
+    assert r.reward_override == -2.5
 
 
 def test_output_views():
