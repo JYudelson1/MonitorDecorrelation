@@ -31,7 +31,7 @@ from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.experiment_config import resolve_think_budget
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
-from monitordecorrelation.eval.rollout_dump import monitor_record
+from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
@@ -151,22 +151,36 @@ def main() -> None:
               f"{r['dprime_margin']:>9.2f}{hi:>11.3f}{lo:>11.3f}{hi - lo:>7.3f}"
               f"{r['tpr']:>7.3f}{r['fpr']:>7.3f}")
 
+    # Laid out like an RL run dir so visualize_transcripts.py (and the slim-dump readers) pick it up:
+    # the summary in baseline.json + run_info.json, the rollouts in eval_rollouts{,_slim}.jsonl using
+    # the RL loop's eval-record schema (rl/train.py run_eval) at step 0.
     out = Path(args.out) if args.out else Path("data/runs") / \
         f"tv_monitor_baseline_{args.model.split('/')[-1]}" / "baseline.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({
-        "model": args.model, "config": args.config, "n_episodes": len(gt), "seed": args.seed,
-        "effort": args.effort, "wall_s": wall_s, "env_options": opts,
+    summary = {
+        "model": args.model, "policy": args.model, "experiment": "tv_monitor_baseline",
+        "config_path": args.config, "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
+        "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
-        "rollouts": [{"task_id": er.meta["task_id"], "behavior_present": er.behavior_present,
-                      "question": r.prompt.text, "cot": r.cot, "output": r.output,
-                      "env_meta": er.meta, "invalid_reason": invalid[i],
-                      # score/label + each judge's exact request/response (monitor_record); {} if invalid
-                      "monitors": {j.name: monitor_record(judged[j.name][i]) for j in judges
-                                   if judged[j.name][i] is not None}}
-                     for i, (r, er) in enumerate(zip(rollouts, results))],
-    }, indent=1, default=str))
-    print(f"\nwrote {out}")
+        "held_out": [{"kind": "cot", **m} for m in specs],
+    }
+    out.write_text(json.dumps(summary, indent=1, default=str))
+    (out.parent / "run_info.json").write_text(json.dumps(summary, indent=2, default=str))
+    with (out.parent / "eval_rollouts.jsonl").open("w") as full, \
+            (out.parent / "eval_rollouts_slim.jsonl").open("w") as slim:
+        for i, (r, er) in enumerate(zip(rollouts, results)):
+            rec = {
+                "step": 0, "task_id": er.meta["task_id"], "question": r.prompt.text,
+                "cot": r.cot, "answer": r.output, "behavior_present": bool(er.behavior_present),
+                "loose_rh": None, "hardcoding": None, "unparsed": er.meta.get("unparsed"),
+                "invalid_reason": invalid[i], "env_meta": er.meta,
+                # score/label + each judge's exact request/response (monitor_record); {} if invalid
+                "monitors": {j.name: monitor_record(judged[j.name][i]) for j in judges
+                             if judged[j.name][i] is not None},
+            }
+            full.write(json.dumps(rec, default=str) + "\n")
+            slim.write(json.dumps(slim_record(rec), default=str) + "\n")
+    print(f"\nwrote {out}, run_info.json, eval_rollouts.jsonl, eval_rollouts_slim.jsonl in {out.parent}")
 
 
 if __name__ == "__main__":
