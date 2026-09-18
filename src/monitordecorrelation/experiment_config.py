@@ -115,7 +115,7 @@ class ExperimentConfig(_Strict):
     env_options: dict = Field(
         default_factory=dict,
         description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
-        "'exec_workers': 32}; terminal_verifier: {'impossible': true, 'offset_range': [1, 3], "
+        "'exec_workers': 32}; terminal_verifier: {'verifier_mode': 'corrupted', 'offset_range': [4, 9], "
         "'max_turns': 4, 'output_view': 'transcript', 'command_timeout': 30}); validated by the env "
         "constructor",
     )
@@ -267,6 +267,11 @@ def apply_overrides(
         --set monitors.model:gemini-3.5.reasoning_effort=medium # every gemini-3.5 judge
         --set monitors.*.threshold=0.6                          # all of them
 
+    A key of the form ``env_options.<key>`` sets one entry of the ``env_options`` dict, keeping the
+    rest (``--set env_options=…`` would replace the whole dict)::
+
+        --set env_options.verifier_mode=possible
+
     Nothing is ever silently dropped — each of these is a SystemExit naming the offending item: an
     item without ``=``, an unknown field, a selector that matches no monitor (a silently-ignored
     override is how you end up analysing a run that trained against something else), and the same
@@ -282,6 +287,7 @@ def apply_overrides(
         return cfg
     overrides: dict = {}
     monitor_overrides: list[tuple[str, str, str, object]] = []  # (the --set item, selector, field, value)
+    env_option_overrides: dict = {}
     for kv in sets:
         key, eq, value = kv.partition("=")
         if not eq or not key:
@@ -294,6 +300,13 @@ def apply_overrides(
                     "monitors.<name|model:substr|*>.<field>=<value>"
                 )
             monitor_overrides.append((kv, selector, field, _coerce(value)))
+        elif key.startswith("env_options."):
+            opt = key[len("env_options."):]
+            if not opt:
+                raise SystemExit(f"--set: {kv!r} names no option; expected env_options.<key>=<value>")
+            if opt in env_option_overrides:
+                raise SystemExit(f"--set: {key!r} is set more than once")
+            env_option_overrides[opt] = _coerce(value)
         else:
             if key in overrides:
                 raise SystemExit(f"--set: {key!r} is set more than once")
@@ -301,7 +314,10 @@ def apply_overrides(
     unknown = set(overrides) - set(type(cfg).model_fields)
     if unknown:
         raise SystemExit(f"--set: unknown config field(s) {sorted(unknown)}")
-    if allowed_fields is not None and (ignored := set(overrides) - allowed_fields):
+    if env_option_overrides and "env_options" in overrides:
+        raise SystemExit("--set: env_options=… and env_options.<key>=… both given; pass one form")
+    touched = set(overrides) | ({"env_options"} if env_option_overrides else set())
+    if allowed_fields is not None and (ignored := touched - allowed_fields):
         raise SystemExit(
             f"--set: this script never reads {sorted(ignored)}, so the override would be silently "
             f"ignored. Overridable here: {sorted(allowed_fields)}. {not_allowed_hint}".rstrip()
@@ -336,6 +352,7 @@ def apply_overrides(
                 )
             set_by[mon["name"], field] = kv
             mon[field] = value
+    data["env_options"] = {**data["env_options"], **env_option_overrides}
     return type(cfg).model_validate({**data, **overrides})
 
 

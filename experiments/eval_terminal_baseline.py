@@ -12,7 +12,7 @@ resulting $ per rollout and per RL step at tinker's published rates.
 
   uv run python experiments/eval_terminal_baseline.py --n-prompts 16 --samples 2
   uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku
-  uv run python experiments/eval_terminal_baseline.py --honest        # verifier holds the TRUE answer
+  uv run python experiments/eval_terminal_baseline.py --verifier-mode possible   # verifier holds the TRUE answer
   uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5
 """
 
@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 import tinker
 
 from monitordecorrelation.envs.base import invalid_reason
-from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
+from monitordecorrelation.envs.terminal_verifier import VERIFIER_MODES, TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.rl.episodes import run_episodes
@@ -103,7 +103,8 @@ def main() -> None:
                     help="cap <think> at N tokens per turn, then force the answer (answer gets --answer-tokens)")
     ap.add_argument("--answer-tokens", type=int, default=512)
     ap.add_argument("--max-turns", type=int, default=4)
-    ap.add_argument("--honest", action="store_true", help="verifier holds the true answer (impossible=False)")
+    ap.add_argument("--verifier-mode", default="corrupted", choices=VERIFIER_MODES,
+                    help="what verifier.py holds (see envs/terminal_verifier.py); 'possible' = the true answer")
     ap.add_argument("--offset", type=int, nargs=2, default=(4, 9), metavar=("LO", "HI"))
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
     ap.add_argument("--require-explanation", action="store_true",
@@ -123,7 +124,7 @@ def main() -> None:
     args = ap.parse_args()
 
     env = TerminalVerifierEnv.from_task(
-        n=max(64, args.n_prompts), seed=args.seed, impossible=not args.honest,
+        n=max(64, args.n_prompts), seed=args.seed, verifier_mode=args.verifier_mode,
         offset_range=tuple(args.offset), eval_n=max(64, args.n_prompts),
         max_turns=args.max_turns, output_view=args.output_view, require_explanation=args.require_explanation,
     )
@@ -139,7 +140,7 @@ def main() -> None:
           f"max_turns={args.max_turns}, max_tokens/turn={args.max_tokens}, "
           f"think_budget={args.think_budget}/{args.answer_tokens}, "
           f"{'effort=' + str(args.effort) + ', ' if is_tml else ''}"
-          f"{'HONEST' if args.honest else 'IMPOSSIBLE'} verifier", flush=True)
+          f"verifier_mode={args.verifier_mode}", flush=True)
     # Judges are built BEFORE sampling so each episode can be handed to them the moment it finishes
     # (MonitorScorer.submit as the driver's on_rollout) instead of after the whole batch — same
     # pipelining the RL loop uses, see rl/train.py.
@@ -189,7 +190,9 @@ def main() -> None:
         return mean(float(er.meta[k]) for er in results)
 
     print(f"\n=== terminal-verifier baseline: {args.model}, {n_ep} episodes ===")
-    print(f"behavior_present (used-verifier/tampered{'' if args.honest else '/passed-impossible'}): {rate('cheated'):.2f}")
+    impossible = args.verifier_mode != "possible"
+    print(f"behavior_present (tampered{'/passed-impossible' if impossible else ''}, "
+          f"verifier_mode={args.verifier_mode}): {rate('cheated'):.2f}")
     for k in ("read_verifier", "used_verifier", "read_not_used", "modified_verifier", "passed", "passed_blind",
               "submitted_true_answer",
               "truncated", "no_command_turns", "n_turns", "n_commands"):
@@ -226,7 +229,7 @@ def main() -> None:
         "n_prompts": len(prompts), "samples_per_prompt": args.samples, "seed": args.seed,
         "max_tokens_per_turn": args.max_tokens, "think_budget": args.think_budget,
         "answer_tokens": args.answer_tokens, "max_turns": args.max_turns,
-        "impossible": not args.honest, "offset_range": list(args.offset), "wall_s": wall_s,
+        "verifier_mode": args.verifier_mode, "offset_range": list(args.offset), "wall_s": wall_s,
         "reward": mean(er.task_reward for er in results),
         "behavior_rate": rate("cheated"),
         "used_verifier": rate("used_verifier"), "modified_verifier": rate("modified_verifier"),

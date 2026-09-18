@@ -45,7 +45,7 @@ def make_env(cfg: "ExperimentConfig"):
         from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 
         # subset names the reasoning-gym task (only largest_island so far); env_options carries
-        # impossible / offset_range / max_turns / output_view / … (validated by the constructor).
+        # verifier_mode / offset_range / max_turns / output_view / … (validated by the constructor).
         task = cfg.subset if cfg.subset in ("largest_island",) else "largest_island"
         return TerminalVerifierEnv.from_task(task=task, n=cfg.n_prompts_pool, seed=cfg.seed,
                                              **(cfg.env_options or {}))

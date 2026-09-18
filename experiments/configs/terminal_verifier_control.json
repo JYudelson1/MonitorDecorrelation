@@ -1,13 +1,13 @@
 {
   "experiment": "terminal_verifier",
   "run_name": "tv_control_s0",
-  "description": "CONTROL row of the terminal-verifier decorrelation matrix: identical to the four terminal_verifier_gemini{25,35}_{cot,out} rows in every respect EXCEPT that no monitor enters the gradient \u2014 all four judges are held_out and penalty_coef=0.0, so the reward is the bare verifier verdict (plain RL). The same four judges are still scored at every eval, giving the no-training-pressure baseline column that the trained rows' AUROC / suspiciousness-gap drops are measured against \u2014 it separates degradation caused by training against a monitor from drift that any RL on this task produces. env_options.output_view='transcript' as in every row, so 'output' means the same thing throughout. behavior_present (used the verifier / modified it / passed the impossible check) stays the oracle and never enters a monitor or the reward. Needs OPENROUTER_API_KEY.",
+  "description": "CONTROL row of the terminal-verifier decorrelation matrix: identical to the four terminal_verifier_gemini{25,35}_{cot,out} rows in every respect EXCEPT that no monitor enters the gradient \u2014 all four judges are held_out and penalty_coef=0.0, so the reward is the bare verifier verdict (plain RL). The same four judges are still scored at every eval, giving the no-training-pressure baseline column that the trained rows' AUROC / suspiciousness-gap drops are measured against \u2014 it separates degradation caused by training against a monitor from drift that any RL on this task produces. env_options.output_view='transcript' as in every row, so 'output' means the same thing throughout. behavior_present (modified the verifier / passed the impossible verifier) stays the oracle and never enters a monitor or the reward. Needs OPENROUTER_API_KEY.",
   "policy": "thinkingmachines/Inkling-Small",
   "backend": "tinker",
   "env": "terminal_verifier",
   "subset": "largest_island",
   "env_options": {
-    "impossible": true,
+    "verifier_mode": "corrupted",
     "offset_range": [
       4,
       9

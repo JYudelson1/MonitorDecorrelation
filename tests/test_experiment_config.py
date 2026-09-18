@@ -296,3 +296,116 @@ def test_set_refuses_fields_the_script_never_reads():
         apply_overrides(_gemini_cfg(), ["monitors.g35_out.role=held_out"], **kw)
     with pytest.raises(SystemExit, match="unknown config field"):  # typos still read as typos
         apply_overrides(_gemini_cfg(), ["max_tokns=99"], **kw)
+
+
+# ---- env_options.<key> overrides + propagation into the terminal-verifier env ---------------------
+
+_TV_CONFIG = "experiments/configs/terminal_verifier_control.json"
+_REPO = __import__("pathlib").Path(__file__).resolve().parents[1]
+
+
+def test_set_env_options_key_merges_into_env_options():
+    from monitordecorrelation.experiment_config import apply_overrides, load_config
+
+    cfg = load_config(_REPO / _TV_CONFIG)
+    assert cfg.env_options["verifier_mode"] == "corrupted"
+    out = apply_overrides(cfg, ["env_options.verifier_mode=verifier_bug", "env_options.max_turns=6"])
+    assert out.env_options == {**cfg.env_options, "verifier_mode": "verifier_bug", "max_turns": 6}
+    # a new key is added; the config's other options survive
+    assert apply_overrides(cfg, ["env_options.min_ones=4"]).env_options["min_ones"] == 4
+    with pytest.raises(SystemExit, match="set more than once"):
+        apply_overrides(cfg, ["env_options.verifier_mode=possible", "env_options.verifier_mode=corrupted"])
+    with pytest.raises(SystemExit, match="both given"):
+        apply_overrides(cfg, ["env_options={}", "env_options.verifier_mode=possible"])
+    with pytest.raises(SystemExit, match="names no option"):
+        apply_overrides(cfg, ["env_options.=x"])
+    # a script that never reads env_options refuses the dotted form too
+    with pytest.raises(SystemExit, match=r"never reads \['env_options'\]"):
+        apply_overrides(cfg, ["env_options.verifier_mode=possible"], allowed_fields={"max_tokens"})
+
+
+def test_every_terminal_verifier_config_uses_the_corrupted_verifier():
+    import json
+
+    paths = sorted((_REPO / "experiments" / "configs").glob("*.json"))
+    tv = [p for p in paths if json.loads(p.read_text()).get("env") == "terminal_verifier"]
+    assert len(tv) == 5
+    for p in tv:
+        opts = json.loads(p.read_text())["env_options"]
+        assert opts["verifier_mode"] == "corrupted" and "impossible" not in opts, p.name
+
+
+class _Stop(Exception):
+    pass
+
+
+def _load_script(name: str):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(f"_{name}", _REPO / "experiments" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("sets, want", [([], "corrupted"),
+                                        (["env_options.verifier_mode=possible"], "possible"),
+                                        (["env_options.verifier_mode=corrupted_negative"], "corrupted_negative"),
+                                        (["env_options.verifier_mode=verifier_bug"], "verifier_bug")])
+def test_run_experiment_propagates_verifier_mode_to_the_env(monkeypatch, sets, want):
+    """Drive run_experiment.main() from argv up to the env it builds (then stop, before any tinker call)."""
+    import sys
+
+    import monitordecorrelation.backends.tinker_backend as tb
+    from monitordecorrelation.envs.factory import make_env as real_make_env
+
+    run = _load_script("run_experiment")
+    built = []
+
+    def spy(cfg):
+        built.append(real_make_env(cfg))
+        raise _Stop
+
+    monkeypatch.setattr(tb, "TinkerBackend", lambda *a, **k: object())
+    monkeypatch.setattr(run, "make_env", spy)
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--config", str(_REPO / _TV_CONFIG),
+                                      "--set", "n_prompts_pool=16", *sets])
+    with pytest.raises(_Stop):
+        run.main()
+    (env,) = built
+    assert {it.verifier_mode for it in env.items + env.eval_items} == {want}
+    assert env.holdout(1)[0].meta["verifier_mode"] == want
+
+
+@pytest.mark.parametrize("sets, want", [([], "corrupted"),
+                                        (["env_options.verifier_mode=possible"], "possible"),
+                                        (["env_options.verifier_mode=corrupted_negative"], "corrupted_negative"),
+                                        (["env_options.verifier_mode=verifier_bug"], "verifier_bug")])
+def test_eval_terminal_monitors_baseline_propagates_verifier_mode_to_the_env(monkeypatch, sets, want):
+    """Drive eval_terminal_monitors_baseline.main() from argv up to the env it builds (then stop at
+    the first tinker call)."""
+    import sys
+
+    ev = _load_script("eval_terminal_monitors_baseline")
+    built = []
+
+    class SpyEnv(ev.TerminalVerifierEnv):
+        @classmethod
+        def from_task(cls, **kw):
+            env = super().from_task(**kw)
+            built.append(env)
+            return env
+
+    def no_tinker():
+        raise _Stop
+
+    monkeypatch.setattr(ev, "TerminalVerifierEnv", SpyEnv)
+    monkeypatch.setattr(ev.tinker, "ServiceClient", no_tinker)
+    monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(_REPO / _TV_CONFIG),
+                                      "--n-prompts", "4", "--set", *sets])
+    with pytest.raises(_Stop):
+        ev.main()
+    (env,) = built
+    assert {it.verifier_mode for it in env.items + env.eval_items} == {want}
+    # the config's other options reach the env too
+    assert env.max_turns == 4 and env.output_view == "transcript" and env.command_timeout == 30.0

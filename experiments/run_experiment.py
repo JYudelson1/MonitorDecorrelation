@@ -75,7 +75,8 @@ def main() -> None:
     ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
                     help="override top-level config fields (e.g. --set run_name=quick n_steps=2), or a "
                          "per-monitor field via monitors.<name|model:substr|*>.<field> (e.g. --set "
-                         "monitors.model:gemini-3.5.reasoning_effort=medium)")
+                         "monitors.model:gemini-3.5.reasoning_effort=medium), or one env option via "
+                         "env_options.<key> (e.g. --set env_options.verifier_mode=possible)")
     args = ap.parse_args()
 
     cfg = apply_overrides(load_config(args.config), args.set)

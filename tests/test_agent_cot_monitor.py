@@ -69,7 +69,7 @@ def _episode(turns=_TURNS, output_view: str = "transcript", *, truncate_last: bo
              env_cls=_LegacyNudgeEnv) -> Rollout:
     """A real episode driven through the env (commands actually execute). Defaults to the legacy
     no-command-nudge shape, since ``_TURNS`` has a command-less turn mid-episode."""
-    items = make_island_items(2, 0, impossible=True, offset_range=(4, 9), min_ones=3, prefix="t")
+    items = make_island_items(2, 0, verifier_mode="corrupted", offset_range=(4, 9), min_ones=3, prefix="t")
     env = env_cls(items, eval_items=[], output_view=output_view, max_turns=6)
     prompt = env._to_prompt(items[0])
     state = env.start(prompt)
