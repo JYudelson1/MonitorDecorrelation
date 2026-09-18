@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from pathlib import Path
 from statistics import mean
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 import tinker
 
@@ -50,6 +52,23 @@ def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
         "n_pos": len(pos),
         "n_neg": len(neg),
     }
+
+
+class _Ticking:
+    """A judge that ticks a progress bar when each ``score`` call finishes (success or failure).
+    Everything else is forwarded, so ``MonitorScorer`` treats it exactly like the judge itself."""
+
+    def __init__(self, judge, bar) -> None:
+        self._judge, self._bar = judge, bar
+
+    def __getattr__(self, name: str):
+        return getattr(self._judge, name)
+
+    def score(self, rollout):
+        try:
+            return self._judge.score(rollout)
+        finally:
+            self._bar.update()
 
 
 def main() -> None:
@@ -106,16 +125,32 @@ def main() -> None:
           f"(PRE-RL, effort={args.effort}) | judges: {', '.join(j.name for j in judges)}", flush=True)
 
     t0 = time.time()
+    ep_bar = tqdm(total=n_ep, desc="episodes", unit="ep", position=0)
+    # The judge total grows as valid episodes arrive (invalid ones are never judged).
+    judge_bar = tqdm(total=0, desc="judge calls", unit="call", position=1)
+    bar_lock = threading.Lock()
+
+    def on_rollout(i: int, rollout) -> None:
+        if invalid_reason(env, rollout) is None:
+            with bar_lock:
+                judge_bar.total += len(judges)
+                judge_bar.refresh()
+        scorer.submit(i, rollout)
+        ep_bar.update()
+
     # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
-    with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
+    with MonitorScorer([_Ticking(j, judge_bar) for j in judges], args.workers,
+                       skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=cfg.get("max_tokens", 3072), temperature=1.0,
                                 seed=args.seed, think_budget=resolve_think_budget(cfg.get("think_budget", "auto"), env),
                                 answer_tokens=cfg.get("answer_tokens", 512),
-                                step_workers=args.workers, on_rollout=scorer.submit)
+                                step_workers=args.workers, on_rollout=on_rollout)
         wall_s = time.time() - t0
         results = [env.score(r) for r in rollouts]
         judged = scorer.collect(rollouts)
+    ep_bar.close()
+    judge_bar.close()
 
     gt = [er.behavior_present for er in results]
     invalid = [invalid_reason(env, r) for r in rollouts]
