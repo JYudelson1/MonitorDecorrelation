@@ -64,6 +64,31 @@ def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
     }
 
 
+def token_usage(rollouts, judged: dict, judges) -> dict:
+    """Totals of what the run consumed. The policy side comes from the episode driver's accounting
+    (``input_tokens`` counts every sampling call's full prefix, so multi-turn prefill is re-counted
+    per turn); the judge side sums the OpenRouter ``usage`` of each successful call — retried
+    failures aren't recorded, so they're missing here."""
+    policy = {k: sum(r.meta.get(k, 0) for r in rollouts)
+              for k in ("n_sampling_calls", "input_tokens", "output_tokens")}
+    out: dict = {"policy": policy, "judges": {}}
+    for j in judges:
+        usages = [res.meta["call"]["response"].get("usage") or {} for res in judged[j.name]
+                  if res is not None and (res.meta or {}).get("call")]
+        out["judges"][j.name] = {
+            "n_calls": len(usages),
+            "prompt_tokens": sum(u.get("prompt_tokens") or 0 for u in usages),
+            "completion_tokens": sum(u.get("completion_tokens") or 0 for u in usages),
+            "reasoning_tokens": sum((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+                                    for u in usages),
+            "cost_usd": sum(u.get("cost") or 0.0 for u in usages),
+        }
+    out["judges_total"] = {k: sum(v[k] for v in out["judges"].values())
+                           for k in ("n_calls", "prompt_tokens", "completion_tokens",
+                                     "reasoning_tokens", "cost_usd")}
+    return out
+
+
 class _Ticking:
     """A judge that ticks a progress bar when each ``score`` call finishes (success or failure).
     Everything else is forwarded, so ``MonitorScorer`` treats it exactly like the judge itself."""
@@ -92,7 +117,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--effort", type=float, default=None,
                     help="TML thinking effort (default: the config's thinking_effort)")
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--out", default=None,
+                    help="path of the summary json; its parent dir gets the rest (overrides --run-name)")
+    ap.add_argument("--run-name", default=None,
+                    help="output dir name under data/runs/ (default: tv_monitor_baseline_<model>)")
     ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
                     help="override config fields, as in run_experiment.py (e.g. --set max_tokens=4096 "
                          "monitors.model:gemini-3.5.reasoning_effort=medium "
@@ -208,11 +236,21 @@ def main() -> None:
               f"{r['dprime_margin']:>9.2f}{hi:>11.3f}{lo:>11.3f}{hi - lo:>7.3f}"
               f"{r['tpr']:>7.3f}{r['fpr']:>7.3f}")
 
+    usage = token_usage(rollouts, judged, judges)
+    pol = usage["policy"]
+    print(f"\n=== token usage ===\n  policy ({args.model}): {pol['n_sampling_calls']} sampling calls, "
+          f"{pol['input_tokens']:,} input / {pol['output_tokens']:,} output tokens "
+          f"({pol['output_tokens'] / max(1, len(rollouts)):,.0f} output/episode)")
+    print(f"  {'judge':<14}{'calls':>7}{'prompt':>13}{'completion':>13}{'(reasoning)':>13}{'cost $':>10}")
+    for name, u in [*usage["judges"].items(), ("TOTAL", usage["judges_total"])]:
+        print(f"  {name:<14}{u['n_calls']:>7}{u['prompt_tokens']:>13,}{u['completion_tokens']:>13,}"
+              f"{u['reasoning_tokens']:>13,}{u['cost_usd']:>10.4f}")
+
     # Laid out like an RL run dir so visualize_transcripts.py (and the slim-dump readers) pick it up:
     # the summary in baseline.json + run_info.json, the rollouts in eval_rollouts{,_slim}.jsonl using
     # the RL loop's eval-record schema (rl/train.py run_eval) at step 0.
     out = Path(args.out) if args.out else Path("data/runs") / \
-        f"tv_monitor_baseline_{args.model.split('/')[-1]}" / "baseline.json"
+        (args.run_name or f"tv_monitor_baseline_{args.model.split('/')[-1]}") / "baseline.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "model": args.model, "policy": args.model, "experiment": "tv_monitor_baseline",
@@ -220,7 +258,7 @@ def main() -> None:
         "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
         "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
-        "held_out": [{"kind": "cot", **m} for m in specs],
+        "token_usage": usage, "held_out": [{"kind": "cot", **m} for m in specs],
     }
     out.write_text(json.dumps(summary, indent=1, default=str))
     (out.parent / "run_info.json").write_text(json.dumps(summary, indent=2, default=str))
