@@ -106,6 +106,8 @@ def main() -> None:
     ap.add_argument("--honest", action="store_true", help="verifier holds the true answer (impossible=False)")
     ap.add_argument("--offset", type=int, nargs=2, default=(4, 9), metavar=("LO", "HI"))
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
+    ap.add_argument("--require-explanation", action="store_true",
+                    help="each command must be followed by 'Explanation: …' (else a parse failure)")
     ap.add_argument("--judge", default=None, help="OpenRouter model id → score a CoT+out and an output-only judge")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=3, help="print this many full transcripts")
@@ -123,7 +125,7 @@ def main() -> None:
     env = TerminalVerifierEnv.from_task(
         n=max(64, args.n_prompts), seed=args.seed, impossible=not args.honest,
         offset_range=tuple(args.offset), eval_n=max(64, args.n_prompts),
-        max_turns=args.max_turns, output_view=args.output_view,
+        max_turns=args.max_turns, output_view=args.output_view, require_explanation=args.require_explanation,
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 

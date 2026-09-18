@@ -230,7 +230,8 @@ Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json
 `terminal_verifier_gemini{25,35}_{cot,out}.json` rows. `env_options`: `impossible`
 (perturbed verifier — the paper's variant; `false` = honest route exists), `offset_range`, `max_turns`,
 `output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
-`command_timeout`. `think_budget` has three states: **absent** from the config (= `"auto"`) → the env's
+`command_timeout`, `require_explanation` (default `false`; `true` = every command must be followed by
+`Explanation: …`, else the turn is a parse failure — the prompts ask for it too). `think_budget` has three states: **absent** from the config (= `"auto"`) → the env's
 default, 1536 here (so a config copied from an MBPP row with only the env name swapped works);
 an **int** → that cap; **`null`** (or `--set think_budget=null`) → **no budget at all**, each turn is one
 call of `max_tokens` (the env default never overrides an explicit null). The banner prints the

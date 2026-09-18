@@ -104,6 +104,7 @@ def main() -> None:
         n=max(64, args.n_prompts), seed=args.seed, impossible=opts.get("impossible", True),
         offset_range=tuple(opts.get("offset_range", (4, 9))), eval_n=max(64, args.n_prompts),
         max_turns=opts.get("max_turns", 4), output_view=opts.get("output_view", "transcript"),
+        require_explanation=opts.get("require_explanation", False),
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 
