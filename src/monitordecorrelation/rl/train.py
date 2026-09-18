@@ -1,7 +1,8 @@
 """GRPO training loop for the decorrelation experiments.
 
-reward = task_reward − penalty_coef · mean(train_against monitor scores). Held-out monitors are
-scored every step but never enter the reward. The ground-truth behavior rate is logged as the
+reward = task_reward − penalty_coef · mean(train_against monitor scores), unless the env sets
+``EnvResult.reward_override`` (then that is the reward; monitors are still scored and logged). Held-out
+monitors are scored every step but never enter the reward. The ground-truth behavior rate is logged as the
 primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
 """
 
@@ -496,7 +497,12 @@ def run_grpo(
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac
-        rewards = [er.task_reward - pen_coef * pen for er, pen in zip(env_results, penalties)]
+        # An env-set ``reward_override`` (e.g. a terminal episode truncated by max_tokens → -1) IS the
+        # reward: the monitor penalty is not applied to it, though its monitor scores are still logged.
+        applied = [0.0 if er.reward_override is not None else pen_coef * pen
+                   for er, pen in zip(env_results, penalties)]
+        rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
+                   for er, ap in zip(env_results, applied)]
         t2 = time.perf_counter()
         # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
         # layer (advantage centering, mask/datum assembly, KL penalty, forward_backward) via cookbook
@@ -537,7 +543,8 @@ def run_grpo(
             # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ:
             "reward/monitor_suspiciousness_mean": mean(penalties),
             "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
-            "reward/penalty_mean": pen_coef * mean(penalties),      # APPLIED penalty = λ · suspiciousness
+            "reward/penalty_mean": mean(applied),  # APPLIED penalty = λ · suspiciousness (0 where overridden)
+            "reward/override_rate": mean(float(er.reward_override is not None) for er in env_results),
             "reward/total_mean": mean(rewards),
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(env_results, env),     # env-declared summary rates
@@ -578,6 +585,7 @@ def run_grpo(
                         "answer": r.output,
                         "env": {
                             "task_reward": er.task_reward,
+                            "reward_override": er.reward_override,
                             "behavior_present": er.behavior_present,
                             "choice": er.meta.get("choice"),
                             "unparsed": er.meta.get("unparsed"),

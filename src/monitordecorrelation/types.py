@@ -45,11 +45,17 @@ class EnvResult:
 
     ``task_reward`` is what RL optimizes (before any monitor penalty). ``behavior_present``
     is the oracle label monitors are graded against — it must NEVER enter a monitor or the reward.
+
+    ``reward_override``, when set, is the rollout's FULL RL reward: it replaces
+    ``task_reward − λ·suspiciousness`` outright (e.g. the terminal env's fixed penalty for an episode
+    cut off by max_tokens). Monitors still score the rollout and their scores are logged as usual;
+    they just don't enter its reward.
     """
 
     task_reward: float
     behavior_present: bool
     meta: dict[str, Any] = field(default_factory=dict)
+    reward_override: float | None = None
 
 
 @dataclass
