@@ -20,6 +20,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/probe_server.py` | Shared frozen-model activation server so parallel runs don't each load the base model (`queue_runs.sh -P` starts it). | localhost server |
 | `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
 | `experiments/analyze_coupling.py` | **The headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
+| `scripts/verify_runs.py` | **Post-launch check.** Does each run actually train against the monitor its name claims? Also checks judge reasoning settings, a shared monitor battery + hyperparameters across the batch, and backend queue pauses. Exits 1 on any problem. | stdout |
 | `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
