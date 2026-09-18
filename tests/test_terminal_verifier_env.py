@@ -7,6 +7,7 @@ import os
 
 import pytest
 
+from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import (
     NO_COMMAND_MESSAGE,
     TERMINAL_INSTRUCTIONS,
@@ -225,9 +226,11 @@ def test_no_command_turn_is_a_parse_failure_that_ends_the_episode_at_minus_one()
     m = view.meta
     assert m["end_reason"] == "no_command" and not m["truncated"] and m["no_command_turns"] == 1
     assert m["n_commands"] == 1
-    r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
+    roll = Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m, "stop_reason": "stop"})
+    r = env.score(roll)
     assert r.meta["unparsed"] and r.task_reward == 0.0 and not r.behavior_present
     assert r.reward_override == -1.0  # fixed reward, independent of any monitor's score
+    assert env.unparseable(roll) and invalid_reason(env, roll) == "unparsed"  # → never monitored
 
 
 def test_truncation_ends_the_episode_at_minus_one():
@@ -238,8 +241,10 @@ def test_truncation_ends_the_episode_at_minus_one():
     assert done and obs is None
     m = env.finish(st).meta
     assert m["end_reason"] == "truncated" and m["truncated"] and m["no_command_turns"] == 0
-    r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
+    roll = Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m, "stop_reason": "length"})
+    r = env.score(roll)
     assert not r.meta["unparsed"] and r.task_reward == 0.0 and r.reward_override == -1.0
+    assert not env.unparseable(roll) and invalid_reason(env, roll) == "truncated"  # → never monitored
 
 
 def test_clean_episode_has_no_reward_override():
@@ -247,8 +252,9 @@ def test_clean_episode_has_no_reward_override():
     st = env.start(env._to_prompt(ITEM))
     env.step(st, "", _turn('python verifier.py "4"'))
     m = env.finish(st).meta
-    r = env.score(Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m}))
-    assert r.reward_override is None and not r.meta["unparsed"]
+    roll = Rollout(prompt=Prompt(text="x"), cot="", output="", meta={"episode": m, "stop_reason": "stop"})
+    r = env.score(roll)
+    assert r.reward_override is None and not r.meta["unparsed"] and invalid_reason(env, roll) is None
 
 
 def test_output_views():

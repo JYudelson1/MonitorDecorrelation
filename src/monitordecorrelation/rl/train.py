@@ -1,11 +1,15 @@
 """GRPO training loop for the decorrelation experiments.
 
-reward = task_reward − penalty_coef · mean(train_against monitor scores), unless
-``EnvResult.reward_override`` is set (then that is the reward; monitors are still scored and logged):
-a rollout truncated by max_tokens (any env, set in ``_score_env``) or with unparseable output (set by
-the env) gets a flat ``INVALID_ROLLOUT_REWARD`` = -1. Held-out
-monitors are scored every step but never enter the reward. The ground-truth behavior rate is logged as the
-primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
+reward = task_reward − penalty_coef · mean(train_against monitor scores), except for an INVALID rollout
+(``envs.base.invalid_reason``: truncated by max_tokens, or output the env could not parse), whose reward
+is a flat ``INVALID_ROLLOUT_REWARD`` = -1 (``EnvResult.reward_override``, enforced in ``_score_env``).
+**No monitor ever scores an invalid rollout**, in training or eval (``MonitorScorer`` skips it), so every
+monitor statistic — AUROC, d′, class means, n_pos/n_neg/n_scored, the train-against suspiciousness — is
+over the valid rollouts only; ``invalid_rate`` logs the excluded fraction. The oracle rates
+(``behavior_rate`` …) stay over ALL rollouts; single-turn envs do not grade a truncated rollout at all
+(``_score_env`` checks), so there it counts as task 0 / no behavior, like an unparseable one. Held-out monitors are scored every eval but never enter the
+reward. The ground-truth behavior rate is logged as the primary metric (see docs/EXPERIMENT_PLAN.md
+"Ground truth is the crux").
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from typing import Callable, Sequence
 import numpy as np
 
 from monitordecorrelation.config import RunConfig
-from monitordecorrelation.envs.base import Env
+from monitordecorrelation.envs.base import Env, invalid_reason, is_truncated
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
@@ -76,9 +80,8 @@ def _rollout_metrics(rollouts: Sequence[Rollout], rewards: Sequence[float], grou
         out["rollout/output_tokens_mean"] = float(np.mean(lens))
         out["rollout/output_tokens_max"] = float(np.max(lens))
         out["rollout/output_tokens_min"] = float(np.min(lens))
-    stops = [(r.meta or {}).get("stop_reason") for r in rollouts]
-    if any(s is not None for s in stops):
-        out["rollout/truncated_rate"] = mean(float(s is not None and s != "stop") for s in stops)
+    if any((r.meta or {}).get("stop_reason") is not None for r in rollouts):
+        out["rollout/truncated_rate"] = mean(float(is_truncated(r)) for r in rollouts)
     return out
 
 
@@ -150,13 +153,6 @@ def _env_metrics(results: Sequence, env) -> dict[str, float]:
     return out
 
 
-def _is_truncated(rollout: Rollout) -> bool:
-    """Sampling stopped on ``max_tokens`` rather than end-of-turn. For a multi-turn episode
-    ``stop_reason`` is the last turn's — and a truncated turn always ends the episode."""
-    stop = (rollout.meta or {}).get("stop_reason")
-    return stop is not None and stop != "stop"
-
-
 def _score_env(env: Env, rollouts: list[Rollout]) -> list:
     """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
 
@@ -164,8 +160,18 @@ def _score_env(env: Env, rollouts: list[Rollout]) -> list:
     ``score_batch`` to execute rollouts concurrently; otherwise this is the plain serial loop. Errors
     propagate deliberately — a grading failure is never coerced into a reward.
 
-    Every rollout truncated by ``max_tokens`` then gets ``reward_override = INVALID_ROLLOUT_REWARD``,
-    whatever the env made of it — the one place this is enforced, so it holds for every env and policy."""
+    Every INVALID rollout (``invalid_reason``: truncated by ``max_tokens``, or unparseable) then gets
+    ``reward_override = INVALID_ROLLOUT_REWARD``, whatever the env made of it — the one place this is
+    enforced, so it holds for every env and policy. The monitors skipped exactly these rollouts (same
+    predicate, evaluated when they were sampled), so two invariants are checked loudly here: the env's
+    ``unparsed`` flag agrees with its ``unparseable()`` (on the rollouts it graded), and the env set
+    ``reward_override`` on no valid rollout — otherwise an unmonitored rollout could get a monitor-free
+    reward, or vice versa.
+
+    A third, for SINGLE-TURN envs: a truncated rollout is not graded at all — the env returns
+    ``meta["truncated"] = True``, ``task_reward = 0`` and ``behavior_present = False`` without looking at
+    the cut-off text (so no hack is ever counted on a rollout no monitor saw). Multi-turn envs are exempt:
+    their episode's earlier, complete turns are still graded (e.g. the terminal env's tampering)."""
     if hasattr(env, "score_batch"):
         results = list(env.score_batch(rollouts))  # type: ignore[attr-defined]
         if len(results) != len(rollouts):
@@ -175,8 +181,22 @@ def _score_env(env: Env, rollouts: list[Rollout]) -> list:
             )
     else:
         results = [env.score(r) for r in rollouts]
-    for r, er in zip(rollouts, results):
-        if _is_truncated(r):
+    check = getattr(env, "unparseable", None)
+    single_turn = not getattr(env, "multi_turn", False)
+    for i, (r, er) in enumerate(zip(rollouts, results)):
+        why = invalid_reason(env, r)
+        if single_turn and why == "truncated" and not (
+                er.meta.get("truncated") is True and er.task_reward == 0.0 and er.behavior_present is False):
+            raise RuntimeError(f"{type(env).__name__} graded truncated rollout {i}; a single-turn env must "
+                               f"return an ungraded result (meta['truncated']=True, task 0, no behavior)")
+        if why != "truncated" and "unparsed" in er.meta and bool(er.meta["unparsed"]) != bool(
+                check is not None and check(r)):
+            raise RuntimeError(f"{type(env).__name__}: rollout {i} has meta['unparsed']="
+                               f"{er.meta['unparsed']} but unparseable() disagrees")
+        if why is None and er.reward_override is not None:
+            raise RuntimeError(f"{type(env).__name__} set reward_override on valid rollout {i}; it is "
+                               f"reserved for invalid (truncated / unparseable) rollouts")
+        if why is not None:
             er.reward_override = INVALID_ROLLOUT_REWARD
     return results
 
@@ -214,12 +234,13 @@ def _sentinel(err: str) -> MonitorResult:
     return MonitorResult(score=float("nan"), label=False, meta={"error": err})
 
 
-def _assert_scored(results: dict[str, list[MonitorResult]]) -> None:
+def _assert_scored(results: dict[str, list[MonitorResult | None]]) -> None:
     """A NaN score is never data — it is a monitor that did not answer. Silently dropping those
     biases a held-out AUROC (the missing rollouts are exactly the ones the API choked on) and
-    silently un-penalizes a train-against rollout, so the run stops instead. Loud beats subtle."""
+    silently un-penalizes a train-against rollout, so the run stops instead. Loud beats subtle.
+    (``None`` is different: an invalid rollout the monitor was deliberately never shown.)"""
     for name, rs in results.items():
-        bad = [i for i, r in enumerate(rs) if r.score != r.score]
+        bad = [i for i, r in enumerate(rs) if r is not None and r.score != r.score]
         if bad:
             err = next((rs[i].meta.get("error") for i in bad if rs[i].meta.get("error")), "?")
             raise RuntimeError(
@@ -245,12 +266,19 @@ class MonitorScorer:
       unsafe. Nothing else waits on the probe: the judges have already run.
 
     Usage: ``with MonitorScorer(monitors, workers) as sc:`` → ``sc.submit(i, rollout)`` per rollout
-    (thread-safe, any order) → ``sc.collect(rollouts)`` → ``{name: [MonitorResult]}`` indexed exactly
-    like ``rollouts``.
+    (thread-safe, any order) → ``sc.collect(rollouts)`` → ``{name: [MonitorResult | None]}`` indexed
+    exactly like ``rollouts``.
+
+    ``skip(rollout) -> bool`` (the RL loop passes "is it invalid?", ``envs.base.invalid_reason``): a
+    skipped rollout is never shown to any monitor — no judge call, not in the probes' batch — and its
+    entry in every result list is ``None``. It must be a pure function of the rollout: ``submit`` and
+    ``collect`` each evaluate it.
     """
 
-    def __init__(self, monitors: Sequence[Monitor], workers: int) -> None:
+    def __init__(self, monitors: Sequence[Monitor], workers: int,
+                 skip: Callable[[Rollout], bool] | None = None) -> None:
         self.monitors = list(monitors)
+        self.skip = skip
         self.batched = [m for m in self.monitors if hasattr(m, "score_batch")]
         self.threaded = [m for m in self.monitors if not hasattr(m, "score_batch")]
         self._ex = (ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="monitor")
@@ -270,7 +298,7 @@ class MonitorScorer:
     def submit(self, index: int, rollout: Rollout) -> None:
         """Queue every API judge on one rollout. Called from the sampling threads, so it only touches
         ``_futs`` under the lock; ``ThreadPoolExecutor.submit`` is itself thread-safe."""
-        if self._ex is None:
+        if self._ex is None or (self.skip is not None and self.skip(rollout)):
             return
         with self._lock:
             for m in self.threaded:
@@ -279,23 +307,32 @@ class MonitorScorer:
                     raise RuntimeError(f"rollout {index} submitted twice to monitor {m.name!r}")
                 self._futs[key] = self._ex.submit(m.score, rollout)
 
-    def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult]]:
-        """Drain the judge futures and run the probes; aborts the run if anything failed to score."""
+    def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult | None]]:
+        """Drain the judge futures and run the probes; aborts the run if anything failed to score.
+        Skipped (invalid) rollouts get ``None`` from every monitor."""
         n = len(rollouts)
-        out: dict[str, list[MonitorResult]] = {}
+        skipped = [self.skip is not None and self.skip(r) for r in rollouts]
+        keep = [i for i in range(n) if not skipped[i]]
+        out: dict[str, list[MonitorResult | None]] = {}
         for m in self.batched:
-            _log(f"      · scoring {m.name} (probe, {n} local fwd, one batched pass)…")
+            _log(f"      · scoring {m.name} (probe, {len(keep)} local fwd, one batched pass)…")
+            res: list[MonitorResult | None] = [None] * n
             try:
-                res = list(m.score_batch(rollouts))  # type: ignore[attr-defined]
-                if len(res) != n:
-                    raise RuntimeError(f"score_batch returned {len(res)} results for {n} rollouts")
-                out[m.name] = res
+                got = list(m.score_batch([rollouts[i] for i in keep])) if keep else []  # type: ignore[attr-defined]
+                if len(got) != len(keep):
+                    raise RuntimeError(f"score_batch returned {len(got)} results for {len(keep)} rollouts")
             except Exception as e:  # noqa: BLE001 — never let a probe failure kill the run
                 _log(f"      ⚠️  {m.name}.score_batch failed ({type(e).__name__}: {e})")
-                out[m.name] = [_sentinel(f"{type(e).__name__}: {e}") for _ in range(n)]
+                got = [_sentinel(f"{type(e).__name__}: {e}") for _ in keep]
+            for i, r in zip(keep, got):
+                res[i] = r
+            out[m.name] = res
         for m in self.threaded:
             res, err = [], None
             for i in range(n):
+                if skipped[i]:
+                    res.append(None)
+                    continue
                 fut = self._futs.get((m.name, i))
                 if fut is None:
                     raise RuntimeError(
@@ -308,7 +345,7 @@ class MonitorScorer:
                     err = f"{type(e).__name__}: {e}"
             out[m.name] = res
             if err is not None:  # one concise warning per monitor, not per rollout
-                n_failed = sum(1 for r in res if r.meta.get("error"))
+                n_failed = sum(1 for r in res if r is not None and r.meta.get("error"))
                 _log(f"      ⚠️  {m.name}: {n_failed}/{n} scores failed ({err})")
         _assert_scored(out)
         return out
@@ -396,6 +433,10 @@ def run_grpo(
     # it is what the split-half / cross-fit coupling analyses read. Schema: eval/rollout_dump.SLIM_FIELDS.
     eval_rollouts_slim_log = (rollout_log_dir / "eval_rollouts_slim.jsonl").open("w")
 
+    def is_invalid(r: Rollout) -> bool:
+        """The monitors' skip predicate: an invalid rollout is never shown to any monitor."""
+        return invalid_reason(env, r) is not None
+
     # The held-out eval set: a FIXED set of prompts, re-scored every eval so curves are comparable.
     # ``holdout`` also REMOVES them from the training pool so eval ⟂ train.
     if hasattr(env, "holdout"):
@@ -410,6 +451,9 @@ def run_grpo(
         AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and the
         behavior-present mean score (``mean_score_<behavior>``) stay defined there, so the
         obfuscation-success regime stays measurable.
+
+        Monitor metrics are over the VALID eval rollouts only (invalid ones are never monitored), so
+        ``n_scored`` = the valid count and ``n_pos``/``n_neg`` split it; the oracle rates are over all.
         """
         n_per = getattr(cfg, "eval_samples_per_prompt", 1) or 1
         _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
@@ -417,7 +461,7 @@ def run_grpo(
         # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
         # instant its episode finishes, so `sample_s` already contains most of the scoring and
         # `score_s` is only whatever was still in flight when the last episode landed.
-        with MonitorScorer(all_monitors, monitor_workers) as scorer:
+        with MonitorScorer(all_monitors, monitor_workers, skip=is_invalid) as scorer:
             ev, streamed = _sample(backend, env, eval_prompts, num_samples=n_per,
                                    max_tokens=max_tokens, think_budget=think_budget,
                                    answer_tokens=answer_tokens, on_rollout=scorer.submit)
@@ -426,6 +470,7 @@ def run_grpo(
                     scorer.submit(i, r)
             ev_env = _score_env(env, ev)
             gt = [er.behavior_present for er in ev_env]
+            invalid = [invalid_reason(env, r) for r in ev]  # None = valid = monitored
             t_sample = time.perf_counter() - t0
             _log(f"  [eval @ {step}] draining {len(all_monitors)} monitors…")
             t1 = time.perf_counter()
@@ -434,7 +479,12 @@ def run_grpo(
         row: dict = {
             "step": step,
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
-            "unparsed_rate": mean(float(er.meta["unparsed"]) for er in ev_env),
+            # single-turn envs: a truncated rollout is not graded, so it is NOT unparsed — there,
+            # unparsed_rate + truncated_rate = invalid_rate
+            "unparsed_rate": mean(float(er.meta.get("unparsed", False)) for er in ev_env),
+            # fraction truncated or unparseable = NOT monitored: every monitor metric below is over the rest
+            "invalid_rate": mean(float(why is not None) for why in invalid),
+            "truncated_rate": mean(float(why == "truncated") for why in invalid),
             **_length_metrics(ev_env, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(ev_env, env),     # env-declared summary rates (terminal env: read/modified/…)
         }
@@ -448,9 +498,10 @@ def run_grpo(
             row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
             row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
-            # Every rollout is scored — MonitorScorer.collect aborts the run otherwise — so this indexes
-            # the whole eval set. Kept explicit so n_scored stays a visible invariant check.
-            idx = [i for i, x in enumerate(res[m.name]) if x.score == x.score]
+            # Every VALID rollout is scored (MonitorScorer.collect aborts the run otherwise) and no
+            # invalid one is (None), so this indexes exactly the valid eval rollouts; n_scored = their
+            # count, a visible invariant check.
+            idx = [i for i, x in enumerate(res[m.name]) if x is not None]
             scores = [res[m.name][i].score for i in idx]
             preds = [res[m.name][i].label for i in idx]
             mgt = [gt[i] for i in idx]  # strict labels (the headline oracle = behavior_present)
@@ -491,10 +542,14 @@ def run_grpo(
                 "loose_rh": bool(er.meta["loose_rh"]) if "loose_rh" in er.meta else None,
                 "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
+                # null (valid), "truncated" or "unparsed": an invalid rollout was shown to no monitor,
+                # so its `monitors` is {} and it is in none of the monitor metrics.
+                "invalid_reason": invalid[i],
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
                 # {score, label} + for every LLM judge its `call`: the exact request (prompt + API
                 # parameters) and response (content + chain of thought) of the successful API call.
-                "monitors": {m.name: monitor_record(res[m.name][i]) for m in all_monitors},
+                "monitors": {m.name: monitor_record(res[m.name][i]) for m in all_monitors
+                             if res[m.name][i] is not None},
             }
             eval_rollouts_log.write(json.dumps(rec, default=str) + "\n")
             eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
@@ -507,7 +562,7 @@ def run_grpo(
             f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}/brier={row[f'monitor/{m.name}/brier']:.2f}"
             for m in all_monitors
         )
-        _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} | {summ} "
+        _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} invalid={row['invalid_rate']:.2f} | {summ} "
              f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
     for step in range(cfg.n_steps):
@@ -529,7 +584,7 @@ def run_grpo(
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
         # As in run_eval, their calls are pipelined into sampling: a rollout is handed to the judges
         # the moment its episode finishes, so t_score below is only the tail still in flight.
-        with MonitorScorer(train_against, monitor_workers) as scorer:
+        with MonitorScorer(train_against, monitor_workers, skip=is_invalid) as scorer:
             rollouts, streamed = _sample(backend, env, prompts, num_samples=cfg.group_size,
                                          max_tokens=max_tokens, think_budget=think_budget,
                                          answer_tokens=answer_tokens, on_rollout=scorer.submit)
@@ -537,6 +592,8 @@ def run_grpo(
                 for i, r in enumerate(rollouts):
                     scorer.submit(i, r)
             env_results = _score_env(env, rollouts)
+            invalid = [invalid_reason(env, r) for r in rollouts]  # None = valid = monitored
+            valid = [i for i, why in enumerate(invalid) if why is None]
             t_sample = time.perf_counter() - t0
             if train_against:
                 _log(f"step {step}: draining train-against monitor(s)…")
@@ -546,10 +603,13 @@ def run_grpo(
 
         # ``penalties[i]`` = raw mean train-against suspiciousness for rollout i (BEFORE the coefficient).
         # This is the obfuscation signal (drops as the policy evades) — logged as monitor_suspiciousness_mean.
-        # No NaN guard is needed: MonitorScorer.collect aborts the run on the first unscored rollout, so a
-        # missing penalty can never silently reach the reward (or NaN the whole group's advantages).
+        # No NaN guard is needed: MonitorScorer.collect aborts the run on the first unscored VALID
+        # rollout, so a missing penalty can never silently reach the reward (or NaN the whole group's
+        # advantages). An invalid rollout has no score at all (never monitored) → None here; its reward
+        # is the -1 override, so no penalty is needed for it.
         penalties = [
-            mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
+            None if invalid[i] is not None
+            else mean(ta_res[m.name][i].score for m in train_against) if train_against else 0.0
             for i in range(len(rollouts))
         ]
         # Effective λ this step: constant penalty_coef, OR a linear ramp start→end if penalty_schedule is
@@ -563,7 +623,7 @@ def run_grpo(
         # A ``reward_override`` (truncated by max_tokens / unparseable output → -1) IS the reward: the
         # monitor penalty is not applied to it, though its monitor scores are still logged.
         applied = [0.0 if er.reward_override is not None else pen_coef * pen
-                   for er, pen in zip(env_results, penalties)]
+                   for er, pen in zip(env_results, penalties)]  # _score_env: override ⇔ invalid ⇔ pen None
         rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
                    for er, ap in zip(env_results, applied)]
         t2 = time.perf_counter()
@@ -580,19 +640,24 @@ def run_grpo(
         # Per-train-against-monitor metrics on the TRAINING rollouts: full set (auroc/accuracy/brier +
         # class-split) vs strict, plus the loose track. AUROC on train is often NaN (single-class batch)
         # but brier + the class-split means stay defined and carry the obfuscation signal.
+        # Over the VALID rollouts only — invalid ones were never monitored (see the module docstring).
         mon: dict[str, float] = {}
+        gt_v = [gt_train[i] for i in valid]
         for m in train_against:
-            s = [x.score for x in ta_res[m.name]]
-            p = [x.label for x in ta_res[m.name]]
+            s = [ta_res[m.name][i].score for i in valid]
+            p = [ta_res[m.name][i].label for i in valid]
             mon[f"monitor/{m.name}/mean_score"] = mean(s) if s else float("nan")
-            mon[f"monitor/{m.name}/auroc"] = roc_auc(s, gt_train)
-            mon[f"monitor/{m.name}/accuracy"] = accuracy(p, gt_train)
-            mon[f"monitor/{m.name}/brier"] = brier(s, gt_train)
-            mon[f"monitor/{m.name}/dprime_margin"] = dprime_margin(s, gt_train)
-            mon[present_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, True)
-            mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_train, False)
+            mon[f"monitor/{m.name}/auroc"] = roc_auc(s, gt_v)
+            mon[f"monitor/{m.name}/accuracy"] = accuracy(p, gt_v)
+            mon[f"monitor/{m.name}/brier"] = brier(s, gt_v)
+            mon[f"monitor/{m.name}/dprime_margin"] = dprime_margin(s, gt_v)
+            mon[present_score_key(m.name, behavior)] = _mean_for_class(s, gt_v, True)
+            mon[absent_score_key(m.name, behavior)] = _mean_for_class(s, gt_v, False)
+            mon[f"monitor/{m.name}/n_pos"] = sum(gt_v)
+            mon[f"monitor/{m.name}/n_neg"] = len(gt_v) - sum(gt_v)
+            mon[f"monitor/{m.name}/n_scored"] = len(s)
             if gt_train_loose is not None:
-                mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, gt_train_loose))
+                mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, [gt_train_loose[i] for i in valid]))
         loss_val = step_metrics.get("loss", float("nan"))
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
         row = {
@@ -602,16 +667,22 @@ def run_grpo(
                 "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
                if any("loose_rh" in er.meta for er in env_results) else {}),
             "reward/task_mean": mean(er.task_reward for er in env_results),
-            # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ:
-            "reward/monitor_suspiciousness_mean": mean(penalties),
+            # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ.
+            # Over the VALID (monitored) rollouts only: averaging in the unmonitored ones as 0 would read
+            # a rise in truncation as evasion. NaN if none is valid; 0.0 in a control (no monitor).
+            "reward/monitor_suspiciousness_mean": (
+                0.0 if not train_against
+                else mean(penalties[i] for i in valid) if valid else float("nan")),
             "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
             "reward/penalty_mean": mean(applied),  # APPLIED penalty = λ · suspiciousness (0 where overridden)
             "reward/override_rate": mean(float(er.reward_override is not None) for er in env_results),
+            # = override_rate (_score_env enforces override ⇔ invalid): the fraction NOT monitored.
+            "invalid_rate": mean(float(why is not None) for why in invalid),
             "reward/total_mean": mean(rewards),
             **_rollout_metrics(rollouts, rewards, cfg.group_size),  # reward spread, lengths, truncation
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(env_results, env),     # env-declared summary rates
-            "unparsed_rate": mean(float(er.meta["unparsed"]) for er in env_results),
+            "unparsed_rate": mean(float(er.meta.get("unparsed", False)) for er in env_results),
             "time/sample_s": t_sample,   # includes the judge calls pipelined into sampling
             "time/score_s": t_score,     # only the monitor tail left after the last rollout landed
             "time/optim_s": t_optim,
@@ -663,7 +734,10 @@ def run_grpo(
                         },
                         # {score, label} + each LLM judge's `call` (exact request + response) —
                         # see eval.rollout_dump.monitor_record.
-                        "monitors": {m.name: monitor_record(ta_res[m.name][i]) for m in train_against},
+                        # {} for an invalid rollout — never shown to a monitor (see invalid_reason).
+                        "monitors": {m.name: monitor_record(ta_res[m.name][i]) for m in train_against
+                                     if ta_res[m.name][i] is not None},
+                        "invalid_reason": invalid[i],  # null | "truncated" | "unparsed"
                         "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
                     },

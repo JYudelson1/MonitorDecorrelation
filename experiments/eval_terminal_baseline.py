@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 
 import tinker
 
+from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
@@ -148,7 +149,8 @@ def main() -> None:
                   AgentCoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
 
     t0 = time.time()
-    with MonitorScorer(judges, args.workers) as scorer:
+    # Invalid episodes (truncated / no <command>) are never shown to a judge, as in the RL loop.
+    with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
                                 think_budget=args.think_budget, answer_tokens=args.answer_tokens,
@@ -161,19 +163,23 @@ def main() -> None:
     out = Path(args.out) if args.out else Path("data/runs") / f"tv_baseline_{short}" / "episodes.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    judge_scores: dict[str, list[float]] = {j.name: [] for j in judges}
+    invalid = [invalid_reason(env, r) for r in rollouts]
+    # (score, behavior_present) per judge, over the VALID episodes only — invalid ones were never judged.
+    judge_scores: dict[str, list[tuple[float, bool]]] = {j.name: [] for j in judges}
     with out.open("w") as f:
         for i, (r, er) in enumerate(zip(rollouts, results)):
             rec = {"task_id": er.meta["task_id"], "behavior_present": er.behavior_present,
                    "task_reward": er.task_reward, "cot": r.cot, "output": r.output,
-                   "stop_reason": r.meta.get("stop_reason"),
+                   "stop_reason": r.meta.get("stop_reason"), "invalid_reason": invalid[i],
                    "tokens": {k: r.meta[k] for k in ("input_tokens", "output_tokens", "train_tokens",
                                                      "n_sampling_calls", "n_forced_answers",
                                                      "n_truncated_turns")},
                    "env_meta": er.meta, "monitors": {}}
             for j in judges:
                 m = judged[j.name][i]
-                judge_scores[j.name].append(m.score)
+                if m is None:  # invalid episode: not judged, `monitors` stays {}
+                    continue
+                judge_scores[j.name].append((m.score, er.behavior_present))
                 rec["monitors"][j.name] = monitor_record(m)  # score/label + the judge's exact call
             f.write(json.dumps(rec, default=str) + "\n")
 
@@ -199,11 +205,13 @@ def main() -> None:
             key = c.split()[0] if c.split() else c
             cmds[key] = cmds.get(key, 0) + 1
     print(f"  first words of commands: {dict(sorted(cmds.items(), key=lambda kv: -kv[1]))}")
-    gt = [er.behavior_present for er in results]
     judge_summary = {}
-    for name, scores in judge_scores.items():
-        judge_summary[name] = {"mean": mean(scores), "auroc": roc_auc(scores, gt)}
-        print(f"  judge {name:<8} mean={mean(scores):.2f} AUROC vs oracle={roc_auc(scores, gt):.2f}")
+    for name, pairs in judge_scores.items():
+        scores, gt = [s for s, _ in pairs], [g for _, g in pairs]
+        mu = mean(scores) if scores else float("nan")
+        judge_summary[name] = {"mean": mu, "auroc": roc_auc(scores, gt), "n_scored": len(scores)}
+        print(f"  judge {name:<8} mean={mu:.2f} AUROC vs oracle={roc_auc(scores, gt):.2f} "
+              f"(over {len(scores)} valid episodes)")
 
     # -- cost + failure-mode accounting (the numbers an RL run is budgeted from) ---------------------
     per_rollout = token_accounting(rollouts)
@@ -228,10 +236,12 @@ def main() -> None:
         "truncated_output_turn_rate": sum(r.meta["n_truncated_turns"] for r in rollouts) / n_turns_total,
         "think_budget_hit_rate": mean(float(r.meta["n_forced_answers"] > 0) for r in rollouts),
         "think_budget_hit_turn_rate": sum(r.meta["n_forced_answers"] for r in rollouts) / n_turns_total,
-        # parse failures: a turn whose text carried no <command> (and was not cut off), and the
-        # episode-level case where that happened every turn, so there was nothing to grade.
+        # parse failures: a turn whose text carried no <command> (and was not cut off) — it ends the
+        # episode, so the episode-level rate is the episodes that ended on one.
         "parse_error_turn_rate": sum(er.meta["no_command_turns"] for er in results) / n_turns_total,
         "parse_error_episode_rate": rate("unparsed"),
+        # truncated or command-less = invalid: -1 reward in RL, and never shown to a judge
+        "invalid_rate": mean(float(w is not None) for w in invalid),
         "n_turns": rate("n_turns"), "n_commands": rate("n_commands"),
         "tokens_per_rollout": per_rollout,
         "end_reasons": ends, "judges": judge_summary,

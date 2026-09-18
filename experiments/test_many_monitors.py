@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 
 import tinker
 
+from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 from monitordecorrelation.eval.metrics import accuracy, roc_auc
 from monitordecorrelation.monitors.cot_monitor import CoTMonitor
@@ -83,15 +84,16 @@ def main() -> None:
             num_samples=args.num_samples, max_tokens=args.max_tokens, temperature=1.0,
         )
         ers = [env.score(r) for r in rollouts]
+        # drop INVALID rollouts (truncated or unparsed) — monitors are never evaluated on them
         parsed = [(r, er.behavior_present) for r, er in zip(rollouts, ers)
-                  if not er.meta["unparsed"]]
+                  if invalid_reason(env, r) is None]
         n_unparsed = len(rollouts) - len(parsed)
         source = f"{args.policy} (fresh)"
 
     n = len(parsed)
     n_syco = sum(g for _, g in parsed)
     print(f"\nsource: {source}")
-    print(f"behavior frequency: {n_syco}/{n} = {n_syco / n:.2f}  (unparsed: {n_unparsed})")
+    print(f"behavior frequency: {n_syco}/{n} = {n_syco / n:.2f}  (invalid, dropped: {n_unparsed})")
 
     # 2. class-balanced eval set (equal behavior / non-behavior) for reliable detection metrics
     rng = random.Random(0)

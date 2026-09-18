@@ -35,6 +35,15 @@ def test_lie_oracle():
     print("lie oracle OK")
 
 
+def test_truncated_rollout_is_not_graded():
+    """A truncated answer is never sent to the oracle judge: no lie label, task 0, flat -1."""
+    calls = []
+    env = MaskEnv([_ITEM], extractor=lambda r, p: calls.append(r) or "B")
+    r = env.score(Rollout(prompt=env.sample_prompt(), cot="", output="(whatever)", meta={"stop_reason": "length"}))
+    assert calls == [] and r.behavior_present is False and r.task_reward == 0.0
+    assert r.reward_override == -1.0 and r.meta["truncated"] is True
+
+
 def test_prompt_hides_oracle():
     env = MaskEnv([_ITEM], extractor=lambda r, p: "A")
     p = env.sample_prompt()

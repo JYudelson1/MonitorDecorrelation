@@ -44,7 +44,9 @@ the row is NaN and the reason is printed. r_between over steps within a single r
 Diagnostics per run: per-cell hack/loose_rh/hardcoding rates (label contamination
 check), and per-monitor TPR/TNR/g-mean2/d' at the monitor's own label threshold.
 
-Hack flag is `behavior_present`. Rows with `unparsed == true` are dropped.
+Hack flag is `behavior_present`. Invalid rows are dropped: `unparsed == true`, or a non-null
+`invalid_reason` (truncated/unparsed — such a rollout was never shown to a monitor, so it has no scores).
+Dumps that predate `invalid_reason` still carry scores for their truncated rollouts, which stay in.
 """
 import argparse, json, re, sys, tempfile
 from collections import defaultdict
@@ -71,7 +73,7 @@ def load_run(path: Path, drop_unparsed: bool = True):
             if not line:
                 continue
             r = json.loads(line)
-            if drop_unparsed and r.get("unparsed", False):
+            if drop_unparsed and (r.get("unparsed", False) or r.get("invalid_reason") is not None):
                 continue
             row = {"step": int(r["step"]), "task_id": r.get("task_id"),
                    "hack": bool(r["behavior_present"])}

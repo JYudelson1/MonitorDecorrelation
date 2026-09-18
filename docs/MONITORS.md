@@ -28,6 +28,12 @@ checkpoint for a probe) — not a different interface.
 
 This is the one abstraction to keep clean. Everything else (envs, RL loop) plugs into it.
 
+**Monitors only ever see valid rollouts.** A rollout truncated by `max_tokens` or whose output the env
+cannot parse is *invalid* (`envs/base.py::invalid_reason`): its RL reward is a flat −1 and the loop
+never hands it to a monitor — train-against or held-out, judge or probe, training or eval. So every
+monitor metric (AUROC, d′, class means, `n_scored`) is over the valid rollouts; `invalid_rate` is the
+excluded fraction. See docs/ENVIRONMENTS.md ("Invalid rollouts").
+
 ### Single-turn vs multi-turn judge prompts
 
 A single-turn rollout genuinely *is* two flat strings, so the judge prompt shows two sections

@@ -188,6 +188,8 @@ def _summarize(rec: dict, off: int, length: int) -> dict:
         "loose_rh": pick("loose_rh"),
         "hardcoding": pick("hardcoding"),
         "unparsed": pick("unparsed"),
+        # null | "truncated" | "unparsed": such a rollout was shown to no monitor (dumps since 2026-09-18)
+        "invalid_reason": rec.get("invalid_reason"),
         "reward": _nan_safe(rec.get("reward")),
         "task_reward": _nan_safe(env.get("task_reward") if env else meta.get("reward")),
         "n_turns": meta.get("n_turns") if isinstance(meta, dict) else None,
@@ -612,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
 
         step = qp("step", int)
         behavior = (q.get("behavior") or [""])[0]      # "" | "1" | "0"
-        unparsed = (q.get("unparsed") or [""])[0]      # "" | "1" | "0"
+        unparsed = (q.get("unparsed") or [""])[0]      # "" | "1" | "0" | "inv" | "val" (invalid = not monitored)
         mon = (q.get("mon") or [""])[0]                # monitor name for the score filter
         mon_min = qp("mon_min", float)
         mon_max = qp("mon_max", float)
@@ -628,6 +630,8 @@ class Handler(BaseHTTPRequestHandler):
             if behavior in ("0", "1") and bool(e.get("behavior_present")) != (behavior == "1"):
                 continue
             if unparsed in ("0", "1") and bool(e.get("unparsed")) != (unparsed == "1"):
+                continue
+            if unparsed in ("inv", "val") and (e.get("invalid_reason") is not None) != (unparsed == "inv"):
                 continue
             if mon:
                 m = (e.get("monitors") or {}).get(mon)
@@ -1242,7 +1246,8 @@ function renderRollouts(c) {
   }
   controls.appendChild(behSel);
   const upSel = el('select', {class:'btn', onchange:e => { S.ro.unparsed = e.target.value; S.ro.offset = 0; loadRollouts(); }});
-  for (const [v, t] of [['','parse: any'],['0','parsed ok'],['1','unparsed']]) {
+  for (const [v, t] of [['','parse: any'],['0','parsed ok'],['1','unparsed'],
+                         ['val','valid (monitored)'],['inv','invalid (truncated/unparsed, not monitored)']]) {
     const o = el('option', {value:v}, t); if (v === S.ro.unparsed) o.selected = true; upSel.appendChild(o);
   }
   controls.appendChild(upSel);
@@ -1287,6 +1292,8 @@ function renderRollouts(c) {
     if (e.loose_rh) flags.push(el('span', {class:'flag n'}, 'loose'));
     if (e.hardcoding) flags.push(el('span', {class:'flag n'}, 'hardcode'));
     if (e.unparsed) flags.push(el('span', {class:'flag n'}, 'unparsed'));
+    if (e.invalid_reason) flags.push(el('span', {class:'flag n', title:'invalid rollout: -1 reward, never shown to a monitor'},
+      'invalid: ' + e.invalid_reason + ' — not monitored'));
     for (const [n, m] of Object.entries(e.monitors || {}))
       flags.push(el('span', {class:'flag ' + (m.label === true ? 'yes' : m.label === false ? 'no' : 'n'),
         title:n}, `${n}=${m.score === null ? '—' : (+m.score).toFixed(2)}`));
@@ -1423,7 +1430,9 @@ function renderMonitorCalls(rec) {
   const withCall = mons.filter(([, m]) => m && typeof m === 'object' && m.call && typeof m.call === 'object');
   const without = mons.filter(([n]) => !withCall.some(([w]) => w === n));
   if (!mons.length) {
-    card.appendChild(el('div', {class:'muted small'}, 'this rollout records no monitor verdicts'));
+    card.appendChild(el('div', {class:'muted small'}, rec.invalid_reason
+      ? `invalid rollout (${rec.invalid_reason}) — by design no monitor was run on it; it is excluded from every monitor metric`
+      : 'this rollout records no monitor verdicts'));
     return card;
   }
   if (!withCall.length) {
@@ -1520,6 +1529,8 @@ function renderRolloutDetail(box, rec) {
       'behavior_present = ' + fmt(beh)) : null,
     rec.loose_rh !== null && rec.loose_rh !== undefined ? el('span', {class:'flag n'}, 'loose_rh = ' + fmt(rec.loose_rh)) : null,
     rec.hardcoding !== null && rec.hardcoding !== undefined ? el('span', {class:'flag n'}, 'hardcoding = ' + fmt(rec.hardcoding)) : null,
+    rec.invalid_reason ? el('span', {class:'flag n', title:'invalid rollout: flat -1 reward, never shown to any monitor, excluded from every monitor metric'},
+      'invalid (' + rec.invalid_reason + ') — not monitored') : null,
     rec.reward !== undefined ? el('span', {class:'badge'}, 'reward = ' + fmt(rec.reward)) : null,
     env.task_reward !== undefined ? el('span', {class:'badge'}, 'task_reward = ' + fmt(env.task_reward)) : null));
   const mons = rec.monitors && typeof rec.monitors === 'object' ? Object.entries(rec.monitors) : [];

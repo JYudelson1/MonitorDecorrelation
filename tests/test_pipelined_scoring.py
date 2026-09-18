@@ -120,6 +120,31 @@ def test_failed_judge_calls_still_abort_the_run():
             sc.collect(rollouts)
 
 
+def test_skipped_rollouts_are_shown_to_no_monitor():
+    """An invalid rollout (the loop's skip predicate) gets no judge call, is not in the probe's batch,
+    and is ``None`` in every result list — which stays indexed like the rollouts."""
+    rollouts = [_rollout(f"q{i}") for i in range(5)]
+    skip = lambda r: r.prompt.text in ("q1", "q3")  # noqa: E731
+    judge, probe = _TimedJudge("j"), _BatchProbe("p")
+    with MonitorScorer([judge, probe], workers=4, skip=skip) as sc:
+        for i, r in enumerate(rollouts):
+            sc.submit(i, r)
+        res = sc.collect(rollouts)
+    assert sorted(judge.seen) == ["q0", "q2", "q4"]
+    assert probe.batch_sizes == [3]
+    for name in ("j", "p"):
+        assert [r is None for r in res[name]] == [False, True, False, True, False]
+    assert [r.meta["q"] for r in res["j"] if r is not None] == ["q0", "q2", "q4"]
+
+
+def test_all_rollouts_skipped_calls_no_probe():
+    rollouts = [_rollout("a"), _rollout("b")]
+    probe = _BatchProbe("p")
+    with MonitorScorer([probe], workers=2, skip=lambda r: True) as sc:
+        res = sc.collect(rollouts)
+    assert probe.batch_sizes == [] and res == {"p": [None, None]}
+
+
 def test_no_monitors_needs_no_pool():
     rollouts = [_rollout("a")]
     with MonitorScorer([], workers=4) as sc:

@@ -76,5 +76,9 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
   much gradient signal the batch carried (a constant-reward group contributes nothing).
 - `reward/total_{std,min,max}`, `rollout/output_tokens_{mean,min,max}`, `rollout/truncated_rate`,
   `loss/n_action_tokens`, `loss/learning_rate`.
+- `invalid_rate` (train + eval; eval also `truncated_rate`) — truncated or unparseable rollouts: flat −1
+  reward and **never monitored**, so every `monitor/*` metric and `reward/monitor_suspiciousness_mean`
+  is over the remaining valid rollouts (`monitor/<m>/n_scored` = their count). `reward/penalty_mean` is
+  still averaged over all rollouts (0 for invalid ones) — the reward actually deducted per rollout.
 - Not available: grad norm (tinker's `optim_step` returns no metrics for LoRA runs) and post-update KL
   (would cost an extra logprob pass per step).

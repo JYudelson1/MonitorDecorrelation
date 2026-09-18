@@ -174,7 +174,7 @@ def test_load_saved_rollouts_fixture():
     assert steps == {0, 1}
     # ground truth labels preserved
     assert sum(1 for _, g in pairs if g) == 3
-    with_unparsed = load_saved_rollouts(str(_FIXTURE), keep_unparsed=True)
+    with_unparsed = load_saved_rollouts(str(_FIXTURE), keep_invalid=True)
     assert len(with_unparsed) == 6
     print("load_saved_rollouts OK")
 

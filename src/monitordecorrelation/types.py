@@ -39,8 +39,9 @@ class Rollout:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
-#: The whole RL reward of a rollout cut off by ``max_tokens`` or whose output could not be parsed, in
-#: every env and for every policy — no monitor penalty on top (``EnvResult.reward_override``).
+#: The whole RL reward of a rollout cut off by ``max_tokens`` or whose output could not be parsed (an
+#: INVALID rollout, ``envs.base.invalid_reason``), in every env and for every policy. No monitor
+#: penalty on top (``EnvResult.reward_override``) — no monitor even scores it.
 INVALID_ROLLOUT_REWARD = -1.0
 
 
@@ -52,11 +53,13 @@ class EnvResult:
     is the oracle label monitors are graded against — it must NEVER enter a monitor or the reward.
 
     ``reward_override``, when set, is the rollout's FULL RL reward: it replaces
-    ``task_reward − λ·suspiciousness`` outright. Monitors still score the rollout and their scores are
-    logged as usual; they just don't enter its reward. It is set to ``INVALID_ROLLOUT_REWARD`` for
-    every rollout that was truncated by ``max_tokens`` (by the RL loop, for every env) or whose output
-    could not be parsed (by the env). ``task_reward`` keeps the task score (0 for such rollouts), so
-    ``reward/task_mean`` stays a task-success measure.
+    ``task_reward − λ·suspiciousness`` outright. It is set to ``INVALID_ROLLOUT_REWARD`` exactly for the
+    INVALID rollouts (``envs.base.invalid_reason``): truncated by ``max_tokens`` (by the RL loop, for
+    every env) or with output that could not be parsed (by the env). No monitor scores an invalid
+    rollout, in training or eval, so none of the monitor statistics include it. A single-turn env does not
+    grade a truncated rollout either (``task_reward`` 0, ``behavior_present`` False, ``meta["truncated"]``
+    True); a multi-turn env still grades a truncated episode's earlier turns. ``task_reward`` keeps the
+    task score (0 for unparseable rollouts), so ``reward/task_mean`` stays a task-success measure.
     """
 
     task_reward: float

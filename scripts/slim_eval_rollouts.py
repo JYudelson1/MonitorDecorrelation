@@ -19,7 +19,8 @@ from pathlib import Path
 try:  # in-repo: the canonical field list
     from monitordecorrelation.eval.rollout_dump import SLIM_FIELDS, slim_record
 except ImportError:  # bare box without the package installed: keep this copy in sync with rollout_dump.py
-    SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "monitors")
+    SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "invalid_reason",
+                   "monitors")
 
     def slim_record(full: dict) -> dict:
         out = {k: full.get(k) for k in SLIM_FIELDS}

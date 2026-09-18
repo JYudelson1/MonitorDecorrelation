@@ -11,6 +11,29 @@ from typing import Any, Protocol, runtime_checkable
 from monitordecorrelation.types import EnvResult, Prompt, Rollout
 
 
+def is_truncated(rollout: Rollout) -> bool:
+    """Sampling stopped on ``max_tokens`` rather than end-of-turn. For a multi-turn episode
+    ``stop_reason`` is the last turn's — and a truncated turn always ends the episode."""
+    stop = (rollout.meta or {}).get("stop_reason")
+    return stop is not None and stop != "stop"
+
+
+def invalid_reason(env: Any, rollout: Rollout) -> str | None:
+    """Why a rollout is INVALID — ``"truncated"`` (cut off by max_tokens) or ``"unparsed"`` (the env
+    could not parse its output) — or None if it is valid.
+
+    An invalid rollout gets the flat ``INVALID_ROLLOUT_REWARD`` and is **never shown to a monitor**,
+    in training or eval: every monitor statistic (AUROC, d′, class means, the train-against
+    suspiciousness) is over the valid rollouts only. Decidable from the rollout alone, so the RL loop
+    can skip the judge calls the moment a rollout is sampled, before the env grades it."""
+    if is_truncated(rollout):
+        return "truncated"
+    check = getattr(env, "unparseable", None)
+    if check is not None and check(rollout):
+        return "unparsed"
+    return None
+
+
 @runtime_checkable
 class Env(Protocol):
     """An RL setting with a ground-truth behavior signal."""
@@ -31,6 +54,13 @@ class Env(Protocol):
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:
         """Pull a fixed held-out eval set of ``n`` prompts and REMOVE them from the training pool
         (eval ⟂ train). Optional — runners fall back to overlapping sampling if absent."""
+        ...
+
+    def unparseable(self, rollout: Rollout) -> bool:
+        """Could the rollout's output NOT be parsed (no codeblock / answer letter / ``<command>``)?
+        Optional — an env without it has no parse failures. Must be cheap and pure (it runs on the
+        sampling threads, before ``score``) and agree with ``score``'s ``meta["unparsed"]``; the RL
+        loop checks that. See ``invalid_reason``."""
         ...
 
 

@@ -2,7 +2,7 @@
 held-out), pooled over seeds. Methodology + the pinned decision: docs/DEGRADATION_METRICS.md §"Split-half".
 Run: `uv run python experiments/coupling_splithalf_proto.py [batch_dir]` (default: the sep3 batch).
 
-Metric: mu_hack (mean monitor score on strict-hack rollouts). Collapse steps (unparsed>0.5) dropped.
+Metric: mu_hack (mean monitor score on strict-hack rollouts). Invalid rollouts (unparsed/truncated — never monitored) dropped; collapse steps (invalid>0.5) dropped.
 Point estimate: median over random task splits, Δ pairs pooled across the target's runs.
 CI: task bootstrap (resample tasks with replacement, independently per run), 90%."""
 import json,glob,collections,numpy as np,sys
@@ -15,12 +15,14 @@ rng=np.random.default_rng(0)
 CANON=['probe_ood','probe_iid','cot_only_weak','cot_only_strong','cot+out_weak','cot+out_strong','out_weak','out_strong']
 def load(d):
     recs=[json.loads(l) for l in open(Path(d)/'eval_rollouts_slim.jsonl') if l.strip()]
-    mons=list(CANON); assert set(recs[0]['monitors'])==set(CANON), recs[0]['monitors']; by=collections.defaultdict(list)
+    bad=lambda r: bool(r.get('unparsed')) or r.get('invalid_reason') is not None  # invalid: never monitored
+    mons=list(CANON); ok=[r for r in recs if not bad(r)]; assert ok and set(ok[0]['monitors'])==set(CANON), ok[:1]; by=collections.defaultdict(list)
     for r in recs: by[r['step']].append(r)
-    steps=[s for s in sorted(by) if np.mean([bool(r.get('unparsed')) for r in by[s]])<=0.5]
+    steps=[s for s in sorted(by) if np.mean([bad(r) for r in by[s]])<=0.5]
     IDX={s:collections.defaultdict(list) for s in steps}
     for s in steps:
-        for r in by[s]: IDX[s][r['task_id']].append((np.array([r['monitors'][m]['score'] for m in mons],float),bool(r['behavior_present'])))
+        for r in by[s]:
+            if not bad(r): IDX[s][r['task_id']].append((np.array([r['monitors'][m]['score'] for m in mons],float),bool(r['behavior_present'])))
     return mons,steps,IDX,sorted({r['task_id'] for r in recs})
 def series(IDX,steps,n,task_list):
     out=np.full((n,len(steps)),np.nan)

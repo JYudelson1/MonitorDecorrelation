@@ -24,12 +24,23 @@ from monitordecorrelation.types import Prompt, Rollout
 __all__ = [
     "build_prompt_tokens",
     "load_saved_rollouts",
+    "saved_rollout_invalid",
     "sample_rollouts",
     "split_cot_answer",
 ]
 
 
-def load_saved_rollouts(path: str, *, keep_unparsed: bool = False) -> list[tuple[Rollout, bool]]:
+def saved_rollout_invalid(rec: dict) -> bool:
+    """Is a saved ``rollouts.jsonl`` record an INVALID rollout (truncated or unparseable) — one the run
+    never showed to a monitor? Newer dumps say so (``invalid_reason``); older ones are judged by their
+    parse flag or a ``reward_override`` (only ever set on truncated / unparseable rollouts)."""
+    if "invalid_reason" in rec:
+        return rec["invalid_reason"] is not None
+    env = rec.get("env") or {}
+    return bool(env.get("unparsed")) or env.get("reward_override") is not None
+
+
+def load_saved_rollouts(path: str, *, keep_invalid: bool = False) -> list[tuple[Rollout, bool]]:
     """Reconstruct (rollout, ground_truth) pairs from a saved ``rollouts.jsonl``.
 
     The saved schema (see ``rl/train.py``) stores ``question``/``cot``/``answer`` plus the env oracle
@@ -37,7 +48,8 @@ def load_saved_rollouts(path: str, *, keep_unparsed: bool = False) -> list[tuple
     those aren't persisted) so any monitor that reads text fields can re-score the run post-hoc. The
     saved ``step`` is stashed in ``Rollout.meta`` so callers can group by training step.
 
-    Unparsed rollouts (the env couldn't extract a choice) are dropped by default.
+    Invalid rollouts (truncated, or the env couldn't parse the output — ``saved_rollout_invalid``) are
+    dropped by default: monitors are never evaluated on them, post hoc included.
     """
     out: list[tuple[Rollout, bool]] = []
     with open(path) as f:
@@ -46,7 +58,7 @@ def load_saved_rollouts(path: str, *, keep_unparsed: bool = False) -> list[tuple
             if not line:
                 continue
             r = json.loads(line)
-            if r["env"].get("unparsed") and not keep_unparsed:
+            if saved_rollout_invalid(r) and not keep_invalid:
                 continue
             # tolerate pre-refactor rollouts that used the old "ground_truth_misbehavior" key
             beh = r["env"].get("behavior_present", r["env"].get("ground_truth_misbehavior"))

@@ -19,8 +19,11 @@ from __future__ import annotations
 
 from typing import Any
 
-# step + task identity + the 3-way hacking labels + parse flag + every monitor's {score, label}
-SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "monitors")
+# step + task identity + the 3-way hacking labels + parse flag + invalid reason + every monitor's
+# {score, label}. ``invalid_reason`` (null | "truncated" | "unparsed"; absent → None in runs that predate
+# it) marks a rollout no monitor was shown — its ``monitors`` is {}.
+SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "invalid_reason",
+               "monitors")
 
 # The per-monitor keys the slim dump keeps.
 SLIM_MONITOR_FIELDS = ("score", "label")

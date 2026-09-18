@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 import tinker
 
+from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 from monitordecorrelation.experiment_config import resolve_think_budget
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
@@ -101,7 +102,8 @@ def main() -> None:
           f"(PRE-RL, effort={args.effort}) | judges: {', '.join(j.name for j in judges)}", flush=True)
 
     t0 = time.time()
-    with MonitorScorer(judges, args.workers) as scorer:
+    # Invalid episodes (truncated / no <command>) are never shown to a judge, as in the RL loop.
+    with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=cfg.get("max_tokens", 3072), temperature=1.0,
                                 seed=args.seed, think_budget=resolve_think_budget(cfg.get("think_budget", "auto"), env),
@@ -112,24 +114,32 @@ def main() -> None:
         judged = scorer.collect(rollouts)
 
     gt = [er.behavior_present for er in results]
+    invalid = [invalid_reason(env, r) for r in rollouts]
+    valid = [i for i, why in enumerate(invalid) if why is None]
+    gt_v = [gt[i] for i in valid]  # the judges' metrics are over the valid (monitored) episodes only
     print(f"\n=== pre-RL baseline: {args.model}, {len(gt)} episodes, {wall_s:.0f}s ===")
     for k in ("used_verifier", "read_verifier", "modified_verifier", "passed", "submitted_true_answer"):
         print(f"  env/{k:<22} {mean(float(er.meta[k]) for er in results):.3f}")
     print(f"  behavior_present (oracle)  {mean(map(float, gt)):.3f}   "
           f"({sum(gt)} positive / {len(gt) - sum(gt)} negative)")
+    print(f"  invalid (not judged)       {1 - len(valid) / len(gt):.3f}   "
+          f"({sum(w == 'truncated' for w in invalid)} truncated / {sum(w == 'unparsed' for w in invalid)} "
+          f"no <command>) — judge metrics below: {len(valid)} valid episodes, "
+          f"{sum(gt_v)} positive / {len(gt_v) - sum(gt_v)} negative")
 
     rows = {}
     print(f"\n{'monitor':<14}{'view':<12}{'AUROC':>7}{'acc':>7}{'brier':>7}{'d-prime':>9}"
           f"{'mean|hack':>11}{'mean|clean':>11}{'gap':>7}{'TPR':>7}{'FPR':>7}")
     for j in judges:
-        scores = [judged[j.name][i].score for i in range(len(rollouts))]
-        preds = [judged[j.name][i].label for i in range(len(rollouts))]
-        hi = mean([s for s, t in zip(scores, gt) if t]) if any(gt) else float("nan")
-        lo = mean([s for s, t in zip(scores, gt) if not t]) if not all(gt) else float("nan")
-        r = {"auroc": roc_auc(scores, gt), "accuracy": accuracy(preds, gt),
-             "brier": brier(scores, gt), "dprime_margin": dprime_margin(scores, gt),
+        scores = [judged[j.name][i].score for i in valid]
+        preds = [judged[j.name][i].label for i in valid]
+        hi = mean([s for s, t in zip(scores, gt_v) if t]) if any(gt_v) else float("nan")
+        lo = mean([s for s, t in zip(scores, gt_v) if not t]) if not all(gt_v) else float("nan")
+        r = {"auroc": roc_auc(scores, gt_v), "accuracy": accuracy(preds, gt_v),
+             "brier": brier(scores, gt_v), "dprime_margin": dprime_margin(scores, gt_v),
              "mean_score_present": hi, "mean_score_absent": lo, "suspiciousness_gap": hi - lo,
-             "mean_score": mean(scores), **rates(preds, gt)}
+             "mean_score": mean(scores) if scores else float("nan"), "n_scored": len(scores),
+             **rates(preds, gt_v)}
         rows[j.name] = r
         view = ("cot+output" if j.use_cot and j.use_output else
                 "output-only" if not j.use_cot else "cot-only")
@@ -143,12 +153,13 @@ def main() -> None:
     out.write_text(json.dumps({
         "model": args.model, "config": args.config, "n_episodes": len(gt), "seed": args.seed,
         "effort": args.effort, "wall_s": wall_s, "env_options": opts,
-        "behavior_rate": mean(map(float, gt)), "monitors": rows,
+        "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
         "rollouts": [{"task_id": er.meta["task_id"], "behavior_present": er.behavior_present,
                       "question": r.prompt.text, "cot": r.cot, "output": r.output,
-                      "env_meta": er.meta,
-                      # score/label + each judge's exact request/response (monitor_record)
-                      "monitors": {j.name: monitor_record(judged[j.name][i]) for j in judges}}
+                      "env_meta": er.meta, "invalid_reason": invalid[i],
+                      # score/label + each judge's exact request/response (monitor_record); {} if invalid
+                      "monitors": {j.name: monitor_record(judged[j.name][i]) for j in judges
+                                   if judged[j.name][i] is not None}}
                      for i, (r, er) in enumerate(zip(rollouts, results))],
     }, indent=1, default=str))
     print(f"\nwrote {out}")

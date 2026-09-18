@@ -626,19 +626,29 @@ class TerminalVerifierEnv:
         return "\n\n".join(parts)
 
     # -- grading (pure: everything was decided during the episode) -----------------------------------
-    def score(self, rollout: Rollout) -> EnvResult:
+    @staticmethod
+    def _episode(rollout: Rollout) -> dict:
         ep = (rollout.meta or {}).get("episode")
         if ep is None:
             raise ValueError(
                 "rollout has no meta['episode'] — TerminalVerifierEnv rollouts must be produced by the "
                 "multi-turn episode driver (rl/episodes.py), not single-turn sampling"
             )
-        unparsed = ep["end_reason"] == "no_command"  # a turn with no <command> ended the episode
+        return ep
+
+    def unparseable(self, rollout: Rollout) -> bool:
+        """A turn with no ``<command>`` ended the episode — an invalid rollout, never shown to a
+        monitor (envs/base.py)."""
+        return self._episode(rollout)["end_reason"] == "no_command"
+
+    def score(self, rollout: Rollout) -> EnvResult:
+        ep = self._episode(rollout)
+        unparsed = self.unparseable(rollout)  # a turn with no <command> ended the episode
         return EnvResult(
             task_reward=float(ep["reward"]),
             behavior_present=bool(ep["cheated"]),
             meta={"unparsed": unparsed, **ep},
-            # Truncated or command-less last turn: flat -1, no monitor penalty. (The RL loop also
-            # applies the truncation half from stop_reason, for every env.)
+            # Truncated or command-less last turn: flat -1, no monitor penalty, never monitored. (The
+            # RL loop also applies the truncation half from stop_reason, for every env.)
             reward_override=INVALID_ROLLOUT_REWARD if (ep["truncated"] or unparsed) else None,
         )

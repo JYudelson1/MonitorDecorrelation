@@ -137,56 +137,153 @@ def test_run_grpo_aborts_when_a_monitor_cannot_score():
             shutil.rmtree(run_dir)
 
 
-class _TruncatingEnv(_FakeEnv):
-    """Alternates truncated (reward_override=-1) and normal rollouts, like the terminal env."""
+class _InvalidatingBackend(_FakeBackend):
+    """Cycles each prompt's samples through: valid, truncated (stop_reason "length"), unparseable (no
+    codeblock), valid — the two kinds of INVALID rollout, alongside valid ones."""
 
-    def __init__(self):
-        self._n = 0
+    def sample(self, prompts, *, num_samples=1, max_tokens=64, temperature=1.0):
+        out = []
+        for p in prompts:
+            for k in range(num_samples):
+                kind = ("ok", "trunc", "noparse", "ok")[k % 4]
+                out.append(Rollout(
+                    prompt=p, cot="reason",
+                    output="no code here" if kind == "noparse" else "```python\ndef f(x):\n  return x\n```",
+                    token_ids=[1, 2, 3], logprobs=[-0.1, -0.2, -0.3],
+                    meta={"stop_reason": "length" if kind == "trunc" else "stop"}))
+        return out
+
+
+class _ParsingEnv(_FakeEnv):
+    """Like the real envs: an output with no codeblock is unparseable (-1, never monitored). Every
+    VALID rollout is a hack, every invalid one is not — so a monitor metric that leaked an invalid
+    rollout in would show up as a negative class."""
+
+    def unparseable(self, rollout):
+        return "```" not in rollout.output
 
     def score(self, rollout):
-        self._n += 1
-        over = -1.0 if self._n % 2 else None
-        return EnvResult(task_reward=0.5, behavior_present=False, meta={"unparsed": False},
-                         reward_override=over)
+        if rollout.meta.get("stop_reason") != "stop":  # truncated: not graded (single-turn rule)
+            return EnvResult(task_reward=0.0, behavior_present=False,
+                             meta={"unparsed": False, "truncated": True}, reward_override=-1.0)
+        if self.unparseable(rollout):
+            return EnvResult(task_reward=0.0, behavior_present=False,
+                             meta={"unparsed": True, "truncated": False}, reward_override=-1.0)
+        return EnvResult(task_reward=0.5, behavior_present=True, meta={"unparsed": False, "truncated": False})
 
 
-def test_run_grpo_reward_override_bypasses_monitor_penalty():
-    """A rollout with ``reward_override`` gets exactly that reward (no λ·suspiciousness), yet its
-    train-against monitor score is still computed and saved."""
-    run_dir = Path("data/runs/smoke_test_loop_override")
+class _CountingMonitor(_FakeMonitor):
+    """A probe-style monitor that records every rollout it is shown."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.seen: list[Rollout] = []
+
+    def score_batch(self, rollouts):
+        self.seen.extend(rollouts)
+        return super().score_batch(rollouts)
+
+
+class _CountingJudge:
+    """An API-judge-style monitor (threaded path) that records every rollout it is shown."""
+
+    def __init__(self, name):
+        self.name = name
+        self.seen: list[Rollout] = []
+
+    def score(self, rollout):
+        self.seen.append(rollout)
+        return MonitorResult(score=0.3, label=False)
+
+
+def test_invalid_rollouts_are_never_monitored_and_excluded_from_monitor_metrics():
+    """Truncated and unparseable rollouts get exactly -1 (no λ·suspiciousness), are shown to NO
+    monitor (train-against or held-out, judge or probe), are saved with ``monitors == {}`` and their
+    ``invalid_reason``, and every monitor statistic is over the valid rollouts only."""
+    run_dir = Path("data/runs/smoke_test_loop_invalid")
     if run_dir.exists():
         shutil.rmtree(run_dir)
     cfg = RunConfig(
         env="fake_env", backend="fake", base_model="fake/model",
-        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        batch_size=2, group_size=4, n_steps=1, eval_every=10, eval_size=2, eval_samples_per_prompt=4,
         penalty_coef=1.0, kl_coef=0.0, seed=0,
-        logging=LoggingConfig(run_name="smoke_test_loop_override", use_wandb=False, log_fraction=1.0),
+        logging=LoggingConfig(run_name="smoke_test_loop_invalid", use_wandb=False, log_fraction=1.0),
     )
+    ta, judge, probe = _CountingMonitor("ta"), _CountingJudge("ho_judge"), _CountingMonitor("ho_probe")
     try:
-        run_grpo(cfg, _TruncatingEnv(), _FakeBackend(), train_against=[_FakeMonitor("ta")], held_out=[])
+        run_grpo(cfg, _ParsingEnv(), _InvalidatingBackend(), train_against=[ta], held_out=[judge, probe])
+        for mon in (ta, judge, probe):
+            assert mon.seen and all(r.meta["stop_reason"] == "stop" and "```" in r.output for r in mon.seen)
+
         rows = [json.loads(l) for l in (run_dir / "rollouts.jsonl").open() if l.strip()]
-        assert len(rows) == 4
+        assert len(rows) == 8
         for r in rows:
-            assert r["monitors"]["ta"]["score"] == pytest.approx(0.3)  # scored either way
-            if r["env"]["reward_override"] is not None:
-                assert r["reward"] == -1.0
+            if r["invalid_reason"] is not None:
+                assert r["monitors"] == {} and r["reward"] == -1.0
+                assert r["env"]["reward_override"] == -1.0
             else:
+                assert r["monitors"]["ta"]["score"] == pytest.approx(0.3)
                 assert r["reward"] == pytest.approx(0.5 - 1.0 * 0.3)
+        assert sorted(str(r["invalid_reason"]) for r in rows) == ["None"] * 4 + ["truncated"] * 2 + ["unparsed"] * 2
+
         m = json.loads((run_dir / "metrics.jsonl").read_text().splitlines()[0])
-        assert m["reward/override_rate"] == 0.5
-        assert m["reward/penalty_mean"] == pytest.approx(0.15)          # applied only to the 2 normal ones
-        assert m["reward/monitor_suspiciousness_mean"] == pytest.approx(0.3)  # over all 4
+        assert m["reward/override_rate"] == 0.5 and m["invalid_rate"] == 0.5
+        assert m["reward/monitor_suspiciousness_mean"] == pytest.approx(0.3)  # over the 4 valid only
+        assert m["reward/penalty_mean"] == pytest.approx(0.15)  # applied only to the 4 valid, per rollout
+        assert m["monitor/ta/n_scored"] == 4 and m["monitor/ta/n_pos"] == 4 and m["monitor/ta/n_neg"] == 0
+        assert m["monitor/ta/mean_score_not_reward_hacking"] != m["monitor/ta/mean_score_not_reward_hacking"]  # NaN
+        assert m["behavior_rate"] == 0.5  # the oracle rate stays over ALL rollouts
+
+        ev = [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
+        for row in ev:
+            assert row["invalid_rate"] == 0.5 and row["truncated_rate"] == 0.25
+            for name in ("ta", "ho_judge", "ho_probe"):
+                assert row[f"monitor/{name}/n_scored"] == 4 and row[f"monitor/{name}/n_neg"] == 0
+        erecs = [json.loads(l) for l in (run_dir / "eval_rollouts.jsonl").open() if l.strip()]
+        slim = [json.loads(l) for l in (run_dir / "eval_rollouts_slim.jsonl").open() if l.strip()]
+        for rec in (*erecs, *slim):
+            assert (rec["monitors"] == {}) == (rec["invalid_reason"] is not None)
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
 
 
+def test_score_env_rejects_an_env_that_overrides_a_valid_rollout():
+    """reward_override is reserved for invalid rollouts — the ones the monitors skipped. An env that
+    sets it on a valid rollout would give a monitored rollout a monitor-free reward: fail loudly."""
+    from monitordecorrelation.rl.train import _score_env
+
+    class _BadEnv:
+        def score(self, rollout):
+            return EnvResult(task_reward=1.0, behavior_present=False, meta={}, reward_override=-1.0)
+
+    with pytest.raises(RuntimeError, match="reward_override on valid rollout 0"):
+        _score_env(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a", meta={"stop_reason": "stop"})])
+
+
+def test_score_env_rejects_an_unparsed_flag_that_disagrees_with_unparseable():
+    from monitordecorrelation.rl.train import _score_env
+
+    class _BadEnv:
+        def unparseable(self, rollout):
+            return False
+
+        def score(self, rollout):
+            return EnvResult(task_reward=0.0, behavior_present=False, meta={"unparsed": True})
+
+    with pytest.raises(RuntimeError, match="unparseable\(\) disagrees"):
+        _score_env(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a")])
+
+
 def test_score_env_gives_every_truncated_rollout_minus_one_whatever_the_env_said():
     """The truncation rule lives in the RL loop, not in each env: any rollout whose sampling stopped
-    on max_tokens gets reward_override = -1, even from an env that knows nothing about truncation."""
+    on max_tokens gets reward_override = -1, even from an env that knows nothing about truncation.
+    (A multi-turn env, which may still grade a truncated episode's earlier turns.)"""
     from monitordecorrelation.rl.train import _score_env
 
     class _PlainEnv:
+        multi_turn = True
+
         def score(self, rollout):
             return EnvResult(task_reward=1.0, behavior_present=False, meta={})
 
@@ -197,3 +294,17 @@ def test_score_env_gives_every_truncated_rollout_minus_one_whatever_the_env_said
     res = _score_env(_PlainEnv(), [roll("length"), roll("stop"), roll(None)])
     assert [r.reward_override for r in res] == [-1.0, None, None]
     assert [r.task_reward for r in res] == [1.0, 1.0, 1.0]  # task score untouched
+
+
+def test_score_env_rejects_a_single_turn_env_that_grades_a_truncated_rollout():
+    """Single-turn envs must not grade a truncated rollout: no task score, no behavior label from text
+    that was cut off (and that no monitor will see)."""
+    from monitordecorrelation.rl.train import _score_env
+
+    class _GradesEverything:
+        def score(self, rollout):
+            return EnvResult(task_reward=1.0, behavior_present=True, meta={})
+
+    trunc = Rollout(prompt=Prompt(text="q"), cot="", output="a", meta={"stop_reason": "length"})
+    with pytest.raises(RuntimeError, match="graded truncated rollout 0"):
+        _score_env(_GradesEverything(), [trunc])

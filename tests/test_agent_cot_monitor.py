@@ -249,7 +249,7 @@ def test_every_saved_inkling_rollout_formats():
     """Replay a real run: every train and eval rollout must format without tripping an assertion,
     and the transcript must carry every turn's thinking, message and tool output."""
     n = 0
-    for r, _gt in load_saved_rollouts(str(_OLD_RUN / "rollouts.jsonl"), keep_unparsed=True):
+    for r, _gt in load_saved_rollouts(str(_OLD_RUN / "rollouts.jsonl"), keep_invalid=True):
         turns = agentic_turns(r)
         t = _transcript(r)
         assert t.count("ASSISTANT:") == len(turns)
