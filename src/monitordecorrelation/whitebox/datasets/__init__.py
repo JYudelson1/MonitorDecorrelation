@@ -83,7 +83,7 @@ PROBE_PRESETS: dict[str, list[str]] = {
         "mask_statements",  # MASK propositions -> blatant true/false (the easy MASK probe)
         "truthfulqa",
         "liarsbench",
-        "sycophancy",
+        #"sycophancy",
         "sandbagging",
     ],
     "mbpp": ["mbpp"],  # on-domain code probe (human code = honest, hardcode = deceptive)
