@@ -55,6 +55,7 @@ def test_unparsed():
     env = _env()
     r = env.score(Rollout(prompt=env.sample_prompt(), cot="", output="I think the answer is sum()."))
     assert r.meta["unparsed"] and r.behavior_present is False and r.task_reward == 0.0
+    assert r.reward_override == -1.0  # flat RL reward, no monitor penalty
     print("unparsed OK")
 
 

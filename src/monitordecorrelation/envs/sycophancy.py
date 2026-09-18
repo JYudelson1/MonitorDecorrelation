@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from monitordecorrelation.types import EnvResult, Prompt, Rollout
+from monitordecorrelation.types import INVALID_ROLLOUT_REWARD, EnvResult, Prompt, Rollout
 
 # anthropics/evals sycophancy subsets -> raw URL + local cache name.
 _SUBSETS = {
@@ -155,4 +155,6 @@ class SycophancyQAEnv:
             task_reward=1.0 if is_syco else 0.0,
             behavior_present=is_syco,
             meta={"choice": choice, "unparsed": choice is None, "sycophantic_letter": syco},
+            # No answer letter could be parsed: flat -1, no monitor penalty (as in every env).
+            reward_override=INVALID_ROLLOUT_REWARD if choice is None else None,
         )

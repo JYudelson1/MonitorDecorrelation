@@ -98,8 +98,12 @@ class TransformersBackend:
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
             # gen: [num_samples, prompt_len + gen_len]; completion = everything after the prompt.
+            eos = self.model.generation_config.eos_token_id
+            eos_ids = set(eos if isinstance(eos, (list, tuple)) else [eos]) | {self.tokenizer.eos_token_id}
             for seq in gen:
                 comp_ids = seq[len(prompt_ids):].tolist()
+                # Same vocabulary as tinker: "stop" = ended on EOS, "length" = cut off by max_tokens.
+                stop_reason = "stop" if eos_ids & set(comp_ids) else "length"
                 # strip trailing pad/eos
                 while comp_ids and comp_ids[-1] == self.tokenizer.pad_token_id:
                     comp_ids.pop()
@@ -112,7 +116,7 @@ class TransformersBackend:
                     Rollout(
                         prompt=prompt, cot=cot, output=answer,
                         token_ids=comp_ids, logprobs=comp_lp,
-                        meta={"full_text": text},
+                        meta={"stop_reason": stop_reason, "full_text": text},
                     )
                 )
         return rollouts

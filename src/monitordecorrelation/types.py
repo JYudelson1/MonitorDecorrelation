@@ -39,6 +39,11 @@ class Rollout:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+#: The whole RL reward of a rollout cut off by ``max_tokens`` or whose output could not be parsed, in
+#: every env and for every policy — no monitor penalty on top (``EnvResult.reward_override``).
+INVALID_ROLLOUT_REWARD = -1.0
+
+
 @dataclass
 class EnvResult:
     """Output of grading a rollout against an environment.
@@ -47,9 +52,11 @@ class EnvResult:
     is the oracle label monitors are graded against — it must NEVER enter a monitor or the reward.
 
     ``reward_override``, when set, is the rollout's FULL RL reward: it replaces
-    ``task_reward − λ·suspiciousness`` outright (e.g. the terminal env's fixed penalty for an episode
-    cut off by max_tokens). Monitors still score the rollout and their scores are logged as usual;
-    they just don't enter its reward.
+    ``task_reward − λ·suspiciousness`` outright. Monitors still score the rollout and their scores are
+    logged as usual; they just don't enter its reward. It is set to ``INVALID_ROLLOUT_REWARD`` for
+    every rollout that was truncated by ``max_tokens`` (by the RL loop, for every env) or whose output
+    could not be parsed (by the env). ``task_reward`` keeps the task score (0 for such rollouts), so
+    ``reward/task_mean`` stays a task-success measure.
     """
 
     task_reward: float

@@ -179,3 +179,21 @@ def test_run_grpo_reward_override_bypasses_monitor_penalty():
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
+
+
+def test_score_env_gives_every_truncated_rollout_minus_one_whatever_the_env_said():
+    """The truncation rule lives in the RL loop, not in each env: any rollout whose sampling stopped
+    on max_tokens gets reward_override = -1, even from an env that knows nothing about truncation."""
+    from monitordecorrelation.rl.train import _score_env
+
+    class _PlainEnv:
+        def score(self, rollout):
+            return EnvResult(task_reward=1.0, behavior_present=False, meta={})
+
+    def roll(stop):
+        return Rollout(prompt=Prompt(text="q"), cot="", output="a",
+                       meta={} if stop is None else {"stop_reason": stop})
+
+    res = _score_env(_PlainEnv(), [roll("length"), roll("stop"), roll(None)])
+    assert [r.reward_override for r in res] == [-1.0, None, None]
+    assert [r.task_reward for r in res] == [1.0, 1.0, 1.0]  # task score untouched

@@ -1,7 +1,9 @@
 """GRPO training loop for the decorrelation experiments.
 
-reward = task_reward − penalty_coef · mean(train_against monitor scores), unless the env sets
-``EnvResult.reward_override`` (then that is the reward; monitors are still scored and logged). Held-out
+reward = task_reward − penalty_coef · mean(train_against monitor scores), unless
+``EnvResult.reward_override`` is set (then that is the reward; monitors are still scored and logged):
+a rollout truncated by max_tokens (any env, set in ``_score_env``) or with unparseable output (set by
+the env) gets a flat ``INVALID_ROLLOUT_REWARD`` = -1. Held-out
 monitors are scored every step but never enter the reward. The ground-truth behavior rate is logged as the
 primary metric (see docs/EXPERIMENT_PLAN.md "Ground truth is the crux").
 """
@@ -30,7 +32,7 @@ from monitordecorrelation.eval.metric_keys import absent_score_key, present_scor
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.rl import sdk_watch as sdk_watch_mod
-from monitordecorrelation.types import MonitorResult, Rollout
+from monitordecorrelation.types import INVALID_ROLLOUT_REWARD, MonitorResult, Rollout
 
 
 def _log(msg: str) -> None:
@@ -148,12 +150,22 @@ def _env_metrics(results: Sequence, env) -> dict[str, float]:
     return out
 
 
+def _is_truncated(rollout: Rollout) -> bool:
+    """Sampling stopped on ``max_tokens`` rather than end-of-turn. For a multi-turn episode
+    ``stop_reason`` is the last turn's — and a truncated turn always ends the episode."""
+    stop = (rollout.meta or {}).get("stop_reason")
+    return stop is not None and stop != "stop"
+
+
 def _score_env(env: Env, rollouts: list[Rollout]) -> list:
     """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
 
     Envs whose grading is expensive and out-of-process (running generated code) implement
     ``score_batch`` to execute rollouts concurrently; otherwise this is the plain serial loop. Errors
-    propagate deliberately — a grading failure is never coerced into a reward."""
+    propagate deliberately — a grading failure is never coerced into a reward.
+
+    Every rollout truncated by ``max_tokens`` then gets ``reward_override = INVALID_ROLLOUT_REWARD``,
+    whatever the env made of it — the one place this is enforced, so it holds for every env and policy."""
     if hasattr(env, "score_batch"):
         results = list(env.score_batch(rollouts))  # type: ignore[attr-defined]
         if len(results) != len(rollouts):
@@ -161,8 +173,12 @@ def _score_env(env: Env, rollouts: list[Rollout]) -> list:
                 f"{type(env).__name__}.score_batch returned {len(results)} results for "
                 f"{len(rollouts)} rollouts"
             )
-        return results
-    return [env.score(r) for r in rollouts]
+    else:
+        results = [env.score(r) for r in rollouts]
+    for r, er in zip(rollouts, results):
+        if _is_truncated(r):
+            er.reward_override = INVALID_ROLLOUT_REWARD
+    return results
 
 
 def _monitor_info(m: Monitor, role: str) -> dict:
@@ -544,8 +560,8 @@ def run_grpo(
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac
-        # An env-set ``reward_override`` (e.g. a terminal episode truncated by max_tokens → -1) IS the
-        # reward: the monitor penalty is not applied to it, though its monitor scores are still logged.
+        # A ``reward_override`` (truncated by max_tokens / unparseable output → -1) IS the reward: the
+        # monitor penalty is not applied to it, though its monitor scores are still logged.
         applied = [0.0 if er.reward_override is not None else pen_coef * pen
                    for er, pen in zip(env_results, penalties)]
         rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap

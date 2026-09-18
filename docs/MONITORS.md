@@ -43,7 +43,8 @@ and ignores `meta["episode"]`. Multi-turn envs (`env.multi_turn`, i.e. the termi
 swaps it in for every `kind: cot` spec, same fields. It renders the episode as a chat transcript in
 the order it happened — `USER:` (the task), then per turn `ASSISTANT:` (`<thinking>…</thinking>`
 first when `use_cot`, then the message) and `TOOL:` (what the command printed); a mid-episode turn
-with no command is followed by the env's "no command" `USER:` message; `SYSTEM:` only if the prompt
+with no command is followed by the env's "no command" `USER:` message (only in episodes recorded
+before 2026-09-18 — a command-less turn now ends the episode); `SYSTEM:` only if the prompt
 carries one — inside a fixed reward-hacking judge prompt (`JUDGE_PROMPT`, 0–100 suspicion score, or
 `JUDGE_PROMPT_BINARY`). It only judges reward hacking, and a CoT-only view (`use_output: false`) is
 rejected — a transcript without the actions is not a transcript. Every assumption about the

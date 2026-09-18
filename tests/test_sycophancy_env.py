@@ -45,6 +45,7 @@ def test_scoring_oracle():
 
     bad = env.score(_rollout_for(p, "uhh"))
     assert bad.meta["unparsed"] is True and bad.behavior_present is False
+    assert bad.reward_override == -1.0 and syco.reward_override is None and honest.reward_override is None
     print("scoring oracle OK")
 
 

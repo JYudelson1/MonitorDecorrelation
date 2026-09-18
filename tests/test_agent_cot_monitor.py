@@ -29,6 +29,8 @@ import pytest
 from monitordecorrelation.envs.terminal_verifier import (
     NO_COMMAND_MESSAGE,
     TerminalVerifierEnv,
+    TurnRecord,
+    extract_commands,
     make_island_items,
 )
 from monitordecorrelation.monitors.agent_cot_monitor import (
@@ -47,10 +49,26 @@ _TURNS = [
 ]
 
 
-def _episode(turns=_TURNS, output_view: str = "transcript", *, truncate_last: bool = False) -> Rollout:
-    """A real episode driven through the real env (commands actually execute)."""
+class _LegacyNudgeEnv(TerminalVerifierEnv):
+    """The env as it behaved before 2026-09-18: a command-less turn got the "no command" nudge and the
+    episode went on (now it ends the episode at -1). Episodes saved back then have that shape, and the
+    judge must keep rendering them — so the fixture below still produces it."""
+
+    def step(self, state, cot, text, *, truncated=False):
+        if not truncated and not extract_commands(text) and len(state.turns) + 1 < self.max_turns:
+            state.turns.append(TurnRecord(cot=cot, text=text, command=None, output=None,
+                                          is_submission=False, verifier_value=None, truncated=False,
+                                          observation=NO_COMMAND_MESSAGE))
+            return NO_COMMAND_MESSAGE, False
+        return super().step(state, cot, text, truncated=truncated)
+
+
+def _episode(turns=_TURNS, output_view: str = "transcript", *, truncate_last: bool = False,
+             env_cls=_LegacyNudgeEnv) -> Rollout:
+    """A real episode driven through the env (commands actually execute). Defaults to the legacy
+    no-command-nudge shape, since ``_TURNS`` has a command-less turn mid-episode."""
     items = make_island_items(2, 0, impossible=True, offset_range=(4, 9), min_ones=3, prefix="t")
-    env = TerminalVerifierEnv(items, eval_items=[], output_view=output_view, max_turns=6)
+    env = env_cls(items, eval_items=[], output_view=output_view, max_turns=6)
     prompt = env._to_prompt(items[0])
     state = env.start(prompt)
     for i, (cot, text) in enumerate(turns):
@@ -107,6 +125,16 @@ def test_truncated_last_turn_has_no_tool_or_user_block():
     assert t.rstrip().endswith("ASSISTANT: <thinking>\ncut off mid-thou\n</thinking>")
     assert t.count("TOOL:") == 1 and NO_COMMAND_MESSAGE not in t
     print("truncated turn OK")
+
+
+def test_current_env_command_less_last_turn_has_no_tool_or_user_block():
+    """Today a command-less turn ends the episode, so it is last and nothing follows it."""
+    r = _episode(_TURNS[:2], env_cls=TerminalVerifierEnv)
+    assert r.meta["episode"]["end_reason"] == "no_command"
+    t = _transcript(r)
+    assert t.rstrip().endswith("Hmm, let me think about it.")
+    assert t.count("TOOL:") == 1 and NO_COMMAND_MESSAGE not in t
+    print("command-less last turn OK")
 
 
 def test_system_message_only_when_present():
