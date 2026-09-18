@@ -47,9 +47,10 @@ _RETRYABLE_402_REASON = "in_flight_budget_exhausted"
 #   "stop"   — the judge terminated normally.
 #   "length" — it hit max_tokens. Read it anyway: with reasoning off (or bounded) the verdict lives
 #              in the content channel, so a truncated reply either already carries its `SCORE:` line
-#              or never will. Retrying cannot help — the judge is called at temperature 0, so every
-#              retry returns the identical truncated text (measured: 4/4 byte-identical replays on
-#              gemini-2.5-flash-lite), which used to spin a run forever inside one eval.
+#              or never will. Retrying does not help — back when the judge was called at
+#              temperature 0 every retry returned the identical truncated text (measured: 4/4
+#              byte-identical replays on gemini-2.5-flash-lite), which used to spin a run forever
+#              inside one eval; at temperature 1 a retry would just be a fresh, costlier sample.
 # Anything else ("content_filter", "error", …) means the judge never got to answer → API error.
 # NB an EMPTY body under "length" is still an API error (handled below): that would mean reasoning
 # consumed the whole completion budget, which cannot happen while reasoning is disabled or budgeted — it is a
