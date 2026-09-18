@@ -288,7 +288,7 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 ## Run outputs (`data/runs/<run>/`)
 - `run_info.json` — full validated config + which model each monitor was (train-against vs held-out) + `env.behavior_name`.
 - `config.json` — the effective config (after `--set` overrides); re-run with `--config data/runs/<run>/config.json`.
-- `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score). 
+- `metrics.jsonl` — per **train** step (ground-truth strict/loose/hardcoding rates, reward, train-against monitor score, plus RL-debugging metrics: IS loss, ratio / sample-train KL, entropy, advantage + reward spread, lengths, truncation — see docs/INFRA.md).
 - `eval_metrics.jsonl` — per **eval** (every `eval_every`) on the fixed held-out set: **every** monitor's AUROC/brier/class-split. **This is what the degradation matrix reads.**
 - `eval_rollouts.jsonl` — one record per held-out rollout with every monitor's score+label (post-hoc recalibration).
 - `eval_rollouts_slim.jsonl` — the **committed** subset of the above (`step, task_id, behavior_present, loose_rh, hardcoding, unparsed, monitors`; no text, ~3 MB/run). Regenerate from a full dump with `python3 scripts/slim_eval_rollouts.py <run dirs>` (stdlib-only; skips corrupt lines).

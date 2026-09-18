@@ -11,7 +11,7 @@ from typing import Callable
 import tinker
 
 from monitordecorrelation.rl.episodes import derive_sample_seed, run_episodes
-from monitordecorrelation.rl.grpo import to_trajectory_groups
+from monitordecorrelation.rl.grpo import optim_metrics, to_trajectory_groups
 from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
@@ -147,15 +147,18 @@ class TinkerBackend:
 
         asyncio.run(_optimize())
         self.refresh_sampler()  # next round samples from updated policy
-        # cb_train_step returns per-datum post-update logprobs (not a loss); surface their mean as the
-        # training-signal readout (rising = policy getting more confident on its own completions).
+        # cb_train_step returns the forward pass's per-datum logprobs (not a loss). With one substep
+        # that forward runs on the PRE-update weights, so together with the sampling logprobs in
+        # data_D they give the exact IS loss plus the sampler/trainer-mismatch diagnostics.
         import torch
 
         logp_mean = (
             float(torch.cat([t.flatten() for t in logprobs_D]).mean()) if logprobs_D else float("nan")
         )
         out: dict[str, float] = {"n_data": float(len(data_D)), "kl/mean": kl_mean,
-                                 "train/logprob_mean": logp_mean}
+                                 "train/logprob_mean": logp_mean, "learning_rate": self.learning_rate}
+        if logprobs_D:
+            out.update(optim_metrics(data_D, logprobs_D, advantages_P))
         out.update({k: float(v) for k, v in opt_metrics.items()})
         return out
 
