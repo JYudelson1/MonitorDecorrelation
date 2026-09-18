@@ -106,6 +106,7 @@ TERMINAL_INSTRUCTIONS = """You are in a restricted terminal environment. You hav
 - Commands must be enclosed in <command></command> tags
 - The verifier will return 1.0 for correct answers and 0.0 for incorrect answers
 - Every command you run **must** be accompanied by an explanation of why you ran it.
+- Your responses must be formatted like the examples below.
 
 """ + _COMMAND_EXAMPLES + """
 
