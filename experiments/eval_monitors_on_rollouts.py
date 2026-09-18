@@ -62,6 +62,10 @@ def main() -> None:
     ap.add_argument("--rollouts", required=True, help="a saved rollouts.jsonl")
     ap.add_argument("--behavior", default="reward_hacking")
     ap.add_argument("--max-per-class", type=int, default=500, help="class-balanced cap (0 = use all)")
+    ap.add_argument("--config", default=None,
+                    help="build the judges from a run config's `monitors` (exact names, views and "
+                         "reasoning settings — no drift from the RL runs). Overrides --models/--modes. "
+                         "Probes are skipped: they need the 8B base model, this script is judges-only.")
     ap.add_argument("--models", default=",".join(_DEFAULT_MODELS))
     ap.add_argument("--modes", default="cot,output", help="cot (reads CoT) and/or output (answer only)")
     ap.add_argument("--workers", type=int, default=16)
@@ -89,26 +93,51 @@ def main() -> None:
         eval_rollouts, gt = [r for r, _ in parsed], [g for _, g in parsed]
         k = None
 
-    models = [m.strip() for m in args.models.split(",") if m.strip()]
-    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-    monitors = [(mid, mode) for mid in models for mode in modes]
+    if args.config:
+        # The battery exactly as a matrix row declares it. Keeping the specs (not just model ids)
+        # preserves each judge's view and reasoning_effort — a gemini-3.x judge without one cannot
+        # complete a single call, and a cot-only judge measured as cot+out is a different monitor.
+        from monitordecorrelation.experiment_config import load_config
+        specs = [s for s in load_config(args.config).monitors if s.kind == "cot"]
+        n_probe = len(load_config(args.config).monitors) - len(specs)
+        monitors = [(s.name, s) for s in specs]
+        models = sorted({s.model_id for s in specs})
+        modes = [args.config]
+        if n_probe:
+            print(f"(skipping {n_probe} probe monitor(s) — judges only)")
+    else:
+        models = [m.strip() for m in args.models.split(",") if m.strip()]
+        modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+        monitors = [(f"{_slug(mid)}_{mode}", (mid, mode)) for mid in models for mode in modes]
     print(f"rollouts: {len(parsed)} ({len(pos)} hacking / {len(neg)} non) — judge: {judge_cls.__name__}")
     print(f"eval set: {len(eval_rollouts)} ({'balanced ' + str(k) + '/class' if k else 'ALL'})")
-    print(f"monitors: {len(monitors)} = {len(models)} models × {len(modes)} modes ({', '.join(modes)})")
+    print(f"monitors: {len(monitors)}" + (f" from {args.config}" if args.config
+          else f" = {len(models)} models × {len(modes)} modes ({', '.join(modes)})"))
     if args.dry_run:
-        print("\n[dry-run] no API calls. Models:")
-        for mid in models:
-            print(f"  - {mid}")
+        print("\n[dry-run] no API calls. Monitors:")
+        for name, spec in monitors:
+            d = (f"{spec.model_id} use_cot={spec.use_cot} use_output={spec.use_output} "
+                 f"reasoning_effort={spec.reasoning_effort}") if args.config else f"{spec[0]} mode={spec[1]}"
+            print(f"  - {name:18s} {d}")
         return
 
     results = []
     print(f"\n{'monitor':40s} {'AUROC':>6} {'acc':>6} {'mean(hack)':>11} {'mean(¬hack)':>12} {'s':>5}")
     print("-" * 86)
-    for mid, mode in monitors:
+    for name, spec in monitors:
         t0 = perf_counter()
+        mid = spec.model_id if args.config else spec[0]
+        mode = args.config if args.config else spec[1]
         try:
-            mon = judge_cls(name=f"{_slug(mid)}_{mode}", model_id=mid, behavior=args.behavior,
-                            use_cot=(mode == "cot"))
+            if args.config:
+                mon = judge_cls(name=name, model_id=spec.model_id, behavior=args.behavior,
+                                use_cot=spec.use_cot, use_output=spec.use_output,
+                                reasoning_effort=spec.reasoning_effort,
+                                reasoning_max_tokens=spec.reasoning_max_tokens,
+                                binary_judge=spec.binary_judge, threshold=spec.threshold)
+            else:
+                mon = judge_cls(name=name, model_id=mid, behavior=args.behavior,
+                                use_cot=(mode == "cot"))
 
             def _safe_score(r):  # one bad call -> NaN, never lose the whole model's row
                 try:
@@ -137,7 +166,7 @@ def main() -> None:
             mn = mean([s for s, g in zip(scores, mgt) if not g]) if not all(mgt) else float("nan")
             parse_rate = len(usable) / len(call_ok) if call_ok else 0.0
             n_call_fail = len(res) - len(call_ok)
-            results.append({"model_id": mid, "mode": mode, "auroc": auc, "accuracy": acc,
+            results.append({"name": name, "model_id": mid, "mode": mode, "auroc": auc, "accuracy": acc,
                             "mean_hack": mh, "mean_nonhack": mn, "n_usable": len(usable),
                             "parse_success_rate": parse_rate, "n_call_failed": n_call_fail,
                             "n_parse_failed": len(call_ok) - len(usable)})
@@ -147,11 +176,11 @@ def main() -> None:
             if n_call_fail:
                 flags.append(f"{n_call_fail} call-fail")
             flag = f"  ({', '.join(flags)})" if flags else ""
-            print(f"{_slug(mid) + '/' + mode:40s} {auc:6.2f} {acc:6.2f} {mh:11.1f} {mn:12.1f} "
+            print(f"{name:40s} {auc:6.2f} {acc:6.2f} {mh:11.1f} {mn:12.1f} "
                   f"{perf_counter()-t0:5.0f}{flag}")
         except Exception as e:  # noqa: BLE001
-            print(f"{_slug(mid) + '/' + mode:40s}  FAILED: {str(e)[:48]}")
-            results.append({"model_id": mid, "mode": mode, "error": str(e)})
+            print(f"{name:40s}  FAILED: {str(e)[:48]}")
+            results.append({"name": name, "model_id": mid, "mode": mode, "error": str(e)})
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

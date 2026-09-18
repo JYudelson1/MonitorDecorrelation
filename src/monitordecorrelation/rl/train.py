@@ -28,6 +28,7 @@ from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
+from monitordecorrelation.rl import sdk_watch as sdk_watch_mod
 from monitordecorrelation.types import MonitorResult, Rollout
 
 
@@ -137,14 +138,28 @@ def _score_env(env: Env, rollouts: list[Rollout]) -> list:
 
 
 def _monitor_info(m: Monitor, role: str) -> dict:
-    """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later)."""
-    return {
+    """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later).
+
+    Includes the judge's VIEW (use_cot/use_output) and reasoning settings: two runs whose judges
+    differ in those are not comparable, and a gemini-3.x judge with no reasoning setting cannot even
+    complete a call, so these belong in the durable record rather than only in the config file that
+    happened to be passed. ``scripts/verify_runs.py`` checks them post-launch."""
+    info = {
         "name": m.name,
         "role": role,
         "model_id": getattr(m, "model_id", None),
         "behavior": getattr(m, "behavior", None),
         "threshold": getattr(m, "threshold", None),
     }
+    if getattr(m, "model_id", None):  # LLM judges only — probes have none of these
+        info.update({
+            "use_cot": getattr(m, "use_cot", None),
+            "use_output": getattr(m, "use_output", None),
+            "binary_judge": getattr(m, "binary_judge", None),
+            "reasoning_effort": getattr(m, "reasoning_effort", None),
+            "reasoning_max_tokens": getattr(m, "reasoning_max_tokens", None),
+        })
+    return info
 
 
 # Per-rollout monitor failures are collected rather than raised on the spot, so ONE warning names
@@ -321,6 +336,10 @@ def run_grpo(
     }
     (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
 
+    # Backend (tinker SDK) warnings -> <run>/sdk_warnings.log + a cumulative counter in the metrics
+    # rows, so "did this run stall on a queue pause?" is answerable from the COMMITTED artifacts.
+    sdk_watch = sdk_watch_mod.install(rollout_log_dir)
+
     rollout_log = (rollout_log_dir / "rollouts.jsonl").open("w")
     # TRAIN metrics (per step, on the training rollouts) and EVAL metrics (periodic, on a FIXED
     # held-out set) go to separate files + wandb namespaces. Degradation curves come from EVAL.
@@ -448,6 +467,7 @@ def run_grpo(
              f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
     for step in range(cfg.n_steps):
+        sdk_watch.step = step  # so each persisted warning names the step it landed on
         if step % cfg.eval_every == 0:
             run_eval(step)  # held-out eval at step 0 and every eval_every
             
@@ -547,6 +567,7 @@ def run_grpo(
             "time/optim_s": t_optim,
             "time/total_s": t_sample + t_score + t_optim,
             "kl/mean": step_metrics.get("kl/mean", 0.0),  # per-token KL to base (0 if kl_coef=0)
+            **sdk_watch.metrics(),  # cumulative backend queue-pause / SDK warning counts
             **{f"loss/{k}": v for k, v in step_metrics.items()},
             **mon,  # per-train-against-monitor metrics (strict + loose), built above
         }
@@ -614,6 +635,7 @@ def run_grpo(
         except Exception as e:  # noqa: BLE001 — never let a save hiccup fail a completed run
             _log(f"⚠️  final checkpoint save failed: {type(e).__name__}: {e}")
 
+    sdk_watch_mod.uninstall(sdk_watch)
     rollout_log.close()
     metrics_log.close()
     eval_metrics_log.close()

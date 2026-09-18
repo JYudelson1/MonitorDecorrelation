@@ -59,10 +59,10 @@ def main() -> None:
             if r["env"].get("behavior_present"):
                 n_kept_hack += 1
             cot_prompt = _PROMPT_TEMPLATE.format(
-                description=rubric.description, adjective=rubric.adjective,
+                description=rubric.description, adjective=rubric.adjective, score_instruction=rubric.score_instruction,
                 question=r["question"], cot=r.get("cot") or "(none provided)", answer=r.get("answer", ""))
             out_prompt = _OUTPUT_TEMPLATE.format(
-                description=rubric.description, adjective=rubric.adjective,
+                description=rubric.description, adjective=rubric.adjective, score_instruction=rubric.score_instruction,
                 question=r["question"], answer=r.get("answer", ""))
             cot_toks.append(len(enc.encode(cot_prompt)))
             out_toks.append(len(enc.encode(out_prompt)))

@@ -203,8 +203,12 @@ def test_cot_monitor_is_single_turn_only():
     p = CoTMonitor("m", "x/y", behavior="reward_hacking", api_key="test")._build_prompt(plain)
     assert "=== ASSISTANT REASONING (chain of thought) ===" in p
     assert "=== ASSISTANT FINAL ANSWER ===" in p
+    # The reward-hacking rubric introduces the material itself (describe_evidence=False), so the
+    # generated evidence sentence is not appended; rubrics that do not, still get it.
     out = CoTMonitor("m", "x/y", behavior="reward_hacking", api_key="test", use_cot=False)._build_prompt(plain)
-    assert "the user's message and the assistant's final answer." in out
+    assert "You are given" not in out and "SECRET_REASONING" not in out
+    syco = CoTMonitor("m", "x/y", behavior="sycophancy", api_key="test", use_cot=False)._build_prompt(plain)
+    assert "the user's message and the assistant's final answer." in syco
     print("CoTMonitor single-turn only OK")
 
 
