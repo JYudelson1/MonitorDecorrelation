@@ -308,7 +308,7 @@ class CoTMonitor:
         return {
             "model": self.model_id,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
+            "temperature": 1.0,
             "max_tokens": 2048,
             "reasoning": self._reasoning,  # {enabled:false}, or effort / a bounded budget
         }
