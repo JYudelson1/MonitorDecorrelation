@@ -28,6 +28,8 @@ from typing import Any
 # because the judge-facing "explanations" view needs to strip commands too, and monitors must not
 # import envs; ``envs.terminal_verifier`` re-exports both helpers for its long-standing callers.
 _COMMAND_RE = re.compile(r"<command>(.*?)</command>", re.S)
+# What must follow the executed command: "Explanation: <text>", the text running to the next <command>.
+_EXPLANATION_RE = re.compile(r"\s*Explanation:(.*?)(?=<command>|\Z)", re.S)
 
 # What the terminal env sends the policy as the next user message when a turn contained no
 # ``<command>`` (verbatim from rg_obfuscation/prompts/terminal_prompts.py). Lives here so the agentic
@@ -45,6 +47,19 @@ DEFAULT_OUTPUT_VIEW = "transcript"
 def extract_commands(text: str) -> list[str]:
     """All ``<command>…</command>`` bodies in an assistant message, stripped, empties dropped."""
     return [c.strip() for c in _COMMAND_RE.findall(text or "") if c.strip()]
+
+
+def explained_command(text: str) -> str | None:
+    """The command a terminal-env turn runs — its first non-empty ``<command>`` — or None if the turn
+    is malformed. Well-formed (rg_obfuscation's format) means that command is immediately followed
+    (whitespace aside) by ``Explanation:`` and a non-empty explanation before any further
+    ``<command>``; a turn with no command, or whose command lacks that explanation, is a parse failure."""
+    text = text or ""
+    for m in _COMMAND_RE.finditer(text):
+        if m.group(1).strip():
+            e = _EXPLANATION_RE.match(text, m.end())
+            return m.group(1).strip() if e and e.group(1).strip() else None
+    return None
 
 
 def strip_commands(text: str) -> str:

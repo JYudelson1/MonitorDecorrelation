@@ -57,7 +57,7 @@ class Env(Protocol):
         ...
 
     def unparseable(self, rollout: Rollout) -> bool:
-        """Could the rollout's output NOT be parsed (no codeblock / answer letter / ``<command>``)?
+        """Could the rollout's output NOT be parsed (no codeblock / answer letter / explained ``<command>``)?
         Optional — an env without it has no parse failures. Must be cheap and pure (it runs on the
         sampling threads, before ``score``) and agree with ``score``'s ``meta["unparsed"]``; the RL
         loop checks that. See ``invalid_reason``."""

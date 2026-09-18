@@ -102,7 +102,7 @@ def main() -> None:
           f"(PRE-RL, effort={args.effort}) | judges: {', '.join(j.name for j in judges)}", flush=True)
 
     t0 = time.time()
-    # Invalid episodes (truncated / no <command>) are never shown to a judge, as in the RL loop.
+    # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
     with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=cfg.get("max_tokens", 3072), temperature=1.0,
@@ -124,7 +124,7 @@ def main() -> None:
           f"({sum(gt)} positive / {len(gt) - sum(gt)} negative)")
     print(f"  invalid (not judged)       {1 - len(valid) / len(gt):.3f}   "
           f"({sum(w == 'truncated' for w in invalid)} truncated / {sum(w == 'unparsed' for w in invalid)} "
-          f"no <command>) — judge metrics below: {len(valid)} valid episodes, "
+          f"malformed) — judge metrics below: {len(valid)} valid episodes, "
           f"{sum(gt_v)} positive / {len(gt_v) - sum(gt_v)} negative")
 
     rows = {}

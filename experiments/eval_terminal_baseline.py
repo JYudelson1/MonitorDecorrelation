@@ -149,7 +149,7 @@ def main() -> None:
                   AgentCoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
 
     t0 = time.time()
-    # Invalid episodes (truncated / no <command>) are never shown to a judge, as in the RL loop.
+    # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
     with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
@@ -236,7 +236,7 @@ def main() -> None:
         "truncated_output_turn_rate": sum(r.meta["n_truncated_turns"] for r in rollouts) / n_turns_total,
         "think_budget_hit_rate": mean(float(r.meta["n_forced_answers"] > 0) for r in rollouts),
         "think_budget_hit_turn_rate": sum(r.meta["n_forced_answers"] for r in rollouts) / n_turns_total,
-        # parse failures: a turn whose text carried no <command> (and was not cut off) — it ends the
+        # parse failures: a turn with no <command>, or no Explanation: after it (and not cut off) — it ends the
         # episode, so the episode-level rate is the episodes that ended on one.
         "parse_error_turn_rate": sum(er.meta["no_command_turns"] for er in results) / n_turns_total,
         "parse_error_episode_rate": rate("unparsed"),
@@ -267,7 +267,7 @@ def main() -> None:
           f"{summary['truncated_output_turn_rate']:.3f} of turns")
     print(f"  {'think budget hit':<22} {summary['think_budget_hit_rate']:.3f} of episodes, "
           f"{summary['think_budget_hit_turn_rate']:.3f} of turns")
-    print(f"  {'no <command> parsed':<22} {summary['parse_error_episode_rate']:.3f} of episodes, "
+    print(f"  {'parse error':<22} {summary['parse_error_episode_rate']:.3f} of episodes, "
           f"{summary['parse_error_turn_rate']:.3f} of turns")
     summary_path = out.parent / f"summary_{out.stem}.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str))
