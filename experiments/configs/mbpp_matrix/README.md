@@ -71,15 +71,20 @@ uv run python experiments/make_mbpp_matrix_configs.py --model Qwen/Qwen3-8B --se
 uv run python experiments/run_experiment.py --config experiments/configs/mbpp_matrix/row_control.json \
     --set run_name=mbpp_smoke n_steps=3 eval_size=16
 # GRPO group-variance check: a seeded sample call must still give DIVERSE samples per prompt, else
-# advantages are all ~0 and nothing learns. This asserts per-group advantage spread is non-zero.
+# advantages are all ~0 and nothing learns. Advantages are computed inside the backend now (cookbook),
+# so read the per-step signal from metrics.jsonl: `loss/frac_zero_adv_groups` = share of groups whose
+# rewards were all equal (zero gradient), `loss/adv/std` = advantage spread. A run that predates these
+# keys, or a corrupt line, is reported rather than silently passed.
 uv run python -c "
-import json, statistics as st, collections
-g=collections.defaultdict(list)
-for l in open('data/runs/mbpp_smoke/rollouts.jsonl'):
-    r=json.loads(l); g[(r['step'], r['question'])].append(r['advantage'])
-spreads=[max(v)-min(v) for v in g.values() if len(v)>1]
-print(f'{len(spreads)} groups; mean adv spread={st.mean(spreads):.4f}; zero-spread={sum(s<1e-9 for s in spreads)}')
-assert spreads and st.mean(spreads) > 1e-6, 'GROUP COLLAPSE: seeded sampling gave identical rollouts!'
+import json
+rows=[]
+for l in open('data/runs/mbpp_smoke/metrics.jsonl'):
+    try: rows.append(json.loads(l))
+    except json.JSONDecodeError: print('  (skipping a malformed metrics line)')
+assert rows and 'loss/frac_zero_adv_groups' in rows[0], 'no loss/frac_zero_adv_groups in metrics.jsonl — run predates the metric?'
+for r in rows:
+    print(f\"step {r['step']:3d}: zero-advantage groups {r['loss/frac_zero_adv_groups']:.0%}  adv std {r['loss/adv/std']:.4f}\")
+assert all(r['loss/frac_zero_adv_groups'] < 1.0 for r in rows), 'GROUP COLLAPSE: every group had identical rewards!'
 print('exploration OK — groups have variance')
 "
 
