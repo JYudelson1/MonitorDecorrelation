@@ -24,6 +24,11 @@ Checks per run:
   - hyperparameters that must be identical across a matrix are identical
   - backend queue-pause warnings recorded so far (``metrics.jsonl``), since runs that stall can
     change behaviour right afterwards
+  - training log-prob spikes (``loss/train/logprob_mean`` far below its running median): on the
+    2026-09-03 MBPP batch every collapse into 100%-truncated single-token loops was preceded, one
+    step earlier, by exactly such a spike (-3 to -51 vs a normal -0.3 to -1.9), and the two smaller
+    spikes (-2.5, -3.7) were followed by partial collapses. A flagged run is worth inspecting (or
+    resuming from the checkpoint before the spike) rather than pooling as-is
 
 Exit status is 1 if anything is flagged, so it can gate a batch in a shell.
 """
@@ -100,6 +105,33 @@ def _queue_pauses(run_dir: Path) -> tuple[int, int | None]:
     return n, first
 
 
+def _logprob_spikes(run_dir: Path, *, floor: float = -2.0, factor: float = 3.0) -> list[tuple[int, float]]:
+    """[(step, logprob_mean)] where the per-token training log-prob drops below ``floor`` AND below
+    ``factor`` x the running median of the earlier steps. Reads metrics.jsonl defensively."""
+    path = run_dir / "metrics.jsonl"
+    if not path.exists():
+        return []
+    seen: list[float] = []
+    out: list[tuple[int, float]] = []
+    for line in path.open(errors="replace"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        v = row.get("loss/train/logprob_mean")
+        if not isinstance(v, (int, float)) or v != v:
+            continue
+        if seen:
+            med = sorted(seen)[len(seen) // 2]
+            if v < floor and v < factor * med:
+                out.append((row.get("step"), v))
+        seen.append(v)
+    return out
+
+
 def check(run_dir: Path) -> tuple[list[str], dict]:
     """(problems, facts) for one run."""
     probs: list[str] = []
@@ -137,10 +169,11 @@ def check(run_dir: Path) -> tuple[list[str], dict]:
     unrecorded = judges and all("reasoning_effort" not in m for m in judges)
 
     n_pause, first = _queue_pauses(run_dir)
+    spikes = _logprob_spikes(run_dir)
     facts = {"name": name, "reasoning_unrecorded": bool(unrecorded), "target": ta[0] if ta else "control", "n_monitors": len(ta) + len(held),
              "battery": tuple(sorted(ta + held)), "seed": cfg.get("seed"),
              "shared": tuple(cfg.get(k) for k in _SHARED_KEYS),
-             "n_pause": n_pause, "pause_step": first}
+             "n_pause": n_pause, "pause_step": first, "spikes": spikes}
     return probs, facts
 
 
@@ -165,11 +198,13 @@ def main() -> int:
             probs.append(f"{f['n_monitors']} monitors, expected {args.expect_monitors}")
         facts.append(f)
         all_probs += len(probs)
-        if probs or not args.quiet:
+        if probs or f["spikes"] or f["n_pause"] or not args.quiet:
             pause = "" if not f["n_pause"] else f"  ⚠️ {f['n_pause']} queue pause(s) from step {f['pause_step']}"
+            spike = "" if not f["spikes"] else ("  ⚠️ logprob spike at step " +
+                                                ", ".join(f"{s} ({v:.1f})" for s, v in f["spikes"][:3]))
             mark = "✗" if probs else "✓"
             print(f"{mark} {d.name:44s} target={f['target']:16s} seed={f['seed']} "
-                  f"monitors={f['n_monitors']}{pause}")
+                  f"monitors={f['n_monitors']}{pause}{spike}")
             for p in probs:
                 print(f"    - {p}")
 
@@ -192,7 +227,15 @@ def main() -> int:
     stalled = [f["name"] for f in facts if f["n_pause"]]
     if stalled:
         print(f"⚠️  {len(stalled)} run(s) recorded backend queue pauses — inspect before pooling: {stalled}")
-    print("OK — nothing flagged" if all_probs == 0 else f"{all_probs} problem(s) flagged")
+    spiked = [f["name"] for f in facts if f["spikes"]]
+    if spiked:
+        print(f"⚠️  {len(spiked)} run(s) show a training log-prob spike (the collapse precursor on the Sep 3 "
+              f"batch) — check unparsed/invalid_rate right after it: {spiked}")
+    n_warn = len(stalled) + len(spiked)
+    if all_probs:
+        print(f"{all_probs} problem(s) flagged")
+    else:
+        print("OK — no problems" + (f" ({n_warn} warning(s) above to inspect before pooling)" if n_warn else ", nothing flagged"))
     return 1 if all_probs else 0
 
 

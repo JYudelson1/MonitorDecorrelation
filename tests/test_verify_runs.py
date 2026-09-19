@@ -1,0 +1,50 @@
+"""verify_runs: the training log-prob spike check (the Sep 3 collapse precursor)."""
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location(
+    "verify_runs", Path(__file__).resolve().parents[1] / "scripts" / "verify_runs.py")
+verify_runs = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(verify_runs)
+
+
+def _write(tmp_path: Path, values: list[float | str], name: str = "run") -> Path:
+    d = tmp_path / name
+    d.mkdir()
+    with (d / "metrics.jsonl").open("w") as f:
+        for step, v in enumerate(values):
+            if v == "garbage":
+                f.write("{not json\n")  # the Sep 3 logs really had malformed records
+            else:
+                f.write(json.dumps({"step": step, "loss/train/logprob_mean": v}) + "\n")
+    return d
+
+
+def test_flags_the_one_step_spike_and_tolerates_bad_lines(tmp_path):
+    # the cot_weak_s2 shape: ~-0.5 for 40 steps, then -51, then a collapsed -2.0 tail
+    d = _write(tmp_path, [-0.5] * 20 + ["garbage"] + [-0.6] * 20 + [-51.0, -2.0, -2.0])
+    spikes = verify_runs._logprob_spikes(d)
+    assert [s for s, _ in spikes] == [41]  # the -2.0 tail is below the floor but not 3x the median
+    assert spikes[0][1] == -51.0
+    print("spike flagged at the right step OK")
+
+
+def test_no_flag_on_gradual_drift_or_a_naturally_low_run(tmp_path):
+    # probe_iid_s1: log-probs sit around -1.3 to -1.9 for most of the run; that is not a spike
+    d = _write(tmp_path, [-0.5, -0.7, -1.2, -1.4, -1.6, -1.8, -1.9, -1.6, -1.4, -1.5, -1.9, -1.7])
+    assert verify_runs._logprob_spikes(d) == []
+    assert verify_runs._logprob_spikes(tmp_path / "missing") == []   # no metrics.jsonl yet
+    print("no false positive on drift OK")
+
+
+def test_check_reports_spikes_as_a_warning_not_a_problem(tmp_path):
+    # a control run (no train_against) so the target check itself has nothing to say
+    d = _write(tmp_path, [-0.4] * 10 + [-3.0, -0.2], name="mbpp_Qwen3-8B_control_s0_test")
+    (d / "run_info.json").write_text(json.dumps({"run_name": "x", "config": {"seed": 0}, "train_against": [], "held_out": []}))
+    probs, facts = verify_runs.check(d)
+    assert probs == []                      # a spike is something to inspect, not a misconfiguration
+    assert facts["spikes"] == [(10, -3.0)]
+    print("spike is a warning OK")
