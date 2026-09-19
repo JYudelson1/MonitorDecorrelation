@@ -4,7 +4,7 @@
   "backend": "tinker",
   "env": "mbpp_honeypot",
   "n_steps": 60,
-  "batch_size": 32,
+  "batch_size": 16,
   "group_size": 16,
   "eval_every": 3,
   "eval_size": 64,

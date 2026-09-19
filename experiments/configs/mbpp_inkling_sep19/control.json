@@ -4,7 +4,7 @@
   "backend": "tinker",
   "env": "mbpp_honeypot",
   "n_steps": 60,
-  "batch_size": 32,
+  "batch_size": 16,
   "group_size": 16,
   "eval_every": 3,
   "eval_size": 64,
@@ -17,7 +17,7 @@
   "lora_rank": 64,
   "seed": 0,
   "run_name": "mbpp_Inkling-Small_control_s0_sep19",
-  "description": "INKLING-SMALL CONTROL on MBPP-Honeypot: pure task reward (length-penalised visible test), no monitor in the gradient, the 6 Gemini judges held out. The question: does Inkling-Small hack the standard honeypot at all? (Qwen3-8B controls do in 5/5 seeds, first >=5% between step 12 and 48.) Same recipe as the sep18 Qwen matrix (32x16, 60 steps, 2048 tokens, eval 64x4 every 3) except policy, lr=5e-4 and thinking_effort=0.5, which match the terminal-env Inkling configs. No probes: the committed probes are Qwen3-8B probes.",
+  "description": "INKLING-SMALL CONTROL on MBPP-Honeypot: pure task reward (length-penalised visible test), no monitor in the gradient, the 6 Gemini judges held out. The question: does Inkling-Small hack the standard honeypot at all? (Qwen3-8B controls do in 5/5 seeds, first >=5% between step 12 and 48.) Same recipe as the sep18 Qwen matrix but 16x16 rollouts/step instead of 32x16 (Inkling costs more per token) (group size 16, 60 steps, 2048 tokens, eval 64x4 every 3) except policy, lr=5e-4 and thinking_effort=0.5, which match the terminal-env Inkling configs. No probes: the committed probes are Qwen3-8B probes.",
   "monitors": [
     {
       "kind": "cot",
