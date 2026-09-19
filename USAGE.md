@@ -111,7 +111,7 @@ counts by the number of runs:
 | Resource | Cap | Set in |
 | --- | --- | --- |
 | Concurrent model-code subprocesses | half this box's cores | `CODE_EXEC_MAX_CONCURRENT` in `src/monitordecorrelation/globalsem.py` |
-| Concurrent in-flight OpenRouter calls | 256 | `OPENROUTER_MAX_CONCURRENT` in the same file |
+| Concurrent in-flight OpenRouter calls | 1024 | `OPENROUTER_MAX_CONCURRENT` in the same file |
 
 Change either number at that one assignment; nothing else reads a copy. The same two semaphores
 cover training and evaluation (every judge call goes through `openrouter.chat`; every code execution

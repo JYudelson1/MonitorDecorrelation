@@ -27,7 +27,7 @@ def _sem_dir(tmp_path, monkeypatch):
 
 def test_limits_are_sane():
     """The two knobs exist, in one place, with the documented values."""
-    assert globalsem.OPENROUTER_MAX_CONCURRENT == 256
+    assert globalsem.OPENROUTER_MAX_CONCURRENT == 1024
     assert globalsem.CODE_EXEC_MAX_CONCURRENT == max(1, globalsem._cpu_count() // 2)
     assert globalsem.CODE_EXEC_MAX_CONCURRENT >= 1
 
@@ -151,7 +151,7 @@ def test_openrouter_backoff_sleep_does_not_hold_a_permit(monkeypatch):
     """`chat` retries forever with backoff; the permit must cover ONE attempt, not the loop.
 
     If it wrapped the whole call, a single judge stuck in its retry loop (a model that's down,
-    say) would sit on a permit indefinitely — with 256 of them and enough parallel runs, that
+    say) would sit on a permit indefinitely — with 1024 of them and enough parallel runs, that
     starves every other run on the box. Pinning this because the `with` is one indentation level
     away from being wrong.
     """

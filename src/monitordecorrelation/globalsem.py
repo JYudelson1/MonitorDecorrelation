@@ -72,7 +72,7 @@ def _cpu_count() -> int:
 CODE_EXEC_MAX_CONCURRENT = max(1, _cpu_count() // 2)
 
 #: Concurrent in-flight OpenRouter requests, across all runs on this box.
-OPENROUTER_MAX_CONCURRENT = 256
+OPENROUTER_MAX_CONCURRENT = 1024
 
 #: Where the slot files live. Must be a LOCAL filesystem — ``flock`` over NFS or a shared host
 #: volume is not something to rely on, and a volume would also silently share the cap with other
