@@ -41,6 +41,11 @@ TML_THINK_BUDGET_CUE = (
 DEFAULT_THINKING_EFFORT = 0.9
 
 
+def _template_kwargs(tokenizer) -> dict:
+    """TEMPORARY (Qwen3.8 exploration): its template takes reasoning_effort (default xhigh)."""
+    return {"reasoning_effort": "low"} if "Qwen3.8" in (getattr(tokenizer, "name_or_path", "") or "") else {}
+
+
 def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True) -> list[int]:
     """Render a single user turn to token ids with a generation prompt (HF chat template)."""
     messages = [{"role": "user", "content": question}]
@@ -50,6 +55,7 @@ def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True) 
         tokenize=True,
         return_dict=False,
         enable_thinking=enable_thinking,
+        **_template_kwargs(tokenizer),
     )
     # transformers 5.x may return a BatchEncoding even with return_dict=False on some paths.
     if hasattr(out, "input_ids"):
@@ -133,7 +139,7 @@ class HFChatRenderer:
                 {"role": "user", "content": observation}]
         full = self.tokenizer.apply_chat_template(
             stub, add_generation_prompt=True, enable_thinking=self.enable_thinking,
-            tokenize=True, return_dict=False,
+            tokenize=True, return_dict=False, **_template_kwargs(self.tokenizer),
         )
         full = list(getattr(full, "input_ids", full))
         eos = self.eos_token_id
@@ -143,12 +149,14 @@ class HFChatRenderer:
         # template rewrites the assistant turn — e.g. inserts an empty <think> block — depending on
         # whether it is the last message.)
         ends = [i for i, t in enumerate(full) if t == eos]
-        if len(ends) != 3:
+        # Index from the END: templates may prepend a default system turn (Qwen3.8's reasoning
+        # effort), so the assistant's end-of-turn is always the second-to-last one.
+        if len(ends) < 3:
             raise ValueError(
-                f"expected 3 end-of-turn tokens in the rendered stub, found {len(ends)} — cannot "
+                f"expected >=3 end-of-turn tokens in the rendered stub, found {len(ends)} — cannot "
                 f"locate the inter-turn framing for this chat template"
             )
-        out = full[ends[1] + 1:]
+        out = full[ends[-2] + 1:]
         return ([eos] if not ended_cleanly else []) + out
 
 
