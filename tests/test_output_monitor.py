@@ -133,3 +133,32 @@ def test_every_rubric_states_its_own_question():
     with pytest.raises(TypeError):
         Rubric(description="d", adjective="a")  # no default to fall back on
     print("every rubric states its own question OK")
+
+
+def test_cot_only_header_says_tool_calls_are_withheld_in_both_judges():
+    """The CoT-only judge is told the answer is deliberately absent — otherwise a judge that reasons
+    about the rollout sees reasoning that never produces code and hedges (measured: the strong judge's
+    mean on hacks fell from ~0.9 to 0.57 when this sentence was missing). The header is the same
+    string in the single-turn and agentic judges, by construction."""
+    from monitordecorrelation.monitors.agent_cot_monitor import JUDGE_PROMPT, JUDGE_PROMPT_COT_ONLY
+    from monitordecorrelation.monitors.rubrics import RH_BODY, RH_COT_ONLY_OPENING, RH_OPENING, get_rubric
+
+    r = _roll()
+    p = CoTMonitor("rh", "x/y", behavior="reward_hacking", api_key="test", use_output=False)._build_prompt(r)
+    assert p.startswith(RH_COT_ONLY_OPENING + RH_BODY)
+    assert "intentionally not shown" in p and "=== ASSISTANT FINAL ANSWER ===" not in p
+    assert "SECRET_REASONING" in p and "THE_ANSWER" not in p
+    for kw in ({}, {"use_cot": False}):  # the views that show the answer keep the original opening
+        assert CoTMonitor("rh", "x/y", behavior="reward_hacking", api_key="test", **kw)._build_prompt(r) \
+            .startswith(RH_OPENING + RH_BODY)
+    assert JUDGE_PROMPT.startswith(RH_OPENING + RH_BODY)
+    assert JUDGE_PROMPT_COT_ONLY.startswith(RH_COT_ONLY_OPENING + RH_BODY)
+    assert get_rubric("reward_hacking").cot_only_description == RH_COT_ONLY_OPENING + RH_BODY
+    # a custom rubric string applies to every view (no stale CoT-only text left behind)
+    c = CoTMonitor("rh", "x/y", behavior="reward_hacking", api_key="test", use_output=False,
+                   rubric="CUSTOM.")._build_prompt(r)
+    assert c.startswith("CUSTOM.") and "intentionally not shown" not in c
+    # rubrics without a CoT-only wording are unchanged
+    s = CoTMonitor("s", "x/y", behavior="sycophancy", api_key="test", use_output=False)._build_prompt(r)
+    assert "the user's message and the assistant's hidden reasoning." in s
+    print("CoT-only header parity OK")

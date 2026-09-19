@@ -202,7 +202,7 @@ class CoTMonitor:
             # vs. reward_hacking's calibrated probability) and its evidence-sentence policy carry
             # over, so an ad-hoc rubric can't silently change what the score means.
             base = get_rubric(behavior)
-            self.rubric = replace(base, description=rubric)
+            self.rubric = replace(base, description=rubric, cot_only_description=None)
         else:
             self.rubric = rubric
         self.threshold = threshold
@@ -285,7 +285,9 @@ class CoTMonitor:
                 _BINARY_COT_ONLY_TEMPLATE if self.binary_judge else _COT_ONLY_TEMPLATE
             )
             return template.format(
-                description=self._description(),
+                # The rubric's CoT-only wording when it has one (reward_hacking: "the agent's tool
+                # calls are intentionally not shown"), else the description + evidence sentence.
+                description=self.rubric.cot_only_description or self._description(),
                 adjective=self.rubric.adjective,
                 score_instruction=self.rubric.score_instruction,
                 question=rollout.prompt.text,

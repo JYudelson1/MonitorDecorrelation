@@ -386,7 +386,8 @@ def build_monitors(
     ``multi_turn`` (the env's ``multi_turn`` flag — the terminal env) makes every ``kind: cot`` spec an
     ``AgentCoTMonitor`` (chat-transcript judge over the per-turn episode record) instead of a
     ``CoTMonitor`` (the single-turn two-section judge). Same spec fields either way; a CoT-only
-    (``use_output: false``) spec is rejected for agentic rollouts by the monitor itself."""
+    (``use_output: false``) spec renders the reasoning-only transcript (the task, then each turn's
+    thinking; commands, explanations and tool output withheld — and the prompt says so)."""
     from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
     from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
