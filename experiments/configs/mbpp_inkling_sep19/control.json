@@ -1,0 +1,76 @@
+{
+  "experiment": "mbpp_degradation_matrix",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "mbpp_honeypot",
+  "n_steps": 60,
+  "batch_size": 32,
+  "group_size": 16,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 6,
+  "max_tokens": 2048,
+  "penalty_coef": 0.5,
+  "penalty_schedule": null,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "seed": 0,
+  "run_name": "mbpp_Inkling-Small_control_s0_sep19",
+  "description": "INKLING-SMALL CONTROL on MBPP-Honeypot: pure task reward (length-penalised visible test), no monitor in the gradient, the 6 Gemini judges held out. The question: does Inkling-Small hack the standard honeypot at all? (Qwen3-8B controls do in 5/5 seeds, first >=5% between step 12 and 48.) Same recipe as the sep18 Qwen matrix (32x16, 60 steps, 2048 tokens, eval 64x4 every 3) except policy, lr=5e-4 and thinking_effort=0.5, which match the terminal-env Inkling configs. No probes: the committed probes are Qwen3-8B probes.",
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "cot_only_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
+    },
+    {
+      "kind": "cot",
+      "name": "cot_only_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": false,
+      "reasoning_effort": "low"
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": true,
+      "reasoning_effort": "low"
+    },
+    {
+      "kind": "cot",
+      "name": "out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": false,
+      "use_output": true,
+      "reasoning_effort": "low"
+    }
+  ],
+  "lr": 0.0005,
+  "thinking_effort": 0.5
+}

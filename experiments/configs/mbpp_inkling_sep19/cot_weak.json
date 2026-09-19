@@ -1,0 +1,76 @@
+{
+  "experiment": "mbpp_degradation_matrix",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "mbpp_honeypot",
+  "n_steps": 60,
+  "batch_size": 32,
+  "group_size": 16,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "max_tokens": 2048,
+  "penalty_coef": 0.5,
+  "penalty_schedule": null,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "seed": 0,
+  "save_every": 6,
+  "run_name": "mbpp_Inkling-Small_cot_weak_s0_sep19",
+  "description": "INKLING-SMALL, train AGAINST cot+out_weak at the sep18 matrix's constant penalty 0.5 \u2014 the direct replica of the Qwen matrix row (where Qwen reaches >=5% hacking in ~2 of 7 seeds). Lowest-information run of the three; drop it first if budget-limited. Held out: the other 5 judges. Same shared settings as control.json.",
+  "monitors": [
+    {
+      "kind": "cot",
+      "name": "cot_only_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": false
+    },
+    {
+      "kind": "cot",
+      "name": "cot_only_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": false,
+      "reasoning_effort": "low"
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_weak",
+      "role": "train_against",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "cot+out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": true,
+      "use_output": true,
+      "reasoning_effort": "low"
+    },
+    {
+      "kind": "cot",
+      "name": "out_weak",
+      "role": "held_out",
+      "model_id": "google/gemini-2.5-flash-lite",
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "out_strong",
+      "role": "held_out",
+      "model_id": "google/gemini-3.5-flash-lite",
+      "use_cot": false,
+      "use_output": true,
+      "reasoning_effort": "low"
+    }
+  ],
+  "lr": 0.0005,
+  "thinking_effort": 0.5
+}
