@@ -2,15 +2,19 @@
 # setup_box.sh — point this uv project's torch at the newest PyTorch CUDA index the box's
 # driver actually supports, then sync and verify. Idempotent; rerun on every new box.
 #
-#   ./setup_box.sh            # torch only
-#   ./setup_box.sh --extra gpu  # also flash-attn etc (args are passed through to `uv sync`)
+#   scripts/setup_box.sh              # torch only
+#   scripts/setup_box.sh --extra gpu  # also flash-attn etc (args are passed through to `uv sync`)
+#
+# pyproject.toml and uv.lock end up modified on the box. Leave them UNCOMMITTED and never push from a
+# box; to update a box later: `git checkout pyproject.toml uv.lock && git pull`, then rerun this.
 #
 # Why: `uv sync` pulls torch from PyPI, whose default wheel targets the newest CUDA (cu130 as of
 # torch 2.11+). Rented boxes often run older drivers; torch then silently falls back to CPU and
 # everything is 50x slower. The driver's max CUDA (nvidia-smi header) is the binding constraint —
 # not nvcc, not what's in /usr/local/cuda.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # the repo root (this script lives in scripts/); everything below edits ./pyproject.toml
+[[ -f pyproject.toml ]] || { echo "no pyproject.toml in $(pwd) — is this script still in <repo>/scripts/?"; exit 1; }
 
 # ---- 1. driver's max supported CUDA, e.g. "12.8" -----------------------------------------------
 DRV=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1) \
@@ -45,8 +49,13 @@ if grep -q 'download\.pytorch\.org/whl/cu' pyproject.toml; then
   sed -i -E "s#(download\.pytorch\.org/whl/)cu[0-9]+#\1$TAG#g; s#pytorch-cu[0-9]+#pytorch-$TAG#g" pyproject.toml
   echo "retargeted existing pytorch index -> $TAG"
 else
-  # first time: adds torch as a direct dep, the [[tool.uv.index]] block, and the tool.uv.sources pin
-  uv add torch --index "pytorch-$TAG=$URL"
+  # first time: adds torch as a direct dep, the [[tool.uv.index]] block, and the tool.uv.sources pin.
+  # --frozen = write pyproject only, do NOT resolve yet: `uv add` writes the index WITHOUT
+  # `explicit = true`, and resolving against a non-explicit PyTorch index pulls every package that
+  # index happens to mirror from it (requests 2.28, urllib3 1.26, tqdm 4.66, …), which in turn drags
+  # transformers 5.x down to 4.57. The one resolution happens in `uv sync` below, after the index is
+  # marked explicit, and starts from the committed uv.lock so nothing but torch moves.
+  uv add torch --index "pytorch-$TAG=$URL" --frozen
   echo "added torch + pytorch-$TAG index to pyproject"
 fi
 # belt & braces: the index must be `explicit = true` or uv may pull *other* deps from it too
