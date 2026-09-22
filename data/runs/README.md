@@ -36,6 +36,12 @@ probe_iid, probe_ood}` + a no-monitor control. The batches differ only in the **
   (iii) Step-0 `unparsed` ≈ 0.5 everywhere (base Qwen3-8B truncates), ≈0 by step 6. Hacking seeds:
   cot_weak s1 (peak 0.27), probe_iid s0/s2, probe_ood s1/s2; the other four never hack.
 
+- **`seed_fix_ab_20260922/`** — the **GRPO group-seeding A/B** (see STATUS "GRPO group seeding fix"). Control,
+  **no monitors at all**, 32×16, 60 steps, seed 0; `seedOLD` = pre-fix code (seeded n-sample request →
+  collapsed groups), `seedFIX` = merged fix (one seeded single-sample request per rollout). Same hack onset
+  (~step 15); FIX saturates by step 18 and never collapses, OLD limps and collapses at steps 36–39.
+  `loss/frac_zero_adv_groups` in `metrics.jsonl` is the direct bug readout.
+
 ## Earlier sycophancy runs (pre-MBPP derisking)
 
 Setting: Anthropic [`anthropics/evals` sycophancy](https://github.com/anthropics/evals/tree/main/sycophancy)
