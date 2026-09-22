@@ -634,7 +634,11 @@ def test_every_repo_config_satisfies_the_relevance_rules():
     assert len(paths) > 10
     n_loaded = 0
     for p in paths:
-        judges = {m["model_id"] for m in json.loads(p.read_text()).get("monitors", [])
+        raw = json.loads(p.read_text())
+        if not any(m.get("role") == "train_against" for m in raw.get("monitors", [])):
+            # a control says it carries no λ explicitly, rather than by omission
+            assert "penalty_coef" in raw and raw["penalty_coef"] is None, p
+        judges = {m["model_id"] for m in raw.get("monitors", [])
                   if m.get("kind", "cot") == "cot"}
         if judges - set(SUPPORTED_JUDGES):
             # The older configs judge with models (claude / deepseek) whose reasoning behaviour

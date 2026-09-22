@@ -60,9 +60,13 @@ def _spec(d: dict, role: str) -> dict:
 
 
 def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lora_rank: int,
-               max_tokens: int, control: bool, penalty_coef: float = 1.0, tag: str = "",
+               max_tokens: int, control: bool, penalty_coef: float | None = None, tag: str = "",
                penalty_schedule: list | None = None, thinking_effort: float | None = None) -> list[dict]:
     from monitordecorrelation.rl.renderers import is_tml_policy
+
+    if (penalty_coef is None) == (penalty_schedule is None):
+        raise ValueError(f"pass exactly one of penalty_coef and penalty_schedule, got "
+                         f"penalty_coef={penalty_coef!r}, penalty_schedule={penalty_schedule!r}")
 
     short = model.split("/")[-1]
     suf = f"_{tag}" if tag else ""  # run-name suffix marking this run set (e.g. _lowpen)
@@ -93,6 +97,8 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
     # λ belongs ONLY on the rows that train against a monitor: exactly one of the constant and the
     # ramp, and neither on the control (whose reward never carries a monitor penalty).
     penalty = {"penalty_schedule": sched} if sched else {"penalty_coef": penalty_coef}
+    # …and the control says so explicitly (null), rather than by omission.
+    no_penalty = {"penalty_coef": None}
     names = [m["name"] for m in monitors]
     rows = []
     # one row per monitor: that monitor is train_against, the rest held_out
@@ -111,6 +117,7 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
     if control:
         rows.append({
             **base,
+            **no_penalty,
             "run_name": f"mbpp_{short}_control_s{seed}{suf}",
             "description": ("CONTROL: train on pure task reward, NO monitor in the gradient (all held_out). "
                            "Baseline for how much each monitor drifts from the policy changing at all."),
@@ -129,11 +136,12 @@ def main() -> None:
     ap.add_argument("--n-steps", type=int, default=90, help="OA uses 120; 90 gives the dip-then-climb room")
     ap.add_argument("--lora-rank", type=int, default=64, help="OA uses 64 (alpha 128)")
     ap.add_argument("--max-tokens", type=int, default=2048)
-    ap.add_argument("--penalty-coef", type=float, default=1.0,
-                    help="train-against monitor penalty weight (lower → policy has more room to hack)")
-    ap.add_argument("--penalty-schedule", type=float, nargs=2, metavar=("START", "END"), default=None,
-                    help="ramp λ linearly START→END over training (hack-then-hide curriculum); "
-                         "overrides --penalty-coef")
+    pen = ap.add_mutually_exclusive_group()  # one λ per set: a coef next to a schedule would be ignored
+    pen.add_argument("--penalty-coef", type=float, default=None,
+                     help="train-against monitor penalty weight (lower → policy has more room to hack); "
+                          "1.0 if neither this nor --penalty-schedule is given")
+    pen.add_argument("--penalty-schedule", type=float, nargs=2, metavar=("START", "END"), default=None,
+                     help="ramp λ linearly START→END over training (hack-then-hide curriculum)")
     ap.add_argument("--thinking-effort", type=float, default=None,
                     help="reasoning effort for a TML-rendered (thinkingmachines/*) policy: 0.1=minimal, "
                          "0.9=high. Required for those models, rejected for any other")
@@ -161,7 +169,9 @@ def main() -> None:
         stale.unlink()
     rows = build_rows(args.model, monitors, seed=args.seed, n_steps=args.n_steps,
                       lora_rank=args.lora_rank, max_tokens=args.max_tokens, control=not args.no_control,
-                      penalty_coef=args.penalty_coef, tag=args.tag, penalty_schedule=args.penalty_schedule,
+                      penalty_coef=(args.penalty_coef if args.penalty_coef is not None
+                                    else None if args.penalty_schedule else 1.0),
+                      tag=args.tag, penalty_schedule=args.penalty_schedule,
                       thinking_effort=args.thinking_effort)
     for r in rows:
         ta = [m["name"] for m in r["monitors"] if m["role"] == "train_against"]

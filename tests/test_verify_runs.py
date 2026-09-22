@@ -86,3 +86,27 @@ def test_batch_must_give_each_judge_the_same_reasoning(tmp_path, capsys, monkeyp
     monkeypatch.setattr("sys.argv", ["verify_runs.py", str(tmp_path / "mbpp_*")])
     assert verify_runs.main() == 1
     assert "do not share one judge reasoning setting" in capsys.readouterr().out
+
+
+def _row(tmp_path: Path, name: str, ta: list[str], **pen) -> None:
+    d = tmp_path / name
+    d.mkdir()
+    (d / "run_info.json").write_text(json.dumps(
+        {"run_name": name, "config": {"seed": 0, **pen},
+         "train_against": [{"name": n} for n in ta],
+         "held_out": [{"name": n} for n in ("probe_ood", "probe_iid", "out_weak") if n not in ta]}))
+
+
+def test_penalty_is_compared_across_the_train_against_runs_only(tmp_path, capsys, monkeypatch):
+    # A control carries no λ (None) — that is not a mismatch with the rows that do.
+    _row(tmp_path, "mbpp_M_control_s0_a", [], penalty_coef=None)
+    _row(tmp_path, "mbpp_M_probe_ood_s0_a", ["probe_ood"], penalty_coef=1.0)
+    _row(tmp_path, "mbpp_M_probe_iid_s0_a", ["probe_iid"], penalty_coef=1.0)
+    monkeypatch.setattr("sys.argv", ["verify_runs.py", str(tmp_path / "mbpp_*")])
+    assert verify_runs.main() == 0
+    # …but two train-against rows under different λ regimes are.
+    _row(tmp_path, "mbpp_M_out_weak_s0_a", ["out_weak"],
+         penalty_schedule={"start_penalty": 0.0, "end_penalty": 1.0})
+    capsys.readouterr()
+    assert verify_runs.main() == 1
+    assert "do not share one monitor penalty λ" in capsys.readouterr().out

@@ -18,7 +18,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb |
 | `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`), shared probe server (`-P`). | one `data/runs/<run>/` per (config×seed) |
 | `experiments/probe_server.py` | Shared frozen-model activation server so parallel runs don't each load the base model (`queue_runs.sh -P` starts it). | localhost server |
-| `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
+| `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef` xor `--penalty-schedule`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
 | `experiments/analyze_coupling.py` | **The headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
 | `scripts/verify_runs.py` | **Post-launch check.** Does each run actually train against the monitor its name claims? Also checks judge reasoning settings, a shared monitor battery + hyperparameters across the batch, and backend queue pauses. Exits 1 on any problem. | stdout |
 | `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
@@ -67,7 +67,7 @@ something the run then quietly ignores. The conditional fields:
 | `max_tokens` | a turn is one sampling call: every single-turn env, or a multi-turn env with `think_budget: null` | a thinking budget is in force (the budget + `answer_tokens` size the two calls) |
 | `answer_tokens` | a thinking budget is in force | no budget — nothing ever forces an answer |
 | `think_budget` | — (defaults to `"auto"` = the env's own) | single-turn envs, which never budget a turn |
-| `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) |
+| `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) — repo controls spell it `"penalty_coef": null`; `run_grpo` re-checks this for a hand-built `RunConfig` |
 | `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
 | `probe_server_url` | — | no monitor is a probe |
 

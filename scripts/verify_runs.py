@@ -48,9 +48,11 @@ from pathlib import Path
 from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
 
 # Hyperparameters that must not vary within one matrix (rows differ ONLY in which monitor is the
-# training target). Seed and run_name are expected to vary and are checked separately.
+# training target). Seed and run_name are expected to vary and are checked separately. λ
+# (penalty_coef / penalty_schedule) is NOT here: a control carries none, so it is compared across the
+# train-against runs only (the "penalty" fact).
 _SHARED_KEYS = ("n_steps", "batch_size", "group_size", "eval_every", "eval_size",
-                "eval_samples_per_prompt", "max_tokens", "penalty_coef", "kl_coef", "lora_rank")
+                "eval_samples_per_prompt", "max_tokens", "kl_coef", "lora_rank")
 
 
 def _run_dirs(patterns: list[str]) -> list[Path]:
@@ -193,6 +195,8 @@ def check(run_dir: Path) -> tuple[list[str], dict]:
     facts = {"name": name, "reasoning_unrecorded": bool(unrecorded), "target": ta[0] if ta else "control", "n_monitors": len(ta) + len(held),
              "battery": tuple(sorted(ta + held)), "reasoning": reasoning, "seed": cfg.get("seed"),
              "shared": tuple(cfg.get(k) for k in _SHARED_KEYS),
+             "penalty": None if not ta else (("penalty_coef", cfg.get("penalty_coef")), (
+                 "penalty_schedule", json.dumps(cfg.get("penalty_schedule"), sort_keys=True))),
              "n_pause": n_pause, "pause_step": first, "spikes": spikes}
     return probs, facts
 
@@ -230,13 +234,14 @@ def main() -> int:
 
     # batch-level coherence: same battery and same shared hyperparameters everywhere
     for label, key in (("monitor battery", "battery"), ("judge reasoning setting", "reasoning"),
-                       ("shared hyperparameters", "shared")):
-        groups = Counter(f[key] for f in facts)
+                       ("shared hyperparameters", "shared"), ("monitor penalty λ", "penalty")):
+        groups = Counter(f[key] for f in facts if f[key] is not None)  # λ: train-against runs only
         if len(groups) > 1:
             all_probs += 1
             print(f"\n✗ runs do not share one {label} — {len(groups)} variants:")
             for val, n in groups.most_common():
-                shown = dict(zip(_SHARED_KEYS, val)) if key == "shared" else list(val)
+                shown = (dict(zip(_SHARED_KEYS, val)) if key == "shared" else dict(val) if key == "penalty"
+                         else list(val))
                 print(f"    {n:2d} run(s): {shown}")
 
     targets = Counter(f["target"] for f in facts)

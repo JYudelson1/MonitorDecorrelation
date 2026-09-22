@@ -351,6 +351,24 @@ class MonitorScorer:
         return out
 
 
+def _check_penalty(cfg: RunConfig, train_against: Sequence[Monitor]) -> None:
+    """λ is set EXACTLY where it takes effect: one of penalty_coef / penalty_schedule with a
+    train_against monitor, neither in a control. Anything else would be silently ignored (a control's
+    λ multiplies nothing; a coef next to a schedule is overridden by it), so it is an error instead.
+    Mirrors the ExperimentConfig validator, for callers that build a RunConfig by hand."""
+    coef, sched = cfg.penalty_coef, cfg.penalty_schedule
+    if train_against:
+        if (coef is None) == (sched is None):
+            raise ValueError(
+                f"training against {[m.name for m in train_against]}: set exactly one of penalty_coef "
+                f"(constant λ) and penalty_schedule (λ ramp), got penalty_coef={coef!r}, "
+                f"penalty_schedule={sched!r}")
+    elif coef is not None or sched is not None:
+        raise ValueError(
+            f"no train_against monitor, so no monitor penalty enters the reward and penalty_coef={coef!r} "
+            f"/ penalty_schedule={sched!r} would be ignored — pass neither for a control run")
+
+
 def run_grpo(
     cfg: RunConfig,
     env: Env,
@@ -381,6 +399,7 @@ def run_grpo(
     before calling (``experiment_config.resolve_think_budget``)."""
     # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
     # (run_episodes enforces it; see the docstring).
+    _check_penalty(cfg, train_against)
     _budget_note = (f"think_budget={think_budget}+answer_tokens={answer_tokens}"
                     if think_budget is not None else f"max_tokens={max_tokens}")
     rng = random.Random(cfg.seed)
@@ -627,8 +646,10 @@ def run_grpo(
         # Effective λ this step: constant penalty_coef, OR a linear ramp start→end if penalty_schedule is
         # set (hack-then-hide curriculum). Logged as penalty_coef so the schedule is visible; the applied
         # reward penalty (penalty_mean) is λ·suspiciousness, now decoupled since λ can vary over training.
-        pen_coef = cfg.penalty_coef
-        if cfg.penalty_schedule:
+        # A control (no train_against) has no λ at all — _check_penalty guarantees both keys are None
+        # there; its penalties are all 0.0 and the effective λ is 0 by construction.
+        pen_coef = cfg.penalty_coef if train_against else 0.0
+        if cfg.penalty_schedule is not None:  # (only ever set alongside a train_against monitor)
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac

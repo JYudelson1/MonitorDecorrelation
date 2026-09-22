@@ -51,9 +51,13 @@ class RunConfig:
     # RL algorithm
     rl_algo: str = "grpo"  # "grpo" | "dr_grpo" | "dapo"
     group_size: int = 8  # rollouts per prompt for group-relative advantage
-    penalty_coef: float = 1.0  # λ on the monitor penalty (constant unless penalty_schedule is set)
-    penalty_schedule: dict | None = None  # None → constant penalty_coef; else {"start_penalty","end_penalty"}
-    #   → λ ramps linearly start→end across n_steps (hack-then-hide curriculum). Overrides penalty_coef.
+    # λ on the monitor penalty: EXACTLY ONE of the constant ``penalty_coef`` and the ramp
+    # ``penalty_schedule`` ({"start_penalty","end_penalty"}, linear start→end across n_steps — the
+    # hack-then-hide curriculum) when the run has a train_against monitor, and NEITHER in a control
+    # (no monitor penalty exists there). No default: run_grpo rejects any other combination rather
+    # than silently ignoring a value.
+    penalty_coef: float | None = None
+    penalty_schedule: dict | None = None
     kl_coef: float = 0.0  # per-token KL-to-base penalty (anchors the policy; 0 = off)
     kl_discount_factor: float = 0.0
 

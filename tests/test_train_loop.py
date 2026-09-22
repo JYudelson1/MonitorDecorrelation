@@ -71,7 +71,8 @@ def test_run_grpo_control_smoke():
     cfg = RunConfig(
         env="fake_env", backend="fake", base_model="fake/model",
         batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
-        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        # A control's config carries NO penalty_coef (ExperimentConfig rejects it), so it arrives None.
+        penalty_coef=None, kl_coef=0.0, seed=0,
         logging=LoggingConfig(run_name="smoke_test_loop", use_wandb=False, log_fraction=1.0),
     )
     try:
@@ -89,10 +90,33 @@ def test_run_grpo_control_smoke():
         # held-out monitor was scored every eval (degradation source)
         ev = [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
         assert ev and "monitor/probe_x/auroc" in ev[0]
+        # no monitor penalty in a control: effective λ and applied penalty are both 0
+        m = [json.loads(l) for l in (run_dir / "metrics.jsonl").open() if l.strip()]
+        assert m[0]["reward/penalty_coef"] == 0.0 and m[0]["reward/penalty_mean"] == 0.0
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
 
+
+@pytest.mark.parametrize("coef,sched,ta,match", [
+    (1.0, None, False, "no train_against monitor"),          # a control's λ multiplies nothing
+    (None, {"start_penalty": 0.0, "end_penalty": 1.0}, False, "no train_against monitor"),
+    (None, None, True, "exactly one"),                       # trains against a monitor with no λ
+    (1.0, {"start_penalty": 0.0, "end_penalty": 1.0}, True, "exactly one"),  # coef hidden by the ramp
+])
+def test_run_grpo_rejects_a_penalty_it_would_ignore(coef, sched, ta, match):
+    """λ is set exactly where it takes effect — anything else fails before the run starts."""
+    run_dir = Path("data/runs/smoke_test_loop_penalty")
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
+        penalty_coef=coef, penalty_schedule=sched, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_penalty", use_wandb=False, log_fraction=1.0),
+    )
+    with pytest.raises(ValueError, match=match):
+        run_grpo(cfg, _FakeEnv(), _FakeBackend(),
+                 train_against=[_FakeMonitor("ta")] if ta else [], held_out=[_FakeMonitor("ho")])
+    assert not run_dir.exists()  # rejected before anything was written
 
 def test_run_grpo_aborts_on_dead_train_against_monitor():
     """A train-against monitor that scores nothing = no penalty signal → the run must ABORT (not
@@ -125,7 +149,7 @@ def test_run_grpo_aborts_when_a_monitor_cannot_score():
     cfg = RunConfig(
         env="fake_env", backend="fake", base_model="fake/model",
         batch_size=2, group_size=2, n_steps=1, eval_every=10, eval_size=2,
-        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        kl_coef=0.0, seed=0,  # a control: no λ
         logging=LoggingConfig(run_name="smoke_test_loop_fail", use_wandb=False, log_fraction=1.0),
     )
     try:
