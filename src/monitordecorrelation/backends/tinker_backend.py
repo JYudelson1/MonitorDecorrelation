@@ -32,10 +32,11 @@ class TinkerBackend:
         self.seed = seed
         self.kl_coef = kl_coef
         self.kl_discount_factor = kl_discount_factor
-        self._sample_calls = 0  # advances every sample() so each call gets a distinct derived seed
+        self._sample_calls = 0  # advances every sample_episodes() so its per-slot seeds differ per call
         self._sc = tinker.ServiceClient()
-        # seed lives on the training client (seeds the LoRA init), NOT on ServiceClient. Sampling is
-        # seeded separately via per-call SamplingParams(seed=…) in sample().
+        # seed lives on the training client (seeds the LoRA init), NOT on ServiceClient. Single-turn
+        # sampling is UNSEEDED (a seeded n-sample request collapses the GRPO group — rollout.py);
+        # multi-turn continuation calls (num_samples=1) keep per-slot derived seeds (episodes.py).
         self.training_client = self._sc.create_lora_training_client(
             base_model, rank=lora_rank, seed=seed
         )
@@ -69,8 +70,8 @@ class TinkerBackend:
         caller can start per-rollout work (monitor calls) without waiting for the whole batch."""
         if self._sampler is None:
             self.refresh_sampler()
-        call_seed = derive_sample_seed(self.seed, self._sample_calls)
-        self._sample_calls += 1
+        # UNSEEDED on purpose: a seeded n-sample request collapses the GRPO group to ~1 distinct
+        # sequence (see rollout.sample_rollouts). ``self.seed`` still seeds the LoRA init, env, holdout.
         return sample_rollouts(
             self._sampler,
             self.renderer,
@@ -78,7 +79,7 @@ class TinkerBackend:
             num_samples=num_samples,
             max_tokens=max_tokens,
             temperature=temperature,
-            seed=call_seed,
+            seed=None,
             on_rollout=on_rollout,
         )
 

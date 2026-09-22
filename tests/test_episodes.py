@@ -168,7 +168,12 @@ def test_episodes_transitions_are_prefix_chained_and_grouped():
     # turn 0: one call per prompt with num_samples; later turns: one call per active episode
     assert [c[1] for c in sampler.calls] == [2, 2] + [1] * 8
     seeds = [c[2] for c in sampler.calls]
-    assert len(set(seeds)) == len(seeds) and seeds[0] == derive_sample_seed(7, 0)
+    # turn-0 GROUP calls are unseeded (a seeded n-sample request collapses the group); the
+    # single-sample continuation calls carry distinct per-slot seeds.
+    assert seeds[:2] == [None, None]
+    later = seeds[2:]
+    assert None not in later and len(set(later)) == len(later)
+    assert later[0] == derive_sample_seed(7, 2)  # slot = len(prompts) + episode*per_ep_calls
 
 
 def test_done_episodes_stop_sampling_and_truncation_closes_the_turn():

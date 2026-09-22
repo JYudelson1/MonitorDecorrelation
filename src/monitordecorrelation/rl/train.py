@@ -378,11 +378,11 @@ def run_grpo(
     before calling (``experiment_config.resolve_think_budget``)."""
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
-    # The tinker sampler is seeded inside the backend (ServiceClient + per-call SamplingParams seed);
-    # env construction + holdout + this rng all take cfg.seed. So one cfg.seed pins the whole run.
+    # env construction + holdout + this rng + the LoRA init all take cfg.seed. Tinker SAMPLING is
+    # deliberately unseeded (a seeded n-sample request collapses the GRPO group — rl/rollout.py).
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
-    _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, and the tinker sampler all derive from it)")
+    _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, LoRA init; tinker sampling is unseeded)")
     # The behavior word (reward_hacking / sycophancy / deception) names the class-split score metrics, so
     # charts + W&B read per-env instead of the historical "syco". Slugged to a safe metric-key token.
     behavior = re.sub(r"\W+", "_", getattr(env, "behavior_name", None) or "behavior").strip("_") or "behavior"

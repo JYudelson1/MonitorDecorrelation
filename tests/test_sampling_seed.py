@@ -49,9 +49,25 @@ class _FakeTok:
         return "reasoning</think>answer"
 
 
-def test_sample_rollouts_threads_seed_to_params():
+def test_sample_rollouts_threads_seed_to_params_for_single_samples():
     sampler = _FakeSampler()
     rolls = sample_rollouts(sampler, _FakeTok(), [Prompt(text="hi")], num_samples=1,
                             max_tokens=8, temperature=1.0, seed=12345)
     assert sampler.captured_seeds == [12345]
     assert rolls and rolls[0].output == "answer" and rolls[0].cot == "reasoning"
+
+
+def test_sample_rollouts_refuses_a_seeded_group():
+    """A seeded num_samples>1 request collapses the GRPO group (tinker seeds the whole request) —
+    must be a loud error, never a silent all-zero-advantage batch."""
+    import pytest
+    with pytest.raises(ValueError, match="collapse"):
+        sample_rollouts(_FakeSampler(), _FakeTok(), [Prompt(text="hi")], num_samples=8,
+                        max_tokens=8, temperature=1.0, seed=12345)
+
+
+def test_sample_rollouts_group_is_unseeded():
+    sampler = _FakeSampler()
+    sample_rollouts(sampler, _FakeTok(), [Prompt(text="hi"), Prompt(text="yo")], num_samples=1,
+                    max_tokens=8, temperature=1.0, seed=None)
+    assert sampler.captured_seeds == [None, None]

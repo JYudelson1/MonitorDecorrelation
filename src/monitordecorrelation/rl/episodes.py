@@ -170,10 +170,13 @@ def run_episodes(
     per_ep_calls = 2 * max_turns
     step_sem = threading.Semaphore(max(1, step_workers))
 
-    def params(slot: int, n_tokens: int) -> tinker.SamplingParams:
+    def params(slot: int, n_tokens: int, *, group: bool = False) -> tinker.SamplingParams:
+        # A seeded request with num_samples>1 collapses to ~1 distinct sequence (tinker seeds the whole
+        # request; see rollout.sample_rollouts), so the turn-0 GROUP call is always unseeded. The
+        # single-sample continuation calls keep their per-slot seeds (distinct seeds → distinct samples).
         return tinker.SamplingParams(
             max_tokens=n_tokens, temperature=temperature,
-            seed=None if seed is None else derive_sample_seed(base_seed, slot),
+            seed=None if (seed is None or group) else derive_sample_seed(base_seed, slot),
             **({"stop": renderer.stop_tokens} if getattr(renderer, "stop_tokens", None) else {}),
         )
 
@@ -272,7 +275,7 @@ def run_episodes(
     # (num_samples sequences per call → num_samples episodes, the GRPO group).
     group_futures = [
         _SharedFuture(sampling_client.sample(renderer.model_input(p.text), num_samples,
-                                             params(i, first_call_tokens)))
+                                             params(i, first_call_tokens, group=num_samples > 1)))
         for i, p in enumerate(prompts)
     ]
     prompt_tokens = [list(renderer.prompt_tokens(p.text)) for p in prompts]

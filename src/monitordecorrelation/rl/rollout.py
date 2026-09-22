@@ -95,17 +95,23 @@ def sample_rollouts(
 
     ``renderer`` is a ``rl.renderers`` renderer, or a bare tokenizer (wrapped as HF-chat) for the
     long-standing call sites. Each prompt is expanded into ``num_samples`` rollouts (the GRPO group).
-    Token ids + logprobs of the *completion* are stored for the policy-gradient step. ``seed`` (when
-    set) makes tinker's sampling reproducible for this call; the caller varies it per call so groups
-    still differ across steps. NOTE: relies on a seeded call returning ``num_samples`` *distinct*
-    sequences (standard n-sampling) — verify GRPO group advantages have non-zero variance on the
-    first real run.
+    Token ids + logprobs of the *completion* are stored for the policy-gradient step.
+
+    **``seed`` must be None whenever ``num_samples > 1``.** Tinker applies one seed to the whole
+    request, so a seeded ``num_samples=8`` call returns ~1–2 distinct sequences (measured 2026-09-22:
+    mean 1.4 unique of 8 on Qwen3-8B; unseeded: 8 of 8) — the GRPO group collapses and its advantages
+    are all zero. A seed does not even buy reproducibility (two identical seeded calls returned
+    different sets), so tinker sampling in this repo is unseeded; the run ``seed`` still pins env /
+    holdout / LoRA init. The guard below makes the collapse a loud error instead of a silent one.
 
     ``on_rollout(index, rollout)`` (optional) is called as each prompt's completions come back, so a
     caller can start per-rollout work (monitor API calls) on the prompts that already landed instead
     of waiting for the slowest one. Given it, each prompt is awaited in its own thread so no prompt
     holds back another's callbacks; the returned list keeps prompt order either way.
     """
+    if num_samples > 1 and seed is not None:
+        raise ValueError(f"sample_rollouts: seed={seed} with num_samples={num_samples} would collapse the "
+                         "GRPO group to ~1 distinct sequence (tinker seeds the whole request); pass seed=None")
     rend = as_renderer(renderer)
     if hasattr(rend, "enable_thinking"):  # HF-chat only; TML conditions on effort, not a flag
         rend.enable_thinking = enable_thinking
