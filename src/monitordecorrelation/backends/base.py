@@ -32,5 +32,9 @@ class RLBackend(Protocol):
         ...
 
     def save_checkpoint(self, label: str) -> str:
-        """Persist current policy weights; returns a handle/path."""
+        """Persist current policy weights; returns a handle/path.
+
+        A backend whose checkpoints expire sets ``checkpoints_expire = True`` and takes a
+        ``ttl_seconds`` keyword; the training loop passes one only to those, so no backend is ever
+        handed a lifetime it would quietly ignore."""
         ...

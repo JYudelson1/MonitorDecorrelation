@@ -112,8 +112,8 @@ def _accepts(fn, name: str) -> bool:
     return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
-def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: int,
-            think_budget: int | None = None, answer_tokens: int = 512,
+def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: int | None,
+            think_budget: int | None = None, answer_tokens: int | None = None,
             on_rollout: Callable[[int, Rollout], None] | None = None) -> tuple[list[Rollout], bool]:
     """Sample rollouts the way the env needs: a multi-turn (tool-loop) env goes through the backend's
     episode driver (``sample_episodes``: sample a turn → env executes it → continue), a single-turn env
@@ -358,9 +358,9 @@ def run_grpo(
     train_against: Sequence[Monitor],
     held_out: Sequence[Monitor] = (),
     *,
-    max_tokens: int = 1024,
+    max_tokens: int | None = None,
     think_budget: int | None = None,
-    answer_tokens: int = 512,
+    answer_tokens: int | None = None,
     # Concurrent judge API calls, shared across ALL monitors × rollouts. Now that scoring is
     # pipelined into sampling this is the binding constraint on how much of it can overlap: one eval
     # is len(monitors) × eval rollouts of calls (6 × 64 = 384 on the terminal matrix), so 16 meant 24
@@ -373,9 +373,16 @@ def run_grpo(
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
-    ``think_budget``/``answer_tokens`` (multi-turn envs only) cap each turn's thinking — see
+    Sampling is sized EITHER by ``max_tokens`` (one call per turn) OR by ``think_budget`` +
+    ``answer_tokens`` (multi-turn envs only: capped thinking, then a forced answer) — exactly one of
+    the two, enforced by ``run_episodes``; ``experiment_config.validate_token_budgets`` is where a
+    config gets the same treatment. See
     rl/episodes.py. ``think_budget=None`` is taken literally (no budget); resolve the env default
     before calling (``experiment_config.resolve_think_budget``)."""
+    # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
+    # (run_episodes enforces it; see the docstring).
+    _budget_note = (f"think_budget={think_budget}+answer_tokens={answer_tokens}"
+                    if think_budget is not None else f"max_tokens={max_tokens}")
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # The tinker sampler is seeded per call → per SAMPLE inside the backend (one single-sample request
@@ -457,7 +464,7 @@ def run_grpo(
         ``n_scored`` = the valid count and ``n_pos``/``n_neg`` split it; the oracle rates are over all.
         """
         n_per = getattr(cfg, "eval_samples_per_prompt", 1) or 1
-        _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts (max_tokens={max_tokens})…")
+        _log(f"  [eval @ {step}] sampling {len(eval_prompts)}×{n_per} held-out rollouts ({_budget_note})…")
         t0 = time.perf_counter()
         # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
         # instant its episode finishes, so `sample_s` already contains most of the scoring and
@@ -572,14 +579,18 @@ def run_grpo(
             run_eval(step)  # held-out eval at step 0 and every eval_every
             
         if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint"):
-            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}", ttl_seconds=4*7*24*60*60)
+            # TTL only where checkpoints can expire (tinker-hosted state). A backend that writes to
+            # local disk says so with checkpoints_expire = False and is asked for no TTL at all —
+            # passing one it cannot honour is an error there, not a silently dropped request.
+            ttl = {"ttl_seconds": 4 * 7 * 24 * 60 * 60} if getattr(backend, "checkpoints_expire", False) else {}
+            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}", **ttl)
             (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
             info[f"checkpoint_{step}"] = ckpt
             _log(f"saved checkpoint at step {step}: {ckpt}")
 
         prompts = [env.sample_prompt() for _ in range(cfg.batch_size)]
         _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
-             f"(max_tokens={max_tokens})…")
+             f"({_budget_note})…")
         t0 = time.perf_counter()
         # Only the TRAIN-AGAINST monitors are scored every step (they form the reward penalty).
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
@@ -754,9 +765,9 @@ def run_grpo(
     # trained model later — important when we don't yet know how long these runs should take.
     if hasattr(backend, "save_checkpoint"):
         try:
-            # ttl_seconds=None = no expiry (tinker rejects 0: "must be at least 3600").
-            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final",
-                                           ttl_seconds=None)
+            # ttl_seconds=None = no expiry (tinker rejects 0: "must be at least 3600"), which is
+            # also what a local-disk backend does natively — so no TTL argument either way.
+            ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-final")
             (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
             info["final_checkpoint"] = ckpt
             (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))

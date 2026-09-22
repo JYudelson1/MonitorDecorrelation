@@ -193,7 +193,7 @@ def test_think_budget_forces_the_answer_as_a_masked_observation():
     # observation, answer sampled with answer_tokens (call 1); turn 1 (call 2) completes normally.
     sampler = _FakeSampler(think={(1, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p")],
-                         num_samples=1, max_tokens=999, seed=3, think_budget=100, answer_tokens=20)
+                         num_samples=1, seed=3, think_budget=100, answer_tokens=20)
     r = rolls[0]
     tr = r.meta["transitions"]
     assert r.meta["n_forced_answers"] == 1 and r.meta["n_turns"] == 2 and len(tr) == 3
@@ -218,7 +218,7 @@ def test_episode_token_accounting_matches_the_transitions():
     sampling call per transition, and the LAST ob+ac is the single training datum."""
     sampler = _FakeSampler(think={(1, 0)})
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p")],
-                         num_samples=1, max_tokens=999, seed=3, think_budget=100, answer_tokens=20)
+                         num_samples=1, seed=3, think_budget=100, answer_tokens=20)
     r = rolls[0]
     tr = r.meta["transitions"]
     assert r.meta["n_sampling_calls"] == len(tr) == 3          # 2 turns, one of them budget-forced

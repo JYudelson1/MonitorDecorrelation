@@ -143,12 +143,12 @@ def run_episodes(
     prompts: list[Prompt],
     *,
     num_samples: int = 1,
-    max_tokens: int = 1024,
+    max_tokens: int | None = None,
     temperature: float = 1.0,
     seed: int | None = None,
     max_turns: int | None = None,
     think_budget: int | None = None,
-    answer_tokens: int = 512,
+    answer_tokens: int | None = None,
     step_workers: int = 16,
     episode_workers: int | None = None,
     on_rollout: Callable[[int, Rollout], None] | None = None,
@@ -157,7 +157,10 @@ def run_episodes(
     return one ``Rollout`` per episode. Every episode runs in its own thread and advances
     independently (see the module docstring). ``max_turns`` defaults to ``env.max_turns``. With
     ``think_budget`` set, each turn's thinking is capped at that many tokens (then force-closed) and
-    the answer gets ``answer_tokens``; otherwise a turn is one call of ``max_tokens``.
+    the answer gets ``answer_tokens``; otherwise a turn is one call of ``max_tokens``. Those two
+    modes use DISJOINT arguments, so exactly one set must be given: ``think_budget`` + ``answer_tokens``,
+    or ``max_tokens`` alone. Passing the unused one is an error rather than a number that silently
+    does nothing.
 
     ``step_workers`` caps how many env steps (command executions) run at once. ``episode_workers``
     caps how many episodes are in flight; the default — one thread per episode — is what makes the
@@ -172,6 +175,22 @@ def run_episodes(
         raise ValueError("run_episodes needs max_turns >= 1 (from the env or the argument)")
     if think_budget is not None and think_budget < 1:
         raise ValueError("think_budget must be >= 1 (or None for no budget)")
+    if think_budget is None:
+        if max_tokens is None:
+            raise ValueError("no think_budget: a turn is one call, so max_tokens must be given")
+        if answer_tokens is not None:
+            raise ValueError(
+                f"no think_budget, so no answer is ever forced and answer_tokens={answer_tokens} would "
+                "be unused — pass think_budget too, or drop answer_tokens"
+            )
+    else:
+        if answer_tokens is None:
+            raise ValueError(f"think_budget={think_budget} forces the answer, so answer_tokens must be given")
+        if max_tokens is not None:
+            raise ValueError(
+                f"think_budget={think_budget} sizes the thinking call and answer_tokens the answer, so "
+                f"max_tokens={max_tokens} would be unused — drop it"
+            )
     base_seed = 0 if seed is None else seed
     first_call_tokens = think_budget if think_budget else max_tokens
     n_episodes = len(prompts) * num_samples

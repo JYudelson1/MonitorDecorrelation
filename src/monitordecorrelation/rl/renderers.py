@@ -284,6 +284,16 @@ class TmlRenderer:
         return "".join(cot).strip(), "".join(answer).strip(), self.tokenizer.decode(tokens)
 
 
+def is_tml_policy(model_name: str) -> bool:
+    """Is this policy rendered by TML (Inkling) rather than an HF chat template?
+
+    The ONE predicate for "does thinking_effort apply to this policy" — ``make_renderer`` dispatches
+    on it, and ``ExperimentConfig`` rejects a ``thinking_effort`` on a policy it is false for (it
+    would be silently ignored). Both must agree, hence one function.
+    """
+    return model_name.split(":")[0].startswith("thinkingmachines/")  # strip tinker ":peft:<n>" suffixes
+
+
 def is_renderer(obj: Any) -> bool:
     """Duck-type check: does this object already speak the renderer interface?"""
     return hasattr(obj, "model_input") and hasattr(obj, "parse")
@@ -310,8 +320,7 @@ def make_renderer(
     tinker resolves TML tokenizers through the internal ``tml_tokenizers`` package, which isn't
     publicly installable — ``tml_renderers.tokenizers.o200k_base_chat()`` is the public equivalent.
     """
-    base = model_name.split(":")[0]  # strip tinker ":peft:<n>" variant suffixes
-    if base.startswith("thinkingmachines/"):
+    if is_tml_policy(model_name):
         return TmlRenderer(effort=effort)
     if tokenizer is None:
         if training_client is None:

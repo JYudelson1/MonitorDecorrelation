@@ -54,9 +54,30 @@ group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget 
 thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank lr seed
 n_prompts_pool probe_server_url monitors`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
-`env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier) and `thinking_effort`
-[0,1) conditions the reasoning length of TML-rendered policies (Inkling; ignored elsewhere).
-`think_budget`/`answer_tokens` (multi-turn envs): cap each turn's thinking and force the answer; absent = env default, `null` = no budget. Each monitor: `{kind:"cot", name, role, model_id,
+`env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier).
+
+**No key is ever silently ignored.** A field that only applies to *some* runs has no default: it is
+**required** where it takes effect and **rejected** where it does not, so a config can never describe
+something the run then quietly ignores. The conditional fields:
+
+| field | required when | rejected when |
+| --- | --- | --- |
+| `subset` | env is sycophancy / impossiblebench / terminal_verifier | env is mbpp_honeypot (no slices) |
+| `thinking_effort` | policy is `thinkingmachines/*` (TML-rendered) | any other policy — no such knob |
+| `max_tokens` | a turn is one sampling call: every single-turn env, or a multi-turn env with `think_budget: null` | a thinking budget is in force (the budget + `answer_tokens` size the two calls) |
+| `answer_tokens` | a thinking budget is in force | no budget — nothing ever forces an answer |
+| `think_budget` | — (defaults to `"auto"` = the env's own) | single-turn envs, which never budget a turn |
+| `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) |
+| `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
+| `probe_server_url` | — | no monitor is a probe |
+
+The env-dependent three (`max_tokens` / `answer_tokens` / `think_budget`) are checked once the env is
+built, so the error names the env; the rest fail at config load. `--set` goes through the same
+validation, so `--set max_tokens=4096` on a budgeted run is an error, not a no-op. An archived run's
+`config.json` written before these rules may no longer load for a *run*; re-scoring scripts read only
+its `monitors` (`load_monitor_specs`) and are unaffected.
+
+Each monitor: `{kind:"cot", name, role, model_id,
 use_cot?, behavior?, threshold?, reasoning_effort?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
 probe_path, probe_model?, threshold?, batch_size?}`.
 

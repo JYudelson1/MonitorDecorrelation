@@ -35,7 +35,7 @@ from monitordecorrelation.experiment_config import (
     apply_overrides,
     build_monitors,
     load_config,
-    resolve_think_budget,
+    validate_token_budgets,
 )
 from monitordecorrelation.hyperparams import get_lr
 from monitordecorrelation.rl.train import run_grpo
@@ -96,17 +96,29 @@ def main() -> None:
                 f"(or --set lr=2e-4)."
             ) from e
 
+    # Env FIRST: it decides how a turn is sampled, so the token-budget keys can only be checked
+    # once it exists — and a config error should cost nothing, i.e. land before the backend opens a
+    # tinker session.
+    try:
+        env = make_env(cfg)  # each env validates its own subset / env_options values
+        think_budget = validate_token_budgets(cfg, env)  # int | None from here on
+    except ValueError as e:
+        raise SystemExit(f"config {args.config}: {e}") from e
+
     # Backend
     if cfg.backend == "tinker":
         from monitordecorrelation.backends.tinker_backend import TinkerBackend
         backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
-                                kl_coef=cfg.kl_coef, kl_discount_factor=cfg.kl_discount_factor,
+                                kl_coef=cfg.kl_coef,
+                                # None exactly when kl_coef is 0, i.e. when the discount is unused.
+                                kl_discount_factor=cfg.kl_discount_factor or 0.0,
                                 thinking_effort=cfg.thinking_effort)
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
-        backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr)
-
-    env = make_env(cfg)
+        # kl_coef / thinking_effort are rejected by ExperimentConfig for this backend (it implements
+        # neither), so everything the config sets here is actually used.
+        backend = TransformersBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr,
+                                      seed=cfg.seed)
     probe_server_url = cfg.probe_server_url or os.environ.get("PROBE_SERVER_URL")
     # Multi-turn (agentic) envs get AgentCoTMonitor judges — a chat transcript of the episode — in
     # place of the single-turn CoTMonitor; every other env is unchanged.
@@ -146,7 +158,7 @@ def main() -> None:
         eval_samples_per_prompt=cfg.eval_samples_per_prompt,
         penalty_coef=cfg.penalty_coef, penalty_schedule=cfg.penalty_schedule, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
-        seed=cfg.seed,
+        seed=cfg.seed, save_every=cfg.save_every,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),
                               wandb_project=_wandb_project,
                               wandb_group=_wandb_group, wandb_tags=_wandb_tags, log_fraction=1.0),
@@ -158,16 +170,15 @@ def main() -> None:
     print(f"[{cfg.experiment}] run_name={cfg.run_name} policy={cfg.policy} backend={cfg.backend} lr={lr:.2e}")
     print(f"  wandb: {run_config.logging.wandb_mode} project={run_config.logging.wandb_project}"
           + (" (syncing — logged in)" if run_config.logging.wandb_mode == "online" else " (local only)"))
-    subset_note = f" subset={cfg.subset}" if cfg.env in ("sycophancy", "impossiblebench") else ""
+    subset_note = f" subset={cfg.subset}" if cfg.subset is not None else ""
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
-    think_budget = resolve_think_budget(cfg.think_budget, env)  # int | None from here on
     if getattr(env, "multi_turn", False):
         src = "env default" if cfg.think_budget == "auto" else "config"
         print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={think_budget} ({src}) "
-              f"answer_tokens={cfg.answer_tokens}"
-              + ("" if think_budget else f" — NO thinking budget: max_tokens/turn={cfg.max_tokens}"))
+              + (f"answer_tokens={cfg.answer_tokens}" if think_budget
+                 else f"— NO thinking budget: max_tokens/turn={cfg.max_tokens}"))
 
     run_grpo(
         run_config, env, backend, train_against=train_against, held_out=held_out,

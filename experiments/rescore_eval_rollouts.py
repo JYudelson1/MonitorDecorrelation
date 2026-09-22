@@ -88,9 +88,8 @@ def select(run_dirs: list[Path], *, hacks: int, clean: int, loose: int, seed: in
 
 
 def build_judges(config_path: str) -> list:
-    from monitordecorrelation.experiment_config import build_monitors, load_config
-    cfg = load_config(config_path)
-    specs = [s for s in cfg.monitors if s.kind == "cot"]
+    from monitordecorrelation.experiment_config import build_monitors, load_monitor_specs
+    specs = [s for s in load_monitor_specs(config_path) if s.kind == "cot"]
     ta, held = build_monitors(specs, default_behavior="reward_hacking")
     return ta + held
 
@@ -273,8 +272,8 @@ def main() -> int:
     print(f"{len(selected)} rollouts selected from {len(run_dirs)} run(s):")
     for run in sorted({r for r, _ in comp}):
         print(f"  {run:34s} " + "  ".join(f"{c}={comp[(run, c)]}" for c in ("strict", "clean", "loose")))
-    from monitordecorrelation.experiment_config import load_config
-    specs = [s for s in load_config(args.config).monitors if s.kind == "cot"]
+    from monitordecorrelation.experiment_config import load_monitor_specs
+    specs = [s for s in load_monitor_specs(args.config) if s.kind == "cot"]
     print(f"{len(specs)} judges from {args.config}: " + ", ".join(
         f"{s.name}({s.model_id}, cot={s.use_cot}, out={s.use_output}, effort={s.reasoning_effort})" for s in specs))
     print(f"-> {len(selected) * len(specs)} judge calls")

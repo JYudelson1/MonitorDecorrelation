@@ -36,6 +36,12 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   where it ships the canonical implementation** (e.g. `tinker_cookbook.rl.metrics.incorporate_kl_penalty`
   for the KL-to-base penalty) rather than reinventing them — don't adopt the cookbook's training loop.
   The online tinker docs are good — consult them rather than guessing the API.
+- **No config key may be silently ignored.** A field that applies to only some runs (env, policy
+  family, backend, whether a budget/penalty/KL is in force) has **no default**: it is required where
+  it takes effect and rejected where it is not, so a run can never quietly use something other than
+  what its config says. The env-dependent ones are checked in `experiment_config.validate_token_budgets`
+  once the env exists; the rest in the `ExperimentConfig` model validator. `--set` goes through the
+  same validation. See the table in `USAGE.md`.
 - **The `Monitor` seam is sacred.** Same `.score(rollout)` interface across CoT judges, output
   judges, and white-box probes; detector strength is config, not a new interface. See `docs/MONITORS.md`.
 - **Never train on the oracle.** `behavior_present` grades detectors; it must never enter a

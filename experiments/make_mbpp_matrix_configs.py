@@ -61,7 +61,9 @@ def _spec(d: dict, role: str) -> dict:
 
 def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lora_rank: int,
                max_tokens: int, control: bool, penalty_coef: float = 1.0, tag: str = "",
-               penalty_schedule: list | None = None) -> list[dict]:
+               penalty_schedule: list | None = None, thinking_effort: float | None = None) -> list[dict]:
+    from monitordecorrelation.rl.renderers import is_tml_policy
+
     short = model.split("/")[-1]
     suf = f"_{tag}" if tag else ""  # run-name suffix marking this run set (e.g. _lowpen)
     sched = ({"start_penalty": penalty_schedule[0], "end_penalty": penalty_schedule[1]}
@@ -80,18 +82,24 @@ def build_rows(model: str, monitors: list[dict], *, seed: int, n_steps: int, lor
                                        # AUROC/d′ + more honest examples even when behavior_rate is high
                                        # (costs 4× monitor scoring per eval — kept at 4 not 8 for spend)
         "max_tokens": max_tokens,
-        "penalty_coef": penalty_coef,  # weight on the train-against monitor penalty (lower → more room to hack)
-        "penalty_schedule": sched,     # None, or {start,end} λ ramp (hack-then-hide curriculum)
         "kl_coef": 1e-4,          # per-token KL-to-base anchor — prevents the reward-hack collapse
+        "kl_discount_factor": 0.0,  # required alongside a non-zero kl_coef (0 = no discount)
         "lora_rank": lora_rank,   # OA: rank 64 (alpha 128 — tinker sets alpha; verify 2×rank on the box)
         "seed": seed,
+        # Only a TML-rendered policy takes a reasoning effort; the config schema rejects the key on
+        # any other, so emit it exactly where it applies.
+        **({"thinking_effort": thinking_effort} if is_tml_policy(model) else {}),
     }
+    # λ belongs ONLY on the rows that train against a monitor: exactly one of the constant and the
+    # ramp, and neither on the control (whose reward never carries a monitor penalty).
+    penalty = {"penalty_schedule": sched} if sched else {"penalty_coef": penalty_coef}
     names = [m["name"] for m in monitors]
     rows = []
     # one row per monitor: that monitor is train_against, the rest held_out
     for target in monitors:
         rows.append({
             **base,
+            **penalty,
             "run_name": f"mbpp_{short}_{target['name']}_s{seed}{suf}",
             "description": (f"Train AGAINST {target['name']} on MBPP-Honeypot (reward-hacking); hold out "
                            f"{', '.join(n for n in names if n != target['name'])}. All scored on the "
@@ -126,10 +134,20 @@ def main() -> None:
     ap.add_argument("--penalty-schedule", type=float, nargs=2, metavar=("START", "END"), default=None,
                     help="ramp λ linearly START→END over training (hack-then-hide curriculum); "
                          "overrides --penalty-coef")
+    ap.add_argument("--thinking-effort", type=float, default=None,
+                    help="reasoning effort for a TML-rendered (thinkingmachines/*) policy: 0.1=minimal, "
+                         "0.9=high. Required for those models, rejected for any other")
     ap.add_argument("--tag", default="", help="run-name + folder marker for this run set (e.g. lowpen)")
     ap.add_argument("--out-dir", default="experiments/configs/mbpp_matrix")
     ap.add_argument("--validate", action="store_true")
     args = ap.parse_args()
+
+    from monitordecorrelation.rl.renderers import is_tml_policy
+
+    if is_tml_policy(args.model) and args.thinking_effort is None:
+        ap.error(f"{args.model} is TML-rendered: pass --thinking-effort (0.1=minimal … 0.9=high)")
+    if not is_tml_policy(args.model) and args.thinking_effort is not None:
+        ap.error(f"{args.model} has no reasoning-effort knob; drop --thinking-effort")
 
     monitors = all_monitors(args.model)
     drop = set(args.skip) | ({"cot_weak", "cot_strong"} if args.no_cot else set())
@@ -143,7 +161,8 @@ def main() -> None:
         stale.unlink()
     rows = build_rows(args.model, monitors, seed=args.seed, n_steps=args.n_steps,
                       lora_rank=args.lora_rank, max_tokens=args.max_tokens, control=not args.no_control,
-                      penalty_coef=args.penalty_coef, tag=args.tag, penalty_schedule=args.penalty_schedule)
+                      penalty_coef=args.penalty_coef, tag=args.tag, penalty_schedule=args.penalty_schedule,
+                      thinking_effort=args.thinking_effort)
     for r in rows:
         ta = [m["name"] for m in r["monitors"] if m["role"] == "train_against"]
         target = ta[0] if ta else "control"  # from the monitors, not run_name parsing (tag-robust)

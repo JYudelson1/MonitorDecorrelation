@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from monitordecorrelation.rl.episodes import derive_sample_seed
 from monitordecorrelation.rl.rollout import build_prompt_tokens, split_cot_answer
 from monitordecorrelation.types import Prompt, Rollout
 
@@ -33,12 +34,14 @@ def _pick_device() -> str:
 
 class TransformersBackend:
     name = "transformers"
+    checkpoints_expire = False  # local directories; a TTL cannot be honoured (see save_checkpoint)
 
     def __init__(
         self,
         base_model: str = "Qwen/Qwen3-0.6B",
         lora_rank: int = 16,
         learning_rate: float = 1e-5,
+        seed: int = 0,
         *,
         device: str | None = None,
         lora_alpha: int | None = None,
@@ -49,6 +52,11 @@ class TransformersBackend:
 
         self.base_model = base_model
         self.learning_rate = learning_rate
+        # Seeding, mirroring TinkerBackend: the seed pins LoRA init (below) and every sampling call
+        # gets its own derived seed, so a run is reproducible on this backend too.
+        self.seed = seed
+        self._sample_calls = 0
+        torch.manual_seed(seed)
         self.device = device or _pick_device()
         self.dtype = torch.bfloat16 if self.device in ("cuda", "mps") else torch.float32
 
@@ -80,6 +88,10 @@ class TransformersBackend:
     ) -> list[Rollout]:
         import torch
 
+        # generate() samples from the global torch RNG, so seed it per call (not once at init):
+        # otherwise a retry or a differently-ordered batch would silently change what was sampled.
+        torch.manual_seed(derive_sample_seed(self.seed, self._sample_calls))
+        self._sample_calls += 1
         self.model.eval()
         rollouts: list[Rollout] = []
         for prompt in prompts:
@@ -169,7 +181,17 @@ class TransformersBackend:
         self.optimizer.step()
         return {"loss": float(loss.detach().cpu()), "n_data": float(len(rollouts))}
 
-    def save_checkpoint(self, label: str) -> str:
+    def save_checkpoint(self, label: str, ttl_seconds: int | None = None) -> str:
+        """Save the LoRA weights under ``data/checkpoints/<label>``.
+
+        ``ttl_seconds`` exists for interface parity with ``TinkerBackend`` (whose checkpoints live on
+        tinker and expire); a local directory has no expiry, so asking for one is refused rather than
+        accepted and ignored — the caller would think its disk was being reclaimed."""
+        if ttl_seconds is not None:
+            raise ValueError(
+                f"ttl_seconds={ttl_seconds}: local checkpoints never expire, so a TTL cannot be honoured "
+                "(pass ttl_seconds=None for this backend)"
+            )
         path = f"data/checkpoints/{label}"
         self.model.save_pretrained(path)
         return path

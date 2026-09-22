@@ -100,6 +100,10 @@ MonitorSpec = Annotated[
     Union[CoTMonitorSpec, ProbeMonitorSpec], Field(discriminator="kind")
 ]
 
+# The envs that slice their dataset, i.e. the ones ``subset`` means something to. Anywhere else a
+# subset would be dropped on the floor by ``factory.make_env``, so the config rejects it.
+ENVS_WITH_SUBSET = frozenset({"sycophancy", "impossiblebench", "terminal_verifier"})
+
 
 class ExperimentConfig(_Strict):
     run_name: str
@@ -110,8 +114,14 @@ class ExperimentConfig(_Strict):
     env: Literal[
         "sycophancy", "mbpp_honeypot", "impossiblebench", "terminal_verifier"
     ] = "sycophancy"
-    subset: str = "nlp"  # sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting
-    #                      | terminal_verifier: the reasoning-gym task (largest_island)
+    subset: str | None = Field(
+        None,
+        description="which slice of the env to run. REQUIRED by the envs that have slices "
+        "(sycophancy: political/nlp/… | impossiblebench: impossible/oneoff/conflicting | "
+        "terminal_verifier: the reasoning-gym task, largest_island) and REJECTED by the ones that "
+        "do not (mbpp_honeypot), where it would be silently ignored. The value itself is checked by "
+        "the env (factory.make_env).",
+    )
     env_options: dict = Field(
         default_factory=dict,
         description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
@@ -139,7 +149,14 @@ class ExperimentConfig(_Strict):
         description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)",
     )
-    max_tokens: int = 1024
+    max_tokens: int | None = Field(
+        None,
+        description="tokens per sampling call, for the runs where a call IS the whole turn: every "
+        "single-turn env, and a multi-turn env with NO thinking budget. REQUIRED there, and REJECTED "
+        "when a `think_budget` is in force (the budget sizes the thinking call and `answer_tokens` "
+        "the answer, so `max_tokens` would be silently ignored). Checked by "
+        "`validate_token_budgets` once the env — hence the resolved budget — is known.",
+    )
     think_budget: int | None | Literal["auto"] = Field(
         "auto",
         description="multi-turn envs, thinking policies (Qwen3, Inkling): cap each turn's thinking at "
@@ -147,28 +164,40 @@ class ExperimentConfig(_Strict):
         "with `answer_tokens`. 'auto' (the default, i.e. the key is absent) = the env's "
         "`default_think_budget` (None for envs without one). null/None = NO budget: a turn is one call "
         "of max_tokens (a long think then eats the turn) — explicit, never overridden by the env default. "
-        "Resolved once by `resolve_think_budget`; the training loop only ever sees int | None.",
+        "Resolved once by `resolve_think_budget`; the training loop only ever sees int | None. "
+        "MULTI-TURN ENVS ONLY: a single-turn env samples one call per rollout and never budgets it, so "
+        "anything but 'auto' there is rejected by `validate_token_budgets` rather than ignored.",
     )
-    answer_tokens: int = Field(
-        512,
-        description="tokens for the post-<think> answer when think_budget forces it",
+    answer_tokens: int | None = Field(
+        None,
+        description="tokens for the post-<think> answer that a `think_budget` forces. REQUIRED "
+        "exactly when a budget is in force, and REJECTED otherwise (no budget → no forced answer → "
+        "the value would be silently ignored). The mirror image of `max_tokens`; both are checked by "
+        "`validate_token_budgets`.",
     )
-    thinking_effort: float = Field(
-        0.9,
+    thinking_effort: float | None = Field(
+        None,
         ge=0.0,
         lt=1.0,
         description="reasoning-effort conditioning for TML-rendered policies (Inkling): 0.1=minimal, "
         "0.7=medium, 0.9=high. Lower effort = far shorter CoT, so it trades monitor-visible reasoning "
-        "against tokens per rollout. Ignored by HF-chat-template policies (Qwen3 & co.).",
+        "against tokens per rollout. REQUIRED for a `thinkingmachines/*` policy and REJECTED for any "
+        "other (HF-chat-template policies — Qwen3 & co. — have no such knob, so the value would be "
+        "silently ignored); see `renderers.is_tml_policy`.",
     )
-    penalty_coef: float = (
-        1.0  # weight on the train-against monitor penalty in the reward
+    penalty_coef: float | None = Field(
+        None,
+        description="constant weight λ on the train-against monitor penalty in the reward. Set "
+        "EXACTLY ONE of `penalty_coef` / `penalty_schedule`, and only when the run has a "
+        "train_against monitor — a control run applies no penalty at all, so either key would be "
+        "silently ignored there.",
     )
     penalty_schedule: dict | None = Field(
         None,
-        description="None → constant penalty_coef. Else {'start_penalty': x, 'end_penalty': y}: λ "
-        "ramps linearly x→y across n_steps (hack-then-hide curriculum — low λ to establish hacking, then "
-        "rising λ to drive obfuscation). Overrides penalty_coef.",
+        description="{'start_penalty': x, 'end_penalty': y}: λ ramps linearly x→y across n_steps "
+        "(hack-then-hide curriculum — low λ to establish hacking, then rising λ to drive obfuscation). "
+        "The alternative to a constant `penalty_coef`: set exactly one of the two, and only on a run "
+        "that trains against a monitor.",
     )
 
     @field_validator("penalty_schedule")
@@ -186,8 +215,11 @@ class ExperimentConfig(_Strict):
         "incorporate_kl_penalty); >0 anchors the policy → prevents the "
         "reward-over-optimization collapse. 0 = off (default).",
     )
-    kl_discount_factor: float = Field(
-        0.0, description="discount for future KL in the penalty; 0 = off"
+    kl_discount_factor: float | None = Field(
+        None,
+        description="discount for future KL in the penalty (0.0 = off). REQUIRED when `kl_coef` > 0 "
+        "and REJECTED when it is 0 — with no KL penalty there is nothing to discount, so the value "
+        "would be silently ignored.",
     )
     lora_rank: int = 16
     lr: float | None = Field(
@@ -209,6 +241,144 @@ class ExperimentConfig(_Strict):
         "baseline for a new env).",
     )
 
+    # ---- no key may be silently ignored -------------------------------------------------------
+    # House rule (see the field descriptions): a key that only applies to SOME runs defaults to
+    # None, is REQUIRED where it applies, and is REJECTED where it does not — so a setting that
+    # cannot take effect fails the config instead of quietly doing nothing. The checks that need
+    # only the config live here; the ones that need the constructed env (``max_tokens`` /
+    # ``answer_tokens`` / ``think_budget``) live in ``validate_token_budgets``, which the runner
+    # calls once the env exists.
+    @model_validator(mode="after")
+    def _check_nothing_is_ignored(self) -> "ExperimentConfig":
+        from monitordecorrelation.rl.renderers import is_tml_policy
+
+        errs: list[str] = []
+
+        if self.env in ENVS_WITH_SUBSET and self.subset is None:
+            errs.append(
+                f"env {self.env!r} is sliced by `subset`, which is not set — set it (sycophancy: "
+                "political/nlp/… | impossiblebench: impossible/oneoff/conflicting | "
+                "terminal_verifier: largest_island)"
+            )
+        if self.env not in ENVS_WITH_SUBSET and self.subset is not None:
+            errs.append(
+                f"env {self.env!r} has no slices, so subset={self.subset!r} would be ignored — drop the key"
+            )
+
+        tml = is_tml_policy(self.policy)
+        if tml and self.thinking_effort is None:
+            errs.append(
+                f"policy {self.policy!r} is TML-rendered, where reasoning effort is a real knob with no "
+                "safe default — set `thinking_effort` (0.1=minimal, 0.5=medium-low, 0.9=high)"
+            )
+        if not tml and self.thinking_effort is not None:
+            errs.append(
+                f"policy {self.policy!r} uses an HF chat template, which has no reasoning-effort knob, so "
+                f"thinking_effort={self.thinking_effort} would be ignored — drop the key"
+            )
+
+        trains_against = [m.name for m in self.monitors if m.role == "train_against"]
+        if trains_against:
+            if (self.penalty_coef is None) == (self.penalty_schedule is None):
+                errs.append(
+                    "set exactly one of `penalty_coef` (constant λ) and `penalty_schedule` (λ ramp): "
+                    f"got penalty_coef={self.penalty_coef!r} and penalty_schedule={self.penalty_schedule!r}, "
+                    f"with {len(trains_against)} train_against monitor(s) ({', '.join(trains_against)})"
+                )
+        elif self.penalty_coef is not None or self.penalty_schedule is not None:
+            errs.append(
+                "no train_against monitor, so no monitor penalty enters the reward and "
+                f"penalty_coef={self.penalty_coef!r} / penalty_schedule={self.penalty_schedule!r} would be "
+                "ignored — drop them (a control run's reward is the task reward alone)"
+            )
+
+        if self.kl_coef > 0 and self.kl_discount_factor is None:
+            errs.append(
+                f"kl_coef={self.kl_coef} turns the KL-to-base penalty on, so `kl_discount_factor` applies "
+                "and must be set explicitly (0.0 = no discount)"
+            )
+        if self.kl_coef == 0 and self.kl_discount_factor is not None:
+            errs.append(
+                f"kl_coef is 0 (no KL penalty), so kl_discount_factor={self.kl_discount_factor} would be "
+                "ignored — drop the key"
+            )
+
+        if self.probe_server_url is not None and not any(m.kind == "probe" for m in self.monitors):
+            errs.append(
+                f"probe_server_url={self.probe_server_url!r} is set but no monitor is a probe, so nothing "
+                "would read from it — drop the key"
+            )
+
+        if self.backend == "transformers":
+            # The local backend implements plain GRPO only: no KL-to-base, and no TML rendering.
+            if self.kl_coef:
+                errs.append(
+                    "the transformers backend has no KL-to-base penalty (it is a tinker-only path), so "
+                    f"kl_coef={self.kl_coef} would be ignored — set kl_coef=0 or use the tinker backend"
+                )
+            if tml:
+                errs.append(
+                    f"policy {self.policy!r} is TML-rendered and only the tinker backend can render it — "
+                    "the transformers backend would fall back to an HF chat template it has no tokenizer for"
+                )
+
+        if errs:
+            raise ValueError("; ".join(errs))
+        return self
+
+
+def validate_token_budgets(cfg: "ExperimentConfig", env) -> int | None:
+    """Resolve ``think_budget`` against ``env`` and reject every token-budget key this run would ignore.
+
+    The three keys divide by how a turn is sampled, which only the env knows:
+
+    * single-turn env — one call per rollout, no budgeting: ``max_tokens`` sizes it; ``think_budget``
+      (anything but the ``"auto"`` default) and ``answer_tokens`` are meaningless and rejected.
+    * multi-turn env, budget in force — the thinking call is ``think_budget`` long and the forced
+      answer ``answer_tokens`` long; ``max_tokens`` is never read, so it is rejected.
+    * multi-turn env, ``think_budget: null`` — a turn is one call of ``max_tokens``; nothing forces an
+      answer, so ``answer_tokens`` is rejected.
+
+    Returns the resolved budget (``int | None``), which is what the training loop takes.
+    """
+    multi_turn = bool(getattr(env, "multi_turn", False))
+    env_default = getattr(env, "default_think_budget", None)
+    if not multi_turn:
+        if env_default is not None:  # an env bug, not a config one — a single turn is never budgeted
+            raise ValueError(
+                f"{type(env).__name__} is single-turn but declares default_think_budget={env_default}, "
+                "which nothing would apply"
+            )
+        if cfg.think_budget != "auto":
+            raise ValueError(
+                f"env {cfg.env!r} is single-turn: a rollout is ONE sampling call of max_tokens and no "
+                f"thinking budget is ever applied, so think_budget={cfg.think_budget!r} would be ignored — "
+                "drop the key (its default, \"auto\", resolves to no budget here)"
+            )
+    budget = resolve_think_budget(cfg.think_budget, env)
+    if budget is None:
+        if cfg.max_tokens is None:
+            raise ValueError(
+                "no thinking budget is in force, so each sampling call is sized by `max_tokens` — set it"
+            )
+        if cfg.answer_tokens is not None:
+            raise ValueError(
+                f"no thinking budget is in force (think_budget={cfg.think_budget!r} → None), so no answer is "
+                f"ever forced and answer_tokens={cfg.answer_tokens} would be ignored — drop the key"
+            )
+    else:
+        if cfg.answer_tokens is None:
+            raise ValueError(
+                f"think_budget={budget} caps each turn's thinking, after which the answer is sampled "
+                "separately — set `answer_tokens` to size it"
+            )
+        if cfg.max_tokens is not None:
+            raise ValueError(
+                f"think_budget={budget} sizes the thinking call and answer_tokens the answer, so "
+                f"max_tokens={cfg.max_tokens} would be ignored — drop the key"
+            )
+    return budget
+
 
 def load_config(path: str | Path) -> ExperimentConfig:
     """Load + validate a JSON or YAML experiment config. Raises pydantic ValidationError if invalid."""
@@ -221,6 +391,28 @@ def load_config(path: str | Path) -> ExperimentConfig:
     else:
         data = json.loads(text)
     return ExperimentConfig.model_validate(data)
+
+
+def load_monitor_specs(path: str | Path) -> list[MonitorSpec]:
+    """Just the ``monitors`` list of a config file, validated, WITHOUT the whole-run rules.
+
+    For the post-hoc scripts that only re-score saved rollouts (``rescore_eval_rollouts``,
+    ``eval_monitors_on_rollouts``): they read nothing but the judge battery, and the config they are
+    pointed at is usually a finished run's ``config.json`` — which may predate the current relevance
+    rules (or describe an env/policy combination those rules would now reject). Re-validating the
+    whole run there would block re-scoring over a key that cannot affect a judge call. Every monitor
+    spec is still fully validated; ``load_config`` remains the strict path for anything that RUNS."""
+    from pydantic import TypeAdapter
+
+    path = Path(path)
+    text = path.read_text()
+    if path.suffix in (".yaml", ".yml"):
+        import yaml
+
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    return TypeAdapter(list[MonitorSpec]).validate_python(data.get("monitors", []))
 
 
 def _coerce(v: str):

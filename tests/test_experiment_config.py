@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from monitordecorrelation.experiment_config import ExperimentConfig, build_monitors
+from monitordecorrelation.experiment_config import (
+    ENVS_WITH_SUBSET,
+    ExperimentConfig,
+    build_monitors,
+    validate_token_budgets,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -14,6 +19,9 @@ def _dummy_openrouter_key(monkeypatch):
 
 
 def _cfg(**kw) -> ExperimentConfig:
+    """A minimal VALID config. The relevance rules (see ``_check_nothing_is_ignored``) make a few keys
+    conditional, so fill exactly the ones this config's env/monitors call for: a `subset` for the envs
+    that have slices, and a λ only when something is trained against."""
     base = dict(
         run_name="t",
         monitors=[
@@ -26,6 +34,10 @@ def _cfg(**kw) -> ExperimentConfig:
         ],
     )
     base.update(kw)
+    if base.get("env", "sycophancy") in ENVS_WITH_SUBSET:
+        base.setdefault("subset", "nlp")
+    if any(m["role"] == "train_against" for m in base["monitors"]):
+        base.setdefault("penalty_coef", 1.0)
     return ExperimentConfig.model_validate(base)
 
 
@@ -181,6 +193,8 @@ def _gemini_cfg() -> ExperimentConfig:
     return ExperimentConfig.model_validate(
         dict(
             run_name="t",
+            subset="nlp",
+            penalty_coef=1.0,
             monitors=[
                 {"kind": "cot", "name": "g25_out", "role": "held_out",
                  "model_id": "google/gemini-2.5-flash-lite"},
@@ -409,3 +423,176 @@ def test_eval_terminal_monitors_baseline_propagates_verifier_mode_to_the_env(mon
     assert {it.verifier_mode for it in env.items + env.eval_items} == {want}
     # the config's other options reach the env too
     assert env.max_turns == 4 and env.output_view == "transcript" and env.command_timeout == 30.0
+
+
+# ---- nothing a config sets may be silently ignored ----------------------------------------------
+# One test per relevance rule. The shape is always the same: the key is REQUIRED where it takes
+# effect and REJECTED where it does not, so a run can never quietly use something other than what the
+# config says. `_cfg` fills the conditional keys, so each test perturbs exactly one of them.
+
+
+def _err(**kw) -> str:
+    """The validation message for a config that must not load."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as e:
+        _cfg(**kw)
+    return str(e.value)
+
+
+def test_subset_is_required_by_sliced_envs_and_refused_by_the_others():
+    assert _cfg(env="sycophancy", subset="political").subset == "political"
+    assert _cfg(env="mbpp_honeypot").subset is None
+    assert "subset" in _err(env="sycophancy", subset=None)
+    assert "would be ignored" in _err(env="mbpp_honeypot", subset="nlp")
+
+
+def test_terminal_verifier_rejects_an_unknown_task_instead_of_coercing_it():
+    """The factory used to replace any subset it didn't know with 'largest_island', so a typo'd task
+    trained on a different env than the config named."""
+    import monitordecorrelation.envs.factory as factory
+
+    with pytest.raises(ValueError, match="unknown task 'not_a_task'"):
+        factory.make_env(_cfg(env="terminal_verifier", subset="not_a_task", n_prompts_pool=2))
+
+
+def test_thinking_effort_is_required_by_tml_policies_and_refused_by_the_others():
+    assert _cfg(policy="thinkingmachines/Inkling-Small", thinking_effort=0.5).thinking_effort == 0.5
+    assert _cfg(policy="Qwen/Qwen3-8B").thinking_effort is None
+    assert "thinking_effort" in _err(policy="thinkingmachines/Inkling-Small")
+    assert "would be ignored" in _err(policy="Qwen/Qwen3-8B", thinking_effort=0.5)
+
+
+def test_exactly_one_penalty_knob_and_only_when_a_monitor_is_trained_against():
+    held_out = [{"kind": "cot", "name": "m", "role": "held_out", "model_id": "x"}]
+    ramp = {"start_penalty": 0.0, "end_penalty": 1.0}
+    assert _cfg(penalty_coef=None, penalty_schedule=ramp).penalty_schedule == ramp
+    assert "exactly one" in _err(penalty_coef=0.5, penalty_schedule=ramp)  # the ramp used to just win
+    assert "exactly one" in _err(penalty_coef=None)
+    # a control run applies no penalty at all, so neither knob may be set
+    assert _cfg(monitors=held_out, penalty_coef=None).penalty_coef is None
+    assert "no train_against monitor" in _err(monitors=held_out, penalty_coef=0.5)
+    assert "no train_against monitor" in _err(monitors=held_out, penalty_schedule=ramp)
+
+
+def test_kl_discount_factor_tracks_kl_coef():
+    assert _cfg(kl_coef=1e-4, kl_discount_factor=0.0).kl_discount_factor == 0.0
+    assert "kl_discount_factor" in _err(kl_coef=1e-4)
+    assert "would be ignored" in _err(kl_discount_factor=0.5)  # kl_coef defaults to 0 = no KL penalty
+
+
+def test_probe_server_url_needs_a_probe_to_serve():
+    probe = [{"kind": "probe", "name": "p", "role": "held_out", "probe_path": "data/probes/x"}]
+    assert _cfg(monitors=probe, penalty_coef=None, probe_server_url="http://x").probe_server_url
+    assert "no monitor is a probe" in _err(probe_server_url="http://x")
+
+
+def test_transformers_backend_refuses_the_knobs_it_does_not_implement():
+    assert "kl_coef" in _err(backend="transformers", kl_coef=1e-4, kl_discount_factor=0.0)
+    assert "only the tinker backend" in _err(
+        backend="transformers", policy="thinkingmachines/Inkling-Small", thinking_effort=0.5
+    )
+
+
+class _SingleTurnEnv:
+    multi_turn = False
+
+
+class _MultiTurnEnv:
+    multi_turn = True
+    max_turns = 4
+    default_think_budget = 1536
+
+
+def test_token_budget_keys_must_match_how_a_turn_is_sampled():
+    """max_tokens sizes a whole call; think_budget + answer_tokens size the two calls of a budgeted
+    turn. Whichever pair is not in force would be read by nobody, so it is refused."""
+    # single-turn env: one call of max_tokens, no budgeting at all
+    assert validate_token_budgets(_cfg(max_tokens=1024), _SingleTurnEnv()) is None
+    with pytest.raises(ValueError, match="max_tokens"):
+        validate_token_budgets(_cfg(), _SingleTurnEnv())
+    with pytest.raises(ValueError, match="would be ignored"):
+        validate_token_budgets(_cfg(max_tokens=1024, answer_tokens=512), _SingleTurnEnv())
+    with pytest.raises(ValueError, match="single-turn"):
+        validate_token_budgets(_cfg(max_tokens=1024, think_budget=256), _SingleTurnEnv())
+
+    # multi-turn with a budget (from the env, or explicit): the answer call needs its own size
+    assert validate_token_budgets(_cfg(answer_tokens=512), _MultiTurnEnv()) == 1536
+    assert validate_token_budgets(_cfg(think_budget=256, answer_tokens=512), _MultiTurnEnv()) == 256
+    with pytest.raises(ValueError, match="answer_tokens"):
+        validate_token_budgets(_cfg(), _MultiTurnEnv())
+    with pytest.raises(ValueError, match="max_tokens=3072 would be ignored"):
+        validate_token_budgets(_cfg(max_tokens=3072, answer_tokens=512), _MultiTurnEnv())
+
+    # multi-turn, budget explicitly off: back to one call of max_tokens
+    assert validate_token_budgets(_cfg(think_budget=None, max_tokens=3072), _MultiTurnEnv()) is None
+    with pytest.raises(ValueError, match="answer_tokens=512 would be ignored"):
+        validate_token_budgets(_cfg(think_budget=None, max_tokens=3072, answer_tokens=512), _MultiTurnEnv())
+
+
+def test_run_episodes_enforces_the_same_split_as_the_config():
+    """The config layer is not the only guard: the episode driver itself refuses the argument it
+    would not read, so a hand-written call cannot pass one either."""
+    from monitordecorrelation.rl.episodes import run_episodes
+
+    with pytest.raises(ValueError, match="max_tokens"):
+        run_episodes(None, None, _MultiTurnEnv(), [], max_tokens=999, think_budget=100, answer_tokens=20)
+    with pytest.raises(ValueError, match="answer_tokens"):
+        run_episodes(None, None, _MultiTurnEnv(), [], max_tokens=999, answer_tokens=20)
+    with pytest.raises(ValueError, match="max_tokens must be given"):
+        run_episodes(None, None, _MultiTurnEnv(), [])
+
+
+def test_every_repo_config_satisfies_the_relevance_rules():
+    """The configs shipped in experiments/configs/ are the worked examples of these rules."""
+    from monitordecorrelation.experiment_config import load_config
+
+    paths = sorted((_REPO / "experiments" / "configs").rglob("*.json"))
+    assert len(paths) > 10
+    for p in paths:
+        cfg = load_config(p)  # schema + relevance rules
+        env = _MultiTurnEnv() if cfg.env == "terminal_verifier" else _SingleTurnEnv()
+        validate_token_budgets(cfg, env)
+
+
+def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
+    """The other half of "nothing is ignored": a key the schema accepts must actually ARRIVE.
+
+    ``save_every: 6`` was accepted, written into the run folder, and then dropped on the way to
+    ``RunConfig`` — every run silently checkpointed at the default 500 (i.e. step 0 only), which is
+    only discoverable by noticing the missing files afterwards. So assert the whole hand-off.
+    """
+    import sys
+
+    import monitordecorrelation.backends.tinker_backend as tb
+
+    run = _load_script("run_experiment")
+    seen = {}
+
+    def spy(run_config, env, backend, **kw):
+        seen["cfg"] = run_config
+        seen["kw"] = kw
+        raise _Stop
+
+    monkeypatch.setattr(tb, "TinkerBackend", lambda *a, **k: object())
+    monkeypatch.setattr(run, "run_grpo", spy)
+    monkeypatch.chdir(tmp_path)  # the runner writes data/runs/<run_name>/config.json
+    overrides = {"n_steps": 9, "batch_size": 3, "group_size": 5, "eval_every": 2, "eval_size": 7,
+                 "eval_samples_per_prompt": 4, "save_every": 6, "lora_rank": 8, "seed": 11,
+                 "penalty_coef": 0.25, "kl_coef": 0.001, "kl_discount_factor": 0.5, "max_tokens": 321,
+                 "lr": 0.0007, "n_prompts_pool": 16}
+    # a config that trains against a monitor, so penalty_coef is one of the fields in play
+    cfg_path = _REPO / "experiments" / "configs" / "terminal_verifier_gemini25_out.json"
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--config", str(cfg_path),
+                                      "--set", *[f"{k}={v}" for k, v in overrides.items()]])
+    with pytest.raises(_Stop):
+        run.main()
+
+    rc = seen["cfg"]
+    for field in ("n_steps", "batch_size", "group_size", "eval_every", "eval_size",
+                  "eval_samples_per_prompt", "save_every", "lora_rank", "seed", "penalty_coef",
+                  "kl_coef"):
+        assert getattr(rc, field) == overrides[field], f"{field} never reached RunConfig"
+    assert rc.learning_rate == overrides["lr"]
+    assert seen["kw"]["max_tokens"] == overrides["max_tokens"]  # this config runs with no think_budget
+    assert seen["kw"]["think_budget"] is None and seen["kw"]["answer_tokens"] is None

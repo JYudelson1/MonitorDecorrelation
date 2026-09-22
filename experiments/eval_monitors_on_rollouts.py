@@ -97,9 +97,10 @@ def main() -> None:
         # The battery exactly as a matrix row declares it. Keeping the specs (not just model ids)
         # preserves each judge's view and reasoning_effort — a gemini-3.x judge without one cannot
         # complete a single call, and a cot-only judge measured as cot+out is a different monitor.
-        from monitordecorrelation.experiment_config import load_config
-        specs = [s for s in load_config(args.config).monitors if s.kind == "cot"]
-        n_probe = len(load_config(args.config).monitors) - len(specs)
+        from monitordecorrelation.experiment_config import load_monitor_specs
+        all_specs = load_monitor_specs(args.config)
+        specs = [s for s in all_specs if s.kind == "cot"]
+        n_probe = len(all_specs) - len(specs)
         monitors = [(s.name, s) for s in specs]
         models = sorted({s.model_id for s in specs})
         modes = [args.config]

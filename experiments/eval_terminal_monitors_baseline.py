@@ -35,12 +35,16 @@ import tinker
 
 from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
-from monitordecorrelation.experiment_config import apply_overrides, load_config, resolve_think_budget
+from monitordecorrelation.experiment_config import (
+    apply_overrides,
+    load_config,
+    validate_token_budgets,
+)
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
-from monitordecorrelation.rl.renderers import make_renderer
+from monitordecorrelation.rl.renderers import is_tml_policy, make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
@@ -130,9 +134,10 @@ def main() -> None:
 
     if args.effort is not None and any(kv.partition("=")[0] == "thinking_effort" for kv in args.set):
         raise SystemExit("--effort and --set thinking_effort=… both given; pass one")
-    cfg = apply_overrides(load_config(args.config), args.set, allowed_fields=READ_FIELDS,
-                          allowed_monitor_fields=READ_MONITOR_FIELDS,
-                          not_allowed_hint="Use --model / --seed for the policy / seed.").model_dump()
+    cfg_obj = apply_overrides(load_config(args.config), args.set, allowed_fields=READ_FIELDS,
+                              allowed_monitor_fields=READ_MONITOR_FIELDS,
+                              not_allowed_hint="Use --model / --seed for the policy / seed.")
+    cfg = cfg_obj.model_dump()
     # Match the RL runs: the policy must be sampled the way training samples it.
     if args.effort is None:
         args.effort = cfg["thinking_effort"]
@@ -156,9 +161,21 @@ def main() -> None:
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 
+    # The same check the training loop makes, now that the env (hence the resolved budget) exists:
+    # max_tokens under a thinking budget, or answer_tokens without one, would be sampled with and
+    # never used, so they are rejected rather than ignored.
+    try:
+        think_budget = validate_token_budgets(cfg_obj, env)
+    except ValueError as e:
+        raise SystemExit(f"config {args.config}: {e}") from e
+
     sc = tinker.ServiceClient()
     sampler = sc.create_sampling_client(base_model=args.model)
-    is_tml = args.model.split(":")[0].startswith("thinkingmachines/")
+    is_tml = is_tml_policy(args.model)
+    if not is_tml and args.effort is not None:
+        raise SystemExit(
+            f"--effort/{args.effort} applies only to TML-rendered policies; {args.model} has no such knob"
+        )
     renderer = make_renderer(args.model, effort=args.effort,
                             tokenizer=None if is_tml else sampler.get_tokenizer())
 
@@ -192,7 +209,7 @@ def main() -> None:
                        skip=lambda r: invalid_reason(env, r) is not None) as scorer:
         rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                                 max_tokens=cfg["max_tokens"], temperature=1.0,
-                                seed=args.seed, think_budget=resolve_think_budget(cfg["think_budget"], env),
+                                seed=args.seed, think_budget=think_budget,
                                 answer_tokens=cfg["answer_tokens"],
                                 step_workers=args.workers, on_rollout=on_rollout)
         wall_s = time.time() - t0

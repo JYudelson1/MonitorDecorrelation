@@ -12,7 +12,11 @@ import tinker
 
 from monitordecorrelation.rl.episodes import derive_sample_seed, run_episodes
 from monitordecorrelation.rl.grpo import optim_metrics, to_trajectory_groups
-from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
+from monitordecorrelation.rl.renderers import (
+    DEFAULT_THINKING_EFFORT,
+    is_tml_policy,
+    make_renderer,
+)
 from monitordecorrelation.rl.rollout import sample_rollouts
 from monitordecorrelation.types import Prompt, Rollout
 
@@ -21,12 +25,21 @@ __all__ = ["TinkerBackend", "derive_sample_seed"]  # derive_sample_seed re-expor
 
 class TinkerBackend:
     name = "tinker"
+    checkpoints_expire = True  # tinker-hosted state: save_checkpoint takes a ttl_seconds
 
     def __init__(
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
-        thinking_effort: float = DEFAULT_THINKING_EFFORT,
+        thinking_effort: float | None = None,
     ) -> None:
+        # thinking_effort reaches the policy only through TmlRenderer, so an effort set for an
+        # HF-templated policy would vanish — say so instead. None on a TML policy takes the model
+        # default; ExperimentConfig requires configs to be explicit, hand-built backends need not be.
+        if thinking_effort is not None and not is_tml_policy(base_model):
+            raise ValueError(
+                f"thinking_effort={thinking_effort} has no effect on {base_model!r}: only TML-rendered "
+                "(thinkingmachines/*) policies take a reasoning effort"
+            )
         self.base_model = base_model
         self.learning_rate = learning_rate
         self.seed = seed
@@ -43,8 +56,10 @@ class TinkerBackend:
         # Prompt framing + CoT parsing are model-family specific (HF chat template vs Inkling's TML
         # rendering) — the renderer owns both, and is shared by sampling and the GRPO datum path so
         # the observation tokens always match what was sampled.
-        self.renderer = make_renderer(base_model, training_client=self.training_client,
-                                      effort=thinking_effort)
+        self.renderer = make_renderer(
+            base_model, training_client=self.training_client,
+            effort=DEFAULT_THINKING_EFFORT if thinking_effort is None else thinking_effort,
+        )
         self.tokenizer = getattr(self.renderer, "tokenizer", None)
         self._sampler = None  # lazily (re)built from current weights
         # KL reference: a sampling client at the BASE model weights (the anchor for the KL penalty).
@@ -91,16 +106,17 @@ class TinkerBackend:
         prompts: list[Prompt],
         *,
         num_samples: int = 1,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         temperature: float = 1.0,
         think_budget: int | None = None,
-        answer_tokens: int = 512,
+        answer_tokens: int | None = None,
         on_rollout: Callable[[int, Rollout], None] | None = None,
     ) -> list[Rollout]:
         """Multi-turn counterpart of ``sample`` for tool-loop envs (``env.multi_turn``): the episode
         driver samples a turn, the env executes it and replies, repeat. Returns one Rollout per
         episode carrying its per-turn transitions (see rl/episodes.py) for ``train_step``.
-        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py).
+        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py) —
+        give either those two or ``max_tokens``, never both (``run_episodes`` rejects the unused one).
         Every episode runs in its own thread and never waits on its peers; ``on_rollout(index,
         rollout)`` fires from that thread the moment an episode is done."""
         if self._sampler is None:

@@ -5,9 +5,12 @@ Keeps ``run_experiment`` env-agnostic: it asks for ``make_env(cfg)`` and gets ba
 setting by adding a branch here (and a value to ``ExperimentConfig.env``'s Literal).
 
 Every env draws its prompt pool from ``cfg.n_prompts_pool`` and seeds off ``cfg.seed``. ``cfg.subset``
-selects the slice where that means something — sycophancy (political/nlp/…) and impossiblebench
-(impossible = oneoff + conflicting, or either alone); MBPP ignores it. ``cfg.env_options`` passes
-env-specific knobs (currently impossiblebench only) straight to the constructor, which validates them.
+selects the slice where that means something — sycophancy (political/nlp/…), impossiblebench
+(impossible = oneoff + conflicting, or either alone) and terminal_verifier (the reasoning-gym task);
+MBPP has no slices, and ``ExperimentConfig`` rejects a ``subset`` for it rather than dropping it here
+(see ``ENVS_WITH_SUBSET``). Each env validates the VALUE and raises on one it does not know.
+``cfg.env_options`` passes env-specific knobs (impossiblebench / terminal_verifier) straight to the
+constructor, which validates them.
 
 NOTE (leakage / task #25 split): MBPP's ``holdout`` currently samples random items, NOT coordinated
 with which task_ids the iid MBPP probe trained on. The iid-probe-vs-eval split must be unified before a
@@ -44,9 +47,9 @@ def make_env(cfg: "ExperimentConfig"):
     if cfg.env == "terminal_verifier":
         from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
 
-        # subset names the reasoning-gym task (only largest_island so far); env_options carries
+        # subset names the reasoning-gym task (only largest_island so far) — passed through, NOT
+        # silently coerced: from_task raises on a task it does not know. env_options carries
         # verifier_mode / offset_range / max_turns / output_view / … (validated by the constructor).
-        task = cfg.subset if cfg.subset in ("largest_island",) else "largest_island"
-        return TerminalVerifierEnv.from_task(task=task, n=cfg.n_prompts_pool, seed=cfg.seed,
+        return TerminalVerifierEnv.from_task(task=cfg.subset, n=cfg.n_prompts_pool, seed=cfg.seed,
                                              **(cfg.env_options or {}))
     raise ValueError(f"unknown env {cfg.env!r}")  # pragma: no cover (pydantic Literal guards this)

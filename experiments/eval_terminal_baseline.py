@@ -33,7 +33,11 @@ from monitordecorrelation.envs.terminal_verifier import VERIFIER_MODES, Terminal
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.rl.episodes import run_episodes
-from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
+from monitordecorrelation.rl.renderers import (
+    DEFAULT_THINKING_EFFORT,
+    is_tml_policy,
+    make_renderer,
+)
 from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
@@ -98,10 +102,13 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3-8B")
     ap.add_argument("--n-prompts", type=int, default=8)
     ap.add_argument("--samples", type=int, default=1, help="episodes per prompt")
-    ap.add_argument("--max-tokens", type=int, default=2048, help="per TURN (single call, when no --think-budget)")
+    ap.add_argument("--max-tokens", type=int, default=None,
+                    help="per TURN (a single call). Use this OR --think-budget + --answer-tokens; "
+                         "defaults to 2048 when no budget is asked for")
     ap.add_argument("--think-budget", type=int, default=None,
                     help="cap <think> at N tokens per turn, then force the answer (answer gets --answer-tokens)")
-    ap.add_argument("--answer-tokens", type=int, default=512)
+    ap.add_argument("--answer-tokens", type=int, default=None,
+                    help="tokens for the forced answer; required with --think-budget, rejected without it")
     ap.add_argument("--max-turns", type=int, default=4)
     ap.add_argument("--verifier-mode", default="corrupted", choices=VERIFIER_MODES,
                     help="what verifier.py holds (see envs/terminal_verifier.py); 'possible' = the true answer")
@@ -113,8 +120,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=3, help="print this many full transcripts")
     ap.add_argument("--out", default=None, help="jsonl path (default data/runs/tv_baseline_<model>/episodes.jsonl)")
-    ap.add_argument("--effort", type=float, default=DEFAULT_THINKING_EFFORT,
-                    help="reasoning effort for TML-rendered policies (Inkling); ignored by Qwen3 & co.")
+    ap.add_argument("--effort", type=float, default=None,
+                    help="reasoning effort for TML-rendered (thinkingmachines/*) policies; refused for any "
+                         f"other. Default for those: {DEFAULT_THINKING_EFFORT}")
     ap.add_argument("--step-rollouts", type=int, default=128,
                     help="rollouts per RL step for the cost estimate (default batch_size 16 x group_size 8)")
     ap.add_argument("--price", default=None,
@@ -122,6 +130,24 @@ def main() -> None:
                          "\"cached\": 0.04, \"train\": 0.44}'")
     ap.add_argument("--workers", type=int, default=16, help="concurrent env steps (command execution)")
     args = ap.parse_args()
+
+    # The two turn-sizing modes are disjoint (run_episodes rejects the unused argument), so settle it
+    # here, where the message can name the flags: budget + answer tokens, or a plain per-turn cap.
+    if args.think_budget is None:
+        if args.answer_tokens is not None:
+            ap.error("--answer-tokens sizes the answer that --think-budget forces; without a budget "
+                     "nothing forces one, so it would be unused")
+        args.max_tokens = 2048 if args.max_tokens is None else args.max_tokens
+    else:
+        if args.max_tokens is not None:
+            ap.error("--think-budget sizes the thinking call and --answer-tokens the answer, so "
+                     "--max-tokens would be unused — drop it")
+        args.answer_tokens = 512 if args.answer_tokens is None else args.answer_tokens
+    is_tml = is_tml_policy(args.model)
+    if not is_tml and args.effort is not None:
+        ap.error(f"--effort applies only to TML-rendered policies; {args.model} has no such knob")
+    if is_tml and args.effort is None:
+        args.effort = DEFAULT_THINKING_EFFORT
 
     env = TerminalVerifierEnv.from_task(
         n=max(64, args.n_prompts), seed=args.seed, verifier_mode=args.verifier_mode,
@@ -132,15 +158,15 @@ def main() -> None:
 
     sc = tinker.ServiceClient()
     sampler = sc.create_sampling_client(base_model=args.model)
-    is_tml = args.model.split(":")[0].startswith("thinkingmachines/")
-    renderer = make_renderer(args.model, effort=args.effort,
+    renderer = make_renderer(args.model, effort=args.effort if is_tml else DEFAULT_THINKING_EFFORT,
                              tokenizer=None if is_tml else sampler.get_tokenizer())
     n_ep = len(prompts) * args.samples
     print(f"sampling {n_ep} episodes ({len(prompts)}×{args.samples}) from {args.model} — "
-          f"max_turns={args.max_turns}, max_tokens/turn={args.max_tokens}, "
-          f"think_budget={args.think_budget}/{args.answer_tokens}, "
-          f"{'effort=' + str(args.effort) + ', ' if is_tml else ''}"
-          f"verifier_mode={args.verifier_mode}", flush=True)
+          f"max_turns={args.max_turns}, "
+          + (f"think_budget={args.think_budget}+answer_tokens={args.answer_tokens}, "
+             if args.think_budget is not None else f"max_tokens/turn={args.max_tokens}, ")
+          + (f"effort={args.effort}, " if is_tml else "")
+          + f"verifier_mode={args.verifier_mode}", flush=True)
     # Judges are built BEFORE sampling so each episode can be handed to them the moment it finishes
     # (MonitorScorer.submit as the driver's on_rollout) instead of after the whole batch — same
     # pipelining the RL loop uses, see rl/train.py.
