@@ -13,6 +13,12 @@ What it shows, per run:
     (name · kind · role · model · threshold), checkpoints, description.
   * **Metrics** — every series in ``metrics.jsonl`` (train) and ``eval_metrics.jsonl`` (eval),
     charted and tabulated. ``behavior_rate`` (the oracle) is preselected, per CLAUDE.md.
+  * **Score dist** — each monitor's score histogram at ONE step, split by the oracle
+    (behavior present vs absent), with per-class means, the gap, AUROC and the threshold. Pick an
+    RL train step (``rollouts.jsonl``: train-against monitors only) or an eval step (the eval dump:
+    every monitor, one panel each). A pre-RL baseline dir from
+    ``experiments/eval_terminal_monitors_baseline.py`` has a single eval step, so there's no picker.
+    Rollouts no monitor scored (invalid, or a control run's train dump) are excluded and counted.
   * **Rollouts** — the full text of every saved rollout: the complete prompt, the complete CoT,
     the complete answer/transcript, the per-turn breakdown for multi-turn envs, the env grading
     record and every monitor's score. **Nothing is truncated** — what you see is exactly what was
@@ -104,6 +110,22 @@ def _nan_safe(o: Any) -> Any:
 
 def dumps(o: Any) -> bytes:
     return json.dumps(_nan_safe(o), default=str).encode()
+
+
+def _auroc(pos: list[float], neg: list[float]) -> Optional[float]:
+    """P(score | present > score | absent), ties counted half (Mann–Whitney). None if a class is empty."""
+    if not pos or not neg:
+        return None
+    ranked = sorted([(s, 1) for s in pos] + [(s, 0) for s in neg])
+    rank_sum, i = 0.0, 0
+    while i < len(ranked):
+        j = i
+        while j < len(ranked) and ranked[j][0] == ranked[i][0]:
+            j += 1
+        avg = (i + j + 1) / 2  # mean of 1-based ranks i+1 … j
+        rank_sum += avg * sum(1 for k in range(i, j) if ranked[k][1])
+        i = j
+    return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
 
 
 # --------------------------------------------------------------------------------------------
@@ -551,6 +573,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_rollout(q)
             elif route == "/api/file":
                 self._route_file(q)
+            elif route == "/api/scoredist":
+                self._route_scoredist(q)
             else:
                 self._err("not found", 404)
         except BrokenPipeError:
@@ -694,6 +718,80 @@ class Handler(BaseHTTPRequestHandler):
             return self._err("no such rollout", 404)
         self._json({"i": i, "record": _nan_safe(rec)})
 
+    def _route_scoredist(self, q: dict) -> None:
+        """Every monitor's scores at ONE step, split by the oracle (behavior present / absent).
+
+        ``kind=train`` reads rollouts.jsonl (an RL step: train-against monitors only); ``kind=eval``
+        reads the eval dump (an eval round: every monitor) — the slim dump when present, since it has
+        the same labels + scores and indexes far faster. A pre-RL baseline dir
+        (eval_terminal_monitors_baseline.py) is an eval dump with a single step, 0.
+        """
+        run = self._run(q)
+        if run is None:
+            return
+        kinds = [k for k, fn in (("train", "rollouts.jsonl"), ("eval", "eval_rollouts.jsonl"))
+                 if (run.dir / fn).exists() or (k == "eval" and (run.dir / "eval_rollouts_slim.jsonl").exists())]
+        if not kinds:
+            return self._json({"kinds": [], "missing": True})
+        kind = (q.get("kind") or [""])[0]
+        if kind not in kinds:
+            kind = "eval" if "eval" in kinds else kinds[0]
+        source = "train" if kind == "train" else \
+            ("eval_slim" if (run.dir / SOURCES["eval_slim"][0]).exists() else "eval")
+        idx = self.store.index(run, source)
+        steps = sorted({e.get("step") for e in idx.entries if e.get("step") is not None}) if idx else []
+        try:
+            step = int((q.get("step") or [""])[0])
+        except ValueError:
+            step = None
+        if step not in steps:
+            step = steps[-1] if steps else None
+
+        # monitor order: the run's config/run_info order, then any extra names seen in the dump
+        order = [m["name"] for m in self.store._monitors(run)]
+        by_mon: dict[str, dict] = {}
+        n_rollouts = n_unlabeled = n_unscored = 0
+        unscored_why: dict[str, int] = {}
+        for e in (idx.entries if idx else []):
+            if e.get("step") != step:
+                continue
+            n_rollouts += 1
+            beh = e.get("behavior_present")
+            if beh is None:
+                n_unlabeled += 1
+            scored = False
+            for name, m in (e.get("monitors") or {}).items():
+                s = (m or {}).get("score")
+                if s is None:
+                    continue
+                scored = True
+                d = by_mon.setdefault(name, {"present": [], "absent": [], "unlabeled": 0})
+                if beh is None:
+                    d["unlabeled"] += 1
+                else:
+                    d["present" if beh else "absent"].append(s)
+            if not scored:
+                n_unscored += 1
+                why = e.get("invalid_reason") or "no monitor score"
+                unscored_why[why] = unscored_why.get(why, 0) + 1
+        names = [n for n in order if n in by_mon] + [n for n in by_mon if n not in order]
+        monitors = []
+        for n in names:
+            d = by_mon[n]
+            pos, neg = d["present"], d["absent"]
+            monitors.append({
+                "name": n, **d,
+                "mean_present": sum(pos) / len(pos) if pos else None,
+                "mean_absent": sum(neg) / len(neg) if neg else None,
+                "auroc": _auroc(pos, neg),
+            })
+        self._json({
+            "kinds": kinds, "kind": kind, "file": idx.path.name if idx else None,
+            "steps": steps, "step": step, "n_rollouts": n_rollouts,
+            "n_unlabeled": n_unlabeled, "n_unscored": n_unscored, "unscored_why": unscored_why,
+            "monitors": monitors,
+        })
+
     def _route_file(self, q: dict) -> None:
         """Serve a file from inside a run dir (plots, run.log, raw configs). Path-escape guarded."""
         run = self._run(q)
@@ -730,16 +828,19 @@ PAGE = r"""<!doctype html>
   --bg:#ffffff; --panel:#f7f7f8; --panel2:#f0f0f2; --line:#e0e0e4; --fg:#16161a; --dim:#6b6b76;
   --accent:#3b62d9; --accent-soft:#e8edfd; --good:#137a4d; --bad:#b3341f; --warn:#8a5b00;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s-present:#eb6834; --s-absent:#2a78d6;
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     --bg:#131317; --panel:#1a1a20; --panel2:#212128; --line:#2e2e38; --fg:#e8e8ee; --dim:#9a9aa8;
     --accent:#7f9cff; --accent-soft:#1e2740; --good:#4fc98a; --bad:#ff8a70; --warn:#e3b341;
+    --s-present:#d95926; --s-absent:#3987e5;
   }
 }
 :root[data-theme="dark"]{
   --bg:#131317; --panel:#1a1a20; --panel2:#212128; --line:#2e2e38; --fg:#e8e8ee; --dim:#9a9aa8;
   --accent:#7f9cff; --accent-soft:#1e2740; --good:#4fc98a; --bad:#ff8a70; --warn:#e3b341;
+  --s-present:#d95926; --s-absent:#3987e5;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -854,6 +955,11 @@ details>summary{cursor:pointer;color:var(--dim)}
 .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--accent);
   border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
+.sdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px}
+@media(max-width:600px){.sdgrid{grid-template-columns:1fr}}
+.sdgrid .card{margin:0}
+.stats{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;margin:2px 0 8px}
+.stats b{font-family:var(--mono);font-weight:600}
 .toast{position:fixed;right:16px;bottom:16px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
   padding:8px 12px;font-size:12.5px;box-shadow:0 8px 30px rgba(0,0,0,.25);z-index:60}
 </style>
@@ -926,6 +1032,7 @@ const S = {
   ro: { source:'eval', step:'', behavior:'', unparsed:'', q:'', mon:'', mon_min:'', mon_max:'',
         offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false },
   metricSel: { train:null, eval:null }, hidden: {}, foldThinking: false,
+  sd: { kind:'', step:'', bins:20, norm:true, data:null, loading:false },
 };
 $('#rootpath').textContent = BOOT.root;
 $('#theme').onclick = () => {
@@ -981,10 +1088,12 @@ function renderRuns() {
 $('#runq').oninput = e => { S.filter = e.target.value; renderRuns(); };
 $('#refresh').onclick = async () => { await loadRuns(true); if (S.sel) await selectRun(S.sel, true); };
 
-const TABS = [['overview','Overview'],['metrics','Metrics'],['rollouts','Rollouts'],['plots','Plots'],['log','Log'],['raw','Raw JSON']];
+const TABS = [['overview','Overview'],['metrics','Metrics'],['scoredist','Score dist'],['rollouts','Rollouts'],['plots','Plots'],['log','Log'],['raw','Raw JSON']];
 async function selectRun(id, keepTab) {
   S.sel = id; S.changed.delete(id);
-  if (!keepTab) { S.ro = {...S.ro, step:'', q:'', offset:0, sel:null, rec:null, list:null}; }
+  if (!keepTab) { S.ro = {...S.ro, step:'', q:'', offset:0, sel:null, rec:null, list:null};
+                  S.sd = {...S.sd, kind:'', step:'', data:null}; }
+  else S.sd.data = null;  // refetch: a live run may have new steps
   $('#runtitle').textContent = id;
   renderRuns();
   $('#tabs').textContent = '';
@@ -999,7 +1108,7 @@ function renderTab() {
   const c = $('#content');
   if (!S.detail) { c.innerHTML = '<div class="muted">pick a run on the left</div>'; return; }
   c.textContent = '';
-  ({overview:renderOverview, metrics:renderMetrics, rollouts:renderRollouts,
+  ({overview:renderOverview, metrics:renderMetrics, scoredist:renderScoreDist, rollouts:renderRollouts,
     plots:renderPlots, log:renderLog, raw:renderRaw}[S.tab] || renderOverview)(c);
 }
 
@@ -1220,6 +1329,179 @@ function drawChart(wrap, rows, keys) {
       el('span', {class:'sw', style:`background:${color}`}), k));
   }
   wrap.appendChild(lg);
+}
+
+/* ------------------------------------------------------------------ score distributions */
+/* Each monitor's score distribution at ONE step, split by the oracle: behavior present vs absent.
+   An RL train step (rollouts.jsonl) carries only the train-against monitors; an eval step carries
+   every monitor. A pre-RL baseline dir (eval_terminal_monitors_baseline.py) has one eval step. */
+async function loadScoreDist() {
+  S.sd.loading = true;
+  const want = S.sel;
+  try {
+    const j = await api('/api/scoredist', {id:want, kind:S.sd.kind, step:S.sd.step});
+    if (S.sel !== want) return;
+    S.sd.data = j; S.sd.kind = j.kind || ''; S.sd.step = j.step === null || j.step === undefined ? '' : String(j.step);
+  } catch (e) { toast('score dist: ' + e.message); S.sd.data = {kinds:[], error:e.message}; }
+  S.sd.loading = false;
+  if (S.tab === 'scoredist') renderTab();
+}
+function renderScoreDist(c) {
+  const D = S.sd.data;
+  if (!D) { c.appendChild(el('div', {class:'muted'}, el('span', {class:'spin'}), ' indexing / loading…'));
+            if (!S.sd.loading) loadScoreDist(); return; }
+  if (!D.kinds || !D.kinds.length) {
+    c.appendChild(el('div', {class:'card'}, el('h3', {}, 'No rollout dump'),
+      el('div', {class:'small'}, 'Score distributions need rollouts.jsonl or eval_rollouts(_slim).jsonl in the run dir.')));
+    return;
+  }
+  const bar = el('div', {class:'card', style:'margin-bottom:12px'});
+  const controls = el('div', {class:'row', style:'flex-wrap:wrap;gap:8px'});
+  const pick = (kind, step) => { S.sd.kind = kind; S.sd.step = step; S.sd.data = null; renderTab(); };
+  if (D.kinds.length > 1) for (const [k, label, tip] of [
+      ['train', 'RL train step', 'rollouts.jsonl — the train-against monitors only'],
+      ['eval', 'eval step', 'the eval dump — every monitor, on the fixed held-out set']])
+    if (D.kinds.includes(k)) controls.appendChild(el('button', {class:'btn' + (D.kind === k ? ' on' : ''), title:tip,
+      onclick:() => { if (D.kind !== k) pick(k, ''); }}, label));
+  if (D.steps.length > 1) {
+    const stepSel = el('select', {class:'btn', onchange:e => pick(D.kind, e.target.value)});
+    for (const s of D.steps) {
+      const o = el('option', {value:s}, 'step ' + s);
+      if (s === D.step) o.selected = true;
+      stepSel.appendChild(o);
+    }
+    const i = D.steps.indexOf(D.step);
+    controls.appendChild(el('button', {class:'btn', disabled:i <= 0 ? '' : null,
+      onclick:() => pick(D.kind, D.steps[i - 1])}, '←'));
+    controls.appendChild(stepSel);
+    controls.appendChild(el('button', {class:'btn', disabled:i >= D.steps.length - 1 ? '' : null,
+      onclick:() => pick(D.kind, D.steps[i + 1])}, '→'));
+  }
+  controls.appendChild(el('span', {style:'flex:1'}));
+  const binSel = el('select', {class:'btn', title:'histogram bins', onchange:e => { S.sd.bins = +e.target.value; renderTab(); }});
+  for (const n of [10, 20, 40]) { const o = el('option', {value:n}, n + ' bins'); if (n === S.sd.bins) o.selected = true; binSel.appendChild(o); }
+  controls.appendChild(binSel);
+  controls.appendChild(el('button', {class:'btn' + (S.sd.norm ? ' on' : ''),
+    title:'bar height = share of its own class (the classes are usually imbalanced) vs raw count',
+    onclick:() => { S.sd.norm = !S.sd.norm; renderTab(); }}, S.sd.norm ? 'y: fraction of class' : 'y: count'));
+  bar.appendChild(controls);
+  const why = Object.entries(D.unscored_why || {}).map(([k, v]) => `${v} ${k}`).join(', ');
+  bar.appendChild(el('div', {class:'muted small', style:'margin-top:7px'},
+    `${D.kind === 'train' ? 'RL train' : 'eval'} step ${fmt(D.step)} · ${D.n_rollouts} rollouts from ${D.file}` +
+    (D.n_unscored ? ` · ${D.n_unscored} scored by no monitor (${why}) — excluded` : '') +
+    (D.n_unlabeled ? ` · ${D.n_unlabeled} without a behavior_present label — excluded` : '')));
+  c.appendChild(bar);
+  if (!D.monitors.length) {
+    c.appendChild(el('div', {class:'card small muted'}, D.kind === 'train'
+      ? 'No monitor scored the rollouts at this RL step — a train dump carries only the train-against monitors (none in a control run). Switch to an eval step to see the held-out monitors.'
+      : 'No monitor scores at this step.'));
+    return;
+  }
+  const grid = el('div', {class:'sdgrid'});
+  for (const m of D.monitors) grid.appendChild(scoreDistCard(m));
+  c.appendChild(grid);
+}
+function scoreDistCard(m) {
+  const spec = monitorSpec(m.name);
+  const card = el('div', {class:'card'});
+  const view = spec.kind === 'cot' ? (spec.use_cot === false ? 'output-only' : spec.use_output === false ? 'cot-only' : 'cot+output') : null;
+  card.appendChild(el('div', {class:'row', style:'flex-wrap:wrap;gap:6px;margin-bottom:4px'},
+    el('span', {class:'mono', style:'font-weight:600;flex:1'}, m.name),
+    spec.kind ? el('span', {class:'badge'}, spec.kind + (view ? ' · ' + view : '')) : null,
+    spec.model_id ? el('span', {class:'badge mono', title:spec.model_id}, String(spec.model_id).split('/').pop()) : null,
+    spec.role ? el('span', {class:'flag ' + (spec.role === 'train_against' ? 'yes' : 'n'),
+      title:'train_against monitors are in the gradient'}, spec.role) : null));
+  const gap = m.mean_present !== null && m.mean_absent !== null ? m.mean_present - m.mean_absent : null;
+  const st = (k, v) => el('span', {}, k + ' ', el('b', {}, v));
+  card.appendChild(el('div', {class:'stats'},
+    st('n present / absent', `${m.present.length} / ${m.absent.length}`),
+    st('mean|present', fmt(m.mean_present)), st('mean|absent', fmt(m.mean_absent)),
+    st('gap', fmt(gap)), st('AUROC', fmt(m.auroc)),
+    spec.threshold !== null && spec.threshold !== undefined ? st('threshold', fmt(spec.threshold)) : null,
+    m.unlabeled ? st('unlabeled', m.unlabeled) : null));
+  card.appendChild(scoreHist(m, spec.threshold));
+  return card;
+}
+function scoreHist(m, threshold) {
+  const all = m.present.concat(m.absent);
+  const wrap = el('div', {class:'chartwrap'});
+  if (!all.length) { wrap.appendChild(el('div', {class:'muted small'}, 'no labeled scores')); return wrap; }
+  const lo = Math.min(0, ...all), hi = Math.max(1, ...all), nb = S.sd.bins, w = (hi - lo) / nb;
+  const bin = v => Math.min(nb - 1, Math.max(0, Math.floor((v - lo) / w + 1e-9)));
+  const count = xs => { const h = new Array(nb).fill(0); for (const v of xs) h[bin(v)]++; return h; };
+  const series = [
+    {key:'behavior present', color:'var(--s-present)', n:m.present.length, h:count(m.present)},
+    {key:'behavior absent', color:'var(--s-absent)', n:m.absent.length, h:count(m.absent)},
+  ];
+  const val = (s, i) => S.sd.norm ? (s.n ? s.h[i] / s.n : 0) : s.h[i];
+  const ymax = Math.max(1e-9, ...series.flatMap(s => s.h.map((_, i) => val(s, i))));
+  const W = 520, H = 220, P = {t:10, r:10, b:30, l:44};
+  const X = v => P.l + (W - P.l - P.r) * (v - lo) / (hi - lo);
+  const Y = v => P.t + (H - P.t - P.b) * (1 - v / ymax);
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const mk = (n, a) => { const e = document.createElementNS(svgNS, n); for (const [k,v] of Object.entries(a)) e.setAttribute(k, v); return e; };
+  const svg = mk('svg', {width:'100%', viewBox:`0 0 ${W} ${H}`, style:'display:block'});
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax * i / 4, y = Y(v);
+    svg.appendChild(mk('line', {x1:P.l, x2:W-P.r, y1:y, y2:y, style:'stroke:var(--line)', 'stroke-width':1}));
+    const tx = mk('text', {x:P.l-6, y:y+3.5, style:'fill:var(--dim)', 'font-size':10, 'text-anchor':'end'});
+    tx.textContent = S.sd.norm ? (v * 100).toFixed(0) + '%' : (Number.isInteger(v) ? v : v.toFixed(1));
+    svg.appendChild(tx);
+  }
+  for (let i = 0; i <= 10; i++) {
+    const v = lo + (hi - lo) * i / 10;
+    const tx = mk('text', {x:X(v), y:H-P.b+14, style:'fill:var(--dim)', 'font-size':10, 'text-anchor':'middle'});
+    tx.textContent = +v.toFixed(2); svg.appendChild(tx);
+  }
+  const xl = mk('text', {x:(P.l + W - P.r) / 2, y:H-2, style:'fill:var(--dim)', 'font-size':10, 'text-anchor':'middle'});
+  xl.textContent = 'monitor score'; svg.appendChild(xl);
+  // two thin bars per bin, 2px apart; 4px rounded tops anchored to the baseline
+  const bw = (W - P.l - P.r) / nb, gap = 2, barW = Math.max(1, (bw - 3 * gap) / 2), base = Y(0);
+  series.forEach((s, k) => {
+    for (let i = 0; i < nb; i++) {
+      const v = val(s, i); if (!v) continue;
+      const x = P.l + i * bw + gap + k * (barW + gap), y = Y(v), h = base - y, r = Math.min(4, barW / 2, h);
+      svg.appendChild(mk('path', {style:`fill:${s.color}`,
+        d:`M${x},${base}V${y + r}Q${x},${y} ${x + r},${y}H${x + barW - r}Q${x + barW},${y} ${x + barW},${y + r}V${base}Z`}));
+    }
+  });
+  svg.appendChild(mk('line', {x1:P.l, x2:W-P.r, y1:base, y2:base, style:'stroke:var(--dim)', 'stroke-width':1}));
+  if (typeof threshold === 'number' && threshold >= lo && threshold <= hi) {
+    svg.appendChild(mk('line', {x1:X(threshold), x2:X(threshold), y1:P.t, y2:base, style:'stroke:var(--fg)',
+      'stroke-width':1, 'stroke-dasharray':'4 3', opacity:.6}));
+    const tt = mk('text', {x:X(threshold) + 4, y:P.t + 9, style:'fill:var(--dim)', 'font-size':10});
+    tt.textContent = 'threshold'; svg.appendChild(tt);
+  }
+  const tip = $('#tip');
+  for (let i = 0; i < nb; i++) {
+    const a = lo + i * w, b = a + w;
+    const hit = mk('rect', {x:P.l + i * bw, y:P.t, width:bw, height:base - P.t, fill:'transparent'});
+    hit.addEventListener('mousemove', ev => {
+      hit.setAttribute('style', 'fill:var(--fg);fill-opacity:.06');
+      tip.innerHTML = `<b>score ${+a.toFixed(3)} – ${+b.toFixed(3)}${i === nb - 1 ? ' (incl.)' : ''}</b><br>` + series.map(s =>
+        `<span style="color:${s.color}">■</span> ${s.key}: ${s.h[i]} of ${s.n}` +
+        (s.n ? ` (${(100 * s.h[i] / s.n).toFixed(1)}%)` : '')).join('<br>');
+      tip.style.display = 'block';
+      tip.style.left = Math.min(ev.clientX + 14, innerWidth - 360) + 'px';
+      tip.style.top = Math.min(ev.clientY + 12, innerHeight - tip.offsetHeight - 10) + 'px';
+    });
+    hit.addEventListener('mouseleave', () => { hit.removeAttribute('style'); tip.style.display = 'none'; });
+    svg.appendChild(hit);
+  }
+  wrap.appendChild(svg);
+  wrap.appendChild(el('div', {class:'legend'}, series.map(s =>
+    el('span', {class:'lg', style:'cursor:default'}, el('span', {class:'sw', style:`background:${s.color}`}), `${s.key} (n=${s.n})`))));
+  const tbl = el('table', {style:'margin-top:6px'}, el('thead', {}, el('tr', {},
+    el('th', {}, 'score bin'), ...series.map(s => el('th', {class:'num'}, s.key)))));
+  const tb = el('tbody');
+  for (let i = 0; i < nb; i++) {
+    if (!series.some(s => s.h[i])) continue;
+    tb.appendChild(el('tr', {}, el('td', {class:'mono'}, `${+(lo + i * w).toFixed(3)} – ${+(lo + (i + 1) * w).toFixed(3)}`),
+      ...series.map(s => el('td', {class:'num'}, `${s.h[i]}` + (s.n ? ` (${(100 * s.h[i] / s.n).toFixed(1)}%)` : '')))));
+  }
+  tbl.appendChild(tb);
+  wrap.appendChild(el('details', {style:'margin-top:6px'}, el('summary', {class:'small'}, 'table'), tbl));
+  return wrap;
 }
 
 /* ------------------------------------------------------------------ rollouts */
