@@ -220,8 +220,8 @@ def _monitor_info(m: Monitor, role: str) -> dict:
             "use_cot": getattr(m, "use_cot", None),
             "use_output": getattr(m, "use_output", None),
             "binary_judge": getattr(m, "binary_judge", None),
-            "reasoning_effort": getattr(m, "reasoning_effort", None),
-            "reasoning_max_tokens": getattr(m, "reasoning_max_tokens", None),
+            # the RESOLVED OpenRouter reasoning object every call sends (model default filled in)
+            "reasoning": getattr(m, "reasoning", None),
         })
     return info
 

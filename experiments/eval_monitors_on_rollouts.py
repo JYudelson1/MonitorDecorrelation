@@ -34,22 +34,14 @@ from monitordecorrelation.types import MonitorResult
 
 load_dotenv(".env")
 
-# Candidate judge ladder (cheap → sonnet anchor). Confirm slugs on openrouter.ai/models.
+# Candidate judges. Only models monitors.judge_reasoning supports can be built at all (any other is
+# refused, because what its reasoning setting does is unestablished) — and gemini-3.5-flash-lite
+# mandates a reasoning setting, which only a --config can give, so the no-config default is the one
+# judge that runs on its default. The historical bakeoff ladder (claude-sonnet-4.6 / haiku-4.5 /
+# 3-haiku, gpt-5.4 / -mini / 4o-mini, gemini-3.1-pro / 3.5-flash / 2.5-flash, deepseek-chat,
+# llama-3.3-70b, qwen3-8b / -32b) needs reasoning support implemented per model before it can re-run.
 _DEFAULT_MODELS = [
-    "anthropic/claude-sonnet-4.6",          # anchor (most expensive)
-    "anthropic/claude-haiku-4.5",
-    "anthropic/claude-3-haiku",             # the cheap older haiku (matrix generator's WEAK)
-    "openai/gpt-5.4",                       # flagship, ~Sonnet price point ($2.5/$15)
-    "openai/gpt-5.4-mini",                  # mid-tier OpenAI
-    "openai/gpt-4o-mini",
-    "google/gemini-3.1-pro-preview",        # Google flagship (pro tier)
-    "google/gemini-3.5-flash",
-    "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
-    "deepseek/deepseek-chat",
-    "meta-llama/llama-3.3-70b-instruct",
-    "qwen/qwen3-8b",                        # small Qwens (cheap; same family as the policy)
-    "qwen/qwen3-32b",
 ]
 
 
@@ -95,7 +87,7 @@ def main() -> None:
 
     if args.config:
         # The battery exactly as a matrix row declares it. Keeping the specs (not just model ids)
-        # preserves each judge's view and reasoning_effort — a gemini-3.x judge without one cannot
+        # preserves each judge's view and reasoning setting — a gemini-3.x judge without one cannot
         # complete a single call, and a cot-only judge measured as cot+out is a different monitor.
         from monitordecorrelation.experiment_config import load_monitor_specs
         all_specs = load_monitor_specs(args.config)
@@ -114,11 +106,27 @@ def main() -> None:
     print(f"eval set: {len(eval_rollouts)} ({'balanced ' + str(k) + '/class' if k else 'ALL'})")
     print(f"monitors: {len(monitors)}" + (f" from {args.config}" if args.config
           else f" = {len(models)} models × {len(modes)} modes ({', '.join(modes)})"))
+    # Build every judge BEFORE any API spend (and before --dry-run reports them), outside the
+    # per-model try below: a judge model (or reasoning setting) monitors.judge_reasoning does not
+    # support is a config error that must stop the script, not be swallowed into one truncated
+    # "FAILED" row.
+    judges = {}
+    for name, spec in monitors:
+        if args.config:
+            judges[name] = judge_cls(name=name, model_id=spec.model_id, behavior=args.behavior,
+                                     use_cot=spec.use_cot, use_output=spec.use_output,
+                                     reasoning=spec.reasoning,
+                                     binary_judge=spec.binary_judge, threshold=spec.threshold)
+        else:
+            judges[name] = judge_cls(name=name, model_id=spec[0], behavior=args.behavior,
+                                     use_cot=(spec[1] == "cot"))
+
     if args.dry_run:
         print("\n[dry-run] no API calls. Monitors:")
         for name, spec in monitors:
             d = (f"{spec.model_id} use_cot={spec.use_cot} use_output={spec.use_output} "
-                 f"reasoning_effort={spec.reasoning_effort}") if args.config else f"{spec[0]} mode={spec[1]}"
+                 f"reasoning={judges[name].reasoning}") if args.config \
+                else f"{spec[0]} mode={spec[1]} reasoning={judges[name].reasoning}"
             print(f"  - {name:18s} {d}")
         return
 
@@ -129,25 +137,16 @@ def main() -> None:
         t0 = perf_counter()
         mid = spec.model_id if args.config else spec[0]
         mode = args.config if args.config else spec[1]
+        mon = judges[name]
         try:
-            if args.config:
-                mon = judge_cls(name=name, model_id=spec.model_id, behavior=args.behavior,
-                                use_cot=spec.use_cot, use_output=spec.use_output,
-                                reasoning_effort=spec.reasoning_effort,
-                                reasoning_max_tokens=spec.reasoning_max_tokens,
-                                binary_judge=spec.binary_judge, threshold=spec.threshold)
-            else:
-                mon = judge_cls(name=name, model_id=mid, behavior=args.behavior,
-                                use_cot=(mode == "cot"))
-
             def _safe_score(r):  # one bad call -> NaN, never lose the whole model's row
                 try:
                     return mon.score(r)
                 except Exception:  # noqa: BLE001
                     return MonitorResult(score=float("nan"), label=False)
 
-            # Warm up sequentially first: settles the monitor's reasoning config (enabled:false → a
-            # bounded budget for mandatory-reasoning models) so the concurrent batch doesn't 400-storm.
+            # One sequential call first, so a judge that fails every call (bad key, no credits) fails
+            # once rather than as a concurrent storm.
             _safe_score(eval_rollouts[0])
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 res = list(ex.map(_safe_score, eval_rollouts))

@@ -41,7 +41,7 @@ def _ok(text: str = "SCORE: 42", finish: str | None = "stop") -> _Resp:
 @pytest.fixture
 def monitor(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    return cm.CoTMonitor("j", "x/y", behavior="deception")
+    return cm.CoTMonitor("j", "google/gemini-2.5-flash-lite", behavior="deception")
 
 
 @pytest.fixture
@@ -112,8 +112,8 @@ def test_fatal_statuses_raise_immediately(monitor, no_sleep, monkeypatch, status
 
 def test_every_400_is_fatal_and_carries_the_providers_explanation(monitor, no_sleep, monkeypatch):
     """No 400 is retried any more — including the mandatory-reasoning one, which used to flip
-    self._reasoning mid-flight and so raced across the threads sharing one monitor instance. The
-    budget is configuration now (reasoning_max_tokens), and the body reaches the log."""
+    the reasoning setting mid-flight and so raced across the threads sharing one monitor instance.
+    The setting is configuration now (``reasoning``), and the body reaches the log."""
     for body in ("bad request: max_tokens",
                  "Reasoning is mandatory for this endpoint and cannot be disabled."):
         calls = _responses(monkeypatch, [_Resp(400, text=body), _ok()])
@@ -121,31 +121,35 @@ def test_every_400_is_fatal_and_carries_the_providers_explanation(monitor, no_sl
             monitor._call("p")
         assert calls["n"] == 1                  # no retry
         assert body[:20] in str(e.value)        # provider's reason is not swallowed
-        assert monitor._reasoning == {"enabled": False}   # never mutated at runtime
+        assert monitor.reasoning == {"max_tokens": 512}   # never mutated at runtime
 
 
-def test_reasoning_budget_is_configuration(monkeypatch):
+def test_reasoning_is_static_configuration(monkeypatch):
+    """The ``reasoning`` object is resolved once, at construction, for the judge model — the first
+    call already carries it — and a setting the model would not honour raises right there."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    assert cm.CoTMonitor("j", "x/y", behavior="deception")._reasoning == {"enabled": False}
-    budgeted = cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_max_tokens=256)
-    assert budgeted._reasoning == {"max_tokens": 256}     # first call already carries the budget
-    with pytest.raises(ValueError):
-        cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_max_tokens=0)
-
-
-def test_reasoning_effort_is_configuration(monkeypatch):
-    """``reasoning_effort`` is the preferred way to satisfy a mandatory-reasoning judge: same
-    static-at-construction rule as the budget, and the two cannot both be set."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    g25, g35 = "google/gemini-2.5-flash-lite", "google/gemini-3.5-flash-lite"
+    assert cm.CoTMonitor("j", g25, behavior="deception").reasoning == {"max_tokens": 512}  # default
+    assert cm.CoTMonitor("j", g25, behavior="deception",
+                         reasoning={"enabled": False}).reasoning == {"enabled": False}
+    assert cm.CoTMonitor("j", g25, behavior="deception",
+                         reasoning={"max_tokens": 1024}).reasoning == {"max_tokens": 1024}
     for effort in ("low", "medium", "high"):
-        mon = cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_effort=effort)
-        assert mon._reasoning == {"effort": effort}       # first call already asks for reasoning
-        assert mon.reasoning_effort == effort
-    with pytest.raises(ValueError):
-        cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_effort="lowish")
-    with pytest.raises(ValueError):  # mutually exclusive — one knob, not two
-        cm.CoTMonitor("j", "x/y", behavior="deception",
-                      reasoning_effort="low", reasoning_max_tokens=256)
+        assert cm.CoTMonitor("j", g35, behavior="deception",
+                             reasoning={"effort": effort}).reasoning == {"effort": effort}
+    assert cm.CoTMonitor("j", g35, behavior="deception",
+                         reasoning={"max_tokens": 256}).reasoning == {"max_tokens": 256}
+    for model, bad in [(g25, {"max_tokens": 511}),      # Google clamps it up to 512
+                       (g25, {"max_tokens": 2048}),     # no room left for the answer
+                       (g25, {"effort": "low"}),        # effort is not a budget
+                       (g25, {"enabled": False, "max_tokens": 512}),
+                       (g35, None),                     # mandatory reasoning
+                       (g35, {"enabled": False}),
+                       (g35, {"effort": "lowish"}),
+                       (g35, {"effort": "low", "max_tokens": 256}),
+                       ("x/y", None)]:                  # unsupported judge model
+        with pytest.raises(ValueError):
+            cm.CoTMonitor("j", model, behavior="deception", reasoning=bad)
 
 
 def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monkeypatch):
@@ -262,7 +266,7 @@ def test_fatal_error_carries_the_whole_provider_body(monitor, no_sleep, monkeypa
     _responses(monkeypatch, [_Resp(401, text=body), _ok()])
     with pytest.raises(httpx.HTTPStatusError) as e:
         monitor._call("p")
-    assert body in str(e.value) and "x/y" in str(e.value)
+    assert body in str(e.value) and "google/gemini-2.5-flash-lite" in str(e.value)
 
 
 def test_retry_warning_carries_the_whole_provider_body(monitor, no_sleep, monkeypatch, capsys):

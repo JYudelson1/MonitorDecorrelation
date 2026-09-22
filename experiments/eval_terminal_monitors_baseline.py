@@ -15,7 +15,7 @@ pre-RL headroom (AUROC ~1.0, gap ~1.0) has nothing to degrade, so the matrix cel
       --model thinkingmachines/Inkling-Small --n-prompts 96 --samples 2
 
   # config overrides, same syntax as run_experiment.py — but only for fields this script reads:
-      --set max_tokens=4096 monitors.model:gemini-3.5.reasoning_effort=medium \
+      --set max_tokens=4096 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' \
             env_options.verifier_mode=verifier_bug
 """
 
@@ -53,7 +53,7 @@ load_dotenv()
 # silently ignored, so apply_overrides refuses it; the policy and seed are the --model / --seed flags.
 READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
-                       "reasoning_max_tokens", "reasoning_effort", "binary_judge"}
+                       "reasoning", "binary_judge"}
 
 
 def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -127,7 +127,7 @@ def main() -> None:
                     help="output dir name under data/runs/ (default: tv_monitor_baseline_<model>)")
     ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
                     help="override config fields, as in run_experiment.py (e.g. --set max_tokens=4096 "
-                         "monitors.model:gemini-3.5.reasoning_effort=medium "
+                         "'monitors.model:gemini-3.5.reasoning={\"effort\":\"medium\"}' "
                          "env_options.verifier_mode=possible); only fields this script "
                          f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}")
     args = ap.parse_args()
@@ -182,8 +182,7 @@ def main() -> None:
     judges = [AgentCoTMonitor(m["name"], m["model_id"], behavior=behavior,
                               use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
                               threshold=m.get("threshold", 0.5),
-                              reasoning_max_tokens=m.get("reasoning_max_tokens"),
-                              reasoning_effort=m.get("reasoning_effort"),
+                              reasoning=m["reasoning"],
                               binary_judge=bool(m.get("binary_judge")))
               for m in specs]
     n_ep = len(prompts) * args.samples
@@ -275,7 +274,9 @@ def main() -> None:
         "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
         "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
-        "token_usage": usage, "held_out": [{"kind": "cot", **m} for m in specs],
+        "token_usage": usage,
+        # as rl/train.py records it: with the RESOLVED reasoning object each judge actually sent
+        "held_out": [{"kind": "cot", **m, "reasoning": j.reasoning} for m, j in zip(specs, judges)],
     }
     out.write_text(json.dumps(summary, indent=1, default=str))
     (out.parent / "run_info.json").write_text(json.dumps(summary, indent=2, default=str))

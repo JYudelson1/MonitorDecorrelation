@@ -18,8 +18,10 @@ Checks per run:
   - the train_against monitor matches the target encoded in the run directory name
   - the monitor battery is the same set in every run of the batch (a matrix row that measures a
     different set of held-out monitors is not comparable to the others)
-  - every gemini-3.x judge carries a reasoning_effort (they reject reasoning:{enabled:false} with a
-    fatal 400) and no gemini-2.5 judge does
+  - every judge's recorded ``reasoning`` is one its model honours as written
+    (``monitors.judge_reasoning.resolve_reasoning`` — e.g. gemini-3.x must reason, a gemini-2.5 budget
+    is >= 512), and every run of the batch gives each judge the same one. Runs recorded in the legacy
+    ``reasoning_effort`` format get the rules of the time (gemini-3.x carries one, gemini-2.5 doesn't)
   - seed matches the ``_s<N>_`` token in the run name
   - hyperparameters that must be identical across a matrix are identical
   - backend queue-pause warnings recorded so far (``metrics.jsonl``), since runs that stall can
@@ -42,6 +44,8 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+
+from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
 
 # Hyperparameters that must not vary within one matrix (rows differ ONLY in which monitor is the
 # training target). Seed and run_name are expected to vary and are checked separately.
@@ -159,19 +163,35 @@ def check(run_dir: Path) -> tuple[list[str], dict]:
               if m.get("model_id")]
     for m in judges:
         mid = m["model_id"]
+        if "reasoning" in m:
+            # Current format: the RESOLVED reasoning object the judge sent. It must be a setting the
+            # model honours as written — the same resolver that built the monitor, so a run built by
+            # older code (or a hand-edited run_info) cannot pass with something it would now refuse.
+            try:
+                if resolve_reasoning(mid, m["reasoning"], monitor=m["name"]) != m["reasoning"]:
+                    probs.append(f"{m['name']}: recorded reasoning {m['reasoning']!r} is not what "
+                                 f"{mid} resolves it to")
+            except ValueError as e:
+                probs.append(str(e))
+            continue
         if "reasoning_effort" not in m:
             continue  # run predates recording it — can't tell, reported once below
+        # Legacy record (reasoning_effort / reasoning_max_tokens), from before `reasoning` replaced
+        # them: then gemini-3.x had to carry one and gemini-2.5 had to run with reasoning off.
         eff = m.get("reasoning_effort") or m.get("reasoning_max_tokens")
         if mid.startswith("google/gemini-3") and not eff:
             probs.append(f"{m['name']}: {mid} needs a reasoning_effort (it 400s on reasoning off)")
         if mid.startswith("google/gemini-2.5") and eff:
             probs.append(f"{m['name']}: {mid} must run with reasoning OFF, got {eff!r}")
-    unrecorded = judges and all("reasoning_effort" not in m for m in judges)
+    unrecorded = judges and all("reasoning_effort" not in m and "reasoning" not in m for m in judges)
+    # Per-judge reasoning, for the batch-level check that every run's judges reasoned the same way.
+    reasoning = tuple(sorted((m["name"], json.dumps(m.get("reasoning", {k: m.get(k) for k in (
+        "reasoning_effort", "reasoning_max_tokens")}), sort_keys=True)) for m in judges))
 
     n_pause, first = _queue_pauses(run_dir)
     spikes = _logprob_spikes(run_dir)
     facts = {"name": name, "reasoning_unrecorded": bool(unrecorded), "target": ta[0] if ta else "control", "n_monitors": len(ta) + len(held),
-             "battery": tuple(sorted(ta + held)), "seed": cfg.get("seed"),
+             "battery": tuple(sorted(ta + held)), "reasoning": reasoning, "seed": cfg.get("seed"),
              "shared": tuple(cfg.get(k) for k in _SHARED_KEYS),
              "n_pause": n_pause, "pause_step": first, "spikes": spikes}
     return probs, facts
@@ -209,13 +229,14 @@ def main() -> int:
                 print(f"    - {p}")
 
     # batch-level coherence: same battery and same shared hyperparameters everywhere
-    for label, key in (("monitor battery", "battery"), ("shared hyperparameters", "shared")):
+    for label, key in (("monitor battery", "battery"), ("judge reasoning setting", "reasoning"),
+                       ("shared hyperparameters", "shared")):
         groups = Counter(f[key] for f in facts)
         if len(groups) > 1:
             all_probs += 1
             print(f"\n✗ runs do not share one {label} — {len(groups)} variants:")
             for val, n in groups.most_common():
-                shown = list(val) if key == "battery" else dict(zip(_SHARED_KEYS, val))
+                shown = dict(zip(_SHARED_KEYS, val)) if key == "shared" else list(val)
                 print(f"    {n:2d} run(s): {shown}")
 
     targets = Counter(f["target"] for f in facts)

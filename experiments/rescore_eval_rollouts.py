@@ -111,7 +111,7 @@ def score_all(selected, judges, out: Path, workers: int) -> None:
     def to_rollout(r: dict) -> Rollout:
         return Rollout(prompt=Prompt(text=r["question"]), cot=r.get("cot") or "", output=r.get("answer") or "")
 
-    # one sequential warm-up call per judge settles its reasoning config before the concurrent storm
+    # one sequential warm-up call per judge, so a judge that fails every call fails once, not as a storm
     for j in judges:
         try:
             j.score(to_rollout(selected[0][5]))
@@ -273,9 +273,11 @@ def main() -> int:
     for run in sorted({r for r, _ in comp}):
         print(f"  {run:34s} " + "  ".join(f"{c}={comp[(run, c)]}" for c in ("strict", "clean", "loose")))
     from monitordecorrelation.experiment_config import load_monitor_specs
+    from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
     specs = [s for s in load_monitor_specs(args.config) if s.kind == "cot"]
     print(f"{len(specs)} judges from {args.config}: " + ", ".join(
-        f"{s.name}({s.model_id}, cot={s.use_cot}, out={s.use_output}, effort={s.reasoning_effort})" for s in specs))
+        f"{s.name}({s.model_id}, cot={s.use_cot}, out={s.use_output}, "
+        f"reasoning={resolve_reasoning(s.model_id, s.reasoning, monitor=s.name)})" for s in specs))
     print(f"-> {len(selected) * len(specs)} judge calls")
     if args.dry_run:
         return 0

@@ -27,7 +27,7 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3-8B")
     ap.add_argument("--n-prompts", type=int, default=8)
     ap.add_argument("--max-tokens", type=int, default=1024)
-    ap.add_argument("--monitor-model", default="meta-llama/llama-3.3-70b-instruct")
+    ap.add_argument("--monitor-model", default="google/gemini-2.5-flash-lite")
     args = ap.parse_args()
 
     sc = tinker.ServiceClient()

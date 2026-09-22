@@ -80,7 +80,7 @@ def _episode(turns=_TURNS, output_view: str = "transcript", *, truncate_last: bo
 
 
 def _monitor(**kw) -> AgentCoTMonitor:
-    return AgentCoTMonitor("m", "x/y", api_key="test", **kw)
+    return AgentCoTMonitor("m", "google/gemini-2.5-flash-lite", api_key="test", **kw)
 
 
 def _transcript(rollout: Rollout, **kw) -> str:
@@ -250,18 +250,18 @@ def test_cot_monitor_is_single_turn_only():
     with_episode = Rollout(prompt=Prompt(text="USERQ"), cot="SECRET_REASONING", output="THE_ANSWER",
                            meta={"episode": _episode().meta["episode"]})
     for kw in ({}, {"use_cot": False}, {"use_output": False}, {"binary_judge": True}):
-        mon = CoTMonitor("m", "x/y", behavior="reward_hacking", api_key="test", **kw)
+        mon = CoTMonitor("m", "google/gemini-2.5-flash-lite", behavior="reward_hacking", api_key="test", **kw)
         assert mon._build_prompt(plain) == mon._build_prompt(with_episode)
         assert "EPISODE TRANSCRIPT" not in mon._build_prompt(with_episode)
         assert "TOOL:" not in mon._build_prompt(with_episode)
-    p = CoTMonitor("m", "x/y", behavior="reward_hacking", api_key="test")._build_prompt(plain)
+    p = CoTMonitor("m", "google/gemini-2.5-flash-lite", behavior="reward_hacking", api_key="test")._build_prompt(plain)
     assert "=== ASSISTANT REASONING (chain of thought) ===" in p
     assert "=== ASSISTANT FINAL ANSWER ===" in p
     # The reward-hacking rubric introduces the material itself (describe_evidence=False), so the
     # generated evidence sentence is not appended; rubrics that do not, still get it.
-    out = CoTMonitor("m", "x/y", behavior="reward_hacking", api_key="test", use_cot=False)._build_prompt(plain)
+    out = CoTMonitor("m", "google/gemini-2.5-flash-lite", behavior="reward_hacking", api_key="test", use_cot=False)._build_prompt(plain)
     assert "You are given" not in out and "SECRET_REASONING" not in out
-    syco = CoTMonitor("m", "x/y", behavior="sycophancy", api_key="test", use_cot=False)._build_prompt(plain)
+    syco = CoTMonitor("m", "google/gemini-2.5-flash-lite", behavior="sycophancy", api_key="test", use_cot=False)._build_prompt(plain)
     assert "the user's message and the assistant's final answer." in syco
     print("CoTMonitor single-turn only OK")
 

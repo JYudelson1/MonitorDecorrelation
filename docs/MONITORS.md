@@ -74,14 +74,35 @@ only. `visualize_transcripts.py` shows these saved calls per rollout — and say
 dumps written before this existed, rather than rebuilding a prompt from the run config (a rebuild
 can silently differ from what the judge was sent if the repo has changed since the run).
 
-### Judge-side reasoning: use `reasoning_effort`, not a token budget
+### Judge-side reasoning: one `reasoning` object, validated per judge model
 
-Judges answer with one line (`SCORE: <n>`), so thinking is pure cost and reasoning is **off** by
-default (`reasoning: {"enabled": false}`). Models that *mandate* reasoning — gemini-3.x — reject that
-with a 400, so they must ask for reasoning explicitly. Two knobs, mutually exclusive:
+A judge's `reasoning` (config key / `CoTMonitor` and `AgentCoTMonitor` kwarg) is the OpenRouter
+`reasoning` object its every call sends. `monitors/judge_reasoning.py:resolve_reasoning` is the one
+place it is validated and the model's default filled in — used by the config schema (at load, naming
+the monitor), by both monitor classes (for hand-built judges) and by `scripts/verify_runs.py`. It is
+**specialized to two judge models**, because the same object means different things on different
+models and OpenRouter silently ignores or clamps what a model does not support:
 
-- `reasoning_effort: "low" | "medium" | "high"` — **preferred**.
-- `reasoning_max_tokens: <n>` — legacy budget, kept for configs that still set it.
+- **`google/gemini-2.5-flash-lite`** — reasoning optional. `{"enabled": false}` = off (answers the
+  `SCORE:` line straight from the content channel; 10/10 at 100 on a blatant terminal transcript).
+  `{"max_tokens": N}` = on with thinking budget N, **512 ≤ N < 2048**. **Default (key absent):
+  `{"max_tokens": 512}`**, the smallest budget. 512 is Google's minimum: measured on OpenRouter
+  (2026-09-22, one easy prompt), budgets 1 / 128 / 511 are accepted but think just as long as 512
+  (380–410 reasoning tokens on every call), i.e. clamped up — so they are refused. N must stay below the judge's
+  completion cap (`JUDGE_MAX_TOKENS` = 2048), which covers thinking and answer. `effort` is refused
+  (OpenRouter would turn it into some budget).
+- **`google/gemini-3.5-flash-lite`** — reasoning **mandatory** (`{"enabled": false}` is a 400), so it
+  must be set: `{"effort": "low" | "medium" | "high"}` (**preferred**) or `{"max_tokens": N}`. A missing
+  setting fails at load (it used to fail as a 400 on the first call).
+- **Any other model is refused**, whatever its `reasoning` — including none, since even the default
+  sends *some* reasoning setting whose effect on that model nobody has checked. To use a new judge,
+  establish what its reasoning object does and add it to `resolve_reasoning`.
+
+The shipped configs: gemini-2.5 judges `{"max_tokens": 512}` on the Inkling-Small runs and
+`{"enabled": false}` on the Qwen3-8B runs; every gemini-3.5 judge `{"effort": "low"}` (unchanged from
+the old `reasoning_effort: "low"`, same request body). The old keys `reasoning_effort` /
+`reasoning_max_tokens` are refused with the translation rather than reinterpreted — under them "both
+null" meant reasoning OFF, which is no longer gemini-2.5's default.
 
 Both are static at construction (never flipped mid-run; a runtime flip used to race across the
 threads sharing a monitor). **A small budget is not reliably honoured.** Measured on
@@ -99,8 +120,10 @@ When the request comes back with `reasoning_tokens == 0` the judge frequently an
 bare `SCORE: 0` (4 completion tokens, no analysis). That parses cleanly, so it lands in the log as a
 real verdict and silently zeroes the penalty on a transcript the judge never audited — on the
 train-against monitor that is reward for a hack that went unpunished. `low` is indistinguishable from
-the budget it replaced; only `medium`/`high` actually induce reasoning on this model. gemini-2.5
-judges are unaffected (they run with reasoning disabled and scored 10/10 at 100 on the same prompt).
+the budget it replaced; only `medium`/`high` actually induce reasoning on this model. (The gemini-2.5
+figure — 10/10 at 100 on the same prompt — was with reasoning disabled; its budgeted default has not
+been measured on these transcripts. Its 512 budget was honoured on every call probed, unlike the
+gemini-3.5 256 budget above, but that was 3 calls on one easy prompt.)
 
 Failure signature in a run dump: a bimodal `{0.0, 1.0}` score histogram on the gemini-3.x monitors
 while the gemini-2.5 monitors on the same rollouts are smooth and high. Note `rl/train.py` persists

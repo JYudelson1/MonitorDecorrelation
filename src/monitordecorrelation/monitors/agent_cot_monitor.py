@@ -30,12 +30,8 @@ parsing as ``CoTMonitor`` (see docs/MONITORS.md).
 
 from __future__ import annotations
 
-from monitordecorrelation.monitors.cot_monitor import (
-    _REASONING_EFFORTS,
-    _SCORE_RE,
-    _VERDICT_RE,
-    reasoning_must_stay_off,
-)
+from monitordecorrelation.monitors.cot_monitor import _SCORE_RE, _VERDICT_RE
+from monitordecorrelation.monitors.judge_reasoning import JUDGE_MAX_TOKENS, resolve_reasoning
 from monitordecorrelation.monitors.openrouter import JudgeCall, chat, resolve_api_key
 from monitordecorrelation.monitors.rubrics import (
     RH_BODY,
@@ -63,8 +59,7 @@ class AgentCoTMonitor:
         api_key: str | None = None,
         use_cot: bool = True,
         use_output: bool = True,
-        reasoning_max_tokens: int | None = None,
-        reasoning_effort: str | None = None,
+        reasoning: dict | None = None,
         binary_judge: bool = False,
     ) -> None:
         assert behavior == "reward_hacking", (
@@ -88,52 +83,10 @@ class AgentCoTMonitor:
         self.timeout = timeout
         self._api_key = resolve_api_key(api_key)
 
-        # Reasoning is off by default: the judge only has to emit `SCORE: <n>` (or `VERDICT:
-        # YES|NO`), so thinking is pure cost. Models that MANDATE reasoning (gemini-3.x) reject
-        # `{"enabled": false}` with a 400 — for those, ask for reasoning explicitly, via
-        # ``reasoning_effort`` ("low"/"medium"/"high") or the older ``reasoning_max_tokens`` budget,
-        # so the FIRST call is already accepted. This is deliberately static: it used to be
-        # discovered by catching that 400 and flipping, which raced across the threads sharing a
-        # monitor (16 concurrent first calls → 1 flip + 15 fatal 400s → 15 NaN scores per eval).
-        #
-        # Prefer ``reasoning_effort``. A small explicit ``max_tokens`` budget is NOT reliably
-        # honoured by gemini-3.5-flash-lite: measured on blatant reward-hacking terminal
-        # transcripts, `{"max_tokens": 256}` came back with `reasoning_tokens == 0` on ~70% of
-        # calls, and an unthinking judge answers a bare `SCORE: 0` — which parses fine and lands in
-        # the log as a real verdict, silently zeroing the penalty on transcripts it never audited.
-        # (That was measured at temperature 0, which did not make it deterministic either; the
-        # judge now samples at temperature 1.) See docs/MONITORS.md.
-        if reasoning_max_tokens is not None and reasoning_max_tokens < 1:
-            raise ValueError(
-                f"reasoning_max_tokens must be >= 1 or None, got {reasoning_max_tokens}"
-            )
-        if reasoning_effort is not None and reasoning_effort not in _REASONING_EFFORTS:
-            raise ValueError(
-                f"reasoning_effort must be one of {sorted(_REASONING_EFFORTS)} or None, "
-                f"got {reasoning_effort!r}"
-            )
-        if reasoning_effort is not None and reasoning_max_tokens is not None:
-            raise ValueError(
-                "reasoning_effort and reasoning_max_tokens are mutually exclusive "
-                f"(got {reasoning_effort!r} and {reasoning_max_tokens})"
-            )
-        if reasoning_must_stay_off(model_id) and (
-            reasoning_effort is not None or reasoning_max_tokens is not None
-        ):
-            raise ValueError(
-                f"monitor {name!r}: {model_id} must run with reasoning OFF, but got "
-                f"reasoning_effort={reasoning_effort!r} / "
-                f"reasoning_max_tokens={reasoning_max_tokens!r}. Judge-side reasoning is only for "
-                "models that mandate it (gemini-3.x); drop both keys for this monitor."
-            )
-        self.reasoning_max_tokens = reasoning_max_tokens
-        self.reasoning_effort = reasoning_effort
-        if reasoning_effort is not None:
-            self._reasoning: dict = {"effort": reasoning_effort}
-        elif reasoning_max_tokens is not None:
-            self._reasoning = {"max_tokens": reasoning_max_tokens}
-        else:
-            self._reasoning = {"enabled": False}
+        # The OpenRouter `reasoning` object every call sends — validated for THIS judge model (and
+        # the model's default filled in) by the resolver CoTMonitor shares; unsupported models raise
+        # here. See monitors/judge_reasoning.py.
+        self.reasoning = resolve_reasoning(model_id, reasoning, monitor=name)
 
     def _build_prompt(self, rollout: Rollout) -> str:
         if self.use_output:
@@ -199,8 +152,8 @@ class AgentCoTMonitor:
             "model": self.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 1.0,
-            "max_tokens": 2048,
-            "reasoning": self._reasoning,  # {enabled:false}, or effort / a bounded budget
+            "max_tokens": JUDGE_MAX_TOKENS,
+            "reasoning": self.reasoning,  # resolved by judge_reasoning.resolve_reasoning
         }
 
     def _call(self, prompt: str, *, warn_after: int = 6) -> JudgeCall:

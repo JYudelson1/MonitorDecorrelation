@@ -427,6 +427,9 @@ class Store:
                 "use_output": m.get("use_output"),
                 "binary_judge": m.get("binary_judge"),
                 "behavior": m.get("behavior"),
+                # run_info's RESOLVED object when recorded (config.json may say null = model default);
+                # legacy runs recorded reasoning_effort / reasoning_max_tokens instead
+                "reasoning": m.get("reasoning"),
                 "reasoning_max_tokens": m.get("reasoning_max_tokens"),
                 "reasoning_effort": m.get("reasoning_effort"),
                 "probe_path": m.get("probe_path"),
@@ -1024,7 +1027,7 @@ function renderOverview(c) {
   c.appendChild(el('div', {class:'card'}, el('h3', {}, 'Hyperparameters'), kv(hp)));
   if (monitors && monitors.length) {
     const t = el('table', {}, el('thead', {}, el('tr', {},
-      ...['name','kind','role','model / probe','threshold','use_cot','use_output','binary'].map(h => el('th', {}, h)))));
+      ...['name','kind','role','model / probe','threshold','use_cot','use_output','binary','reasoning'].map(h => el('th', {}, h)))));
     const tb = el('tbody');
     for (const m of monitors) tb.appendChild(el('tr', {},
       el('td', {class:'mono'}, m.name),
@@ -1032,7 +1035,11 @@ function renderOverview(c) {
       el('td', {}, el('span', {class:'flag ' + (m.role === 'train_against' ? 'yes' : 'n')}, m.role || '—')),
       el('td', {class:'mono small'}, fmt(m.model_id)),
       el('td', {class:'num'}, fmt(m.threshold)),
-      el('td', {}, fmt(m.use_cot)), el('td', {}, fmt(m.use_output)), el('td', {}, fmt(m.binary_judge))));
+      el('td', {}, fmt(m.use_cot)), el('td', {}, fmt(m.use_output)), el('td', {}, fmt(m.binary_judge)),
+      el('td', {class:'mono small'}, m.reasoning ? JSON.stringify(m.reasoning)
+        : (m.reasoning_effort || m.reasoning_max_tokens)
+          ? JSON.stringify({effort: m.reasoning_effort, max_tokens: m.reasoning_max_tokens}) + ' (legacy)'
+          : fmt(m.reasoning))));
     t.appendChild(tb);
     c.appendChild(el('div', {class:'card'}, el('h3', {}, `Monitors (${monitors.length}) — train-against rows are in the gradient`), t));
   }

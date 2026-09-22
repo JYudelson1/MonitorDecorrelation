@@ -48,3 +48,41 @@ def test_check_reports_spikes_as_a_warning_not_a_problem(tmp_path):
     assert probs == []                      # a spike is something to inspect, not a misconfiguration
     assert facts["spikes"] == [(10, -3.0)]
     print("spike is a warning OK")
+
+
+def _run_info(tmp_path: Path, held_out: list[dict], name: str = "mbpp_Qwen3-8B_control_s0_x") -> Path:
+    d = tmp_path / name
+    d.mkdir()
+    (d / "run_info.json").write_text(json.dumps(
+        {"run_name": name, "config": {"seed": 0}, "train_against": [], "held_out": held_out}))
+    return d
+
+
+def test_recorded_reasoning_is_checked_against_what_the_model_honours(tmp_path):
+    g25, g35 = "google/gemini-2.5-flash-lite", "google/gemini-3.5-flash-lite"
+    ok = [{"name": "a", "model_id": g25, "reasoning": {"max_tokens": 512}},
+          {"name": "b", "model_id": g25, "reasoning": {"enabled": False}},
+          {"name": "c", "model_id": g35, "reasoning": {"effort": "low"}}]
+    probs, facts = verify_runs.check(_run_info(tmp_path, ok, "mbpp_Qwen3-8B_control_s0_ok"))
+    assert probs == [] and not facts["reasoning_unrecorded"]
+    bad = [{"name": "a", "model_id": g25, "reasoning": {"max_tokens": 256}},   # clamped by Google
+           {"name": "c", "model_id": g35, "reasoning": {"enabled": False}},    # mandatory reasoning
+           {"name": "d", "model_id": "anthropic/claude-3-haiku", "reasoning": {"enabled": False}}]
+    probs, _ = verify_runs.check(_run_info(tmp_path, bad, "mbpp_Qwen3-8B_control_s0_bad"))
+    assert len(probs) == 3 and "'a'" in probs[0] and "'c'" in probs[1] and "specialized" in probs[2]
+    # legacy records keep the rules of their time
+    legacy = [{"name": "a", "model_id": g25, "reasoning_effort": None, "reasoning_max_tokens": None},
+              {"name": "c", "model_id": g35, "reasoning_effort": None, "reasoning_max_tokens": None}]
+    probs, _ = verify_runs.check(_run_info(tmp_path, legacy, "mbpp_Qwen3-8B_control_s0_legacy"))
+    assert probs == ["c: google/gemini-3.5-flash-lite needs a reasoning_effort (it 400s on reasoning off)"]
+
+
+def test_batch_must_give_each_judge_the_same_reasoning(tmp_path, capsys, monkeypatch):
+    g25 = "google/gemini-2.5-flash-lite"
+    _run_info(tmp_path, [{"name": "a", "model_id": g25, "reasoning": {"max_tokens": 512}}],
+              "mbpp_Qwen3-8B_control_s0_x")
+    _run_info(tmp_path, [{"name": "a", "model_id": g25, "reasoning": {"enabled": False}}],
+              "mbpp_Qwen3-8B_control_s1_x")
+    monkeypatch.setattr("sys.argv", ["verify_runs.py", str(tmp_path / "mbpp_*")])
+    assert verify_runs.main() == 1
+    assert "do not share one judge reasoning setting" in capsys.readouterr().out

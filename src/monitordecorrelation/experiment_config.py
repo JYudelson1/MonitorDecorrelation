@@ -35,52 +35,51 @@ class CoTMonitorSpec(_Strict):
         True  # False = output-only monitor (judge the answer, ignore the CoT)
     )
     use_output: bool = True  # False = ignore the output (judge the CoT only)
-    reasoning_max_tokens: int | None = Field(
+    reasoning: dict | None = Field(
         None,
-        ge=1,
-        description="judge-side reasoning BUDGET, in tokens. Legacy — prefer `reasoning_effort`: a "
-        "small explicit budget is not reliably honoured (gemini-3.5-flash-lite returned "
-        "`reasoning_tokens == 0` on ~60% of calls at 256, and an unthinking judge answers a bare "
-        "`SCORE: 0`). Mutually exclusive with `reasoning_effort`. None = reasoning disabled.",
-    )
-    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
-        None,
-        description="judge-side reasoning effort. None = reasoning disabled (the judge only emits "
-        "`SCORE: <n>`, so thinking is pure cost). REQUIRED for models that mandate reasoning "
-        "(gemini-3.x reject `reasoning:{enabled:false}` with a 400). NB on "
-        "gemini-3.5-flash-lite 'low' behaves like no reasoning at all — measured on blatant "
-        "reward-hacking terminal transcripts, 24/40 calls came back with `reasoning_tokens == 0` "
-        "and 17/40 scored a reflexive 0, vs 0/40 at 'medium'.",
+        description="judge-side reasoning: the OpenRouter `reasoning` object every call of this judge "
+        "sends, validated per judge model by `monitors.judge_reasoning.resolve_reasoning` (at LOAD). "
+        'gemini-2.5-flash-lite: {"enabled": false} (off) or {"max_tokens": N} (on, thinking budget N, '
+        "512 <= N < 2048); absent = the default, the smallest budget {\"max_tokens\": 512}. "
+        'gemini-3.5-flash-lite: REQUIRED (it mandates reasoning) — {"effort": "low"|"medium"|"high"} '
+        '(preferred) or {"max_tokens": N}. NB on gemini-3.5-flash-lite \'low\' behaves like no '
+        "reasoning at all — measured on blatant reward-hacking terminal transcripts, 24/40 calls came "
+        "back with `reasoning_tokens == 0` and 17/40 scored a reflexive 0, vs 0/40 at 'medium'. Any "
+        "other judge model is REJECTED: reasoning support is specialized to those two.",
     )
     binary_judge: bool = (
         False  # True = YES/NO verdict instead of 0–100 score; omitted → False
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_reasoning_keys(cls, data):
+        """``reasoning_effort`` / ``reasoning_max_tokens`` were replaced by ``reasoning``. Say so, with the
+        translation, instead of pydantic's bare "extra inputs are not permitted" — and never guess:
+        under the old keys "both null" meant reasoning OFF, which is no longer gemini-2.5's default."""
+        legacy = sorted({"reasoning_effort", "reasoning_max_tokens"} & set(data or {})) \
+            if isinstance(data, dict) else []
+        if legacy:
+            raise ValueError(
+                f"monitor {data.get('name')!r}: {legacy} were replaced by `reasoning` (an OpenRouter "
+                'reasoning object). Translate: reasoning_effort=E → {"effort": E}; '
+                'reasoning_max_tokens=N → {"max_tokens": N}; both null (the old reasoning-OFF '
+                'default) → {"enabled": false}. See monitors/judge_reasoning.py for what each judge '
+                "model accepts."
+            )
+        return data
+
     @model_validator(mode="after")
     def _check_reasoning(self) -> "CoTMonitorSpec":
-        """Reject a reasoning knob the judge must not carry — at LOAD, not at the first judge call.
+        """Reject a reasoning setting the judge model would not honour as written — or any judge model
+        whose reasoning behaviour is not established — at LOAD, not at the first judge call. Same
+        resolver ``CoTMonitor.__init__`` runs for hand-built monitors, so the two cannot drift. The
+        field keeps what the config said (``None`` stays ``None`` = the model's default): resolving
+        here would pin one model's default onto the spec, where a later ``--set`` of ``model_id``
+        would silently carry it to another model."""
+        from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
 
-        Two rules, both enforced again in ``CoTMonitor.__init__`` for hand-built monitors:
-        effort and budget are mutually exclusive, and a judge whose family must run with reasoning
-        off (gemini-2.5) may set neither. The point is that a mistyped matrix config fails before
-        any GPU time is spent, naming the offending monitor.
-        """
-        from monitordecorrelation.monitors.cot_monitor import reasoning_must_stay_off
-
-        if self.reasoning_effort is not None and self.reasoning_max_tokens is not None:
-            raise ValueError(
-                f"monitor {self.name!r}: reasoning_effort and reasoning_max_tokens are mutually "
-                f"exclusive (got {self.reasoning_effort!r} and {self.reasoning_max_tokens})"
-            )
-        if reasoning_must_stay_off(self.model_id) and (
-            self.reasoning_effort is not None or self.reasoning_max_tokens is not None
-        ):
-            raise ValueError(
-                f"monitor {self.name!r}: {self.model_id} must run with reasoning OFF, but the "
-                f"config sets reasoning_effort={self.reasoning_effort!r} / "
-                f"reasoning_max_tokens={self.reasoning_max_tokens!r}. Judge-side reasoning is only "
-                "for models that mandate it (gemini-3.x); drop both keys for this monitor."
-            )
+        resolve_reasoning(self.model_id, self.reasoning, monitor=self.name)
         return self
 
 
@@ -418,6 +417,13 @@ def load_monitor_specs(path: str | Path) -> list[MonitorSpec]:
 def _coerce(v: str):
     if v.lower() in ("null", "none", ""):
         return None  # e.g. --set think_budget=null → NO thinking budget (one call per turn, no env default)
+    if v[:1] in ("{", "["):
+        # A JSON object / list, e.g. --set 'monitors.g25_cot.reasoning={"enabled":false}'. Malformed
+        # JSON is an error, never a fallback to the raw string.
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--set: value {v!r} starts like JSON but does not parse: {e}") from e
     for cast in (int, float):
         try:
             return cast(v)
@@ -451,13 +457,19 @@ def apply_overrides(
     the config file itself.
 
     A key of the form ``monitors.<selector>.<field>`` overrides a field on the matching monitor(s)
-    instead of a top-level field — so per-run judge settings (notably ``reasoning_effort`` for the
-    gemini-3.x judges) are a launch flag, not a forked config file. The selector is a monitor
-    ``name``, ``model:<substring of model_id>``, or ``*`` for every monitor::
+    instead of a top-level field — so per-run judge settings (notably ``reasoning``) are a launch
+    flag, not a forked config file. The selector is a monitor ``name``, ``model:<substring of
+    model_id>``, or ``*`` for every monitor. A value starting with ``{`` or ``[`` is parsed as JSON
+    (quote it for the shell)::
 
-        --set monitors.g35_out.reasoning_effort=medium          # one judge, by name
-        --set monitors.model:gemini-3.5.reasoning_effort=medium # every gemini-3.5 judge
-        --set monitors.*.threshold=0.6                          # all of them
+        --set 'monitors.g35_out.reasoning={"effort":"medium"}'           # one judge, by name
+        --set 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}'  # every gemini-3.5 judge
+        --set 'monitors.model:gemini-2.5.reasoning={"enabled":false}'    # gemini-2.5 judges: off
+        --set 'monitors.model:gemini-2.5.reasoning={"max_tokens":1024}'  # … or a bigger budget
+        --set monitors.*.threshold=0.6                                   # all of them
+
+    ``reasoning`` is replaced WHOLE, never merged key by key (``{"enabled": false}`` + a budget would
+    be contradictory).
 
     A key of the form ``env_options.<key>`` sets one entry of the ``env_options`` dict, keeping the
     rest (``--set env_options=…`` would replace the whole dict)::
@@ -469,7 +481,8 @@ def apply_overrides(
     override is how you end up analysing a run that trained against something else), and the same
     field set twice (on one monitor, possibly via two different selectors), where one value would
     silently lose. The result is re-validated like any other override, so e.g. pointing
-    ``reasoning_effort`` at a gemini-2.5 judge fails loudly right here.
+    ``{"effort": …}`` at a gemini-2.5 judge (or ``{"enabled": false}`` at a gemini-3.5 one) fails
+    loudly right here.
 
     ``allowed_fields`` / ``allowed_monitor_fields`` are for scripts that read only part of the config
     (e.g. an eval that never trains): a valid field the script would never look at is refused too,
@@ -598,8 +611,7 @@ def build_monitors(
                 threshold=s.threshold,
                 use_cot=s.use_cot,
                 use_output=s.use_output,
-                reasoning_max_tokens=s.reasoning_max_tokens,
-                reasoning_effort=s.reasoning_effort,
+                reasoning=s.reasoning,
                 binary_judge=s.binary_judge,
             )
         else:  # probe

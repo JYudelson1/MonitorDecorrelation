@@ -29,7 +29,7 @@ def _cfg(**kw) -> ExperimentConfig:
                 "kind": "cot",
                 "name": "m",
                 "role": "train_against",
-                "model_id": "anthropic/claude-3.5-haiku",
+                "model_id": "google/gemini-2.5-flash-lite",
             }
         ],
     )
@@ -83,7 +83,7 @@ def test_explicit_behavior_overrides_default():
                 "kind": "cot",
                 "name": "m",
                 "role": "held_out",
-                "model_id": "x",
+                "model_id": "google/gemini-2.5-flash-lite",
                 "behavior": "deception",
             }
         ]
@@ -110,7 +110,7 @@ def test_binary_judge_defaults_false_and_passes_through():
                 "kind": "cot",
                 "name": "m",
                 "role": "train_against",
-                "model_id": "x",
+                "model_id": "google/gemini-2.5-flash-lite",
                 "binary_judge": True,
             }
         ]
@@ -189,7 +189,8 @@ def test_set_overrides_are_validated_not_just_assigned():
 
 
 def _gemini_cfg() -> ExperimentConfig:
-    """A terminal-matrix-shaped config: gemini-2.5 judges (reasoning off) + gemini-3.5 (effort)."""
+    """A terminal-matrix-shaped config: a gemini-2.5 judge (model-default reasoning) + gemini-3.5
+    judges (explicit effort — they mandate reasoning)."""
     return ExperimentConfig.model_validate(
         dict(
             run_name="t",
@@ -199,59 +200,127 @@ def _gemini_cfg() -> ExperimentConfig:
                 {"kind": "cot", "name": "g25_out", "role": "held_out",
                  "model_id": "google/gemini-2.5-flash-lite"},
                 {"kind": "cot", "name": "g35_out", "role": "train_against",
-                 "model_id": "google/gemini-3.5-flash-lite", "reasoning_effort": "low"},
+                 "model_id": "google/gemini-3.5-flash-lite", "reasoning": {"effort": "low"}},
                 {"kind": "cot", "name": "g35_cot", "role": "held_out",
-                 "model_id": "google/gemini-3.5-flash-lite", "reasoning_effort": "low"},
+                 "model_id": "google/gemini-3.5-flash-lite", "reasoning": {"effort": "low"}},
             ],
         )
     )
 
 
-def test_gemini_25_may_not_be_given_judge_side_reasoning():
-    """gemini-2.5 answers the SCORE line with reasoning off; turning it on would silently change what
-    a held-out judge measures mid-matrix, so it's rejected at LOAD rather than ignored."""
+def _one_judge(model_id: str, **kw) -> ExperimentConfig:
+    return ExperimentConfig.model_validate(dict(run_name="t", subset="nlp", monitors=[
+        {"kind": "cot", "name": "j", "role": "held_out", "model_id": model_id, **kw}]))
+
+
+def test_gemini_25_reasoning_is_off_or_a_budget_and_defaults_to_the_smallest_budget():
+    """gemini-2.5-flash-lite: {"enabled": false} or {"max_tokens": N ≥ 512}; absent = {"max_tokens": 512}.
+    The spec keeps what the config said (None = the model default); the MONITOR sends the resolved one."""
     from pydantic import ValidationError
 
-    for knob in ({"reasoning_effort": "low"}, {"reasoning_max_tokens": 256}):
-        with pytest.raises(ValidationError, match="must run with reasoning OFF"):
-            ExperimentConfig.model_validate(
-                dict(run_name="t", monitors=[
-                    {"kind": "cot", "name": "g25_out", "role": "train_against",
-                     "model_id": "google/gemini-2.5-flash-lite", **knob}])
-            )
-    # …and the same rule guards a hand-built monitor, not just a config.
+    g25 = "google/gemini-2.5-flash-lite"
+    for given, sent in [(None, {"max_tokens": 512}), ({"enabled": False}, {"enabled": False}),
+                        ({"max_tokens": 512}, {"max_tokens": 512}),
+                        ({"max_tokens": 2047}, {"max_tokens": 2047})]:
+        cfg = _one_judge(g25) if given is None else _one_judge(g25, reasoning=given)
+        assert cfg.monitors[0].reasoning == given
+        _, (mon,) = build_monitors(cfg.monitors)
+        assert mon.reasoning == sent and mon._request_body("p")["reasoning"] == sent
+    for bad, msg in [({"max_tokens": 511}, "clamps"), ({"max_tokens": 1}, "clamps"),
+                     ({"max_tokens": 2048}, "completion cap"), ({"max_tokens": "512"}, "must be an int"),
+                     ({"effort": "low"}, "unsupported reasoning"), ({"enabled": True}, "unsupported"),
+                     ({"enabled": False, "max_tokens": 512}, "unsupported"), ("off", "valid dictionary")]:
+        with pytest.raises(ValidationError, match=msg):
+            _one_judge(g25, reasoning=bad)
+
+
+def test_gemini_35_reasoning_must_be_set_and_is_unchanged():
+    """gemini-3.5-flash-lite mandates reasoning: an effort or a budget, exactly as before the refactor
+    (same request bodies), but a missing setting now fails at LOAD instead of as a 400 per call."""
+    from pydantic import ValidationError
+
+    g35 = "google/gemini-3.5-flash-lite"
+    for given in ({"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"max_tokens": 256}):
+        _, (mon,) = build_monitors(_one_judge(g35, reasoning=given).monitors)
+        assert mon._request_body("p")["reasoning"] == given
+    for bad in (None, {"enabled": False}, {"effort": "lowish"}, {"effort": "low", "max_tokens": 256},
+                {"max_tokens": 0}):
+        with pytest.raises(ValidationError, match="monitor 'j'"):
+            _one_judge(g35) if bad is None else _one_judge(g35, reasoning=bad)
+
+
+def test_any_other_judge_model_is_refused_whatever_its_reasoning():
+    """Reasoning support is specialized to the two geminis; for any other OpenRouter model even the
+    default is refused (what its reasoning object does is unestablished) — in a config AND by hand."""
+    from pydantic import ValidationError
+
+    from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
 
-    with pytest.raises(ValueError, match="must run with reasoning OFF"):
-        CoTMonitor("g25_out", "google/gemini-2.5-flash-lite", reasoning_effort="low")
+    for model in ("anthropic/claude-3-haiku", "deepseek/deepseek-chat", "google/gemini-2.5-flash",
+                  "google/gemini-2.5-flash-lite-preview-09-2025", "google/gemini-3.5-flash",
+                  "openai/gpt-5.4-mini"):
+        for kw in ({}, {"reasoning": {"enabled": False}}, {"reasoning": {"effort": "low"}}):
+            with pytest.raises(ValidationError, match="specialized to google/gemini-2.5-flash-lite and "
+                                                      "google/gemini-3.5-flash-lite"):
+                _one_judge(model, **kw)
+            for cls in (CoTMonitor, AgentCoTMonitor):
+                with pytest.raises(ValueError, match="Implement support for this model"):
+                    cls("j", model, **kw)
 
 
-def test_reasoning_effort_and_budget_are_mutually_exclusive():
+def test_legacy_reasoning_keys_are_refused_with_the_translation():
+    """The old keys are not silently reinterpreted: 'both null' used to mean reasoning OFF, which is no
+    longer gemini-2.5's default — so a legacy config must be rewritten, and the error says how."""
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
-        ExperimentConfig.model_validate(
-            dict(run_name="t", monitors=[
-                {"kind": "cot", "name": "g35_out", "role": "train_against",
-                 "model_id": "google/gemini-3.5-flash-lite",
-                 "reasoning_effort": "low", "reasoning_max_tokens": 256}])
-        )
+    from monitordecorrelation.experiment_config import load_monitor_specs
+
+    for legacy in ({"reasoning_effort": "low"}, {"reasoning_max_tokens": 256},
+                   {"reasoning_effort": None, "reasoning_max_tokens": None}):
+        with pytest.raises(ValidationError, match=r"replaced by `reasoning`.*\{\"enabled\": false\}"):
+            _one_judge("google/gemini-3.5-flash-lite", **legacy)
+    import json
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:  # old run config.json
+        json.dump({"monitors": [{"kind": "cot", "name": "g25", "role": "held_out",
+                                 "model_id": "google/gemini-2.5-flash-lite",
+                                 "reasoning_effort": None, "reasoning_max_tokens": None}]}, f)
+    with pytest.raises(ValidationError, match="replaced by `reasoning`"):
+        load_monitor_specs(f.name)
 
 
 def test_set_overrides_a_single_monitor_field():
-    """``--set monitors.<name>.<field>`` makes per-judge settings a launch flag, not a forked config."""
+    """``--set monitors.<name>.<field>`` makes per-judge settings a launch flag, not a forked config;
+    a JSON value is parsed, and the override reaches the monitor's request body."""
     run = _runner()
-    cfg = run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effort=medium"])
-    assert [m.reasoning_effort for m in cfg.monitors] == [None, "medium", "low"]
+    cfg = run.apply_overrides(_gemini_cfg(), ['monitors.g35_out.reasoning={"effort":"medium"}'])
+    assert [m.reasoning for m in cfg.monitors] == [None, {"effort": "medium"}, {"effort": "low"}]
+    ta, held = build_monitors(cfg.monitors)
+    assert [m._request_body("p")["reasoning"] for m in ta + held] == \
+        [{"effort": "medium"}, {"max_tokens": 512}, {"effort": "low"}]
 
 
 def test_set_overrides_every_monitor_of_a_model_family():
     run = _runner()
     cfg = run.apply_overrides(
-        _gemini_cfg(), ["monitors.model:gemini-3.5.reasoning_effort=medium"]
+        _gemini_cfg(), ['monitors.model:gemini-3.5.reasoning={"effort":"medium"}',
+                        'monitors.model:gemini-2.5.reasoning={"enabled":false}']
     )
-    assert [m.reasoning_effort for m in cfg.monitors] == [None, "medium", "medium"]
+    assert [m.reasoning for m in cfg.monitors] == \
+        [{"enabled": False}, {"effort": "medium"}, {"effort": "medium"}]
     assert cfg.monitors[0].model_id == "google/gemini-2.5-flash-lite"  # untouched
+    cfg = run.apply_overrides(_gemini_cfg(), ['monitors.g25_out.reasoning={"max_tokens":1024}'])
+    _, held = build_monitors(cfg.monitors)
+    assert held[0]._request_body("p")["reasoning"] == {"max_tokens": 1024}
+    # …and replaced WHOLE, never merged: {"enabled": false} over a budget drops the budget
+    cfg = run.apply_overrides(cfg, ['monitors.g25_out.reasoning={"enabled":false}'])
+    assert cfg.monitors[0].reasoning == {"enabled": False}
+    # null puts a judge back on its model's default
+    cfg = run.apply_overrides(cfg, ["monitors.g25_out.reasoning=null"])
+    assert cfg.monitors[0].reasoning is None
+    assert build_monitors(cfg.monitors)[1][0].reasoning == {"max_tokens": 512}
 
 
 def test_monitor_overrides_are_validated_like_any_other():
@@ -259,14 +328,22 @@ def test_monitor_overrides_are_validated_like_any_other():
 
     run = _runner()
     with pytest.raises(SystemExit, match="matched no monitor"):
-        run.apply_overrides(_gemini_cfg(), ["monitors.g35_nope.reasoning_effort=low"])
+        run.apply_overrides(_gemini_cfg(), ['monitors.g35_nope.reasoning={"effort":"low"}'])
     with pytest.raises(SystemExit, match="has no field"):
-        run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effrt=low"])
+        run.apply_overrides(_gemini_cfg(), ['monitors.g35_out.reasoning_effort=low'])
+    with pytest.raises(SystemExit, match="does not parse"):  # malformed JSON is never a raw string
+        run.apply_overrides(_gemini_cfg(), ['monitors.g35_out.reasoning={"effort":low}'])
     with pytest.raises(ValidationError):  # not one of low/medium/high
-        run.apply_overrides(_gemini_cfg(), ["monitors.g35_out.reasoning_effort=lowish"])
-    # a wildcard that would switch reasoning on for the gemini-2.5 judges is refused, by name
+        run.apply_overrides(_gemini_cfg(), ['monitors.g35_out.reasoning={"effort":"lowish"}'])
+    # a wildcard that would give the gemini-2.5 judge an effort is refused, by name
     with pytest.raises(ValidationError, match="g25_out"):
-        run.apply_overrides(_gemini_cfg(), ["monitors.*.reasoning_effort=medium"])
+        run.apply_overrides(_gemini_cfg(), ['monitors.*.reasoning={"effort":"medium"}'])
+    # …and one that would switch the gemini-3.5 judges' mandatory reasoning off, too
+    with pytest.raises(ValidationError, match="g35_out"):
+        run.apply_overrides(_gemini_cfg(), ['monitors.*.reasoning={"enabled":false}'])
+    # switching a judge's model re-resolves its (None = model-default) reasoning for the NEW model
+    with pytest.raises(ValidationError, match="mandates reasoning"):
+        run.apply_overrides(_gemini_cfg(), ["monitors.g25_out.model_id=google/gemini-3.5-flash-lite"])
 
 
 def test_malformed_or_conflicting_set_items_fail_loudly():
@@ -293,7 +370,7 @@ def test_malformed_or_conflicting_set_items_fail_loudly():
     # distinct fields on the same monitor, or the same field on different monitors, are fine
     cfg = apply_overrides(_gemini_cfg(), ["monitors.g35_out.threshold=0.6",
                                           "monitors.g35_cot.threshold=0.7",
-                                          "monitors.g35_out.reasoning_effort=high"])
+                                          'monitors.g35_out.reasoning={"effort":"high"}'])
     assert [m.threshold for m in cfg.monitors] == [0.5, 0.6, 0.7]
 
 
@@ -464,7 +541,7 @@ def test_thinking_effort_is_required_by_tml_policies_and_refused_by_the_others()
 
 
 def test_exactly_one_penalty_knob_and_only_when_a_monitor_is_trained_against():
-    held_out = [{"kind": "cot", "name": "m", "role": "held_out", "model_id": "x"}]
+    held_out = [{"kind": "cot", "name": "m", "role": "held_out", "model_id": "google/gemini-2.5-flash-lite"}]
     ramp = {"start_penalty": 0.0, "end_penalty": 1.0}
     assert _cfg(penalty_coef=None, penalty_schedule=ramp).penalty_schedule == ramp
     assert "exactly one" in _err(penalty_coef=0.5, penalty_schedule=ramp)  # the ramp used to just win
@@ -547,12 +624,29 @@ def test_every_repo_config_satisfies_the_relevance_rules():
     """The configs shipped in experiments/configs/ are the worked examples of these rules."""
     from monitordecorrelation.experiment_config import load_config
 
+    import json
+
+    from pydantic import ValidationError
+
+    from monitordecorrelation.monitors.judge_reasoning import SUPPORTED_JUDGES
+
     paths = sorted((_REPO / "experiments" / "configs").rglob("*.json"))
     assert len(paths) > 10
+    n_loaded = 0
     for p in paths:
+        judges = {m["model_id"] for m in json.loads(p.read_text()).get("monitors", [])
+                  if m.get("kind", "cot") == "cot"}
+        if judges - set(SUPPORTED_JUDGES):
+            # The older configs judge with models (claude / deepseek) whose reasoning behaviour
+            # monitors.judge_reasoning does not establish: they must be refused loudly, not run.
+            with pytest.raises(ValidationError, match="specialized to"):
+                load_config(p)
+            continue
         cfg = load_config(p)  # schema + relevance rules
         env = _MultiTurnEnv() if cfg.env == "terminal_verifier" else _SingleTurnEnv()
         validate_token_budgets(cfg, env)
+        n_loaded += 1
+    assert n_loaded > 10
 
 
 def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
@@ -596,3 +690,95 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
     assert rc.learning_rate == overrides["lr"]
     assert seen["kw"]["max_tokens"] == overrides["max_tokens"]  # this config runs with no think_budget
     assert seen["kw"]["think_budget"] is None and seen["kw"]["answer_tokens"] is None
+
+
+@pytest.mark.parametrize("cfg_name, multi_turn", [
+    ("terminal_verifier_gemini25_out.json", True),        # Inkling-Small, AgentCoTMonitor judges
+    ("mbpp_matrix_sep18/row_cot_weak.json", False),       # Qwen3-8B, single-turn CoTMonitor judges
+])
+def test_judge_reasoning_reaches_every_judge_call(monkeypatch, tmp_path, cfg_name, multi_turn):
+    """Judge reasoning, from the config file and from ``--set``, must arrive in the request body of
+    every judge the training loop is handed — through the REAL runner (run_experiment.main), not just
+    the helpers it calls — and be recorded as sent (run_info's monitor records, config.json)."""
+    import json
+    import sys
+
+    import monitordecorrelation.backends.tinker_backend as tb
+    import monitordecorrelation.envs.factory as factory
+    from monitordecorrelation.rl.train import _monitor_info
+
+    class _Env:
+        behavior_name = "reward_hacking"
+        multi_turn = False
+        default_think_budget = None
+
+    class _TermEnv(_Env):
+        multi_turn = True
+        max_turns = 4
+        default_think_budget = 1536
+
+    run = _load_script("run_experiment")
+    monkeypatch.setattr(tb, "TinkerBackend", lambda *a, **k: object())
+    if not multi_turn:  # keep the MBPP dataset out of it; the terminal env builds offline
+        monkeypatch.setattr(run, "make_env", lambda cfg: _Env())
+    # probes (the MBPP rows hold two out) would load the 8B base model; they carry no judge reasoning
+    import monitordecorrelation.monitors.probe_monitor as pm
+    import monitordecorrelation.whitebox.model as wbm
+    import monitordecorrelation.whitebox.probe as wbp
+
+    monkeypatch.setattr(wbp.LinearProbe, "load", classmethod(lambda cls, path: type("P", (), {"meta": {}})()))
+    monkeypatch.setattr(wbm, "WhiteBoxModel", lambda *a, **k: object())
+    monkeypatch.setattr(pm, "ProbeMonitor", lambda name, *a, **k: type("PM", (), {"name": name})())
+    monkeypatch.chdir(tmp_path)
+    cfg_path = _REPO / "experiments" / "configs" / cfg_name
+    file_cfg = {m["name"]: m for m in json.loads(cfg_path.read_text())["monitors"]}
+
+    def launch(*sets):
+        seen = {}
+
+        def spy(run_config, env, backend, **kw):
+            seen.update(kw)
+            raise _Stop
+
+        monkeypatch.setattr(run, "run_grpo", spy)
+        monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--config", str(cfg_path),
+                                          "--set", "run_name=r", *sets])
+        with pytest.raises(_Stop):
+            run.main()
+        judges = [m for m in seen["train_against"] + seen["held_out"] if hasattr(m, "model_id")]
+        assert judges and all(
+            type(j).__name__ == ("AgentCoTMonitor" if multi_turn else "CoTMonitor") for j in judges)
+        sent = {j.name: j._request_body("p")["reasoning"] for j in judges}
+        roles = {m.name: "train_against" for m in seen["train_against"]}
+        # recorded exactly as sent, in run_info (via rl/train.py's monitor records) …
+        assert {j.name: _monitor_info(j, roles.get(j.name, "held_out"))["reasoning"]
+                for j in judges} == sent
+        # … and the effective config.json carries the override, not the file's value
+        written = {m["name"]: m["reasoning"]
+                   for m in json.loads((tmp_path / "data/runs/r/config.json").read_text())["monitors"]
+                   if m["kind"] == "cot"}
+        assert written == {m["name"]: m["reasoning"] for m in seen["run_info"]["config"]["monitors"]
+                           if m["kind"] == "cot"}
+        assert set(written) == set(sent)
+        return sent, written
+
+    g25 = [n for n, m in file_cfg.items() if m.get("model_id") == "google/gemini-2.5-flash-lite"]
+    g35 = [n for n, m in file_cfg.items() if m.get("model_id") == "google/gemini-3.5-flash-lite"]
+    assert g25 and g35
+    policy_default = {"max_tokens": 512} if multi_turn else {"enabled": False}  # Inkling vs Qwen3-8B
+
+    sent, _ = launch()  # the file as shipped
+    assert all(sent[n] == policy_default for n in g25)
+    assert all(sent[n] == file_cfg[n]["reasoning"] == {"effort": "low"} for n in g35)
+
+    sent, written = launch('monitors.model:gemini-2.5.reasoning={"max_tokens":1024}',
+                           'monitors.model:gemini-3.5.reasoning={"effort":"medium"}')
+    assert all(sent[n] == written[n] == {"max_tokens": 1024} for n in g25)
+    assert all(sent[n] == written[n] == {"effort": "medium"} for n in g35)
+
+    sent, written = launch(f'monitors.{g25[0]}.reasoning={{"enabled":false}}')
+    assert sent[g25[0]] == written[g25[0]] == {"enabled": False}
+    assert all(sent[n] == policy_default for n in g25[1:])  # the other judges keep the file's value
+
+    sent, written = launch(f"monitors.{g25[0]}.reasoning=null")  # null → the model default
+    assert written[g25[0]] is None and sent[g25[0]] == {"max_tokens": 512}

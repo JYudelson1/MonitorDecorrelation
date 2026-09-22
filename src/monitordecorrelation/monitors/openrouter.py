@@ -155,7 +155,8 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
     provider's whole response body in the message. That surfaces as a NaN sentinel per rollout in
     ``rl.train.MonitorScorer``, which then aborts the run (the intended behaviour for a config
     error). NB a mandatory-reasoning model ("Reasoning is mandatory for this endpoint and cannot be
-    disabled.") lands there by design — the fix is the monitor's ``reasoning_effort``, not a retry.
+    disabled.") lands there by design — the fix is the monitor's ``reasoning`` setting, not a retry
+    (``monitors.judge_reasoning`` rejects that combination at construction for the judges it knows).
     """
     attempt = 0
     while True:

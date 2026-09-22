@@ -11,7 +11,7 @@ per rollout (the training figure is the size of the single GRPO datum the episod
 resulting $ per rollout and per RL step at tinker's published rates.
 
   uv run python experiments/eval_terminal_baseline.py --n-prompts 16 --samples 2
-  uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku
+  uv run python experiments/eval_terminal_baseline.py --judge google/gemini-2.5-flash-lite
   uv run python experiments/eval_terminal_baseline.py --verifier-mode possible   # verifier holds the TRUE answer
   uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5
 """
@@ -116,7 +116,10 @@ def main() -> None:
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
     ap.add_argument("--require-explanation", action="store_true",
                     help="each command must be followed by 'Explanation: …' (else a parse failure)")
-    ap.add_argument("--judge", default=None, help="OpenRouter model id → score a CoT+out and an output-only judge")
+    ap.add_argument("--judge", default=None,
+                    help="OpenRouter model id → score a CoT+out and an output-only judge, each on the "
+                         "model's default reasoning — so a model monitors/judge_reasoning.py supports "
+                         "AND gives a default (gemini-2.5-flash-lite); anything else is refused")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=3, help="print this many full transcripts")
     ap.add_argument("--out", default=None, help="jsonl path (default data/runs/tv_baseline_<model>/episodes.jsonl)")

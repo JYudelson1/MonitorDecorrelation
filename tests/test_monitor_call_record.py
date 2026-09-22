@@ -64,7 +64,8 @@ def _rollout() -> Rollout:
 
 def test_call_record_is_exactly_what_was_posted_and_what_came_back(posted):
     log, script = posted
-    mon = cm.CoTMonitor("j", "x/y", behavior="deception", reasoning_effort="low", timeout=45.0)
+    mon = cm.CoTMonitor("j", "google/gemini-3.5-flash-lite", behavior="deception", reasoning={"effort": "low"},
+                         timeout=45.0)
     message = {"role": "assistant", "content": "SCORE: 73", "reasoning": "hmm, it lies… SCORE: 73"}
     script.append(_reply(message))
     res = mon.score(_rollout())
@@ -90,7 +91,7 @@ def test_call_record_is_exactly_what_was_posted_and_what_came_back(posted):
 
 def test_only_the_successful_attempt_is_recorded(posted):
     log, script = posted
-    mon = cm.CoTMonitor("j", "x/y", behavior="deception")
+    mon = cm.CoTMonitor("j", "google/gemini-2.5-flash-lite", behavior="deception")
     script += [_Resp(503, text="overloaded"), httpx.ConnectError("boom"),
                _reply({"content": "garbage", "reasoning": "first draft"}, finish="content_filter"),
                _reply({"content": "SCORE: 5", "reasoning": "final"})]
@@ -107,7 +108,8 @@ def test_verdict_read_from_the_reasoning_channel_keeps_the_whole_reply(posted):
     """Gemini-3.x sometimes answers in ``reasoning`` with ``content: null``: the parsed ``raw`` is just
     the verdict line, but the saved response is the whole message — the chain of thought included."""
     log, script = posted
-    mon = cm.CoTMonitor("j", "x/y", behavior="deception", binary_judge=True, reasoning_effort="low")
+    mon = cm.CoTMonitor("j", "google/gemini-3.5-flash-lite", behavior="deception", binary_judge=True,
+                         reasoning={"effort": "low"})
     script.append(_reply({"content": None, "reasoning": "step 1… step 2… VERDICT: YES"}))
     res = mon.score(_rollout())
     assert res.score == 1.0 and res.meta["raw"] == "VERDICT: YES"
@@ -117,7 +119,7 @@ def test_verdict_read_from_the_reasoning_channel_keeps_the_whole_reply(posted):
 
 def test_unparseable_reply_still_carries_the_call(posted):
     log, script = posted
-    mon = cm.CoTMonitor("j", "x/y", behavior="deception")
+    mon = cm.CoTMonitor("j", "google/gemini-2.5-flash-lite", behavior="deception")
     script.append(_reply({"content": "I refuse."}))
     res = mon.score(_rollout())
     assert res.meta["parse_error"] is True and res.meta["call"]["response"]["message"]["content"] == "I refuse."

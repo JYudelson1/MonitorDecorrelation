@@ -12,10 +12,14 @@ Usage:
   # one-off overrides (handy for quick tests; everything else comes from the config):
   uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2
 
-  # per-monitor overrides — monitors.<name|model:substr|*>.<field>, e.g. the judge-side reasoning
-  # effort of every gemini-3.5 judge (the gemini-2.5 judges must stay reasoning-off and will refuse):
+  # per-monitor overrides — monitors.<name|model:substr|*>.<field>, e.g. the judge-side reasoning of
+  # every gemini-3.5 judge, or turning the gemini-2.5 judges' reasoning off / giving them a bigger
+  # budget. `reasoning` is an OpenRouter reasoning object (JSON — quote it), validated per judge model
+  # (monitors/judge_reasoning.py), and replaced whole:
   uv run python experiments/run_experiment.py --config <cfg> \
-      --set monitors.model:gemini-3.5.reasoning_effort=medium run_name=<...>_eff-medium
+      --set 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' run_name=<...>_eff-medium
+  uv run python experiments/run_experiment.py --config <cfg> \
+      --set 'monitors.model:gemini-2.5.reasoning={"enabled":false}' run_name=<...>_g25-off
 
 The config is schema-validated (pydantic, extra keys forbidden) — a malformed config fails fast.
 """
@@ -75,7 +79,7 @@ def main() -> None:
     ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
                     help="override top-level config fields (e.g. --set run_name=quick n_steps=2), or a "
                          "per-monitor field via monitors.<name|model:substr|*>.<field> (e.g. --set "
-                         "monitors.model:gemini-3.5.reasoning_effort=medium), or one env option via "
+                         "'monitors.model:gemini-3.5.reasoning={\"effort\":\"medium\"}'), or one env option via "
                          "env_options.<key> (e.g. --set env_options.verifier_mode=possible)")
     args = ap.parse_args()
 

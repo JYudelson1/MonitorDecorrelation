@@ -34,13 +34,13 @@ from monitordecorrelation.rl.rollout import load_saved_rollouts, sample_rollouts
 
 load_dotenv(".env")
 
-# Default candidate ladder (weak -> strong). All must be valid OpenRouter ids.
+# Default candidates. A judge can only be built for a model monitors.judge_reasoning supports (any
+# other is refused: what its reasoning setting does is unestablished), and gemini-3.5-flash-lite needs
+# an explicit reasoning setting this script does not take — so the default is the one judge that runs
+# on its default. The historical ladder (llama-3.2-3b, gpt-4o-mini, claude-3-haiku, claude-sonnet-4.6,
+# claude-opus-4.8) needs reasoning support implemented per model before it can re-run.
 _DEFAULT_CANDIDATES = [
-    "meta-llama/llama-3.2-3b-instruct",
-    "openai/gpt-4o-mini",
-    "anthropic/claude-3-haiku",
-    "anthropic/claude-sonnet-4.6",
-    "anthropic/claude-opus-4.8",
+    "google/gemini-2.5-flash-lite",
 ]
 
 
@@ -66,6 +66,10 @@ def main() -> None:
     rubric_kwargs = {}
     if args.rubric_file:
         rubric_kwargs["rubric"] = Path(args.rubric_file).read_text()
+    # Build the judges before sampling anything: an unsupported judge model must stop the script up
+    # front, not be swallowed into a "FAILED" row after the policy sampling was paid for.
+    candidate_ids = [c.strip() for c in args.candidates.split(",") if c.strip()]
+    monitors = {mid: CoTMonitor(name=_slug(mid), model_id=mid, **rubric_kwargs) for mid in candidate_ids}
 
     # 1. get (rollout, ground_truth) pairs — either from disk or by sampling the policy
     if args.from_rollouts:
@@ -107,13 +111,12 @@ def main() -> None:
     print(f"balanced detection set: {k} behavior + {k} non-behavior\n")
 
     # 3. each candidate monitor's detection ability
-    candidate_ids = [c.strip() for c in args.candidates.split(",") if c.strip()]
     results = []
     print(f"{'monitor':28s} {'AUROC':>6} {'acc':>6} {'mean(beh)':>10} {'mean(¬beh)':>11}")
     print("-" * 66)
     for mid in candidate_ids:
         try:
-            mon = CoTMonitor(name=_slug(mid), model_id=mid, **rubric_kwargs)
+            mon = monitors[mid]
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 res = list(ex.map(mon.score, eval_rollouts))
             scores = [x.score for x in res]

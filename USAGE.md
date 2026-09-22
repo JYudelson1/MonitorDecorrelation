@@ -39,13 +39,13 @@ forbidden). So "train against CoT", "train against a probe", "train against stro
 out weak CoT + two probes" are all just different configs — no per-experiment scripts.
 
 ```bash
-uv run python experiments/run_experiment.py --config experiments/configs/mbpp_matrix/row_control.json
-uv run python experiments/run_experiment.py --config experiments/configs/train_against_cot.json
+uv run python experiments/run_experiment.py --config experiments/configs/mbpp_matrix_sep18/row_control.json
+uv run python experiments/run_experiment.py --config experiments/configs/terminal_verifier_control.json
 # quick one-off overrides of top-level fields:
 uv run python experiments/run_experiment.py --config <cfg> --set run_name=quick n_steps=2 batch_size=2
-# per-monitor overrides: monitors.<name|model:substr|*>.<field>
+# per-monitor overrides: monitors.<name|model:substr|*>.<field> (a {…}/[…] value is parsed as JSON)
 uv run python experiments/run_experiment.py --config <cfg> \
-    --set monitors.model:gemini-3.5.reasoning_effort=medium run_name=<...>_eff-medium
+    --set 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' run_name=<...>_eff-medium
 ```
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
@@ -78,20 +78,43 @@ validation, so `--set max_tokens=4096` on a budgeted run is an error, not a no-o
 its `monitors` (`load_monitor_specs`) and are unaffected.
 
 Each monitor: `{kind:"cot", name, role, model_id,
-use_cot?, behavior?, threshold?, reasoning_effort?}` (output monitor = `use_cot:false`) or `{kind:"probe", name, role,
-probe_path, probe_model?, threshold?, batch_size?}`.
+use_cot?, use_output?, behavior?, threshold?, reasoning?, binary_judge?}` (output monitor = `use_cot:false`) or
+`{kind:"probe", name, role, probe_path, probe_model?, threshold?, batch_size?}`.
 
-**Judge-side reasoning (`reasoning_effort`).** Judges answer in one line, so reasoning is **off** by
-default and must stay off for gemini-2.5 — setting `reasoning_effort`/`reasoning_max_tokens` on a
-`google/gemini-2.5-*` monitor is rejected at config load, naming the monitor. Models that *mandate*
-reasoning (gemini-3.x, which reject `reasoning:{enabled:false}` with a 400) need
-`reasoning_effort: "low"|"medium"|"high"`. Pick it per run without forking the config:
+**Judge-side reasoning (`reasoning`).** The OpenRouter `reasoning` object every call of that judge
+sends, validated **per judge model** at config load (`monitors/judge_reasoning.py`), naming the monitor:
+
+| judge `model_id` | accepted `reasoning` | absent (default) |
+| --- | --- | --- |
+| `google/gemini-2.5-flash-lite` | `{"enabled": false}` (off) · `{"max_tokens": N}`, 512 ≤ N < 2048 (on, thinking budget N) | `{"max_tokens": 512}` — on, smallest budget |
+| `google/gemini-3.5-flash-lite` | `{"effort": "low"\|"medium"\|"high"}` (preferred) · `{"max_tokens": N}` | **error** — it mandates reasoning (`enabled:false` is a 400) |
+| **any other model** | **error** | **error** |
+
+512 is Google's minimum budget: a smaller one is accepted but clamped up (measured: budgets 1/128/511
+think as long as 512), so it is refused rather than let mean something else. Any other judge model is
+refused outright — even with no `reasoning` key — because what a reasoning setting does on it has not
+been established; implement its support in `resolve_reasoning` first. The shipped configs set it
+explicitly: `{"max_tokens": 512}` on the gemini-2.5 judges of the Inkling-Small runs, `{"enabled":
+false}` on those of the Qwen3-8B runs, `{"effort": "low"}` on every gemini-3.5 judge. The old keys
+`reasoning_effort` / `reasoning_max_tokens` are refused with the translation (both null used to mean
+reasoning OFF). Pick it per run without forking the config — the value replaces the whole object:
 
 ```bash
---set monitors.g35_out.reasoning_effort=medium            # one judge, by name
---set monitors.model:gemini-3.5.reasoning_effort=medium   # every gemini-3.5 judge (keeps the matrix
-                                                          # rows comparable — see docs/MONITORS.md)
+--set 'monitors.g35_out.reasoning={"effort":"medium"}'            # one judge, by name
+--set 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}'   # every gemini-3.5 judge (keeps the matrix
+                                                                  # rows comparable — see docs/MONITORS.md)
+--set 'monitors.model:gemini-2.5.reasoning={"enabled":false}'     # gemini-2.5 judges: reasoning off
+--set 'monitors.model:gemini-2.5.reasoning={"max_tokens":1024}'   # … or on, with a bigger budget
+--set monitors.g25_out.reasoning=null                             # back to the model's default
 ```
+
+So the older configs whose judges are claude / deepseek models — `matrix8b/`, `mbpp_matrix/`,
+`mbpp_matrix_lowpen/`, `mbpp_matrix_sched01/`, `full_matrix.json`, `train_against_*.json` — and what
+`make_matrix_configs.py` / `make_mbpp_matrix_configs.py` generate **no longer load** until those models
+get reasoning support (the `queue_runs.sh` examples below still name some of those dirs).
+
+Through `scripts/queue_runs.sh -- …` write the JSON **without spaces** (the extra overrides are
+word-split). `run_info.json` records the resolved object each judge actually sent.
 
 ⚠️ On `gemini-3.5-flash-lite`, `low` is **not** a working setting: ~60% of calls come back with
 `reasoning_tokens == 0` and the unthinking judge answers a reflexive bare `SCORE: 0`, which parses as
@@ -217,7 +240,7 @@ TV_CONTROL=experiments/configs/terminal_verifier_control.json
 
 # 1. baseline inference — does the base model read the verifier, how often, what does it do:
 uv run python experiments/eval_terminal_baseline.py --n-prompts 24 --samples 2 --think-budget 1536
-uv run python experiments/eval_terminal_baseline.py --judge anthropic/claude-3-haiku   # + judge AUROC
+uv run python experiments/eval_terminal_baseline.py --judge google/gemini-2.5-flash-lite   # + judge AUROC
 # Inkling (TML rendering, reasoning effort instead of a thinking flag):
 uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5 \
     --n-prompts 256 --think-budget 1536 --answer-tokens 512 --max-tokens 3072
@@ -230,11 +253,11 @@ uv run python experiments/run_experiment.py --config $TV_CONTROL
 #    (run_name must differ, or the two runs share data/runs/<name>/):
 uv run python experiments/run_experiment.py \
     --config experiments/configs/terminal_verifier_gemini35_out.json --set \
-    monitors.model:gemini-3.5.reasoning_effort=low \
+    'monitors.model:gemini-3.5.reasoning={"effort":"low"}' \
     run_name=tv_g35out_eff-low_s0 seed=0
 uv run python experiments/run_experiment.py \
     --config experiments/configs/terminal_verifier_gemini35_out.json --set \
-    monitors.model:gemini-3.5.reasoning_effort=medium \
+    'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' \
     run_name=tv_g35out_eff-medium_s0 seed=0
 ```
 
