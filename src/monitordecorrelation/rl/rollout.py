@@ -14,6 +14,7 @@ from typing import Callable
 
 import tinker
 
+from monitordecorrelation.rl.episodes import derive_sample_seed
 from monitordecorrelation.rl.renderers import (  # re-exported: long-standing import path
     as_renderer,
     build_prompt_tokens,
@@ -97,32 +98,46 @@ def sample_rollouts(
     long-standing call sites. Each prompt is expanded into ``num_samples`` rollouts (the GRPO group).
     Token ids + logprobs of the *completion* are stored for the policy-gradient step.
 
-    **``seed`` must be None whenever ``num_samples > 1``.** Tinker applies one seed to the whole
-    request, so a seeded ``num_samples=8`` call returns ~1–2 distinct sequences (measured 2026-09-22:
-    mean 1.4 unique of 8 on Qwen3-8B; unseeded: 8 of 8) — the GRPO group collapses and its advantages
-    are all zero. A seed does not even buy reproducibility (two identical seeded calls returned
-    different sets), so tinker sampling in this repo is unseeded; the run ``seed`` still pins env /
-    holdout / LoRA init. The guard below makes the collapse a loud error instead of a silent one.
+    **Seeding (2026-09-22 fix).** Tinker applies one seed to the whole request, so a seeded
+    ``sample(num_samples=8)`` returns ~1–2 distinct sequences (measured on base Qwen3-8B: 1.4 of 8
+    unique; unseeded 8 of 8; 8 single-sample calls with distinct seeds: 8 of 8) — i.e. the GRPO group
+    collapses and its advantages are all zero. So when ``seed`` is set, each of the ``num_samples``
+    completions is its OWN single-sample request with its own derived seed
+    (``derive_sample_seed(seed, i*num_samples + k)``), which keeps the run (near-)reproducible AND
+    the group distinct. With ``seed=None`` a single n-sample request is used (cheapest: shared
+    prefill). Never pass a seed on an n-sample request.
 
     ``on_rollout(index, rollout)`` (optional) is called as each prompt's completions come back, so a
     caller can start per-rollout work (monitor API calls) on the prompts that already landed instead
     of waiting for the slowest one. Given it, each prompt is awaited in its own thread so no prompt
     holds back another's callbacks; the returned list keeps prompt order either way.
     """
-    if num_samples > 1 and seed is not None:
-        raise ValueError(f"sample_rollouts: seed={seed} with num_samples={num_samples} would collapse the "
-                         "GRPO group to ~1 distinct sequence (tinker seeds the whole request); pass seed=None")
     rend = as_renderer(renderer)
     if hasattr(rend, "enable_thinking"):  # HF-chat only; TML conditions on effort, not a flag
         rend.enable_thinking = enable_thinking
-    params = tinker.SamplingParams(
-        max_tokens=max_tokens, temperature=temperature, seed=seed,
+    stop = {"stop": rend.stop_tokens} if getattr(rend, "stop_tokens", None) else {}
+
+    def _params(sample_seed: int | None) -> tinker.SamplingParams:
         # Inkling's end-of-turn token is not an EOS the sampler knows about; the renderer supplies it.
-        **({"stop": rend.stop_tokens} if getattr(rend, "stop_tokens", None) else {}),
-    )
-    futures = []
-    for p in prompts:
-        futures.append((p, sampling_client.sample(rend.model_input(p.text), num_samples, params)))
+        return tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature, seed=sample_seed, **stop)
+
+    # futures[i] = the list of API futures whose sequences (concatenated, in order) form prompt i's
+    # group: ONE n-sample future when unseeded, ``num_samples`` single-sample futures when seeded.
+    futures: list[tuple[Prompt, list]] = []
+    for i, p in enumerate(prompts):
+        mi = rend.model_input(p.text)
+        if seed is None:
+            futs = [sampling_client.sample(mi, num_samples, _params(None))]
+        else:
+            futs = [sampling_client.sample(mi, 1, _params(derive_sample_seed(seed, i * num_samples + k)))
+                    for k in range(num_samples)]
+        futures.append((p, futs))
+
+    def _group_seqs(i: int) -> list:
+        seqs = [seq for fut in futures[i][1] for seq in fut.result().sequences]
+        if len(seqs) != num_samples:
+            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
+        return seqs
 
     def _to_rollout(prompt: Prompt, seq) -> Rollout:
         cot, answer, text = rend.parse(list(seq.tokens))
@@ -137,22 +152,19 @@ def sample_rollouts(
 
     if on_rollout is None:
         rollouts: list[Rollout] = []
-        for prompt, fut in futures:
-            for seq in fut.result().sequences:
+        for i, (prompt, _) in enumerate(futures):
+            for seq in _group_seqs(i):
                 rollouts.append(_to_rollout(prompt, seq))
         return rollouts
 
     # Streaming path: a thread per prompt, writing into pre-allocated slots so the output order is
     # the same prompt-major, group-consecutive layout GRPO expects. It needs a fixed stride to index
-    # those slots, hence the group-size check (tinker's n-sampling always returns what was asked).
+    # those slots, hence the group-size check in _group_seqs.
     slots: list[Rollout | None] = [None] * (len(prompts) * num_samples)
 
     def _collect(i: int) -> None:
-        prompt, fut = futures[i]
-        seqs = list(fut.result().sequences)
-        if len(seqs) != num_samples:
-            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
-        for k, seq in enumerate(seqs):
+        prompt = futures[i][0]
+        for k, seq in enumerate(_group_seqs(i)):
             idx = i * num_samples + k
             r = _to_rollout(prompt, seq)
             slots[idx] = r

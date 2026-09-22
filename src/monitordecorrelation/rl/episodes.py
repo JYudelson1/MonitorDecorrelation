@@ -95,6 +95,18 @@ class _Episode:
     n_calls: int = 0                                       # sampling calls this episode issued itself
 
 
+class _Gathered:
+    """Presents ``n`` single-sample futures as one future whose ``.result().sequences`` is their
+    concatenation — so a seeded turn-0 group (one request per sample) looks like an n-sample call."""
+
+    def __init__(self, futures: list) -> None:
+        self._futures = futures
+
+    def result(self) -> Any:
+        seqs = [seq for f in self._futures for seq in f.result().sequences]
+        return type("_R", (), {"sequences": seqs})()
+
+
 class _SharedFuture:
     """One API future consumed by the whole GRPO group.
 
@@ -164,19 +176,17 @@ def run_episodes(
     first_call_tokens = think_budget if think_budget else max_tokens
     n_episodes = len(prompts) * num_samples
     # Seed slots are addressed by POSITION, never by issue order, so threading can't move them:
-    # slots [0, len(prompts)) are the per-prompt turn-0 calls, then episode e owns the contiguous
-    # block [len(prompts) + e*per_ep, … + per_ep). An episode issues at most one call per turn after
+    # slots [0, len(prompts)*num_samples) are the per-(prompt, sample) turn-0 calls, then episode e
+    # owns the contiguous block [turn0_slots + e*per_ep, … + per_ep). An episode issues at most one call per turn after
     # turn 0, plus one forced-answer call per turn — hence 2*max_turns, which is a strict bound.
     per_ep_calls = 2 * max_turns
+    turn0_slots = len(prompts) * num_samples  # one slot per (prompt, sample) turn-0 request
     step_sem = threading.Semaphore(max(1, step_workers))
 
-    def params(slot: int, n_tokens: int, *, group: bool = False) -> tinker.SamplingParams:
-        # A seeded request with num_samples>1 collapses to ~1 distinct sequence (tinker seeds the whole
-        # request; see rollout.sample_rollouts), so the turn-0 GROUP call is always unseeded. The
-        # single-sample continuation calls keep their per-slot seeds (distinct seeds → distinct samples).
+    def params(slot: int, n_tokens: int) -> tinker.SamplingParams:
         return tinker.SamplingParams(
             max_tokens=n_tokens, temperature=temperature,
-            seed=None if (seed is None or group) else derive_sample_seed(base_seed, slot),
+            seed=None if seed is None else derive_sample_seed(base_seed, slot),
             **({"stop": renderer.stop_tokens} if getattr(renderer, "stop_tokens", None) else {}),
         )
 
@@ -187,7 +197,7 @@ def run_episodes(
                 f"episode {ep.index} issued more than {per_ep_calls} sampling calls "
                 f"(max_turns={max_turns}) — the per-episode seed block would overflow"
             )
-        slot = len(prompts) + ep.index * per_ep_calls + ep.n_calls
+        slot = turn0_slots + ep.index * per_ep_calls + ep.n_calls
         ep.n_calls += 1
         return sampling_client.sample(tinker.ModelInput.from_ints(ep.ob), 1, params(slot, n_tokens))
 
@@ -271,13 +281,19 @@ def run_episodes(
             },
         )
 
-    # -- turn 0: one call per prompt, issued up front so the whole batch is in flight at once ------
-    # (num_samples sequences per call → num_samples episodes, the GRPO group).
-    group_futures = [
-        _SharedFuture(sampling_client.sample(renderer.model_input(p.text), num_samples,
-                                             params(i, first_call_tokens, group=num_samples > 1)))
-        for i, p in enumerate(prompts)
-    ]
+    # -- turn 0: issued up front so the whole batch is in flight at once. Seeded → one single-sample
+    # request PER EPISODE with its own slot seed (a seeded n-sample request collapses the group to
+    # ~1 distinct sequence — tinker seeds the whole request; see rollout.sample_rollouts). Unseeded →
+    # one n-sample request per prompt. Either way group_futures[i].result().sequences is prompt i's
+    # group of ``num_samples`` sequences.
+    def _turn0(i: int, p: Prompt):
+        mi = renderer.model_input(p.text)
+        if seed is None:
+            return _SharedFuture(sampling_client.sample(mi, num_samples, params(i, first_call_tokens)))
+        return _SharedFuture(_Gathered([sampling_client.sample(mi, 1, params(i * num_samples + k, first_call_tokens))
+                                        for k in range(num_samples)]))
+
+    group_futures = [_turn0(i, p) for i, p in enumerate(prompts)]
     prompt_tokens = [list(renderer.prompt_tokens(p.text)) for p in prompts]
 
     out: list[Rollout | None] = [None] * n_episodes

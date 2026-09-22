@@ -441,14 +441,17 @@ class _ScriptSampler:
 
     def __init__(self, scripts: list[list[int]]) -> None:
         self.scripts = scripts
+        self._n_first = 0  # turn-0 sequences issued so far: a SEEDED turn 0 is one request per episode
 
     def sample(self, model_input, num_samples, params):
         ob = list(model_input.chunks[0].tokens)
         turn = ob.count(_GEN) - 1
         first = len(ob) == 1
+        if first:
+            base, self._n_first = self._n_first, self._n_first + num_samples
         seqs = []
         for i in range(num_samples):
-            k = i if first else ob[2] - _K0
+            k = base + i if first else ob[2] - _K0
             seqs.append(_ScriptSeq([self.scripts[k][turn], _K0 + k]))
         return _ScriptFut(seqs)
 

@@ -64,12 +64,13 @@ class _FakeSampler:
     test (turn-0 calls are issued from the caller's thread, in prompt order, before any episode runs).
     """
 
-    def __init__(self, truncate=(), think=(), turn0_delay=None):
+    def __init__(self, truncate=(), think=(), turn0_delay=None, group=1):
         self.calls: list[tuple[list[int], int, int | None, int]] = []
         self.truncate = set(truncate)
         self.think = set(think)
         self.turn0_delay = dict(turn0_delay or {})
-        self._n_turn0 = 0
+        self.group = group  # GRPO group size: a SEEDED turn 0 is one single-sample request per episode
+        self._n_turn0_seqs = 0  # turn-0 sequences issued so far (requests come in prompt/sample order)
         self._lock = threading.Lock()
 
     def sample(self, model_input, num_samples, params):
@@ -82,12 +83,13 @@ class _FakeSampler:
             self.calls.append((ob, num_samples, params.seed, params.max_tokens))
             delay = 0.0
             if first_turn:
-                delay = self.turn0_delay.get(self._n_turn0, 0.0)
-                self._n_turn0 += 1
+                base = self._n_turn0_seqs  # global turn-0 sequence index → (prompt, k) via the group size
+                self._n_turn0_seqs += num_samples
+                delay = self.turn0_delay.get(base // self.group, 0.0)
         turn = ob.count(GEN)  # one generation prompt per turn so far
         seqs = []
         for i in range(num_samples):
-            k = i if first_turn else ob[4]
+            k = (base + i) % self.group if first_turn else ob[4]
             if (turn, k) in self.truncate:
                 seqs.append(_Seq([turn, k], stop="length"))  # no EOS
             elif (turn, k) in self.think and FORCE not in ob:
@@ -150,7 +152,7 @@ class _FakeEnv:
 
 
 def test_episodes_transitions_are_prefix_chained_and_grouped():
-    sampler = _FakeSampler()
+    sampler = _FakeSampler(group=2)
     prompts = [Prompt(text="p0"), Prompt(text="p1")]
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), prompts,
                          num_samples=2, max_tokens=8, seed=7)
@@ -165,27 +167,25 @@ def test_episodes_transitions_are_prefix_chained_and_grouped():
         assert r.token_ids == [t for x in tr for t in x["ac"]]
         assert len(r.logprobs) == len(r.token_ids)
         assert r.cot == "COT" and r.output == "OUT" and r.meta["episode"]["n_turns"] == 3
-    # turn 0: one call per prompt with num_samples; later turns: one call per active episode
-    assert [c[1] for c in sampler.calls] == [2, 2] + [1] * 8
+    # SEEDED: turn 0 is one single-sample request per (prompt, sample) — a seeded n-sample request
+    # collapses the group — then one call per active episode per later turn. All seeds distinct.
+    assert [c[1] for c in sampler.calls] == [1] * 4 + [1] * 8
     seeds = [c[2] for c in sampler.calls]
-    # turn-0 GROUP calls are unseeded (a seeded n-sample request collapses the group); the
-    # single-sample continuation calls carry distinct per-slot seeds.
-    assert seeds[:2] == [None, None]
-    later = seeds[2:]
-    assert None not in later and len(set(later)) == len(later)
-    assert later[0] == derive_sample_seed(7, 2)  # slot = len(prompts) + episode*per_ep_calls
+    assert None not in seeds and len(set(seeds)) == len(seeds)
+    assert seeds[0] == derive_sample_seed(7, 0) and seeds[3] == derive_sample_seed(7, 3)
+    assert seeds[4] == derive_sample_seed(7, 4)  # first continuation: slot = turn0_slots + 0
 
 
 def test_done_episodes_stop_sampling_and_truncation_closes_the_turn():
     # one turn-0 call (2 samples) → both episodes continue; ep0's turn-1 answer is TRUNCATED → it
     # ends there; ep1 runs turns 1 and 2 → 4 sampling calls in all, none of them a resample of ep0.
-    sampler = _FakeSampler(truncate={(2, 0)})
+    sampler = _FakeSampler(truncate={(2, 0)}, group=2)
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), [Prompt(text="p")],
                          num_samples=2, max_tokens=8, seed=1)
     ep0, ep1 = rolls
     assert ep0.meta["episode"]["truncated"] and ep0.meta["stop_reason"] == "length"
     assert len(ep0.meta["transitions"]) == 2 and len(ep1.meta["transitions"]) == 3
-    assert len(sampler.calls) == 1 + 2 + 1  # ep0 was not resampled after truncation
+    assert len(sampler.calls) == 2 + 2 + 1  # seeded turn 0 = 2 single-sample requests; ep0 not resampled
 
 
 def test_think_budget_forces_the_answer_as_a_masked_observation():
@@ -229,7 +229,7 @@ def test_episode_token_accounting_matches_the_transitions():
 
 
 def test_truncated_answer_turns_are_counted():
-    sampler = _FakeSampler(truncate={(2, 0)})
+    sampler = _FakeSampler(truncate={(2, 0)}, group=2)
     rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=3), [Prompt(text="p")],
                          num_samples=2, max_tokens=8, seed=1)
     assert rolls[0].meta["n_truncated_turns"] == 1 and rolls[1].meta["n_truncated_turns"] == 0
