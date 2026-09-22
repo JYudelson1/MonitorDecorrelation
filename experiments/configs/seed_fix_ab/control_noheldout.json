@@ -1,0 +1,22 @@
+{
+  "experiment": "mbpp_degradation_matrix",
+  "policy": "Qwen/Qwen3-8B",
+  "backend": "tinker",
+  "env": "mbpp_honeypot",
+  "n_steps": 60,
+  "batch_size": 32,
+  "group_size": 16,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 6,
+  "max_tokens": 2048,
+  "penalty_coef": 0.5,
+  "penalty_schedule": null,
+  "kl_coef": 0.0001,
+  "lora_rank": 64,
+  "seed": 0,
+  "run_name": "mbpp_Qwen3-8B_control_s0_seedfix",
+  "description": "A/B test of the GRPO group-seed fix (fix-grpo-group-seed): CONTROL, pure task reward, NO monitors at all (nothing trained against, nothing held out) \u2014 the only readout is behavior_rate / task reward vs step. Run the same config from the old code with run_name=..._seedOLD for the baseline.",
+  "monitors": []
+}
