@@ -34,8 +34,12 @@ What it shows, per run:
 Rollout dumps run to ~100 MB per run, so they are never loaded whole: each ``*.jsonl`` gets a
 byte-offset index (built lazily, cached on disk under ``.cache/visualize_transcripts/``), and a
 single rollout is served by seeking to its offset. **Refreshing re-scans**: new run directories
-appear, and runs that grew get their new steps/rollouts indexed incrementally (the file is re-read
-only from the last indexed byte). The page also polls in the background, so a live run fills in.
+appear, and runs that grew get their new steps/rollouts indexed incrementally. A dump is never
+*assumed* append-only, though — scripts rewrite dumps in place, sometimes longer than before — so
+whenever a file changed, the already-indexed prefix is re-hashed and a mismatch re-indexes it from
+scratch (see ``AppendOnlyJsonl``); every rollout read is checked against the bytes that were indexed;
+and a list's row numbers are tied to the file version they came from, so a stale click is refused
+instead of opening a different rollout. The page also polls in the background, so a live run fills in.
 
 Stdlib only — no deps, nothing to install.
 """
@@ -55,6 +59,8 @@ import sys
 import threading
 import time
 import traceback
+import uuid
+import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -133,50 +139,135 @@ def _auroc(pos: list[float], neg: list[float]) -> Optional[float]:
 # --------------------------------------------------------------------------------------------
 
 
-@dataclass
-class JsonlTail:
-    """Whole-file jsonl reader that only re-reads the bytes appended since last time.
+_CHUNK = 1 << 24
 
-    Used for the small per-step metrics files. A file that SHRANK (a run relaunched and reopened
-    its logs with mode "w") is re-read from scratch.
+
+def _file_id(p: Path) -> Optional[tuple]:
+    """Everything stat knows about a file's identity and contents; None if it doesn't exist."""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _hash_prefix(path: Path, n: int) -> Optional["hashlib._Hash"]:
+    """sha1 of the file's first ``n`` bytes; None if it now has fewer, or can't be read."""
+    h = hashlib.sha1()
+    try:
+        with path.open("rb") as f:
+            while n:
+                b = f.read(min(n, _CHUNK))
+                if not b:
+                    return None
+                h.update(b)
+                n -= len(b)
+    except OSError:
+        return None
+    return h
+
+
+@dataclass
+class AppendOnlyJsonl:
+    """A jsonl file parsed incrementally, WITHOUT ever assuming it was only appended to.
+
+    Live runs append, so normally only the new bytes need parsing. But dumps also get rewritten in
+    place (eval_terminal_monitors_baseline.py re-opens eval_rollouts.jsonl with mode "w"), and the
+    rewrite can be LONGER than what was parsed — so size says nothing about append-vs-rewrite.
+    Instead ``digest`` is the sha1 of exactly the bytes parsed, and whenever stat says the file
+    changed, that same prefix of the current file is re-hashed: equal → an append, parse only the
+    tail; different or shorter → a rewrite, discard everything and re-parse from byte 0.
+
+    ``epoch`` changes on every discard: row numbers handed out under one epoch keep meaning the same
+    line until it changes. If the file changes WHILE being read (a writer mid-rewrite) the parse
+    goes round again, so it never mixes two versions of the file.
     """
 
     path: Path
+    offset: int = 0                 # bytes parsed (always a whole number of lines)
+    bad: int = 0                    # complete lines that didn't parse as JSON
+    digest: str = ""                # sha1 of bytes [0, offset)
+    epoch: str = ""
+    fid: Optional[tuple] = None     # _file_id the parse was verified against; None = verify next sync
+
+    def _clear(self) -> None:
+        raise NotImplementedError
+
+    def _take(self, raw: bytes, rec: dict, off: int) -> None:
+        raise NotImplementedError
+
+    def _discard(self) -> None:
+        self._clear()
+        self.offset, self.bad, self.digest = 0, 0, ""
+        self.epoch = uuid.uuid4().hex[:12]
+
+    def sync(self) -> bool:
+        """Make the parse match the file on disk. Returns True if anything changed."""
+        changed = False
+        for _ in range(5):
+            fid = _file_id(self.path)
+            if fid is None:
+                changed |= self.offset > 0
+                if self.offset or not self.epoch:
+                    self._discard()
+                self.fid = None
+                return changed
+            if fid == self.fid:
+                return changed
+            h = _hash_prefix(self.path, self.offset)
+            if h is None or h.hexdigest() != self.digest:
+                changed |= self.offset > 0
+                self._discard()
+                h = hashlib.sha1()
+            off = self.offset
+            try:
+                with self.path.open("rb") as f:
+                    f.seek(off)
+                    for raw in f:
+                        if not raw.endswith(b"\n"):
+                            break  # partial line: a live run is mid-write, pick it up next sync
+                        s = raw.strip()
+                        if s:
+                            try:
+                                rec = json.loads(s)
+                            except Exception:
+                                self.bad += 1  # interleaved/spliced writes happen; skip like coupling._read_jsonl
+                                rec = None
+                            if isinstance(rec, dict):
+                                self._take(raw, rec, off)
+                        h.update(raw)
+                        off += len(raw)
+            except OSError:
+                pass
+            changed |= off != self.offset
+            self.offset, self.digest = off, h.hexdigest()
+            if _file_id(self.path) == fid:
+                self.fid = fid
+                return changed
+            # modified while being read: go round — the prefix check tells an append from a rewrite
+        # still changing after every retry: keep the parse only if it IS the file's current prefix
+        self.fid = None
+        h = _hash_prefix(self.path, self.offset)
+        if h is None or h.hexdigest() != self.digest:
+            changed |= self.offset > 0
+            self._discard()
+        return changed
+
+
+@dataclass
+class JsonlTail(AppendOnlyJsonl):
+    """Whole-file jsonl reader for the small per-step metrics files."""
+
     rows: list[dict] = field(default_factory=list)
-    offset: int = 0
-    bad: int = 0
+
+    def _clear(self) -> None:
+        self.rows = []  # a new list: a request holding the old one keeps a consistent (old) view
+
+    def _take(self, raw: bytes, rec: dict, off: int) -> None:
+        self.rows.append(rec)
 
     def refresh(self) -> bool:
-        """Read any new complete lines. Returns True if anything changed."""
-        st = _stat(self.path)
-        if st is None:
-            changed = bool(self.rows)
-            self.rows, self.offset, self.bad = [], 0, 0
-            return changed
-        size, _ = st
-        if size < self.offset:  # truncated / rewritten
-            self.rows, self.offset, self.bad = [], 0, 0
-        if size == self.offset:
-            return False
-        with self.path.open("rb") as f:
-            f.seek(self.offset)
-            off = self.offset
-            for raw in f:
-                if not raw.endswith(b"\n"):
-                    break  # partial line: a live run is mid-write, pick it up next refresh
-                off += len(raw)
-                s = raw.strip()
-                if not s:
-                    continue
-                try:
-                    rec = json.loads(s)
-                except Exception:
-                    self.bad += 1  # interleaved/spliced writes happen; skip like coupling._read_jsonl
-                    continue
-                if isinstance(rec, dict):
-                    self.rows.append(rec)
-            self.offset = off
-        return True
+        return self.sync()
 
 
 def _summarize(rec: dict, off: int, length: int) -> dict:
@@ -226,78 +317,75 @@ def _summarize(rec: dict, off: int, length: int) -> dict:
 
 
 @dataclass
-class RolloutIndex:
+class RolloutIndex(AppendOnlyJsonl):
     """Byte-offset index over one rollout dump. Built lazily, extended incrementally, cached."""
 
-    path: Path
     entries: list[dict] = field(default_factory=list)
-    offset: int = 0
-    bad: int = 0
     built: bool = False
-    building: bool = False
     seconds: float = 0.0
 
-    def refresh(self, cache: "IndexCache | None" = None) -> bool:
-        st = _stat(self.path)
-        if st is None:
-            return False
-        size, mtime = st
-        if size < self.offset:
-            self.entries, self.offset, self.bad = [], 0, 0
-        if not self.built and cache is not None:
-            cached = cache.load(self.path, size)
-            if cached is not None:
-                self.entries, self.offset, self.bad = cached["entries"], cached["offset"], cached.get("bad", 0)
-        if size == self.offset and self.built:
-            return False
-        t0 = time.perf_counter()
-        grew = size > self.offset
-        if grew:
-            with self.path.open("rb") as f:
-                f.seek(self.offset)
-                off = self.offset
-                for raw in f:
-                    if not raw.endswith(b"\n"):
-                        break
-                    ln = len(raw)
-                    s = raw.strip()
-                    if s:
-                        try:
-                            rec = json.loads(s)
-                        except Exception:
-                            self.bad += 1
-                            rec = None
-                        if isinstance(rec, dict):
-                            self.entries.append(_summarize(rec, off, ln))
-                    off += ln
-                self.offset = off
-        self.built = True
-        self.seconds = time.perf_counter() - t0
-        if cache is not None and grew:
-            cache.save(self.path, size, {"entries": self.entries, "offset": self.offset, "bad": self.bad})
-        return grew
+    def _clear(self) -> None:
+        self.entries = []  # a new list: views handed out earlier keep their (old) entries intact
 
-    def read(self, i: int) -> Optional[dict]:
+    def _take(self, raw: bytes, rec: dict, off: int) -> None:
+        self.entries.append({**_summarize(rec, off, len(raw)), "crc": zlib.crc32(raw)})
+
+    def refresh(self, cache: "IndexCache | None" = None) -> None:
+        if not self.built and cache is not None:
+            st = cache.load(self.path)
+            if st is not None:  # adopted unverified (fid None): the sync below checks it against the file
+                self.entries, self.offset, self.bad = st["entries"], st["offset"], st["bad"]
+                self.digest, self.epoch = st["digest"], st["epoch"]
+        t0 = time.perf_counter()
+        changed = self.sync()
+        self.seconds = time.perf_counter() - t0
+        self.built = True
+        if cache is not None and changed:
+            cache.save(self.path, {"entries": self.entries, "offset": self.offset, "bad": self.bad,
+                                   "digest": self.digest, "epoch": self.epoch})
+
+    def view(self) -> "IndexView":
+        return IndexView(self.path, list(self.entries), self.epoch, self.bad, self.seconds)
+
+
+@dataclass(frozen=True)
+class IndexView:
+    """One request's snapshot of a RolloutIndex. Entry ``i`` names the same rollout for as long as
+    ``epoch`` is unchanged, and a read returns None unless the bytes at the entry's offset are still
+    exactly the ones that were indexed (same length + crc32) — so a rewrite between indexing and
+    reading can never serve a different rollout, or a spliced one, under an old entry."""
+
+    path: Path
+    entries: list[dict]
+    epoch: str
+    bad: int
+    seconds: float
+
+    def read_raw(self, i: int) -> Optional[bytes]:
         if not (0 <= i < len(self.entries)):
             return None
         e = self.entries[i]
-        with self.path.open("rb") as f:
-            f.seek(e["off"])
-            raw = f.read(e["len"])
         try:
-            return json.loads(raw)
+            with self.path.open("rb") as f:
+                f.seek(e["off"])
+                raw = f.read(e["len"])
+        except OSError:
+            return None
+        return raw if len(raw) == e["len"] and zlib.crc32(raw) == e["crc"] else None
+
+    def read(self, i: int) -> Optional[dict]:
+        raw = self.read_raw(i)
+        try:
+            return json.loads(raw) if raw is not None else None
         except Exception:
             return None
 
-    def read_text(self, i: int) -> str:
-        e = self.entries[i]
-        with self.path.open("rb") as f:
-            f.seek(e["off"])
-            return f.read(e["len"]).decode("utf-8", "replace")
-
 
 class IndexCache:
-    """On-disk cache of rollout indexes, keyed by absolute path + file size."""
+    """On-disk cache of rollout indexes, keyed by absolute path. A cached index is only ever a
+    starting point: RolloutIndex re-verifies it against the file (prefix sha1) before using it."""
+
+    KEYS = ("entries", "offset", "bad", "digest", "epoch")
 
     def __init__(self, root: Optional[Path]):
         self.root = root
@@ -306,28 +394,26 @@ class IndexCache:
 
     def _p(self, path: Path) -> Path:
         h = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:16]
-        return self.root / f"{path.name}.{h}.json"  # type: ignore[union-attr]
+        return self.root / f"{path.name}.{h}.v2.json"  # type: ignore[union-attr]
 
-    def load(self, path: Path, size: int) -> Optional[dict]:
+    def load(self, path: Path) -> Optional[dict]:
         if self.root is None:
             return None
-        p = self._p(path)
         try:
-            d = json.loads(p.read_text())
+            d = json.loads(self._p(path).read_text())
         except Exception:
             return None
-        # Only reuse a cache that covers a PREFIX of the current file (append-only growth).
-        if not isinstance(d, dict) or d.get("indexed_size", -1) > size:
+        if not isinstance(d, dict) or any(k not in d for k in self.KEYS):
             return None
         return d
 
-    def save(self, path: Path, size: int, payload: dict) -> None:
+    def save(self, path: Path, payload: dict) -> None:
         if self.root is None:
             return
         p = self._p(path)
         try:
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps({**payload, "indexed_size": size, "path": str(path)}))
+            tmp = p.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps({**payload, "path": str(path)}))
             tmp.replace(p)
         except Exception:
             pass
@@ -350,7 +436,8 @@ class Run:
     train: JsonlTail = None          # type: ignore[assignment]
     eval: JsonlTail = None           # type: ignore[assignment]
     indexes: dict[str, RolloutIndex] = field(default_factory=dict)
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.Lock = field(default_factory=threading.Lock)       # guards the rollout indexes
+    meta_lock: threading.Lock = field(default_factory=threading.Lock)  # guards run_info/config + metrics tails
 
 
 class Store:
@@ -391,14 +478,19 @@ class Store:
             self.last_scan = time.time()
 
     def _refresh_run(self, run: Run) -> None:
-        info_p, cfg_p = run.dir / "run_info.json", run.dir / "config.json"
-        stat = (_stat(info_p), _stat(cfg_p))
-        if stat != run.info_stat:
-            run.run_info = _read_json(info_p) or {}
-            run.config = _read_json(cfg_p) or (run.run_info.get("config") or {})
-            run.info_stat = stat
-        run.train.refresh()
-        run.eval.refresh()
+        with run.meta_lock:  # scan() and request threads both get here; two syncs of one tail would double its rows
+            info_p, cfg_p = run.dir / "run_info.json", run.dir / "config.json"
+            stat = (_file_id(info_p), _file_id(cfg_p))
+            if stat != run.info_stat:
+                info, cfg = _read_json(info_p), _read_json(cfg_p)
+                run.run_info = info if isinstance(info, dict) else {}
+                run.config = (cfg if isinstance(cfg, dict) else None) or (run.run_info.get("config") or {})
+                # Settle only on a clean read: a file caught mid-write parses as nothing (or changes
+                # under us) — leave info_stat unset so it is re-read on the next refresh.
+                clean = all(fid is None or isinstance(d, dict) for fid, d in zip(stat, (info, cfg)))
+                run.info_stat = stat if clean and (_file_id(info_p), _file_id(cfg_p)) == stat else ()
+            run.train.refresh()
+            run.eval.refresh()
 
     def get(self, rid: str) -> Optional[Run]:
         with self.lock:
@@ -411,7 +503,9 @@ class Store:
             self._refresh_run(run)
         return run
 
-    def index(self, run: Run, source: str) -> Optional[RolloutIndex]:
+    def index(self, run: Run, source: str, reverify: bool = False) -> Optional[IndexView]:
+        """A verified-current snapshot of one rollout dump's index. ``reverify`` re-checks the file
+        even if stat looks unchanged (a read found bytes that no longer match what was indexed)."""
         fname = SOURCES.get(source, (None, None))[0]
         if fname is None:
             return None
@@ -423,8 +517,10 @@ class Store:
             if idx is None:
                 idx = RolloutIndex(path)
                 run.indexes[source] = idx
+            if reverify:
+                idx.fid = None
             idx.refresh(self.cache)
-            return idx
+            return idx.view()
 
     # -- serialization -----------------------------------------------------------------------
 
@@ -469,7 +565,7 @@ class Store:
                 idx = run.indexes.get(key)
                 sources[key] = {
                     "file": fname, "desc": desc, "size": st[0], "mtime": st[1],
-                    "indexed": (idx.built and idx.offset >= st[0]) if idx else False,
+                    "indexed": (idx.built and idx.fid is not None and idx.fid == _file_id(run.dir / fname)) if idx else False,
                     "n": len(idx.entries) if idx else None,
                 }
         plots = sorted(str(p.relative_to(run.dir)) for p in run.dir.rglob("*.png"))
@@ -538,6 +634,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _err(self, msg: str, code: int = 400) -> None:
         self._json({"error": msg}, code)
+
+    def _stale(self) -> None:
+        self._json({"error": "this rollout dump was rewritten on disk since the list was loaded — reloaded the list",
+                    "stale": True}, 409)
 
     def _run(self, q: dict) -> Optional[Run]:
         rid = (q.get("id") or [""])[0]
@@ -653,36 +753,47 @@ class Handler(BaseHTTPRequestHandler):
         offset = qp("offset", int, 0) or 0
         order = (q.get("order") or ["asc"])[0]
 
-        sel = []
-        for i, e in enumerate(idx.entries):
+        def keep(e: dict) -> bool:
             if step is not None and e.get("step") != step:
-                continue
+                return False
             if behavior in ("0", "1") and bool(e.get("behavior_present")) != (behavior == "1"):
-                continue
+                return False
             if unparsed in ("0", "1") and bool(e.get("unparsed")) != (unparsed == "1"):
-                continue
+                return False
             if unparsed in ("inv", "val") and (e.get("invalid_reason") is not None) != (unparsed == "inv"):
-                continue
+                return False
             if mon:
                 m = (e.get("monitors") or {}).get(mon)
                 s = (m or {}).get("score")
                 if s is None:
-                    continue
+                    return False
                 if mon_min is not None and s < mon_min:
-                    continue
+                    return False
                 if mon_max is not None and s > mon_max:
-                    continue
-            sel.append(i)
+                    return False
+            return True
 
         scanned = 0
-        if text:
-            needle = text.lower()
-            hits = []
+        for _ in range(3):
+            sel = [i for i, e in enumerate(idx.entries) if keep(e)]
+            if not text:
+                break
+            needle, hits, scanned = text.lower(), [], 0
             for i in sel:
                 scanned += 1
-                if needle in idx.read_text(i).lower():
+                raw = idx.read_raw(i)
+                if raw is None:  # the dump changed on disk since it was indexed: re-index, search again
+                    break
+                if needle in raw.decode("utf-8", "replace").lower():
                     hits.append(i)
-            sel = hits
+            else:
+                sel = hits
+                break
+            idx = self.store.index(run, source, reverify=True)
+            if idx is None:
+                return self._err("rollout dump disappeared", 404)
+        else:
+            return self._stale()
         if order == "desc":
             sel = sel[::-1]
         page = sel[offset: offset + limit]
@@ -697,7 +808,8 @@ class Handler(BaseHTTPRequestHandler):
             "steps": steps, "monitor_names": monitor_names,
             "n_indexed": len(idx.entries), "bad_lines": idx.bad,
             "file": idx.path.name, "index_seconds": round(idx.seconds, 2), "searched": scanned,
-            "entries": [{**{k: v for k, v in idx.entries[i].items() if k not in ("off", "len")}, "i": i}
+            "epoch": idx.epoch,
+            "entries": [{**{k: v for k, v in idx.entries[i].items() if k not in ("off", "len", "crc")}, "i": i}
                         for i in page],
         })
 
@@ -713,10 +825,16 @@ class Handler(BaseHTTPRequestHandler):
             i = int((q.get("i") or ["0"])[0])
         except ValueError:
             return self._err("bad index")
-        rec = idx.read(i)
-        if rec is None:
+        epoch = (q.get("epoch") or [""])[0]  # the list's epoch: its row numbers only mean anything in it
+        if epoch and epoch != idx.epoch:
+            return self._stale()
+        if not (0 <= i < len(idx.entries)):
             return self._err("no such rollout", 404)
-        self._json({"i": i, "record": _nan_safe(rec)})
+        rec = idx.read(i)
+        if rec is None:  # its bytes are no longer the ones indexed: the file changed since
+            self.store.index(run, source, reverify=True)
+            return self._stale()
+        self._json({"i": i, "epoch": idx.epoch, "record": _nan_safe(rec)})
 
     def _route_scoredist(self, q: dict) -> None:
         """Every monitor's scores at ONE step, split by the oracle (behavior present / absent).
@@ -1016,7 +1134,7 @@ async function api(path, params={}) {
   for (const [k,v] of Object.entries(params)) if (v !== null && v !== undefined && v !== '') u.searchParams.set(k, v);
   const r = await fetch(u);
   const j = await r.json();
-  if (j && j.error) throw new Error(j.error);
+  if (j && j.error) { const err = new Error(j.error); err.body = j; throw err; }
   return j;
 }
 function toast(msg) {
@@ -1030,7 +1148,9 @@ const S = {
   runs: [], filter: '', sel: null, tab: 'overview', detail: null,
   changed: new Set(),                 // runs that grew since the last poll
   ro: { source:'eval', step:'', behavior:'', unparsed:'', q:'', mon:'', mon_min:'', mon_max:'',
-        offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false },
+        offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false,
+        selEpoch:null,   // the dump version (server epoch) the selected row number belongs to
+        seq:0 },         // latest list request: an older response arriving late is dropped
   metricSel: { train:null, eval:null }, hidden: {}, foldThinking: false,
   sd: { kind:'', step:'', bins:20, norm:true, data:null, loading:false },
 };
@@ -1093,7 +1213,7 @@ async function selectRun(id, keepTab) {
   S.sel = id; S.changed.delete(id);
   if (!keepTab) { S.ro = {...S.ro, step:'', q:'', offset:0, sel:null, rec:null, list:null};
                   S.sd = {...S.sd, kind:'', step:'', data:null}; }
-  else S.sd.data = null;  // refetch: a live run may have new steps
+  else { S.sd.data = null; S.ro.list = null; }  // refetch: a live run may have new steps, a dump may be rewritten
   $('#runtitle').textContent = id;
   renderRuns();
   $('#tabs').textContent = '';
@@ -1611,28 +1731,41 @@ function renderRollouts(c) {
     el('button', {class:'btn small', onclick:() => { if (S.ro.offset + S.ro.limit < L.total) { S.ro.offset += S.ro.limit; loadRollouts(); } }}, 'next →'));
   list.appendChild(pager);
   if (S.ro.rec) renderRolloutDetail(detail, S.ro.rec);
+  else if (S.ro.sel !== null) detail.appendChild(el('div', {class:'muted small'}, el('span', {class:'spin'}), ' loading…'));
   else detail.appendChild(el('div', {class:'muted small'}, 'pick a rollout to see its full prompt, CoT and response'));
 }
 async function loadRollouts() {
   S.ro.loading = true;
   const {source, step, behavior, unparsed, q, mon, mon_min, mon_max, offset, limit, order} = S.ro;
-  const want = S.sel;
+  const want = S.sel, seq = ++S.ro.seq;
   try {
     const j = await api('/api/rollouts', {id:want, source, step, behavior, unparsed, q, mon, mon_min, mon_max, offset, limit, order});
-    if (S.sel !== want) return;
+    if (S.sel !== want || seq !== S.ro.seq || S.ro.source !== source) return;
+    if (S.ro.sel !== null && S.ro.selEpoch !== j.epoch) {
+      // the dump was rewritten: the open rollout's row number now names a different line (or none)
+      S.ro.sel = null; S.ro.rec = null; S.ro.selEpoch = null;
+      toast('this rollout dump was rewritten on disk — closed the open rollout');
+    }
     S.ro.list = j;
-  } catch (e) { toast('rollouts: ' + e.message); }
+  } catch (e) { if (seq === S.ro.seq) toast('rollouts: ' + e.message); }
   S.ro.loading = false;
   if (S.tab === 'rollouts') renderTab();
 }
 async function openRollout(i) {
-  S.ro.sel = i;
-  const want = S.sel, src = S.ro.source;
+  const want = S.sel, src = S.ro.source, epoch = S.ro.list && S.ro.list.epoch;
+  S.ro.sel = i; S.ro.selEpoch = epoch; S.ro.rec = null;
+  if (S.tab === 'rollouts') renderTab();
+  const current = () => S.sel === want && S.ro.source === src && S.ro.sel === i && S.ro.selEpoch === epoch;
   try {
-    const j = await api('/api/rollout', {id:want, source:src, i});
-    if (S.sel !== want) return;
+    const j = await api('/api/rollout', {id:want, source:src, i, epoch});
+    if (!current()) return;  // superseded by another click / list reload while in flight
     S.ro.rec = j.record;
-  } catch (e) { toast('rollout: ' + e.message); return; }
+  } catch (e) {
+    if (!current()) return;
+    toast('rollout: ' + e.message);
+    if (e.body && e.body.stale) { S.ro.sel = null; S.ro.selEpoch = null; S.ro.list = null; if (S.tab === 'rollouts') renderTab(); }
+    return;
+  }
   if (S.tab === 'rollouts') renderTab();
 }
 function textBlock(label, text, opts={}) {
