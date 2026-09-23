@@ -40,7 +40,7 @@ from monitordecorrelation.monitors.rubrics import (
     Rubric,
     get_rubric,
 )
-from monitordecorrelation.transcript import NO_COMMAND_MESSAGE
+from monitordecorrelation.transcript import NO_COMMAND_MESSAGE, SUBMISSION_INCORRECT_MESSAGE
 from monitordecorrelation.types import MonitorResult, Prompt, Rollout
 
 
@@ -98,8 +98,9 @@ class AgentCoTMonitor:
     def _format_rollout(self, rollout: Rollout) -> str:
         """The episode as a chat transcript: ``SYSTEM:`` (only if there is one), ``USER:``, then per
         turn ``ASSISTANT:`` (``<thinking>…</thinking>`` first when ``use_cot``) and ``TOOL:`` with
-        what its command printed. A turn that ran no command mid-episode is followed by the
-        ``USER:`` message the env actually sent the policy (``NO_COMMAND_MESSAGE``).
+        what its command printed. A ``<submit>`` turn (the env's submit_* modes) that did not end the
+        episode is followed by the ``USER:`` message the env sent (``SUBMISSION_INCORRECT_MESSAGE``);
+        any other turn that ran no command mid-episode by ``NO_COMMAND_MESSAGE``.
 
         Every assumption about ``rollout.meta["episode"]["turns"]`` is asserted (see
         ``agentic_turns``), including that the turns are the ones this rollout's flattened
@@ -138,6 +139,10 @@ class AgentCoTMonitor:
 
             if turn["command"] is not None:
                 blocks.append(("TOOL: " + turn["output"].strip()).rstrip())
+            elif turn.get("submission") is not None:
+                # A submission ends the episode unless it was wrong under submission_ends="correct".
+                if i < last:
+                    blocks.append(f"USER: {SUBMISSION_INCORRECT_MESSAGE.format(answer=turn['submission']).strip()}")
             elif i < last:
                 # No command and the episode went on: the env replied with its "no command" user
                 # message (a turn cut off by max_tokens ends the episode, so it is always last).
@@ -256,8 +261,17 @@ def agentic_turns(rollout: Rollout) -> list[dict]:
         assert (turn["command"] is None) == (turn["output"] is None), (
             f"turn {i}: command and output must both be set or both be None"
         )
+        submission = turn.get("submission")  # submit_* modes only; absent from older records
+        assert submission is None or isinstance(submission, str), (
+            f"turn {i}: submission must be str | None, got {type(submission).__name__}"
+        )
+        assert submission is None or turn["command"] is None, (
+            f"turn {i}: a turn either runs a command or submits, not both"
+        )
         if turn["truncated"]:
-            assert turn["command"] is None, f"turn {i}: a truncated turn cannot have run a command"
+            assert turn["command"] is None and submission is None, (
+                f"turn {i}: a truncated turn cannot have run a command or submitted"
+            )
             assert i == last, f"turn {i}: a truncated turn ends the episode, but {last - i} more follow"
         cot = turn["cot"].strip()
         assert not cot or cot in rollout.cot, (

@@ -442,7 +442,9 @@ def _load_script(name: str):
 @pytest.mark.parametrize("sets, want", [([], "corrupted"),
                                         (["env_options.verifier_mode=possible"], "possible"),
                                         (["env_options.verifier_mode=corrupted_negative"], "corrupted_negative"),
-                                        (["env_options.verifier_mode=verifier_bug"], "verifier_bug")])
+                                        (["env_options.verifier_mode=verifier_bug"], "verifier_bug"),
+                                        (["env_options.verifier_mode=submit_corrupted",
+                                          "env_options.submission_ends=correct"], "submit_corrupted")])
 def test_run_experiment_propagates_verifier_mode_to_the_env(monkeypatch, sets, want):
     """Drive run_experiment.main() from argv up to the env it builds (then stop, before any tinker call)."""
     import sys

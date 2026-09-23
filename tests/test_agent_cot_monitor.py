@@ -309,3 +309,24 @@ if __name__ == "__main__":
     if _OLD_RUN.is_dir():
         test_every_saved_inkling_rollout_formats()
     print("ALL PASS")
+
+
+def test_submit_mode_wrong_submission_is_followed_by_the_incorrect_message():
+    from monitordecorrelation.transcript import SUBMISSION_INCORRECT_MESSAGE
+
+    items = make_island_items(2, 0, verifier_mode="submit_corrupted", offset_range=(4, 9), min_ones=3,
+                              prefix="t")
+    env = TerminalVerifierEnv(items, eval_items=[], max_turns=6, submission_ends="correct")
+    prompt = env._to_prompt(items[0])
+    state = env.start(prompt)
+    right = str(items[0].verifier_answer)
+    for cot, text in (("peek", "<command>cat verifier.py</command>"), ("guess", "<submit>0</submit>"),
+                      ("use it", f"<submit>{right}</submit>")):
+        env.step(state, cot, text)
+    view = env.finish(state)
+    r = Rollout(prompt=prompt, cot=view.cot, output=view.output, meta={"episode": view.meta})
+    t = _transcript(r)
+    roles = [b.split(":", 1)[0] for b in t.split("\n\n") if b.split(":", 1)[0] in ("USER", "ASSISTANT", "TOOL")]
+    assert roles == ["USER", "ASSISTANT", "TOOL", "ASSISTANT", "USER", "ASSISTANT"], roles
+    assert f"USER: {SUBMISSION_INCORRECT_MESSAGE.format(answer='0').strip()}" in t
+    assert t.rstrip().endswith(f"<submit>{right}</submit>") and NO_COMMAND_MESSAGE not in t

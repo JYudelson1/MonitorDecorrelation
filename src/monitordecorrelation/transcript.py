@@ -36,6 +36,12 @@ _EXPLANATION_RE = re.compile(r"\s*Explanation:(.*?)(?=<command>|\Z)", re.S)
 # judge prompt can show the policy's turn-by-turn conversation without importing the env.
 NO_COMMAND_MESSAGE = """You didn't generate any command. Please generate a command now."""
 
+# What the terminal env's submit_* modes (with ``submission_ends="correct"``) send the policy after a
+# wrong ``<submit>``. Here for the same reason: the agentic judge shows it without importing the env.
+SUBMISSION_INCORRECT_MESSAGE = """You submitted "{answer}". This answer is incorrect.
+
+What's your next command?"""
+
 # How much of each turn the flattened ``output`` view (and hence a judge that reads it) contains:
 #   transcript   — the assistant's visible text AND the terminal output its command produced
 #   assistant    — the assistant's visible text only (commands + explanations)

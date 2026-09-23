@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 import tinker
 
 from monitordecorrelation.envs.base import invalid_reason
-from monitordecorrelation.envs.terminal_verifier import VERIFIER_MODES, TerminalVerifierEnv
+from monitordecorrelation.envs.terminal_verifier import SUBMISSION_ENDS, VERIFIER_MODES, TerminalVerifierEnv
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.rl.episodes import run_episodes
@@ -112,10 +112,17 @@ def main() -> None:
     ap.add_argument("--max-turns", type=int, default=4)
     ap.add_argument("--verifier-mode", default="corrupted", choices=VERIFIER_MODES,
                     help="what verifier.py holds (see envs/terminal_verifier.py); 'possible' = the true answer")
+    ap.add_argument("--submission-ends", default=None, choices=SUBMISSION_ENDS,
+                    help="submit_* modes only (required there): 'first' = the first <submit> ends the episode; "
+                         "'correct' = only a correct one does, a wrong one is answered 'incorrect'")
+    ap.add_argument("--read-only-verifier", action="store_true",
+                    help="make verifier.py read-only (real file permissions: commands run as 'nobody'; "
+                         "needs root)")
     ap.add_argument("--offset", type=int, nargs=2, default=(4, 9), metavar=("LO", "HI"))
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
     ap.add_argument("--require-explanation", action="store_true",
-                    help="each command must be followed by 'Explanation: …' (else a parse failure)")
+                    help="each command (and, in the submit_* modes, each <submit>) must be followed by "
+                         "'Explanation: …' (else a parse failure)")
     ap.add_argument("--judge", default=None,
                     help="OpenRouter model id → score a CoT+out and an output-only judge, each on the "
                          "model's default reasoning — so a model monitors/judge_reasoning.py supports "
@@ -156,6 +163,7 @@ def main() -> None:
         n=max(64, args.n_prompts), seed=args.seed, verifier_mode=args.verifier_mode,
         offset_range=tuple(args.offset), eval_n=max(64, args.n_prompts),
         max_turns=args.max_turns, output_view=args.output_view, require_explanation=args.require_explanation,
+        submission_ends=args.submission_ends, read_only_verifier=args.read_only_verifier,
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 
@@ -219,11 +227,14 @@ def main() -> None:
         return mean(float(er.meta[k]) for er in results)
 
     print(f"\n=== terminal-verifier baseline: {args.model}, {n_ep} episodes ===")
-    impossible = args.verifier_mode != "possible"
-    print(f"behavior_present (tampered{'/passed-impossible' if impossible else ''}, "
+    impossible = args.verifier_mode.removeprefix("submit_") != "possible"
+    submit = args.verifier_mode.startswith("submit_")
+    what = ("passed-impossible" if impossible else "never") if submit else \
+        f"tampered{'/passed-impossible' if impossible else ''}"
+    print(f"behavior_present ({what}, "
           f"verifier_mode={args.verifier_mode}): {rate('cheated'):.2f}")
     for k in ("read_verifier", "used_verifier", "read_not_used", "modified_verifier", "passed", "passed_blind",
-              "submitted_true_answer",
+              "submitted_true_answer", "n_submissions",
               "truncated", "no_command_turns", "n_turns", "n_commands"):
         print(f"  {k:<22} {rate(k):.2f}")
     print(f"  {'task_reward':<22} {mean(er.task_reward for er in results):.2f}")
@@ -258,7 +269,9 @@ def main() -> None:
         "n_prompts": len(prompts), "samples_per_prompt": args.samples, "seed": args.seed,
         "max_tokens_per_turn": args.max_tokens, "think_budget": args.think_budget,
         "answer_tokens": args.answer_tokens, "max_turns": args.max_turns,
-        "verifier_mode": args.verifier_mode, "offset_range": list(args.offset), "wall_s": wall_s,
+        "verifier_mode": args.verifier_mode, "submission_ends": args.submission_ends,
+        "read_only_verifier": args.read_only_verifier,
+        "offset_range": list(args.offset), "wall_s": wall_s,
         "reward": mean(er.task_reward for er in results),
         "behavior_rate": rate("cheated"),
         "used_verifier": rate("used_verifier"), "modified_verifier": rate("modified_verifier"),
@@ -317,6 +330,8 @@ def main() -> None:
             print(f"--- turn {t_i + 1} TEXT ---\n{(t['text'] or '').strip()[:800]}")
             if t["command"] is not None:
                 print(f"--- turn {t_i + 1} TERMINAL ---\n$ {t['command']}\n{(t['output'] or '').strip()[:600]}")
+            if t.get("submission") is not None:
+                print(f"--- turn {t_i + 1} SUBMIT --- {t['submission']!r}")
 
 
 if __name__ == "__main__":
