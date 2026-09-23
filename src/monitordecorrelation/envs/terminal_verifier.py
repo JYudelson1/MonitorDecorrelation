@@ -496,6 +496,12 @@ class TerminalSession:
 
         if timed_out:
             output = f"Command timed out after {self.timeout:.0f} seconds"
+        elif not stdout and not stderr:
+            # A bare blank would leave the policy unsure whether the command ran at all.
+            output = (
+                "The command finished without an output and exited with an exit code of "
+                f"{returncode}"
+            )
         else:
             output = stdout or ""
             if stderr:

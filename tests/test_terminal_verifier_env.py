@@ -180,6 +180,11 @@ def test_session_detects_tampering_stderr_and_timeouts():
         assert r.timed_out and "timed out" in r.output
         r = s.run("echo 'print(1.0)' > verifier.py")
         assert r.verifier_modified
+        assert r.output == (
+            "The command finished without an output and exited with an exit code of 0"
+        )
+        r = s.run("false")
+        assert r.output.endswith("exited with an exit code of 1")
         r = s.run('python verifier.py "anything"')
         assert r.verifier_value == 1.0 and r.verifier_modified
     finally:
