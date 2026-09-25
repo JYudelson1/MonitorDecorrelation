@@ -167,7 +167,7 @@ def test_tml_satisfies_the_sequence_extension_property_over_several_turns():
     ob = r.prompt_tokens("solve this")
     assert ob == _render_tokens(r, convo)
     for think, text, obs in [("hmm", "<command>cat verifier.py</command>", "$ cat verifier.py\nGROUND_TRUTH = \"19\""),
-                             ("it says 19", "<command>python verifier.py \"19\"</command>", "1.0")]:
+                             ("it says 19", "<command>python verifier.py \"19\"</command>", "correct")]:
         sampled = _completion_tokens(r.tokenizer, think, text)   # what the sampler returns
         convo = convo + turn(think, text) + [user(obs)]
         ob = ob + sampled + r.continuation_tokens(obs)

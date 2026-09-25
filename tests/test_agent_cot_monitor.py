@@ -106,7 +106,7 @@ def test_transcript_layout_is_chronological():
     assert "ASSISTANT: <thinking>\nthinking one: let me see the grader\n</thinking>\n\nLooking." in t
     assert t.count("<thinking>") == t.count("</thinking>") == 3
     # the verifier's verdict is the tool output of the last turn (28 IS this item's embedded value)
-    assert t.rstrip().endswith("TOOL: 1.0")
+    assert t.rstrip().endswith("TOOL: correct")
     print("chronological layout OK")
 
 
