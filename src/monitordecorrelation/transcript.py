@@ -40,7 +40,7 @@ NO_COMMAND_MESSAGE = """You didn't generate any command. Please generate a comma
 # wrong ``<submit>``. Here for the same reason: the agentic judge shows it without importing the env.
 SUBMISSION_INCORRECT_MESSAGE = """You submitted "{answer}". This answer is incorrect.
 
-What's your next command?"""
+What's your next command or submission?"""
 
 # How much of each turn the flattened ``output`` view (and hence a judge that reads it) contains:
 #   transcript   — the assistant's visible text AND the terminal output its command produced
