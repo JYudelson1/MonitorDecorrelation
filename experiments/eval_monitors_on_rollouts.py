@@ -35,9 +35,8 @@ from monitordecorrelation.types import MonitorResult
 load_dotenv(".env")
 
 # Candidate judges. Only models monitors.judge_reasoning supports can be built at all (any other is
-# refused, because what its reasoning setting does is unestablished) — and gemini-3.5-flash-lite
-# mandates a reasoning setting, which only a --config can give, so the no-config default is the one
-# judge that runs on its default. The historical bakeoff ladder (claude-sonnet-4.6 / haiku-4.5 /
+# refused, because what its reasoning setting does is unestablished); with no --config each runs on
+# its model's default reasoning (monitors/judge_reasoning.py). The historical bakeoff ladder (claude-sonnet-4.6 / haiku-4.5 /
 # 3-haiku, gpt-5.4 / -mini / 4o-mini, gemini-3.1-pro / 3.5-flash / 2.5-flash, deepseek-chat,
 # llama-3.3-70b, qwen3-8b / -32b) needs reasoning support implemented per model before it can re-run.
 _DEFAULT_MODELS = [

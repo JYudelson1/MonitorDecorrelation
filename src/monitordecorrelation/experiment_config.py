@@ -40,10 +40,10 @@ class CoTMonitorSpec(_Strict):
         description="judge-side reasoning: the OpenRouter `reasoning` object every call of this judge "
         "sends, validated per judge model by `monitors.judge_reasoning.resolve_reasoning` (at LOAD). "
         'gemini-2.5-flash-lite: {"enabled": false} (off) or {"max_tokens": N} (on, thinking budget N, '
-        "512 <= N < 2048); absent = the default, the smallest budget {\"max_tokens\": 512}. "
-        'gemini-3.5-flash-lite: REQUIRED (it mandates reasoning) — {"effort": "low"|"medium"|"high"} '
-        '(preferred) or {"max_tokens": N}. NB on gemini-3.5-flash-lite \'low\' behaves like no '
-        "reasoning at all — measured on blatant reward-hacking terminal transcripts, 24/40 calls came "
+        "512 <= N < 2048); absent = the default, the largest budget {\"max_tokens\": 2047}. "
+        'gemini-3.5-flash-lite (it mandates reasoning): {"effort": "low"|"medium"|"high"} (preferred) '
+        'or {"max_tokens": N}; absent = the default, {"effort": "low"}. NB on gemini-3.5-flash-lite '
+        "'low' behaves like no reasoning at all — measured on blatant reward-hacking terminal transcripts, 24/40 calls came "
         "back with `reasoning_tokens == 0` and 17/40 scored a reflexive 0, vs 0/40 at 'medium'. Any "
         "other judge model is REJECTED: reasoning support is specialized to those two.",
     )

@@ -35,8 +35,10 @@ class _Stop(Exception):
     pass
 
 
-def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypatch, tmp_path):
-    """Config file + ``--set`` → the AgentCoTMonitors this script scores with (and its run_info)."""
+@pytest.mark.parametrize("cfg_name", sorted(p.name for p in (_REPO / "experiments" / "configs").glob("terminal_verifier_*.json")))
+def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypatch, tmp_path, cfg_name):
+    """Config file + ``--set`` → the AgentCoTMonitors this script scores with (and its run_info), for
+    every terminal config: none sets ``reasoning``, so each judge runs on its model's default."""
     mod = _load_script("eval_terminal_monitors_baseline")
     seen = {}
 
@@ -61,7 +63,7 @@ def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypa
     monkeypatch.setattr(mod, "make_renderer", lambda *a, **k: None)
     monkeypatch.setattr(mod, "MonitorScorer", _Scorer)
     monkeypatch.setattr(mod, "run_episodes", _stop)
-    cfg = _REPO / "experiments" / "configs" / "terminal_verifier_control.json"
+    cfg = _REPO / "experiments" / "configs" / cfg_name
 
     def sent(*sets):
         monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(cfg),
@@ -70,7 +72,7 @@ def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypa
             mod.main()
         return {j.name: j._request_body("p")["reasoning"] for j in seen["judges"]}
 
-    assert sent() == {"g25_cot": {"max_tokens": 512}, "g25_out": {"max_tokens": 512},
+    assert sent() == {"g25_cot": {"max_tokens": 2047}, "g25_out": {"max_tokens": 2047},
                       "g35_cot": {"effort": "low"}, "g35_out": {"effort": "low"}}
     assert sent('monitors.model:gemini-2.5.reasoning={"enabled":false}',
                 'monitors.g35_out.reasoning={"effort":"medium"}') == \
@@ -87,7 +89,7 @@ def test_eval_monitors_on_rollouts_config_path_keeps_each_judges_reasoning(monke
                                       "--config", str(cfg), "--dry-run"])
     mod.main()
     out = capsys.readouterr().out
-    for name, reasoning in [("cot_only_weak", "{'enabled': False}"), ("out_strong", "{'effort': 'low'}")]:
+    for name, reasoning in [("cot_only_weak", "{'max_tokens': 2047}"), ("out_strong", "{'effort': 'low'}")]:
         line = next(ln for ln in out.splitlines() if ln.strip().startswith(f"- {name} "))
         assert f"reasoning={reasoning}" in line
 
@@ -108,4 +110,4 @@ def test_rescore_eval_rollouts_builds_judges_with_the_configs_reasoning():
     judges = mod.build_judges(str(_REPO / "experiments" / "configs" / "mbpp_inkling_sep19" / "control.json"))
     by_model = {(j.model_id, j._request_body("p")["reasoning"]["max_tokens" if j.model_id == G25 else "effort"])
                 for j in judges}
-    assert by_model == {(G25, 512), (G35, "low")}
+    assert by_model == {(G25, 2047), (G35, "low")}

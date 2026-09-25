@@ -126,7 +126,7 @@ def main() -> None:
     ap.add_argument("--judge", default=None,
                     help="OpenRouter model id → score a CoT+out and an output-only judge, each on the "
                          "model's default reasoning — so a model monitors/judge_reasoning.py supports "
-                         "AND gives a default (gemini-2.5-flash-lite); anything else is refused")
+                         "(gemini-2.5-flash-lite / gemini-3.5-flash-lite); anything else is refused")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=3, help="print this many full transcripts")
     ap.add_argument("--out", default=None, help="jsonl path (default data/runs/tv_baseline_<model>/episodes.jsonl)")

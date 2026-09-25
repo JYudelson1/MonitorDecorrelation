@@ -86,16 +86,15 @@ sends, validated **per judge model** at config load (`monitors/judge_reasoning.p
 
 | judge `model_id` | accepted `reasoning` | absent (default) |
 | --- | --- | --- |
-| `google/gemini-2.5-flash-lite` | `{"enabled": false}` (off) · `{"max_tokens": N}`, 512 ≤ N < 2048 (on, thinking budget N) | `{"max_tokens": 512}` — on, smallest budget |
-| `google/gemini-3.5-flash-lite` | `{"effort": "low"\|"medium"\|"high"}` (preferred) · `{"max_tokens": N}` | **error** — it mandates reasoning (`enabled:false` is a 400) |
+| `google/gemini-2.5-flash-lite` | `{"enabled": false}` (off) · `{"max_tokens": N}`, 512 ≤ N < 2048 (on, thinking budget N) | `{"max_tokens": 2047}` — on, largest budget |
+| `google/gemini-3.5-flash-lite` | `{"effort": "low"\|"medium"\|"high"}` (preferred) · `{"max_tokens": N}` — it mandates reasoning (`enabled:false` is a 400) | `{"effort": "low"}` |
 | **any other model** | **error** | **error** |
 
 512 is Google's minimum budget: a smaller one is accepted but clamped up (measured: budgets 1/128/511
 think as long as 512), so it is refused rather than let mean something else. Any other judge model is
 refused outright — even with no `reasoning` key — because what a reasoning setting does on it has not
-been established; implement its support in `resolve_reasoning` first. The shipped configs set it
-explicitly: `{"max_tokens": 512}` on the gemini-2.5 judges of the Inkling-Small runs, `{"enabled":
-false}` on those of the Qwen3-8B runs, `{"effort": "low"}` on every gemini-3.5 judge. The old keys
+been established; implement its support in `resolve_reasoning` first. No shipped config sets it, so
+every judge runs on its model's default unless overridden with `--set`. The old keys
 `reasoning_effort` / `reasoning_max_tokens` are refused with the translation (both null used to mean
 reasoning OFF). Pick it per run without forking the config — the value replaces the whole object:
 

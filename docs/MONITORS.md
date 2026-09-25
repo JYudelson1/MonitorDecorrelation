@@ -86,21 +86,25 @@ models and OpenRouter silently ignores or clamps what a model does not support:
 - **`google/gemini-2.5-flash-lite`** — reasoning optional. `{"enabled": false}` = off (answers the
   `SCORE:` line straight from the content channel; 10/10 at 100 on a blatant terminal transcript).
   `{"max_tokens": N}` = on with thinking budget N, **512 ≤ N < 2048**. **Default (key absent):
-  `{"max_tokens": 512}`**, the smallest budget. 512 is Google's minimum: measured on OpenRouter
+  `{"max_tokens": 2047}`**, the largest budget. 512 is Google's minimum: measured on OpenRouter
   (2026-09-22, one easy prompt), budgets 1 / 128 / 511 are accepted but think just as long as 512
   (380–410 reasoning tokens on every call), i.e. clamped up — so they are refused. N must stay below the judge's
   completion cap (`JUDGE_MAX_TOKENS` = 2048), which covers thinking and answer. `effort` is refused
   (OpenRouter would turn it into some budget).
 - **`google/gemini-3.5-flash-lite`** — reasoning **mandatory** (`{"enabled": false}` is a 400), so it
-  must be set: `{"effort": "low" | "medium" | "high"}` (**preferred**) or `{"max_tokens": N}`. A missing
-  setting fails at load (it used to fail as a 400 on the first call).
+  is always on: `{"effort": "low" | "medium" | "high"}` (**preferred**) or `{"max_tokens": N}`.
+  **Default (key absent): `{"effort": "low"}`** — see the table below for what 'low' does.
 - **Any other model is refused**, whatever its `reasoning` — including none, since even the default
   sends *some* reasoning setting whose effect on that model nobody has checked. To use a new judge,
   establish what its reasoning object does and add it to `resolve_reasoning`.
 
-The shipped configs: gemini-2.5 judges `{"max_tokens": 512}` on the Inkling-Small runs and
-`{"enabled": false}` on the Qwen3-8B runs; every gemini-3.5 judge `{"effort": "low"}` (unchanged from
-the old `reasoning_effort: "low"`, same request body). The old keys `reasoning_effort` /
+No shipped config sets `reasoning` (since 2026-09-25): every gemini-2.5 judge runs on
+`{"max_tokens": 2047}` and every gemini-3.5 judge on `{"effort": "low"}`, unless `--set` overrides it.
+At 2047 the thinking leaves little room under the 2048 cap: in the verifier-bug terminal runs
+(`data/runs/*budget-2047*`, ~40k gemini-2.5 calls) the median call used ~1.6–1.9k reasoning tokens and
+~3% ended `finish_reason=length`, read as-is (see `monitors/openrouter.py`).
+Earlier runs set it per config (gemini-2.5: 512 on Inkling-Small runs, off on Qwen3-8B runs); their
+`run_info.json` records what each judge actually sent. The old keys `reasoning_effort` /
 `reasoning_max_tokens` are refused with the translation rather than reinterpreted — under them "both
 null" meant reasoning OFF, which is no longer gemini-2.5's default.
 

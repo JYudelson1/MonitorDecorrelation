@@ -15,11 +15,15 @@ models (and OpenRouter silently ignores or clamps what a model does not support)
   budgets of 1, 128 and 511 are accepted but think just as long as 512 (~390 reasoning tokens on the
   same prompt) — Google clamps them up to its 512 minimum, so a smaller value would not mean what it
   says. N must also stay below ``JUDGE_MAX_TOKENS``, the completion cap that covers thinking AND answer.
-* ``None`` (key absent) — the default, ``GEMINI_25_DEFAULT`` = the smallest budget, ``{"max_tokens": 512}``.
+* ``None`` (key absent) — the default, ``GEMINI_25_DEFAULT`` = the largest budget,
+  ``{"max_tokens": 2047}``.
 
-``google/gemini-3.5-flash-lite`` — reasoning is MANDATORY (``{"enabled": false}`` is a 400), so it must
-be configured: ``{"effort": "low" | "medium" | "high"}`` (preferred) or ``{"max_tokens": N}`` (N ≥ 1; not
-reliably honoured when small — see docs/MONITORS.md).
+``google/gemini-3.5-flash-lite`` — reasoning is MANDATORY (``{"enabled": false}`` is a 400):
+``{"effort": "low" | "medium" | "high"}`` (preferred) or ``{"max_tokens": N}`` (N ≥ 1; not reliably
+honoured when small — see docs/MONITORS.md).
+
+* ``None`` (key absent) — the default, ``GEMINI_35_DEFAULT`` = ``{"effort": "low"}``. NB on this model
+  'low' behaves much like no reasoning at all (see docs/MONITORS.md); 'medium' is the fix.
 
 **Any other model is refused**, whatever its ``reasoning`` — including none, which would still send
 some reasoning setting whose meaning for that model nobody has checked. Supporting a new judge means
@@ -37,7 +41,9 @@ SUPPORTED_JUDGES = (GEMINI_25_FLASH_LITE, GEMINI_35_FLASH_LITE)
 JUDGE_MAX_TOKENS = 2048
 
 GEMINI_25_MIN_BUDGET = 512
-GEMINI_25_DEFAULT: dict = {"max_tokens": GEMINI_25_MIN_BUDGET}
+GEMINI_25_DEFAULT: dict = {"max_tokens": 2047}  # the largest budget below JUDGE_MAX_TOKENS
+
+GEMINI_35_DEFAULT: dict = {"effort": "low"}
 
 REASONING_EFFORTS = ("low", "medium", "high")
 
@@ -83,11 +89,7 @@ def resolve_reasoning(model_id: str, reasoning: dict | None, *, monitor: str) ->
 
     if model_id == GEMINI_35_FLASH_LITE:
         if reasoning is None:
-            raise ValueError(
-                f"{where}: this model mandates reasoning (it rejects {{\"enabled\": false}} with a "
-                'fatal 400), so reasoning must be set — {"effort": "low"|"medium"|"high"} '
-                '(preferred) or {"max_tokens": N}'
-            )
+            return dict(GEMINI_35_DEFAULT)
         if set(reasoning) == {"effort"}:
             if reasoning["effort"] not in REASONING_EFFORTS:
                 raise ValueError(
@@ -102,7 +104,8 @@ def resolve_reasoning(model_id: str, reasoning: dict | None, *, monitor: str) ->
             return {"max_tokens": n}
         raise ValueError(
             f"{where}: unsupported reasoning {reasoning!r}. This model mandates reasoning: use "
-            '{"effort": "low"|"medium"|"high"} (preferred) or {"max_tokens": N}'
+            '{"effort": "low"|"medium"|"high"} (preferred) or {"max_tokens": N}; omit the key for '
+            f"the default, {GEMINI_35_DEFAULT}"
         )
 
     raise ValueError(

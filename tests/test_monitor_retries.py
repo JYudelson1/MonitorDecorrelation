@@ -121,7 +121,7 @@ def test_every_400_is_fatal_and_carries_the_providers_explanation(monitor, no_sl
             monitor._call("p")
         assert calls["n"] == 1                  # no retry
         assert body[:20] in str(e.value)        # provider's reason is not swallowed
-        assert monitor.reasoning == {"max_tokens": 512}   # never mutated at runtime
+        assert monitor.reasoning == {"max_tokens": 2047}  # never mutated at runtime
 
 
 def test_reasoning_is_static_configuration(monkeypatch):
@@ -129,7 +129,8 @@ def test_reasoning_is_static_configuration(monkeypatch):
     call already carries it — and a setting the model would not honour raises right there."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     g25, g35 = "google/gemini-2.5-flash-lite", "google/gemini-3.5-flash-lite"
-    assert cm.CoTMonitor("j", g25, behavior="deception").reasoning == {"max_tokens": 512}  # default
+    assert cm.CoTMonitor("j", g25, behavior="deception").reasoning == {"max_tokens": 2047}  # default
+    assert cm.CoTMonitor("j", g35, behavior="deception").reasoning == {"effort": "low"}     # default
     assert cm.CoTMonitor("j", g25, behavior="deception",
                          reasoning={"enabled": False}).reasoning == {"enabled": False}
     assert cm.CoTMonitor("j", g25, behavior="deception",
@@ -143,7 +144,6 @@ def test_reasoning_is_static_configuration(monkeypatch):
                        (g25, {"max_tokens": 2048}),     # no room left for the answer
                        (g25, {"effort": "low"}),        # effort is not a budget
                        (g25, {"enabled": False, "max_tokens": 512}),
-                       (g35, None),                     # mandatory reasoning
                        (g35, {"enabled": False}),
                        (g35, {"effort": "lowish"}),
                        (g35, {"effort": "low", "max_tokens": 256}),

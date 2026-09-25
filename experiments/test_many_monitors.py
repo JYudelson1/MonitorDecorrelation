@@ -35,9 +35,8 @@ from monitordecorrelation.rl.rollout import load_saved_rollouts, sample_rollouts
 load_dotenv(".env")
 
 # Default candidates. A judge can only be built for a model monitors.judge_reasoning supports (any
-# other is refused: what its reasoning setting does is unestablished), and gemini-3.5-flash-lite needs
-# an explicit reasoning setting this script does not take — so the default is the one judge that runs
-# on its default. The historical ladder (llama-3.2-3b, gpt-4o-mini, claude-3-haiku, claude-sonnet-4.6,
+# other is refused: what its reasoning setting does is unestablished); each runs on its model's
+# default reasoning (monitors/judge_reasoning.py), as this script takes no reasoning setting. The historical ladder (llama-3.2-3b, gpt-4o-mini, claude-3-haiku, claude-sonnet-4.6,
 # claude-opus-4.8) needs reasoning support implemented per model before it can re-run.
 _DEFAULT_CANDIDATES = [
     "google/gemini-2.5-flash-lite",

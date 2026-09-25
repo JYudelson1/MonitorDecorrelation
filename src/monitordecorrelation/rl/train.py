@@ -205,8 +205,8 @@ def _monitor_info(m: Monitor, role: str) -> dict:
     """Best-effort record of what a monitor actually is (so 'cot_weak' is decodable later).
 
     Includes the judge's VIEW (use_cot/use_output) and reasoning settings: two runs whose judges
-    differ in those are not comparable, and a gemini-3.x judge with no reasoning setting cannot even
-    complete a call, so these belong in the durable record rather than only in the config file that
+    differ in those are not comparable, and the resolved reasoning object depends on the code's
+    per-model default, so these belong in the durable record rather than only in the config file that
     happened to be passed. ``scripts/verify_runs.py`` checks them post-launch."""
     info = {
         "name": m.name,
