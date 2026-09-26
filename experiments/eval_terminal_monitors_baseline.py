@@ -119,6 +119,8 @@ def main() -> None:
     ap.add_argument("--n-prompts", type=int, default=96)
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--episode-workers", type=int, default=None,
+                    help="max episodes in flight at once (default: no cap, one thread per episode)")
     ap.add_argument("--effort", type=float, default=None,
                     help="TML thinking effort (default: the config's thinking_effort)")
     ap.add_argument("--out", default=None,
@@ -131,6 +133,8 @@ def main() -> None:
                          "env_options.verifier_mode=possible); only fields this script "
                          f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}")
     args = ap.parse_args()
+    if args.episode_workers is not None and args.episode_workers < 1:
+        ap.error(f"--episode-workers must be >= 1 (got {args.episode_workers})")
 
     if args.effort is not None and any(kv.partition("=")[0] == "thinking_effort" for kv in args.set):
         raise SystemExit("--effort and --set thinking_effort=… both given; pass one")
@@ -213,7 +217,8 @@ def main() -> None:
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=cfg["max_tokens"], temperature=1.0,
                             seed=args.seed, think_budget=think_budget,
-                            answer_tokens=cfg["answer_tokens"], on_rollout=on_rollout)
+                            answer_tokens=cfg["answer_tokens"], episode_workers=args.episode_workers,
+                            on_rollout=on_rollout)
     wall_s = time.time() - t0
     results = [env.score(r) for r in rollouts]
     judged = scorer.collect(rollouts)
@@ -288,7 +293,8 @@ def main() -> None:
         "model": args.model, "policy": args.model, "experiment": "tv_monitor_baseline",
         "config_path": args.config, "config_overrides": args.set,
         "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
-        "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
+        "seed": args.seed, "effort": args.effort, "episode_workers": args.episode_workers,
+        "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
         "token_usage": usage,
         # as rl/train.py records it: with the RESOLVED settings each judge actually sent (provider,
