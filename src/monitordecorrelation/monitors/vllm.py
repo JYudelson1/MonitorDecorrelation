@@ -51,8 +51,9 @@ from monitordecorrelation.monitors.openrouter import _JUDGE_ANSWER_RE, JudgeCall
 VLLM_JUDGES = frozenset({"Qwen/Qwen3-30B-A3B-FP8", "Qwen/Qwen3.5-35B-A3B-FP8"})
 
 # Client-side request timeout. A non-streaming call sends nothing until the whole completion is done,
-# and an unbudgeted thinker can write 16k tokens on a server shared by dozens of concurrent calls.
-VLLM_TIMEOUT = 1800.0
+# and an unbudgeted thinker can write 16k tokens on a server shared by hundreds of concurrent calls
+# (judge calls are uncapped within a run, and a timed-out call is retried from scratch). Two hours.
+VLLM_TIMEOUT = 7200.0
 
 _FATAL_STATUS = frozenset({400, 401, 403, 404, 422})
 
