@@ -45,6 +45,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from monitordecorrelation.monitors.judge_backend import validate_judge_settings
 from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
 
 # Hyperparameters that must not vary within one matrix (rows differ ONLY in which monitor is the
@@ -165,12 +166,24 @@ def check(run_dir: Path) -> tuple[list[str], dict]:
               if m.get("model_id")]
     for m in judges:
         mid = m["model_id"]
+        if m.get("provider") == "vllm":
+            # A local vLLM judge: no OpenRouter reasoning object — its thinking settings are recorded
+            # as they were sent. Same offline check that built the monitor.
+            try:
+                validate_judge_settings("vllm", model_id=mid, monitor=m["name"], max_tokens=m.get("max_tokens"),
+                                        base_url=m.get("base_url"), enable_thinking=m.get("enable_thinking"),
+                                        thinking_budget=m.get("thinking_budget"))
+            except ValueError as e:
+                probs.append(str(e))
+            continue
         if "reasoning" in m:
             # Current format: the RESOLVED reasoning object the judge sent. It must be a setting the
             # model honours as written — the same resolver that built the monitor, so a run built by
             # older code (or a hand-edited run_info) cannot pass with something it would now refuse.
             try:
-                if resolve_reasoning(mid, m["reasoning"], monitor=m["name"]) != m["reasoning"]:
+                # runs that predate a recorded max_tokens ran with the old fixed 2048 cap
+                if resolve_reasoning(mid, m["reasoning"], max_tokens=m.get("max_tokens", 2048),
+                                     monitor=m["name"]) != m["reasoning"]:
                     probs.append(f"{m['name']}: recorded reasoning {m['reasoning']!r} is not what "
                                  f"{mid} resolves it to")
             except ValueError as e:

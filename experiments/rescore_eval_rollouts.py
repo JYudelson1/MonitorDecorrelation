@@ -273,11 +273,18 @@ def main() -> int:
     for run in sorted({r for r, _ in comp}):
         print(f"  {run:34s} " + "  ".join(f"{c}={comp[(run, c)]}" for c in ("strict", "clean", "loose")))
     from monitordecorrelation.experiment_config import load_monitor_specs
-    from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
+    from monitordecorrelation.monitors.judge_backend import validate_judge_settings
     specs = [s for s in load_monitor_specs(args.config) if s.kind == "cot"]
+
+    def thinking(s) -> str:
+        if s.provider == "vllm":
+            return (f"vllm {s.base_url}, max_tokens={s.max_tokens}, enable_thinking={s.enable_thinking}, "
+                    f"thinking_budget={s.thinking_budget}")
+        return "reasoning=" + str(validate_judge_settings(
+            "openrouter", model_id=s.model_id, monitor=s.name, max_tokens=s.max_tokens, reasoning=s.reasoning))
+
     print(f"{len(specs)} judges from {args.config}: " + ", ".join(
-        f"{s.name}({s.model_id}, cot={s.use_cot}, out={s.use_output}, "
-        f"reasoning={resolve_reasoning(s.model_id, s.reasoning, monitor=s.name)})" for s in specs))
+        f"{s.name}({s.model_id}, cot={s.use_cot}, out={s.use_output}, {thinking(s)})" for s in specs))
     print(f"-> {len(selected) * len(specs)} judge calls")
     if args.dry_run:
         return 0

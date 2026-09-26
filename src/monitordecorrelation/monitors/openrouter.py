@@ -1,7 +1,9 @@
-"""The one OpenRouter chat client: every LLM-judge call in the repo goes through ``chat()``.
+"""The one OpenRouter chat client: every OpenRouter LLM-judge call in the repo goes through ``chat()``.
 
-Callers: ``monitors.cot_monitor.CoTMonitor`` (the CoT / output judges) and ``envs.mask`` (the MASK
-lie oracle). Both share this module's retry policy — there used to be a second, bounded-retry
+Callers: ``monitors.judge_backend`` (the CoT / output judges) and ``envs.mask`` (the MASK lie oracle).
+Both share this module's retry policy — and so do the local vLLM judges (``monitors.vllm``), whose
+client is the same request/retry loop (``post_chat``) with vLLM's endpoint, error taxonomy and
+answer extraction plugged in — there used to be a second, bounded-retry
 helper here for the oracle, which drifted from the monitor's error taxonomy and had to be fixed
 in two places (e.g. the same OpenRouter 402 broke both).
 
@@ -22,6 +24,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from typing import Callable, ContextManager
 
 import httpx
 
@@ -45,16 +48,17 @@ _RETRYABLE_402_REASON = "in_flight_budget_exhausted"
 
 # Finish reasons whose body we read.
 #   "stop"   — the judge terminated normally.
-#   "length" — it hit max_tokens. Read it anyway: with reasoning off (or bounded) the verdict lives
-#              in the content channel, so a truncated reply either already carries its `SCORE:` line
-#              or never will. Retrying does not help — back when the judge was called at
-#              temperature 0 every retry returned the identical truncated text (measured: 4/4
-#              byte-identical replays on gemini-2.5-flash-lite), which used to spin a run forever
-#              inside one eval; at temperature 1 a retry would just be a fresh, costlier sample.
+#   "length" — it hit max_tokens. That is FINAL: the call is returned as is, and whatever answer text
+#              it carries is parsed. A reply cut off before its `SCORE:` line — including one whose
+#              thinking ate the whole completion budget, leaving the content channel empty (routine
+#              for an unbudgeted vLLM thinker) — becomes the caller's parse_error (score 0), and is
+#              counted in the per-monitor `finish_length_rate` / `parse_error_rate` metrics.
+#              Retrying does not help — back when the judge was called at temperature 0 every retry
+#              returned the identical truncated text (measured: 4/4 byte-identical replays on
+#              gemini-2.5-flash-lite), which used to spin a run forever inside one eval; at
+#              temperature 1 a retry is a fresh, costlier sample that censors exactly the long-thinking
+#              calls out of the statistics.
 # Anything else ("content_filter", "error", …) means the judge never got to answer → API error.
-# NB an EMPTY body under "length" is still an API error (handled below): that would mean reasoning
-# consumed the whole completion budget, which cannot happen while reasoning is disabled or budgeted — it is a
-# sanity check, not an expected path.
 _OK_FINISH_REASONS = frozenset({"stop", "length"})
 
 # Reasoning-channel fallback: accept either instructed format (percentile SCORE or binary VERDICT).
@@ -98,13 +102,15 @@ def resolve_api_key(api_key: str | None = None) -> str:
     return key
 
 
-def _judge_output(message: dict) -> str | None:
-    """Pull the judge's answer line from an OpenRouter ``message``.
+def _judge_output(message: dict, finish: str | None = None) -> str | None:
+    """Pull the judge's answer line from an OpenRouter ``message`` (``finish`` = its finish_reason).
 
     Prefer ``content``. Gemini-3.x (mandatory reasoning) sometimes returns ``content: null`` and
     parks the instructed ``SCORE: <n>`` / ``VERDICT: YES|NO`` line in ``reasoning`` instead. We only
     fall back to that channel when:
       - ``content`` is missing/blank, AND
+      - the completion was not cut off (``finish != "length"``): a truncated scratchpad was still
+        deliberating, so a ``SCORE:`` in it is a draft, not the answer, AND
       - ``reasoning`` contains an explicit ``SCORE:`` or ``VERDICT:`` match (the format we asked
         for).
     Free-form thinking with bare numbers / yes-no prose is rejected — those are intermediate
@@ -117,6 +123,8 @@ def _judge_output(message: dict) -> str | None:
     if isinstance(content, str) and content.strip():
         return content  # model answered in content — never dig into reasoning
     if content is not None and not isinstance(content, str):
+        return None
+    if finish == "length":
         return None
     reasoning = message.get("reasoning")
     if not isinstance(reasoning, str) or not reasoning.strip():
@@ -144,11 +152,12 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
     OpenRouter and return the judge's text plus the record of the successful call (``JudgeCall``),
     retrying **indefinitely** with exponential backoff (capped at 30s) on any transient API error:
     connection/timeout, 404 ("no endpoints available for this model right now"), 408/429/5xx, the
-    in-flight-budget 402, a malformed body, a non-"stop" ``finish_reason``, or empty output (null
-    content with no ``SCORE:``/``VERDICT:`` in ``reasoning``). A multi-hour run must not lose a
-    monitor to a provider hiccup, so there is no give-up path for these — from the
+    in-flight-budget 402, a malformed body, an unusable ``finish_reason``, or empty output under
+    ``"stop"`` (null content with no ``SCORE:``/``VERDICT:`` in ``reasoning``). A multi-hour run must
+    not lose a monitor to a provider hiccup, so there is no give-up path for these — from the
     ``warn_after``-th retry on, every retry prints a warning to stderr (prefixed with ``name``, e.g.
-    ``monitor cot_weak``) so a stuck judge is visible in the log rather than silent.
+    ``monitor cot_weak``) so a stuck judge is visible in the log rather than silent. A ``"length"``
+    completion is final (see ``_OK_FINISH_REASONS``): its text — possibly empty — is returned.
 
     The exceptions are ``_FATAL_STATUS`` (400/401/402/403): a malformed request, a bad key, no
     credits, or a forbidden model never fixes itself, so those raise immediately, with the
@@ -158,6 +167,41 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
     disabled.") lands there by design — the fix is the monitor's ``reasoning`` setting, not a retry
     (``monitors.judge_reasoning`` rejects that combination at construction for the judges it knows).
     """
+    return post_chat(
+        body,
+        url=_OPENROUTER_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=timeout,
+        name=name,
+        warn_after=warn_after,
+        slot=openrouter_slot,
+        is_fatal=lambda resp: resp.status_code in _FATAL_STATUS and not _is_retryable_402(resp),
+        extract=_judge_output,
+    )
+
+
+def post_chat(
+    body: dict,
+    *,
+    url: str,
+    headers: dict,
+    timeout: float,
+    name: str,
+    warn_after: int,
+    slot: Callable[[], ContextManager],
+    is_fatal: Callable[[httpx.Response], bool],
+    extract: Callable[[dict, str | None], str | None],
+) -> JudgeCall:
+    """The provider-agnostic request/retry loop behind ``chat`` (OpenRouter) and ``monitors.vllm.chat``.
+
+    ``slot()`` is held around each single attempt (a cross-process concurrency permit, or a no-op);
+    ``is_fatal(resp)`` picks the error statuses that raise at once (with the whole body) instead of
+    retrying; ``extract(message, finish_reason)`` returns the judge's answer text, or ``None`` for
+    "no usable output" — a transient error under ``"stop"``, but under ``"length"`` the call is
+    final and returns ``""`` (the caller's parse_error). ``extract`` may itself raise to flag a
+    configuration error (e.g. a vLLM server returning unparsed thinking). Everything else is
+    documented on ``chat``.
+    """
     attempt = 0
     while True:
         attempt += 1
@@ -166,17 +210,12 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
             # The permit covers ONE attempt, not the retry-forever loop around it: its hold time is
             # then bounded by `timeout`, so a wedged judge can never starve the other runs sharing
             # the box. The backoff sleep below happens with the permit released.
-            with openrouter_slot():
-                resp = httpx.post(
-                    _OPENROUTER_URL,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=body,
-                    timeout=timeout,
-                )
+            with slot():
+                resp = httpx.post(url, headers=headers, json=body, timeout=timeout)
         except (httpx.TransportError, httpx.TimeoutException) as e:
             err = f"{type(e).__name__}: {e}"  # connection/timeout -> retry
         else:
-            if resp.status_code in _FATAL_STATUS and not _is_retryable_402(resp):
+            if is_fatal(resp):
                 # Unrecoverable (bad request / key / credits) -> fail fast, with the provider's
                 # explanation attached in full: raise_for_status() alone reports only the status
                 # and URL, which leaves a 400 undiagnosable in the run log.
@@ -196,35 +235,31 @@ def chat(body: dict, *, api_key: str, timeout: float, name: str, warn_after: int
                     err = f"malformed response body ({type(e).__name__}: {e})"
                 else:
                     # A filtered / errored completion never reached the verdict line, so it's
-                    # an API error, not a score of 0. A truncated one ("length") is read like a
-                    # normal completion — see _OK_FINISH_REASONS. A missing finish_reason (some
-                    # providers omit it) is not evidence of failure — judge the body instead.
+                    # an API error, not a score of 0. A truncated one ("length") is final — see
+                    # _OK_FINISH_REASONS. A missing finish_reason (some providers omit it) is not
+                    # evidence of failure — judge the body instead.
                     finish = choice.get("finish_reason")
                     if finish is not None and finish not in _OK_FINISH_REASONS:
                         err = f"finish_reason={finish!r} (completion did not terminate normally)"
                     else:
-                        text = _judge_output(message)
+                        text = extract(message, finish)
+                        if text is None and finish == "length":
+                            text = ""  # cut off before any answer: the caller's parse_error, no retry
                         if text is None:
                             # Null content with no SCORE:/VERDICT: in reasoning (Gemini
                             # sometimes empties both). Retry rather than parse_error->score 0
-                            # (that would silently under-flag). Under "length" this is the
-                            # sanity check: an empty content channel means reasoning ate the
-                            # whole completion budget.
+                            # (that would silently under-flag).
                             err = (
                                 "empty judge output (no content / no SCORE:|VERDICT: in "
                                 "reasoning)"
                             )
-                            if finish == "length":
-                                err += " and finish_reason='length' — reasoning consumed the "
-                                err += "whole completion budget (should not happen with "
-                                err += "reasoning disabled/bounded)"
                         else:
                             if attempt > warn_after:
                                 _warn(f"{name}: recovered on attempt {attempt}")
                             # Only the call that succeeded is recorded — failed attempts
                             # never had an answer worth keeping.
                             record = {
-                                "url": _OPENROUTER_URL,
+                                "url": url,
                                 "request": body,
                                 "timeout": timeout,
                                 "attempts": attempt,

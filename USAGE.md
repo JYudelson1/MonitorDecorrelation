@@ -77,17 +77,53 @@ validation, so `--set max_tokens=4096` on a budgeted run is an error, not a no-o
 `config.json` written before these rules may no longer load for a *run*; re-scoring scripts read only
 its `monitors` (`load_monitor_specs`) and are unaffected.
 
-Each monitor: `{kind:"cot", name, role, model_id,
-use_cot?, use_output?, behavior?, threshold?, reasoning?, binary_judge?}` (output monitor = `use_cot:false`) or
+Each monitor: `{kind:"cot", name, role, provider?, model_id, max_tokens?,
+use_cot?, use_output?, behavior?, threshold?, reasoning?, binary_judge?}` (output monitor = `use_cot:false`;
+`provider` defaults to `"openrouter"`), a vLLM judge (`provider: "vllm"`, below), or
 `{kind:"probe", name, role, probe_path, probe_model?, threshold?, batch_size?}`.
+
+**Judge completion cap (`max_tokens`).** Covers the judge's thinking AND its answer. OpenRouter judges:
+optional, absent = **4096** (`judge_reasoning.OPENROUTER_DEFAULT_MAX_TOKENS`; was a fixed 2048 until
+2026-09-25). A call that stops at the cap (`finish_reason: "length"`) is final — never retried — and
+its answer is parsed as is: cut off before its `SCORE:` line (e.g. thinking that ate the whole cap)
+it is a parse error, scored 0. Both are logged per judge (see "Judge call health" below).
+
+**vLLM judges (`provider: "vllm"`).** A judge served by a local vLLM OpenAI-compatible server
+(`monitors/vllm.py`). Every key is explicit:
+
+| key | | |
+| --- | --- | --- |
+| `model_id` | required | a model the server serves; only `Qwen/Qwen3-30B-A3B-FP8` and `Qwen/Qwen3.5-35B-A3B-FP8` are accepted (verified: `vllm.VLLM_JUDGES`) |
+| `base_url` | required | the server's OpenAI-compatible base **ending in `/v1`**, e.g. `http://localhost:8001/v1` |
+| `max_tokens` | required | completion cap, thinking + answer |
+| `enable_thinking` | required | sent as `chat_template_kwargs.enable_thinking` |
+| `thinking_budget` | optional, default `null` | `null` = no budget; N = vLLM's `thinking_token_budget` (thinking force-closed after N tokens, then the answer), only with `enable_thinking`, 1 ≤ N < `max_tokens` |
+
+`reasoning` is rejected on a vLLM judge, and `base_url` / `enable_thinking` / a non-null
+`thinking_budget` on an OpenRouter one. The server must run with a reasoning parser (`vllm serve …
+--reasoning-parser qwen3`): the thinking comes back in `message.reasoning`, the verdict is read from
+`content` only (a draft `SCORE:` in the thinking is never used), and a reply with `</think>` still in
+its content aborts as a config error. Building the monitor checks `GET <base_url>/models` lists the
+model with room for `max_tokens`. Override per run like any monitor field:
+
+```bash
+--set monitors.model:Qwen.thinking_budget=4096 monitors.model:Qwen.max_tokens=8192
+```
+
+**Judge call health.** For every LLM judge the eval rows (`eval_metrics.jsonl`, W&B `eval/…`) and the
+train-against train rows carry `monitor/<name>/finish_length_rate` (calls that stopped at
+`max_tokens`) and `monitor/<name>/parse_error_rate` (answers with no parseable `SCORE:`/`VERDICT:`,
+scored 0), over the rollouts it scored. `eval_terminal_monitors_baseline.py` prints them per judge and
+writes them into `baseline.json`; `visualize_transcripts.py` shows them per judge on the Score-dist
+cards and as a Metrics preset.
 
 **Judge-side reasoning (`reasoning`).** The OpenRouter `reasoning` object every call of that judge
 sends, validated **per judge model** at config load (`monitors/judge_reasoning.py`), naming the monitor:
 
 | judge `model_id` | accepted `reasoning` | absent (default) |
 | --- | --- | --- |
-| `google/gemini-2.5-flash-lite` | `{"enabled": false}` (off) · `{"max_tokens": N}`, 512 ≤ N < 2048 (on, thinking budget N) | `{"max_tokens": 2047}` — on, largest budget |
-| `google/gemini-3.5-flash-lite` | `{"effort": "low"\|"medium"\|"high"}` (preferred) · `{"max_tokens": N}` — it mandates reasoning (`enabled:false` is a 400) | `{"effort": "low"}` |
+| `google/gemini-2.5-flash-lite` | `{"enabled": false}` (off) · `{"max_tokens": N}`, 512 ≤ N < the judge's `max_tokens` (on, thinking budget N) | `{"max_tokens": 2048}` |
+| `google/gemini-3.5-flash-lite` | `{"effort": "low"\|"medium"\|"high"}` (preferred) · `{"max_tokens": N}`, N < the judge's `max_tokens` — it mandates reasoning (`enabled:false` is a 400) | `{"effort": "low"}` |
 | **any other model** | **error** | **error** |
 
 512 is Google's minimum budget: a smaller one is accepted but clamped up (measured: budgets 1/128/511

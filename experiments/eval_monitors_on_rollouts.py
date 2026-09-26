@@ -115,7 +115,10 @@ def main() -> None:
             judges[name] = judge_cls(name=name, model_id=spec.model_id, behavior=args.behavior,
                                      use_cot=spec.use_cot, use_output=spec.use_output,
                                      reasoning=spec.reasoning,
-                                     binary_judge=spec.binary_judge, threshold=spec.threshold)
+                                     binary_judge=spec.binary_judge, threshold=spec.threshold,
+                                     provider=spec.provider, max_tokens=spec.max_tokens,
+                                     base_url=spec.base_url, enable_thinking=spec.enable_thinking,
+                                     thinking_budget=spec.thinking_budget)
         else:
             judges[name] = judge_cls(name=name, model_id=spec[0], behavior=args.behavior,
                                      use_cot=(spec[1] == "cot"))
@@ -124,7 +127,7 @@ def main() -> None:
         print("\n[dry-run] no API calls. Monitors:")
         for name, spec in monitors:
             d = (f"{spec.model_id} use_cot={spec.use_cot} use_output={spec.use_output} "
-                 f"reasoning={judges[name].reasoning}") if args.config \
+                 f"reasoning={judges[name].reasoning} {judges[name].backend.info()}") if args.config \
                 else f"{spec[0]} mode={spec[1]} reasoning={judges[name].reasoning}"
             print(f"  - {name:18s} {d}")
         return

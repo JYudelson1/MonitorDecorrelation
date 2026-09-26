@@ -11,8 +11,10 @@ Keep ``SLIM_FIELDS`` stable: downstream readers key on these names.
 Per monitor, the FULL dumps store ``monitor_record(result)``: ``{score, label}`` plus, for an LLM
 judge, ``call`` — the exact request it was sent and the exact response it gave (prompt, API
 parameters, content and chain of thought; see ``monitors.cot_monitor.JudgeCall``). The slim dump keeps
-only ``{score, label}`` per monitor (``slim_monitors``): a call record is the judge prompt plus its
-answer, i.e. more bytes than the rollout text the slim file exists to drop.
+only ``{score, label}`` per monitor (``slim_monitors``) — plus, for an LLM judge, the two call-health
+flags ``finish_reason`` (lifted out of the call record) and ``parse_error`` (only when set): a call
+record is the judge prompt plus its answer, i.e. more bytes than the rollout text the slim file exists
+to drop.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from typing import Any
 SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "invalid_reason",
                "monitors")
 
-# The per-monitor keys the slim dump keeps.
+# The per-monitor keys the slim dump always keeps; an LLM judge's also carries ``finish_reason`` (from
+# its call record) and ``parse_error`` (only when true) — see ``slim_monitors``.
 SLIM_MONITOR_FIELDS = ("score", "label")
 
 
@@ -46,12 +49,26 @@ def monitor_record(result: Any) -> dict:
     return rec
 
 
+def _slim_monitor(m: Any) -> Any:
+    if not isinstance(m, dict):
+        return m
+    out = {k: m.get(k) for k in SLIM_MONITOR_FIELDS}
+    call = m.get("call")
+    if isinstance(call, dict):  # an LLM judge: keep its call health, drop the (bulky) call itself
+        out["finish_reason"] = (call.get("response") or {}).get("finish_reason")
+    elif "finish_reason" in m:  # already slim
+        out["finish_reason"] = m["finish_reason"]
+    if m.get("parse_error"):
+        out["parse_error"] = True
+    return out
+
+
 def slim_monitors(monitors: Any) -> Any:
-    """Per-monitor ``{score, label}`` only — drops the ``call`` record (and anything else)."""
+    """Per-monitor ``{score, label}`` (+ an LLM judge's ``finish_reason`` / ``parse_error``) — drops the
+    ``call`` record and anything else."""
     if not isinstance(monitors, dict):
         return monitors
-    return {name: ({k: m.get(k) for k in SLIM_MONITOR_FIELDS} if isinstance(m, dict) else m)
-            for name, m in monitors.items()}
+    return {name: _slim_monitor(m) for name, m in monitors.items()}
 
 
 def slim_record(full: dict) -> dict:

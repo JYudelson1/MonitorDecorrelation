@@ -121,7 +121,7 @@ def test_every_400_is_fatal_and_carries_the_providers_explanation(monitor, no_sl
             monitor._call("p")
         assert calls["n"] == 1                  # no retry
         assert body[:20] in str(e.value)        # provider's reason is not swallowed
-        assert monitor.reasoning == {"max_tokens": 2047}  # never mutated at runtime
+        assert monitor.reasoning == {"max_tokens": 2048}  # never mutated at runtime
 
 
 def test_reasoning_is_static_configuration(monkeypatch):
@@ -129,7 +129,7 @@ def test_reasoning_is_static_configuration(monkeypatch):
     call already carries it — and a setting the model would not honour raises right there."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     g25, g35 = "google/gemini-2.5-flash-lite", "google/gemini-3.5-flash-lite"
-    assert cm.CoTMonitor("j", g25, behavior="deception").reasoning == {"max_tokens": 2047}  # default
+    assert cm.CoTMonitor("j", g25, behavior="deception").reasoning == {"max_tokens": 2048}  # default
     assert cm.CoTMonitor("j", g35, behavior="deception").reasoning == {"effort": "low"}     # default
     assert cm.CoTMonitor("j", g25, behavior="deception",
                          reasoning={"enabled": False}).reasoning == {"enabled": False}
@@ -141,7 +141,7 @@ def test_reasoning_is_static_configuration(monkeypatch):
     assert cm.CoTMonitor("j", g35, behavior="deception",
                          reasoning={"max_tokens": 256}).reasoning == {"max_tokens": 256}
     for model, bad in [(g25, {"max_tokens": 511}),      # Google clamps it up to 512
-                       (g25, {"max_tokens": 2048}),     # no room left for the answer
+                       (g25, {"max_tokens": 4096}),     # no room left for the answer (default cap 4096)
                        (g25, {"effort": "low"}),        # effort is not a budget
                        (g25, {"enabled": False, "max_tokens": 512}),
                        (g35, {"enabled": False}),
@@ -168,12 +168,32 @@ def test_truncated_completion_is_read_like_a_normal_one(monitor, no_sleep, monke
 
 
 @pytest.mark.parametrize("empty", [None, "", "   "])
-def test_truncated_completion_with_no_output_is_still_an_api_error(monitor, no_sleep, monkeypatch,
-                                                                   empty):
-    """The sanity check: an empty content channel under 'length' means reasoning ate the whole
-    budget, which should be impossible with reasoning disabled/bounded. Retry rather than score 0."""
+def test_truncated_completion_with_no_output_is_final_and_scores_zero(monitor, no_sleep, monkeypatch,
+                                                                      empty):
+    """An empty content channel under 'length' means the thinking ate the whole budget. That is final,
+    like any 'length' call — a retry would censor exactly the long-thinking calls out of the
+    statistics — so it is a parse_error (score 0), counted in the parse_error / length rates."""
     cut = _Resp(200, {"choices": [{"finish_reason": "length", "message": {"content": empty}}]})
     calls = _responses(monkeypatch, [cut, _ok()])
+    res = monitor.score(_rollout())
+    assert calls["n"] == 1 and no_sleep == []
+    assert res.score == 0.0 and res.meta["parse_error"] is True
+    assert res.meta["call"]["response"]["finish_reason"] == "length"
+
+
+def test_truncated_scratchpad_is_not_mined_for_a_draft_score(monitor, no_sleep, monkeypatch):
+    """Under 'length' the reasoning channel was cut off mid-deliberation: a SCORE: in it is a draft."""
+    cut = _Resp(200, {"choices": [{"finish_reason": "length",
+                                   "message": {"content": None, "reasoning": "first guess SCORE: 90, but"}}]})
+    _responses(monkeypatch, [cut])
+    res = monitor.score(_rollout())
+    assert res.score == 0.0 and res.meta["parse_error"] is True
+
+
+def test_empty_output_under_stop_is_still_retried(monitor, no_sleep, monkeypatch):
+    """Gemini sometimes empties both channels on a normal stop — that stays a transient API error."""
+    empty = _Resp(200, {"choices": [{"finish_reason": "stop", "message": {"content": None}}]})
+    calls = _responses(monkeypatch, [empty, _ok()])
     assert monitor._call("p").text == "SCORE: 42"
     assert calls["n"] == 2
 

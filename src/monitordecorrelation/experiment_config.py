@@ -26,7 +26,33 @@ class CoTMonitorSpec(_Strict):
     kind: Literal["cot"] = "cot"
     name: str
     role: Literal["train_against", "held_out"]
-    model_id: str  # OpenRouter model id (the judge)
+    provider: Literal["openrouter", "vllm"] = Field(
+        "openrouter",
+        description="where the judge runs: 'openrouter' (the default) or 'vllm' (a local vLLM "
+        "OpenAI-compatible server). Each takes only its own settings — see monitors/judge_backend.py.",
+    )
+    model_id: str  # the judge: an OpenRouter model id, or the model a vLLM server serves
+    max_tokens: int | None = Field(
+        None,
+        description="the judge's completion cap (covers its thinking AND its answer). OpenRouter: "
+        "optional, absent = 4096 (`judge_reasoning.OPENROUTER_DEFAULT_MAX_TOKENS`). vLLM: REQUIRED.",
+    )
+    base_url: str | None = Field(
+        None,
+        description="vLLM only, REQUIRED there: the server's OpenAI-compatible base, ending in /v1 "
+        "(e.g. 'http://localhost:8001/v1'). Rejected on an OpenRouter judge.",
+    )
+    enable_thinking: bool | None = Field(
+        None,
+        description="vLLM only, REQUIRED there: sent as chat_template_kwargs.enable_thinking. "
+        "Rejected on an OpenRouter judge (whose thinking is `reasoning`).",
+    )
+    thinking_budget: int | None = Field(
+        None,
+        description="vLLM only: null (the default) = no thinking budget; N = vLLM's "
+        "thinking_token_budget (thinking force-closed after N tokens), 1 <= N < max_tokens, only with "
+        "enable_thinking. A non-null value is rejected on an OpenRouter judge.",
+    )
     behavior: str | None = (
         None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
     )
@@ -37,10 +63,11 @@ class CoTMonitorSpec(_Strict):
     use_output: bool = True  # False = ignore the output (judge the CoT only)
     reasoning: dict | None = Field(
         None,
-        description="judge-side reasoning: the OpenRouter `reasoning` object every call of this judge "
-        "sends, validated per judge model by `monitors.judge_reasoning.resolve_reasoning` (at LOAD). "
+        description="OpenRouter judges only (rejected on a vLLM judge): the OpenRouter `reasoning` "
+        "object every call of this judge sends, validated per judge model by "
+        "`monitors.judge_reasoning.resolve_reasoning` (at LOAD). "
         'gemini-2.5-flash-lite: {"enabled": false} (off) or {"max_tokens": N} (on, thinking budget N, '
-        "512 <= N < 2048); absent = the default, the largest budget {\"max_tokens\": 2047}. "
+        "512 <= N < the judge's max_tokens); absent = the default, {\"max_tokens\": 2048}. "
         'gemini-3.5-flash-lite (it mandates reasoning): {"effort": "low"|"medium"|"high"} (preferred) '
         'or {"max_tokens": N}; absent = the default, {"effort": "low"}. NB on gemini-3.5-flash-lite '
         "'low' behaves like no reasoning at all — measured on blatant reward-hacking terminal transcripts, 24/40 calls came "
@@ -70,16 +97,23 @@ class CoTMonitorSpec(_Strict):
         return data
 
     @model_validator(mode="after")
-    def _check_reasoning(self) -> "CoTMonitorSpec":
-        """Reject a reasoning setting the judge model would not honour as written — or any judge model
-        whose reasoning behaviour is not established — at LOAD, not at the first judge call. Same
-        resolver ``CoTMonitor.__init__`` runs for hand-built monitors, so the two cannot drift. The
-        field keeps what the config said (``None`` stays ``None`` = the model's default): resolving
-        here would pin one model's default onto the spec, where a later ``--set`` of ``model_id``
-        would silently carry it to another model."""
-        from monitordecorrelation.monitors.judge_reasoning import resolve_reasoning
+    def _check_judge_settings(self) -> "CoTMonitorSpec":
+        """Reject a judge setting that would not take effect as written — a setting of the other
+        provider (vLLM's base_url / enable_thinking / thinking_budget on an OpenRouter judge,
+        ``reasoning`` on a vLLM one), a missing required vLLM setting, a reasoning setting the judge
+        model would not honour, or a judge model whose thinking behaviour is not established — at
+        LOAD, not at the first judge call. Same check ``CoTMonitor.__init__`` runs for hand-built
+        monitors (``judge_backend.validate_judge_settings``), so the two cannot drift. The fields keep
+        what the config said (``None`` stays ``None`` = the default): resolving here would pin one
+        model's default onto the spec, where a later ``--set`` of ``model_id`` would silently carry it
+        to another model."""
+        from monitordecorrelation.monitors.judge_backend import validate_judge_settings
 
-        resolve_reasoning(self.model_id, self.reasoning, monitor=self.name)
+        validate_judge_settings(
+            self.provider, model_id=self.model_id, monitor=self.name, max_tokens=self.max_tokens,
+            reasoning=self.reasoning, base_url=self.base_url, enable_thinking=self.enable_thinking,
+            thinking_budget=self.thinking_budget,
+        )
         return self
 
 
@@ -614,6 +648,11 @@ def build_monitors(
                 use_output=s.use_output,
                 reasoning=s.reasoning,
                 binary_judge=s.binary_judge,
+                provider=s.provider,
+                max_tokens=s.max_tokens,
+                base_url=s.base_url,
+                enable_thinking=s.enable_thinking,
+                thinking_budget=s.thinking_budget,
             )
         else:  # probe
             probe = LinearProbe.load(s.probe_path)

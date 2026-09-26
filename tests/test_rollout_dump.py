@@ -27,10 +27,18 @@ def test_slim_record_projects_exactly_the_slim_fields():
     s = slim_record(FULL)
     assert tuple(s) == SLIM_FIELDS
     assert "cot" not in s and "answer" not in s and "question" not in s  # the bulky text is gone
-    # per monitor only {score, label}: the judge's call record (prompt + reply) is full-dump only
-    assert s["monitors"]["cot_weak"] == SLIM_MONITORS["cot_weak"] and s["behavior_present"] is True
+    # per monitor {score, label} + an LLM judge's call-health flags: the judge's call record (prompt +
+    # reply) is full-dump only
+    assert s["monitors"]["cot_weak"] == {**SLIM_MONITORS["cot_weak"], "finish_reason": "stop"}
+    assert s["behavior_present"] is True
     assert tuple(s["monitors"]["probe_ood"]) == ("score", "label") and math.isnan(s["monitors"]["probe_ood"]["score"])
     assert "call" not in s["monitors"]["cot_weak"]
+    # a parse error survives slimming; slimming an already-slim record is a no-op
+    bad = {"monitors": {"j": {"score": 0.0, "label": False, "parse_error": True,
+                              "call": {**CALL, "response": {**CALL["response"], "finish_reason": "length"}}}}}
+    slim = slim_record(bad)["monitors"]
+    assert slim == {"j": {"score": 0.0, "label": False, "finish_reason": "length", "parse_error": True}}
+    assert slim_record({"monitors": slim})["monitors"] == slim
 
 
 def test_monitor_record_keeps_the_judges_call_and_flags():

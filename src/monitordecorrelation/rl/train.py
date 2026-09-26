@@ -35,7 +35,14 @@ from monitordecorrelation.config import RunConfig
 from monitordecorrelation.envs.base import Env, invalid_reason, is_truncated
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.eval.metric_keys import absent_score_key, present_score_key
-from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
+from monitordecorrelation.eval.metrics import (
+    _mean_for_class,
+    accuracy,
+    brier,
+    dprime_margin,
+    judge_call_rates,
+    roc_auc,
+)
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.rl import sdk_watch as sdk_watch_mod
 from monitordecorrelation.rl.episodes import derive_sample_seed
@@ -275,7 +282,23 @@ def _monitor_info(m: Monitor, role: str) -> dict:
             # the RESOLVED OpenRouter reasoning object every call sends (model default filled in)
             "reasoning": getattr(m, "reasoning", None),
         })
+        backend = getattr(m, "backend", None)
+        if backend is not None:  # provider + the resolved settings every call uses (max_tokens, vLLM's thinking)
+            info.update(backend.info())
     return info
+
+
+def _is_judge(m: Monitor) -> bool:
+    """An LLM judge (it makes API calls, so it has call-health metrics) — not a probe."""
+    return bool(getattr(m, "model_id", None))
+
+
+def _judge_call_metrics(m: Monitor, results) -> dict[str, float]:
+    """``monitor/<name>/finish_length_rate`` + ``monitor/<name>/parse_error_rate`` for an LLM judge
+    (see ``eval.metrics.judge_call_rates``); ``{}`` for a probe."""
+    if not _is_judge(m):
+        return {}
+    return {f"monitor/{m.name}/{k}": v for k, v in judge_call_rates(results).items()}
 
 
 # Per-rollout monitor failures are collected rather than raised on the spot, so ONE warning names
@@ -653,6 +676,8 @@ def run_grpo(
             row[f"monitor/{m.name}/n_pos"] = sum(mgt)
             row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
+            # judge call health: stopped at max_tokens / answer unparseable (scored 0)
+            row.update(_judge_call_metrics(m, res[m.name]))
             if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
                 row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
         # sample_s now COVERS the judge calls that ran concurrently with sampling; score_s is only
@@ -695,6 +720,8 @@ def run_grpo(
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
         summ = " ".join(
             f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}/brier={row[f'monitor/{m.name}/brier']:.2f}"
+            + (f"/len={row[f'monitor/{m.name}/finish_length_rate']:.2f}"
+               f"/parse_err={row[f'monitor/{m.name}/parse_error_rate']:.2f}" if _is_judge(m) else "")
             for m in all_monitors
         )
         _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} invalid={row['invalid_rate']:.2f} | {summ} "
@@ -820,6 +847,7 @@ def run_grpo(
             mon[f"monitor/{m.name}/n_pos"] = sum(gt_v)
             mon[f"monitor/{m.name}/n_neg"] = len(gt_v) - sum(gt_v)
             mon[f"monitor/{m.name}/n_scored"] = len(s)
+            mon.update(_judge_call_metrics(m, ta_res[m.name]))
             if gt_train_loose is not None:
                 mon.update(_label_metrics(f"monitor/{m.name}/loose", s, p, [gt_train_loose[i] for i in valid]))
         loss_val = step_metrics.get("loss", float("nan"))

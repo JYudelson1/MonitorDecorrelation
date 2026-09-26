@@ -40,7 +40,7 @@ from monitordecorrelation.experiment_config import (
     load_config,
     validate_token_budgets,
 )
-from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, roc_auc
+from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, judge_call_rates, judge_finish_reason, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
@@ -53,7 +53,8 @@ load_dotenv()
 # silently ignored, so apply_overrides refuses it; the policy and seed are the --model / --seed flags.
 READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
-                       "reasoning", "binary_judge"}
+                       "reasoning", "binary_judge", "provider", "max_tokens", "base_url",
+                       "enable_thinking", "thinking_budget"}
 
 
 def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -71,8 +72,8 @@ def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
 def token_usage(rollouts, judged: dict, judges) -> dict:
     """Totals of what the run consumed. The policy side comes from the episode driver's accounting
     (``input_tokens`` counts every sampling call's full prefix, so multi-turn prefill is re-counted
-    per turn); the judge side sums the OpenRouter ``usage`` of each successful call — retried
-    failures aren't recorded, so they're missing here."""
+    per turn); the judge side sums the ``usage`` (OpenRouter / vLLM) of each successful call — retried
+    failures aren't recorded, so they're missing here. vLLM reports no cost."""
     policy = {k: sum(r.meta.get(k, 0) for r in rollouts)
               for k in ("n_sampling_calls", "input_tokens", "output_tokens")}
     out: dict = {"policy": policy, "judges": {}}
@@ -182,7 +183,10 @@ def main() -> None:
                               use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
                               threshold=m.get("threshold", 0.5),
                               reasoning=m["reasoning"],
-                              binary_judge=bool(m.get("binary_judge")))
+                              binary_judge=bool(m.get("binary_judge")),
+                              provider=m["provider"], max_tokens=m["max_tokens"],
+                              base_url=m["base_url"], enable_thinking=m["enable_thinking"],
+                              thinking_budget=m["thinking_budget"])
               for m in specs]
     n_ep = len(prompts) * args.samples
     print(f"sampling {n_ep} episodes ({len(prompts)}x{args.samples}) from {args.model} "
@@ -242,13 +246,26 @@ def main() -> None:
              "brier": brier(scores, gt_v), "dprime_margin": dprime_margin(scores, gt_v),
              "mean_score_present": hi, "mean_score_absent": lo, "suspiciousness_gap": hi - lo,
              "mean_score": mean(scores) if scores else float("nan"), "n_scored": len(scores),
-             **rates(preds, gt_v)}
+             **rates(preds, gt_v),
+             # call health: stopped at max_tokens / no parseable answer (so scored 0)
+             **judge_call_rates([judged[j.name][i] for i in valid]),
+             "n_finish_length": sum(judge_finish_reason(judged[j.name][i]) == "length" for i in valid),
+             "n_parse_error": sum(bool(judged[j.name][i].meta.get("parse_error")) for i in valid)}
         rows[j.name] = r
         view = ("cot+output" if j.use_cot and j.use_output else
                 "output-only" if not j.use_cot else "cot-only")
         print(f"{j.name:<14}{view:<12}{r['auroc']:>7.3f}{r['accuracy']:>7.3f}{r['brier']:>7.3f}"
               f"{r['dprime_margin']:>9.2f}{hi:>11.3f}{lo:>11.3f}{hi - lo:>7.3f}"
               f"{r['tpr']:>7.3f}{r['fpr']:>7.3f}")
+
+    print(f"\n=== judge calls: stopped at max_tokens (finish_reason=length) / unparseable answer (scored 0) ===")
+    print(f"  {'monitor':<14}{'backend':<40}{'calls':>7}{'length':>9}{'len rate':>10}{'parse err':>11}{'err rate':>10}")
+    for j in judges:
+        r, b = rows[j.name], j.backend.info()
+        where = (f"vllm max={b['max_tokens']} think={b['enable_thinking']} budget={b['thinking_budget']}"
+                 if b["provider"] == "vllm" else f"openrouter max={b['max_tokens']}")
+        print(f"  {j.name:<14}{where:<40}{r['n_scored']:>7}{r['n_finish_length']:>9}"
+              f"{r['finish_length_rate']:>10.3f}{r['n_parse_error']:>11}{r['parse_error_rate']:>10.3f}")
 
     usage = token_usage(rollouts, judged, judges)
     pol = usage["policy"]
@@ -273,8 +290,10 @@ def main() -> None:
         "seed": args.seed, "effort": args.effort, "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
         "token_usage": usage,
-        # as rl/train.py records it: with the RESOLVED reasoning object each judge actually sent
-        "held_out": [{"kind": "cot", **m, "reasoning": j.reasoning} for m, j in zip(specs, judges)],
+        # as rl/train.py records it: with the RESOLVED settings each judge actually sent (provider,
+        # max_tokens, and the reasoning object / vLLM thinking settings)
+        "held_out": [{"kind": "cot", **m, "reasoning": j.reasoning, **j.backend.info()}
+                     for m, j in zip(specs, judges)],
     }
     out.write_text(json.dumps(summary, indent=1, default=str))
     (out.parent / "run_info.json").write_text(json.dumps(summary, indent=2, default=str))

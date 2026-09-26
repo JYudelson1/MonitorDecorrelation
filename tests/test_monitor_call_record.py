@@ -76,7 +76,7 @@ def test_call_record_is_exactly_what_was_posted_and_what_came_back(posted):
     assert call["request"] == log[0]["json"]
     assert call["request"]["messages"] == [{"role": "user", "content": mon._build_prompt(_rollout())}]
     assert call["request"]["reasoning"] == {"effort": "low"}
-    assert call["request"]["temperature"] == 1.0 and call["request"]["max_tokens"] == 2048
+    assert call["request"]["temperature"] == 1.0 and call["request"]["max_tokens"] == 4096  # the OpenRouter default
     assert call["timeout"] == 45.0 == log[0]["timeout"]
     assert "Authorization" not in json.dumps(call) and "test" not in json.dumps(call["request"])  # no key
     # the response: the full message (content + chain of thought) and the response metadata
@@ -125,5 +125,15 @@ def test_unparseable_reply_still_carries_the_call(posted):
     assert res.meta["parse_error"] is True and res.meta["call"]["response"]["message"]["content"] == "I refuse."
     rec = monitor_record(res)
     assert rec["parse_error"] is True and rec["call"] is res.meta["call"] and rec["score"] == 0.0
-    # the committed slim dump never carries the call
-    assert slim_record({"monitors": {"j": rec}})["monitors"] == {"j": {"score": 0.0, "label": False}}
+    # the committed slim dump never carries the call — only its call-health flags
+    assert slim_record({"monitors": {"j": rec}})["monitors"] == \
+        {"j": {"score": 0.0, "label": False, "finish_reason": "stop", "parse_error": True}}
+
+
+def test_max_tokens_is_configurable(posted):
+    log, script = posted
+    mon = cm.CoTMonitor("j", "google/gemini-2.5-flash-lite", behavior="deception", max_tokens=8192,
+                         reasoning={"max_tokens": 6000})
+    script.append(_reply({"content": "SCORE: 1"}))
+    assert mon.score(_rollout()).meta["call"]["request"]["max_tokens"] == 8192
+    assert mon.backend.info() == {"provider": "openrouter", "max_tokens": 8192, "reasoning": {"max_tokens": 6000}}

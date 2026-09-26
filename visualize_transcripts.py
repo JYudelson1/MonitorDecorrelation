@@ -281,6 +281,15 @@ def _summarize(rec: dict, off: int, length: int) -> dict:
     for name, m in mons.items():
         if isinstance(m, dict):
             monitors[name] = {"score": _nan_safe(m.get("score")), "label": m.get("label")}
+            # judge call health: its finish_reason (full dump: inside the call record; slim dump: lifted
+            # out) and whether its answer was unparseable (scored 0)
+            call = m.get("call") if isinstance(m.get("call"), dict) else {}
+            resp = call.get("response") if isinstance(call.get("response"), dict) else {}
+            finish = m.get("finish_reason") or resp.get("finish_reason")
+            if finish is not None:
+                monitors[name]["finish_reason"] = finish
+            if m.get("parse_error"):
+                monitors[name]["parse_error"] = True
         else:
             monitors[name] = {"score": _nan_safe(m), "label": None}
 
@@ -394,7 +403,7 @@ class IndexCache:
 
     def _p(self, path: Path) -> Path:
         h = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:16]
-        return self.root / f"{path.name}.{h}.v2.json"  # type: ignore[union-attr]
+        return self.root / f"{path.name}.{h}.v3.json"  # type: ignore[union-attr]
 
     def load(self, path: Path) -> Optional[dict]:
         if self.root is None:
@@ -550,6 +559,12 @@ class Store:
                 "reasoning": m.get("reasoning"),
                 "reasoning_max_tokens": m.get("reasoning_max_tokens"),
                 "reasoning_effort": m.get("reasoning_effort"),
+                # the judge's backend: provider + completion cap, and a vLLM judge's thinking settings
+                "provider": m.get("provider"),
+                "max_tokens": m.get("max_tokens"),
+                "base_url": m.get("base_url"),
+                "enable_thinking": m.get("enable_thinking"),
+                "thinking_budget": m.get("thinking_budget"),
                 "probe_path": m.get("probe_path"),
                 "probe_model": m.get("probe_model"),
             })
@@ -883,7 +898,15 @@ class Handler(BaseHTTPRequestHandler):
                 if s is None:
                     continue
                 scored = True
-                d = by_mon.setdefault(name, {"present": [], "absent": [], "unlabeled": 0})
+                d = by_mon.setdefault(name, {"present": [], "absent": [], "unlabeled": 0,
+                                             "n_calls": 0, "n_finish_length": 0, "n_parse_error": 0,
+                                             "n_finish_known": 0})
+                # judge call health, over every scored rollout (labeled or not)
+                d["n_calls"] += 1
+                if m.get("finish_reason") is not None:
+                    d["n_finish_known"] += 1
+                    d["n_finish_length"] += m["finish_reason"] == "length"
+                d["n_parse_error"] += bool(m.get("parse_error"))
                 if beh is None:
                     d["unlabeled"] += 1
                 else:
@@ -1256,7 +1279,7 @@ function renderOverview(c) {
   c.appendChild(el('div', {class:'card'}, el('h3', {}, 'Hyperparameters'), kv(hp)));
   if (monitors && monitors.length) {
     const t = el('table', {}, el('thead', {}, el('tr', {},
-      ...['name','kind','role','model / probe','threshold','use_cot','use_output','binary','reasoning'].map(h => el('th', {}, h)))));
+      ...['name','kind','role','model / probe','threshold','use_cot','use_output','binary','reasoning','backend'].map(h => el('th', {}, h)))));
     const tb = el('tbody');
     for (const m of monitors) tb.appendChild(el('tr', {},
       el('td', {class:'mono'}, m.name),
@@ -1268,7 +1291,11 @@ function renderOverview(c) {
       el('td', {class:'mono small'}, m.reasoning ? JSON.stringify(m.reasoning)
         : (m.reasoning_effort || m.reasoning_max_tokens)
           ? JSON.stringify({effort: m.reasoning_effort, max_tokens: m.reasoning_max_tokens}) + ' (legacy)'
-          : fmt(m.reasoning))));
+          : fmt(m.reasoning)),
+      el('td', {class:'mono small'}, m.provider === 'vllm'
+        ? `vllm ${m.base_url} · max_tokens ${fmt(m.max_tokens)} · thinking ${m.enable_thinking ? 'on' : 'off'}` +
+          (m.enable_thinking ? ` · budget ${m.thinking_budget === null || m.thinking_budget === undefined ? 'none' : m.thinking_budget}` : '')
+        : m.provider ? `${m.provider} · max_tokens ${fmt(m.max_tokens)}` : '—')));
     t.appendChild(tb);
     c.appendChild(el('div', {class:'card'}, el('h3', {}, `Monitors (${monitors.length}) — train-against rows are in the gradient`), t));
   }
@@ -1336,6 +1363,7 @@ function renderMetrics(c) {
       ['reward', ks => ks.filter(k => k.startsWith('reward/'))],
       ['monitor AUROC', ks => ks.filter(k => /^monitor\/[^/]+\/auroc$/.test(k))],
       ['monitor mean score', ks => ks.filter(k => /^monitor\/[^/]+\/mean_score$/.test(k))],
+      ['judge calls: length / parse err', ks => ks.filter(k => /^monitor\/[^/]+\/(finish_length_rate|parse_error_rate)$/.test(k))],
       ["monitor d′", ks => ks.filter(k => /dprime/.test(k))],
       ['env', ks => ks.filter(k => k.startsWith('env/'))],
       ['none', () => []],
@@ -1539,6 +1567,16 @@ function scoreDistCard(m) {
     st('gap', fmt(gap)), st('AUROC', fmt(m.auroc)),
     spec.threshold !== null && spec.threshold !== undefined ? st('threshold', fmt(spec.threshold)) : null,
     m.unlabeled ? st('unlabeled', m.unlabeled) : null));
+  if (m.n_finish_known || m.n_parse_error) {
+    // judge call health: calls that stopped at max_tokens, and answers with no parseable SCORE:/VERDICT: (scored 0)
+    const pct = (k, n) => n ? `${k} / ${n} (${(100 * k / n).toFixed(1)}%)` : '—';
+    card.appendChild(el('div', {class:'stats'},
+      el('span', {title:'judge calls with finish_reason = "length" (stopped at the judge\'s max_tokens)' +
+        (m.n_finish_known < m.n_calls ? ` — ${m.n_calls - m.n_finish_known} calls have no recorded finish_reason (slim dump written before it was kept, or a probe)` : '')},
+        'stopped at max_tokens ', el('b', {}, pct(m.n_finish_length, m.n_finish_known))),
+      el('span', {title:'judge answers with no parseable SCORE:/VERDICT: line — scored 0'},
+        'unparseable (scored 0) ', el('b', {}, pct(m.n_parse_error, m.n_calls)))));
+  }
   card.appendChild(scoreHist(m, spec.threshold));
   return card;
 }

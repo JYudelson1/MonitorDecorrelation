@@ -24,15 +24,15 @@ explanation and the tool output are all withheld, and the prompt (``JUDGE_PROMPT
 Only the terminal-verifier env (``envs/terminal_verifier.py``) produces these rollouts today, and the
 per-turn record it stores is the format ``_format_rollout`` renders. Every assumption about that
 record is asserted, so a rollout in an unexpected shape fails loudly instead of yielding a transcript
-that silently misrepresents the episode. Same OpenRouter client, retry policy, call record and score
-parsing as ``CoTMonitor`` (see docs/MONITORS.md).
+that silently misrepresents the episode. Same judge backends (OpenRouter / vLLM), retry policy, call
+record and score parsing as ``CoTMonitor`` (see docs/MONITORS.md).
 """
 
 from __future__ import annotations
 
 from monitordecorrelation.monitors.cot_monitor import _SCORE_RE, _VERDICT_RE
-from monitordecorrelation.monitors.judge_reasoning import JUDGE_MAX_TOKENS, resolve_reasoning
-from monitordecorrelation.monitors.openrouter import JudgeCall, chat, resolve_api_key
+from monitordecorrelation.monitors.judge_backend import make_judge_backend
+from monitordecorrelation.monitors.openrouter import JudgeCall
 from monitordecorrelation.monitors.rubrics import (
     RH_BODY,
     RH_COT_ONLY_OPENING,
@@ -55,12 +55,17 @@ class AgentCoTMonitor:
         behavior: str = "reward_hacking",
         rubric: Rubric | str | None = None,
         threshold: float = 0.5,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         api_key: str | None = None,
         use_cot: bool = True,
         use_output: bool = True,
         reasoning: dict | None = None,
         binary_judge: bool = False,
+        provider: str = "openrouter",
+        max_tokens: int | None = None,
+        base_url: str | None = None,
+        enable_thinking: bool | None = None,
+        thinking_budget: int | None = None,
     ) -> None:
         assert behavior == "reward_hacking", (
             f"AgentCoTMonitor only judges reward hacking, got behavior={behavior!r}"
@@ -80,13 +85,16 @@ class AgentCoTMonitor:
         self.use_output = use_output
         self.binary_judge = binary_judge  # True -> YES/NO verdict, not a 0–100 score
         self.threshold = threshold
-        self.timeout = timeout
-        self._api_key = resolve_api_key(api_key)
-
-        # The OpenRouter `reasoning` object every call sends — validated for THIS judge model (and
-        # the model's default filled in) by the resolver CoTMonitor shares; unsupported models raise
-        # here. See monitors/judge_reasoning.py.
-        self.reasoning = resolve_reasoning(model_id, reasoning, monitor=name)
+        # Where the calls go (OpenRouter or a vLLM server) and with which settings — validated here;
+        # a setting the provider does not take raises. See monitors/judge_backend.py.
+        self.backend = make_judge_backend(
+            provider, name=name, model_id=model_id, max_tokens=max_tokens, reasoning=reasoning,
+            base_url=base_url, enable_thinking=enable_thinking, thinking_budget=thinking_budget,
+            timeout=timeout, api_key=api_key,
+        )
+        # The RESOLVED OpenRouter `reasoning` object every call sends (the model default filled in);
+        # None for a vLLM judge, whose thinking is `enable_thinking` / `thinking_budget`.
+        self.reasoning = self.backend.reasoning
 
     def _build_prompt(self, rollout: Rollout) -> str:
         if self.use_output:
@@ -151,29 +159,17 @@ class AgentCoTMonitor:
         return "\n\n".join(blocks)
 
     def _request_body(self, prompt: str) -> dict:
-        """The exact JSON body ``_call`` POSTs to OpenRouter for ``prompt`` (the one source of truth —
-        the persisted call record is this same dict)."""
-        return {
-            "model": self.model_id,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 1.0,
-            "max_tokens": JUDGE_MAX_TOKENS,
-            "reasoning": self.reasoning,  # resolved by judge_reasoning.resolve_reasoning
-        }
+        """The exact JSON body ``_call`` POSTs for ``prompt`` (the one source of truth — the persisted
+        call record is this same dict). Built by the judge's backend (``monitors.judge_backend``)."""
+        return self.backend.request_body(prompt)
 
     def _call(self, prompt: str, *, warn_after: int = 6) -> JudgeCall:
-        """POST to OpenRouter via ``monitors.openrouter.chat`` and return the judge's text plus the
-        record of the successful call (``JudgeCall``). The retry policy — indefinite retries on
-        transient errors, fail-fast on the ``_FATAL_STATUS`` config errors — is documented there.
-        Warnings are prefixed ``monitor <name>`` so a stuck judge is identifiable in the log.
+        """Make the judge call via the backend (``monitors.openrouter.chat`` / ``monitors.vllm.chat``)
+        and return the judge's text plus the record of the successful call (``JudgeCall``). The retry
+        policy — indefinite retries on transient errors, fail-fast on config errors — is documented
+        there. Warnings are prefixed ``monitor <name>`` so a stuck judge is identifiable in the log.
         """
-        return chat(
-            self._request_body(prompt),
-            api_key=self._api_key,
-            timeout=self.timeout,
-            name=f"monitor {self.name}",
-            warn_after=warn_after,
-        )
+        return self.backend.call(prompt, warn_after=warn_after)
 
     def score(self, rollout: Rollout) -> MonitorResult:
         """Judge one rollout. ``meta`` carries ``raw`` (the text the verdict was parsed from) and

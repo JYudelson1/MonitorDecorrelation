@@ -63,14 +63,15 @@ replays a real Inkling-Small run when `../MonitorDecorrelationOld` is checked ou
 
 `CoTMonitor.score` returns, in `MonitorResult.meta["call"]`, a record of the API call that produced
 the verdict (`cot_monitor.JudgeCall`): the endpoint, the **exact JSON body POSTed** (`model`,
-`messages` — i.e. the full prompt — `temperature`, `max_tokens`, `reasoning`), the client timeout,
+`messages` — i.e. the full prompt — `temperature`, `max_tokens`, `reasoning`; for a vLLM judge
+`chat_template_kwargs` / `thinking_token_budget` instead of `reasoning`), the client timeout,
 and the **full response** — the assistant `message` (`content`, plus the judge's chain of thought
 under `reasoning` / `reasoning_details` when the provider returns one), `finish_reason`, and the
 response-level `id` / `model` / `provider` / `usage`. When a call was retried only the attempt that
 succeeded is recorded (`attempts` says how many it took). `rl/train.py` writes it per monitor into
 `rollouts.jsonl` and `eval_rollouts.jsonl` as `monitors.<name>.call` (via
 `eval.rollout_dump.monitor_record`); the committed `eval_rollouts_slim.jsonl` keeps `{score, label}`
-only. `visualize_transcripts.py` shows these saved calls per rollout — and says "unavailable" for
+plus each judge's `finish_reason` and `parse_error` flag (since 2026-09-25). `visualize_transcripts.py` shows these saved calls per rollout — and says "unavailable" for
 dumps written before this existed, rather than rebuilding a prompt from the run config (a rebuild
 can silently differ from what the judge was sent if the repo has changed since the run).
 
@@ -85,11 +86,13 @@ models and OpenRouter silently ignores or clamps what a model does not support:
 
 - **`google/gemini-2.5-flash-lite`** — reasoning optional. `{"enabled": false}` = off (answers the
   `SCORE:` line straight from the content channel; 10/10 at 100 on a blatant terminal transcript).
-  `{"max_tokens": N}` = on with thinking budget N, **512 ≤ N < 2048**. **Default (key absent):
-  `{"max_tokens": 2047}`**, the largest budget. 512 is Google's minimum: measured on OpenRouter
+  `{"max_tokens": N}` = on with thinking budget N, **512 ≤ N < the judge's `max_tokens`**. **Default
+  (key absent): `{"max_tokens": 2048}`** (2047 until 2026-09-25, the largest budget under the old
+  fixed 2048 cap). 512 is Google's minimum: measured on OpenRouter
   (2026-09-22, one easy prompt), budgets 1 / 128 / 511 are accepted but think just as long as 512
   (380–410 reasoning tokens on every call), i.e. clamped up — so they are refused. N must stay below the judge's
-  completion cap (`JUDGE_MAX_TOKENS` = 2048), which covers thinking and answer. `effort` is refused
+  completion cap (`max_tokens`, default `OPENROUTER_DEFAULT_MAX_TOKENS` = 4096; a fixed 2048 until
+  2026-09-25), which covers thinking and answer. `effort` is refused
   (OpenRouter would turn it into some budget).
 - **`google/gemini-3.5-flash-lite`** — reasoning **mandatory** (`{"enabled": false}` is a 400), so it
   is always on: `{"effort": "low" | "medium" | "high"}` (**preferred**) or `{"max_tokens": N}`.
@@ -99,10 +102,12 @@ models and OpenRouter silently ignores or clamps what a model does not support:
   establish what its reasoning object does and add it to `resolve_reasoning`.
 
 No shipped config sets `reasoning` (since 2026-09-25): every gemini-2.5 judge runs on
-`{"max_tokens": 2047}` and every gemini-3.5 judge on `{"effort": "low"}`, unless `--set` overrides it.
-At 2047 the thinking leaves little room under the 2048 cap: in the verifier-bug terminal runs
+`{"max_tokens": 2048}` (2047 before 2026-09-25) and every gemini-3.5 judge on `{"effort": "low"}`,
+unless `--set` overrides it.
+At 2047 the thinking left little room under the old 2048 cap: in the verifier-bug terminal runs
 (`data/runs/*budget-2047*`, ~40k gemini-2.5 calls) the median call used ~1.6–1.9k reasoning tokens and
-~3% ended `finish_reason=length`, read as-is (see `monitors/openrouter.py`).
+~3% ended `finish_reason=length`, read as-is (see `monitors/openrouter.py`). Since 2026-09-25 the cap
+is 4096 by default (`max_tokens` per monitor), leaving ~2k tokens for the answer.
 Earlier runs set it per config (gemini-2.5: 512 on Inkling-Small runs, off on Qwen3-8B runs); their
 `run_info.json` records what each judge actually sent. The old keys `reasoning_effort` /
 `reasoning_max_tokens` are refused with the translation rather than reinterpreted — under them "both
@@ -134,6 +139,37 @@ while the gemini-2.5 monitors on the same rollouts are smooth and high. Note `rl
 only `{score, label}` per monitor, dropping `meta["raw"]`, so a reflexive zero is not distinguishable
 from a reasoned one after the fact.
 
+
+### vLLM judges (`provider: "vllm"`)
+
+A judge can also run on a local vLLM server (`monitors/vllm.py`, dispatched by
+`monitors/judge_backend.py`, which both monitor classes use for every call). Instead of an OpenRouter
+`reasoning` object it takes explicit `base_url` (ending `/v1`), `max_tokens`, `enable_thinking`
+(→ `chat_template_kwargs.enable_thinking`) and an optional `thinking_budget` (→ vLLM's
+`thinking_token_budget`; `null` = none). As with OpenRouter judges the models are specialized:
+`Qwen/Qwen3-30B-A3B-FP8` and `Qwen/Qwen3.5-35B-A3B-FP8`, checked against running servers (vLLM 0.30,
+`--reasoning-parser qwen3`): thinking on → the thinking in `message.reasoning`, the answer alone in
+`content`; off → no reasoning at all; budget 64 → 63–64 reasoning tokens, then a normal answer.
+
+Two deliberate differences from the OpenRouter client: the verdict is read from `content` **only**
+(a thinking Qwen drafts `SCORE:` lines while deliberating, so there is no reasoning-channel fallback)
+— its **last** `SCORE:`/`VERDICT:` line, and a `length` stop is always a parse error (after a
+`thinking_budget` force-closes the thinking, Qwen3.5 sometimes keeps deliberating in content: at
+budget 4096, 13/88 answers carried several SCORE lines and one call ran into `max_tokens` holding only
+a draft) — and 404/422 are fatal (a wrong model name or path on a local server never fixes itself). A reply with
+`</think>` in its content means the server is not splitting reasoning and aborts the run.
+
+### Judge call health: `finish_length_rate` / `parse_error_rate`
+
+A call that stops at `max_tokens` (`finish_reason: "length"`) is **final** for every provider — its
+answer text is parsed as is, and one cut off before its `SCORE:` line (including an empty content
+channel, i.e. thinking that ate the whole cap) is a `parse_error`, scored 0. Until 2026-09-25 an
+empty `length` reply was retried as an API error; that censored exactly the long-thinking calls out of
+the statistics and, for an unbudgeted vLLM thinker, could retry forever. Both rates are logged per
+judge — `monitor/<name>/finish_length_rate`, `monitor/<name>/parse_error_rate` — in
+`eval_metrics.jsonl` / W&B, in the train-against train rows, in the baseline script's output and
+`baseline.json`, and on the `visualize_transcripts.py` Score-dist cards. A judge with a high
+`parse_error_rate` is scoring 0 by default, not judging: read its AUROC with that in mind.
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |

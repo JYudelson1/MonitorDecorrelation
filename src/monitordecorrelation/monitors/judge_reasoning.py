@@ -1,5 +1,6 @@
-"""Judge-side reasoning: the ONE place a monitor's ``reasoning`` setting becomes the OpenRouter
-``reasoning`` object its every call carries.
+"""Judge-side reasoning: the ONE place an OpenRouter monitor's ``reasoning`` setting becomes the
+OpenRouter ``reasoning`` object its every call carries. (vLLM judges configure thinking differently —
+``enable_thinking`` / ``thinking_budget``, see ``monitors.vllm`` — and never take a ``reasoning``.)
 
 A monitor's ``reasoning`` (config key, ``CoTMonitor`` / ``AgentCoTMonitor`` kwarg) is an OpenRouter
 ``reasoning`` object, sent verbatim once validated — or ``None`` for the model's default. What is
@@ -14,9 +15,10 @@ models (and OpenRouter silently ignores or clamps what a model does not support)
   Gemini's ``thinkingBudget``). N must be ≥ ``GEMINI_25_MIN_BUDGET`` (512): measured on OpenRouter,
   budgets of 1, 128 and 511 are accepted but think just as long as 512 (~390 reasoning tokens on the
   same prompt) — Google clamps them up to its 512 minimum, so a smaller value would not mean what it
-  says. N must also stay below ``JUDGE_MAX_TOKENS``, the completion cap that covers thinking AND answer.
-* ``None`` (key absent) — the default, ``GEMINI_25_DEFAULT`` = the largest budget,
-  ``{"max_tokens": 2047}``.
+  says. N must also stay below the monitor's ``max_tokens`` (default ``OPENROUTER_DEFAULT_MAX_TOKENS``),
+  the completion cap that covers thinking AND answer.
+* ``None`` (key absent) — the default, ``GEMINI_25_DEFAULT`` = ``{"max_tokens": 2048}`` (2047 until
+  2026-09-25, the largest budget below the old fixed 2048 completion cap).
 
 ``google/gemini-3.5-flash-lite`` — reasoning is MANDATORY (``{"enabled": false}`` is a 400):
 ``{"effort": "low" | "medium" | "high"}`` (preferred) or ``{"max_tokens": N}`` (N ≥ 1; not reliably
@@ -36,12 +38,13 @@ GEMINI_25_FLASH_LITE = "google/gemini-2.5-flash-lite"
 GEMINI_35_FLASH_LITE = "google/gemini-3.5-flash-lite"
 SUPPORTED_JUDGES = (GEMINI_25_FLASH_LITE, GEMINI_35_FLASH_LITE)
 
-# The completion cap of every judge call (``max_tokens`` in the request body). With reasoning on it
-# covers the thinking AND the answer, so a thinking budget must stay below it.
-JUDGE_MAX_TOKENS = 2048
+# The completion cap (``max_tokens`` in the request body) of an OpenRouter judge whose config does not
+# set one (``CoTMonitorSpec.max_tokens``). With reasoning on it covers the thinking AND the answer, so
+# a thinking budget must stay below it. (Was a fixed 2048.)
+OPENROUTER_DEFAULT_MAX_TOKENS = 4096
 
 GEMINI_25_MIN_BUDGET = 512
-GEMINI_25_DEFAULT: dict = {"max_tokens": 2047}  # the largest budget below JUDGE_MAX_TOKENS
+GEMINI_25_DEFAULT: dict = {"max_tokens": 2048}  # 2047 until 2026-09-25 (below the old fixed 2048 cap)
 
 GEMINI_35_DEFAULT: dict = {"effort": "low"}
 
@@ -52,13 +55,16 @@ def _is_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def resolve_reasoning(model_id: str, reasoning: dict | None, *, monitor: str) -> dict:
-    """The exact ``reasoning`` object a judge on ``model_id`` sends, given its configured ``reasoning``.
+def resolve_reasoning(model_id: str, reasoning: dict | None, *, max_tokens: int, monitor: str) -> dict:
+    """The exact ``reasoning`` object a judge on ``model_id`` sends, given its configured ``reasoning``
+    and its completion cap ``max_tokens`` (which a thinking budget must stay below).
 
     Raises ``ValueError`` (naming ``monitor``) for an unsupported model or a setting that model would
     not honour as written. Returns a fresh dict, so callers may keep it without aliasing the config.
     """
     where = f"monitor {monitor!r} ({model_id})"
+    if not _is_int(max_tokens) or max_tokens < 1:
+        raise ValueError(f"{where}: max_tokens must be an int >= 1, got {max_tokens!r}")
     if reasoning is not None and not isinstance(reasoning, dict):
         raise ValueError(
             f"{where}: reasoning must be an OpenRouter reasoning object (a dict such as "
@@ -67,23 +73,29 @@ def resolve_reasoning(model_id: str, reasoning: dict | None, *, monitor: str) ->
 
     if model_id == GEMINI_25_FLASH_LITE:
         if reasoning is None:
+            if GEMINI_25_DEFAULT["max_tokens"] >= max_tokens:
+                raise ValueError(
+                    f"{where}: the default reasoning {GEMINI_25_DEFAULT} does not fit below "
+                    f"max_tokens={max_tokens} (the completion cap must also fit the answer) — set "
+                    '`reasoning` explicitly ({"enabled": false}, or {"max_tokens": N} with a smaller N)'
+                )
             return dict(GEMINI_25_DEFAULT)
         if reasoning == {"enabled": False}:
             return {"enabled": False}
         if set(reasoning) == {"max_tokens"}:
             n = reasoning["max_tokens"]
-            if not _is_int(n) or not GEMINI_25_MIN_BUDGET <= n < JUDGE_MAX_TOKENS:
+            if not _is_int(n) or not GEMINI_25_MIN_BUDGET <= n < max_tokens:
                 raise ValueError(
                     f"{where}: reasoning max_tokens (the thinking budget) must be an int in "
-                    f"[{GEMINI_25_MIN_BUDGET}, {JUDGE_MAX_TOKENS}), got {n!r} — Google clamps a "
+                    f"[{GEMINI_25_MIN_BUDGET}, {max_tokens}), got {n!r} — Google clamps a "
                     f"smaller budget up to {GEMINI_25_MIN_BUDGET}, and the judge's completion cap "
-                    f"(max_tokens={JUDGE_MAX_TOKENS}) must also fit the answer"
+                    f"(max_tokens={max_tokens}) must also fit the answer"
                 )
             return {"max_tokens": n}
         raise ValueError(
             f"{where}: unsupported reasoning {reasoning!r}. Use "
             f'{{"enabled": false}} (reasoning off) or {{"max_tokens": N}} with '
-            f"{GEMINI_25_MIN_BUDGET} <= N < {JUDGE_MAX_TOKENS} (reasoning on, budget N); omit the key "
+            f"{GEMINI_25_MIN_BUDGET} <= N < {max_tokens} (reasoning on, budget N); omit the key "
             f"for the default, {GEMINI_25_DEFAULT}"
         )
 
@@ -99,8 +111,11 @@ def resolve_reasoning(model_id: str, reasoning: dict | None, *, monitor: str) ->
             return {"effort": reasoning["effort"]}
         if set(reasoning) == {"max_tokens"}:
             n = reasoning["max_tokens"]
-            if not _is_int(n) or n < 1:
-                raise ValueError(f"{where}: reasoning max_tokens must be an int >= 1, got {n!r}")
+            if not _is_int(n) or not 1 <= n < max_tokens:
+                raise ValueError(
+                    f"{where}: reasoning max_tokens must be an int in [1, {max_tokens}) — below the "
+                    f"completion cap max_tokens={max_tokens}, which must also fit the answer — got {n!r}"
+                )
             return {"max_tokens": n}
         raise ValueError(
             f"{where}: unsupported reasoning {reasoning!r}. This model mandates reasoning: use "
