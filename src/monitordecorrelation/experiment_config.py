@@ -124,7 +124,7 @@ class ExperimentConfig(_Strict):
     env_options: dict = Field(
         default_factory=dict,
         description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
-        "'exec_workers': 32}; terminal_verifier: {'verifier_mode': 'corrupted', 'offset_range': [4, 9], "
+        "'per_test_timeout': 1.0}; terminal_verifier: {'verifier_mode': 'corrupted', 'offset_range': [4, 9], "
         "'max_turns': 4, 'output_view': 'transcript', 'command_timeout': 30}, plus 'submission_ends': "
         "'first'|'correct' — required by, and only by, the submit_* verifier_modes); validated by the env "
         "constructor",

@@ -43,12 +43,11 @@ class Env(Protocol):
 
     def sample_prompt(self) -> Prompt: ...
 
-    def score(self, rollout: Rollout) -> EnvResult: ...
-
-    def score_batch(self, rollouts: list[Rollout]) -> list[EnvResult]:
-        """Grade a whole batch at once. Optional — the RL loop calls it when present (``rl/train.py``
-        ``_score_env``) and otherwise loops over ``score``. Implement it when grading is expensive and
-        parallelizable (e.g. executing generated code in subprocesses)."""
+    def score(self, rollout: Rollout) -> EnvResult:
+        """Grade one rollout. The RL loop calls it the moment each rollout lands, one thread per rollout
+        with no cap (``rl/train.py::EnvScorer``), so it must be safe to call concurrently: a pure
+        function of the rollout, plus its own subprocess (under ``globalsem.code_exec_slot``) or API
+        call (under the OpenRouter slot)."""
         ...
 
     def holdout(self, n: int, seed: int = 0) -> list[Prompt]:

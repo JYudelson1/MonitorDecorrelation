@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
 import tinker
 from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
 
@@ -172,8 +173,10 @@ def test_episodes_transitions_are_prefix_chained_and_grouped():
     assert [c[1] for c in sampler.calls] == [1] * 4 + [1] * 8
     seeds = [c[2] for c in sampler.calls]
     assert None not in seeds and len(set(seeds)) == len(seeds)
-    assert seeds[0] == derive_sample_seed(7, 0) and seeds[3] == derive_sample_seed(7, 3)
-    assert seeds[4] == derive_sample_seed(7, 4)  # first continuation: slot = turn0_slots + 0
+    # every seed is a function of its POSITION (group, sample, call; turn 0 = call 0) — turn 0 is issued
+    # in prompt order, the later calls in whatever order the episode threads get there
+    assert seeds[:4] == [derive_sample_seed(7, g, k, 0) for g in range(2) for k in range(2)]
+    assert set(seeds) == {derive_sample_seed(7, g, k, c) for g in range(2) for k in range(2) for c in range(3)}
 
 
 def test_done_episodes_stop_sampling_and_truncation_closes_the_turn():
@@ -240,6 +243,43 @@ def test_unseeded_run_passes_no_seed():
     run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=1), [Prompt(text="p")],
                  num_samples=1, max_tokens=8, seed=None)
     assert sampler.calls[0][2] is None
+
+
+@pytest.mark.parametrize("seed", [3, None])
+def test_every_request_is_a_single_sample(seed):
+    """Never one n-sample request per group, seeded or not: tinker seeds a whole request, so a seeded
+    n-sample request collapses the group to ~1 distinct sequence."""
+    sampler = _FakeSampler(group=4)
+    rolls = run_episodes(sampler, _FakeRenderer(), _FakeEnv(done_after=2),
+                         [Prompt(text="p0"), Prompt(text="p1")], num_samples=4, max_tokens=8, seed=seed)
+    assert len(rolls) == 8 and [r.prompt.text for r in rolls] == ["p0"] * 4 + ["p1"] * 4
+    assert [c[1] for c in sampler.calls] == [1] * 16  # 8 turn-0 requests + 8 second turns
+    seeds = [c[2] for c in sampler.calls]
+    if seed is None:
+        assert set(seeds) == {None}
+    else:
+        assert None not in seeds and len(set(seeds)) == 16
+
+
+def test_an_episode_does_not_wait_for_its_siblings_turn_0():
+    """Each episode waits only for its OWN turn-0 request: a slow sibling in the same GRPO group
+    (prompt 0, sample 1) must not hold back sample 0."""
+    SLOW = 1.0
+    slow_seed = derive_sample_seed(0, 0, 1, 0)  # (group 0, sample 1, call 0)
+
+    class _SlowSibling(_FakeSampler):
+        def sample(self, model_input, num_samples, params):
+            fut = super().sample(model_input, num_samples, params)
+            if params.seed == slow_seed:
+                fut._delay = SLOW
+            return fut
+
+    done: dict[int, float] = {}
+    t0 = time.perf_counter()
+    run_episodes(_SlowSibling(group=2), _FakeRenderer(), _FakeEnv(done_after=2), [Prompt(text="p0")],
+                 num_samples=2, max_tokens=8, seed=0,
+                 on_rollout=lambda i, r: done.__setitem__(i, time.perf_counter() - t0))
+    assert done[0] < SLOW / 2 <= SLOW <= done[1]
 
 
 def test_multi_turn_rollouts_fold_into_one_masked_datum():
@@ -322,3 +362,21 @@ def test_episodes_do_not_wait_for_each_other():
     assert all(finished[f"p{i}"] - t0 < SLOW for i in range(1, N))
     # and the batch costs ~one stall, not one per turn per episode
     assert elapsed < SLOW * 2
+
+
+def test_env_steps_are_not_capped():
+    """Every episode whose turn is ready runs its env step at once — the driver puts no limit on
+    concurrent commands: 40 episodes' first steps each wait on a barrier that only opens once all 40
+    are inside ``step`` together."""
+    n = 40
+    barrier = threading.Barrier(n, timeout=10)
+
+    class _RendezvousEnv(_FakeEnv):
+        def step(self, state, cot, text, *, truncated=False):
+            barrier.wait()  # BrokenBarrierError unless all n steps run concurrently
+            return super().step(state, cot, text, truncated=truncated)
+
+    prompts = [Prompt(text=f"p{i}") for i in range(n)]
+    rolls = run_episodes(_FakeSampler(), _FakeRenderer(), _RendezvousEnv(done_after=1), prompts,
+                         num_samples=1, max_tokens=8, seed=0)
+    assert len(rolls) == n and all(r.meta["n_turns"] == 1 for r in rolls)

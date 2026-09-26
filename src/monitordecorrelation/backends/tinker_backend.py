@@ -26,6 +26,12 @@ __all__ = ["TinkerBackend", "derive_sample_seed"]  # derive_sample_seed re-expor
 class TinkerBackend:
     name = "tinker"
     checkpoints_expire = True  # tinker-hosted state: save_checkpoint takes a ttl_seconds
+    # The RL loop may run an eval in the background while training continues: an eval samples from a
+    # sampling client pinned at launch (``current_sampler``), which later optim steps never touch —
+    # each ``refresh_sampler`` makes a NEW client on a new sampling session and leaves old ones valid
+    # (checked live: a client still samples after newer weights were saved; a sampling session the
+    # server no longer has fails at once with a non-retryable tinker.NotFoundError, 404).
+    async_eval = True
 
     def __init__(
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
@@ -42,14 +48,12 @@ class TinkerBackend:
             )
         self.base_model = base_model
         self.learning_rate = learning_rate
-        self.seed = seed
         self.kl_coef = kl_coef
         self.kl_discount_factor = kl_discount_factor
-        self._sample_calls = 0  # advances every sample()/sample_episodes() so each call gets a distinct derived seed
         self._sc = tinker.ServiceClient()
         # seed lives on the training client (seeds the LoRA init), NOT on ServiceClient. Sampling is
-        # seeded per call → per SAMPLE (one single-sample request per rollout; a seeded n-sample
-        # request collapses the GRPO group — rollout.py / episodes.py).
+        # seeded by the caller per batch (``seed=``), then per SAMPLE (one single-sample request per
+        # rollout; a seeded n-sample request collapses the GRPO group — rollout.py / episodes.py).
         self.training_client = self._sc.create_lora_training_client(
             base_model, rank=lora_rank, seed=seed
         )
@@ -72,31 +76,45 @@ class TinkerBackend:
         """Pull current policy weights into a fresh sampling client (call after each optim step)."""
         self._sampler = self.training_client.save_weights_and_get_sampling_client()
 
+    def current_sampler(self) -> tinker.SamplingClient:
+        """The sampling client at the CURRENT weights. The RL loop takes it once per step and passes it
+        to every ``sample`` / ``sample_episodes`` of that step (the train batch and, possibly in the
+        background, the eval), so what a batch samples from is fixed when it is launched — never
+        whatever ``refresh_sampler`` has installed by the time a call is made."""
+        if self._sampler is None:
+            self.refresh_sampler()
+        return self._sampler
+
+    @staticmethod
+    def sampler_id(sampler: tinker.SamplingClient) -> str:
+        """The sampling session a client samples from (one per ``refresh_sampler``) — logged with every
+        train / eval row so which weights a batch used is checkable after the fact."""
+        return sampler._sampling_session_id
+
     def sample(
         self,
         prompts: list[Prompt],
         *,
+        sampler: tinker.SamplingClient,
+        seed: int,
         num_samples: int = 1,
         max_tokens: int = 1024,
         temperature: float = 1.0,
         on_rollout: Callable[[int, Rollout], None] | None = None,
     ) -> list[Rollout]:
-        """``on_rollout(index, rollout)`` (optional) fires as each prompt's completions land, so the
-        caller can start per-rollout work (monitor calls) without waiting for the whole batch."""
-        if self._sampler is None:
-            self.refresh_sampler()
-        # One derived seed per call; sample_rollouts fans it out to one seed PER SAMPLE (a seeded
-        # n-sample request collapses the GRPO group — see rollout.sample_rollouts).
-        call_seed = derive_sample_seed(self.seed, self._sample_calls)
-        self._sample_calls += 1
+        """Sample from ``sampler`` (from ``current_sampler``); ``seed`` is the batch's seed, fanned out
+        to one seed PER SAMPLE (a seeded n-sample request collapses the GRPO group — see
+        rollout.sample_rollouts). ``on_rollout(index, rollout)`` (optional) fires as each prompt's
+        completions land, so the caller can start per-rollout work (monitor calls) without waiting
+        for the whole batch."""
         return sample_rollouts(
-            self._sampler,
+            sampler,
             self.renderer,
             prompts,
             num_samples=num_samples,
             max_tokens=max_tokens,
             temperature=temperature,
-            seed=call_seed,
+            seed=seed,
             on_rollout=on_rollout,
         )
 
@@ -105,6 +123,8 @@ class TinkerBackend:
         env,
         prompts: list[Prompt],
         *,
+        sampler: tinker.SamplingClient,
+        seed: int,
         num_samples: int = 1,
         max_tokens: int | None = None,
         temperature: float = 1.0,
@@ -118,16 +138,12 @@ class TinkerBackend:
         ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py) —
         give either those two or ``max_tokens``, never both (``run_episodes`` rejects the unused one).
         Every episode runs in its own thread and never waits on its peers; ``on_rollout(index,
-        rollout)`` fires from that thread the moment an episode is done."""
-        if self._sampler is None:
-            self.refresh_sampler()
-        call_seed = derive_sample_seed(self.seed, self._sample_calls)
-        self._sample_calls += 1
+        rollout)`` fires from that thread the moment an episode is done. ``sampler`` / ``seed``: as in
+        ``sample``."""
         return run_episodes(
-            self._sampler, self.renderer, env, prompts, num_samples=num_samples,
-            max_tokens=max_tokens, temperature=temperature, seed=call_seed,
+            sampler, self.renderer, env, prompts, num_samples=num_samples,
+            max_tokens=max_tokens, temperature=temperature, seed=seed,
             think_budget=think_budget, answer_tokens=answer_tokens,
-            step_workers=getattr(env, "step_workers", 16),
             episode_workers=getattr(env, "episode_workers", None),
             on_rollout=on_rollout,
         )

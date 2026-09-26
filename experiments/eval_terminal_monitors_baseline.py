@@ -118,7 +118,6 @@ def main() -> None:
     ap.add_argument("--n-prompts", type=int, default=96)
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--effort", type=float, default=None,
                     help="TML thinking effort (default: the config's thinking_effort)")
     ap.add_argument("--out", default=None,
@@ -204,16 +203,15 @@ def main() -> None:
         ep_bar.update()
 
     # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
-    with MonitorScorer([_Ticking(j, judge_bar) for j in judges], args.workers,
-                       skip=lambda r: invalid_reason(env, r) is not None) as scorer:
-        rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
-                                max_tokens=cfg["max_tokens"], temperature=1.0,
-                                seed=args.seed, think_budget=think_budget,
-                                answer_tokens=cfg["answer_tokens"],
-                                step_workers=args.workers, on_rollout=on_rollout)
-        wall_s = time.time() - t0
-        results = [env.score(r) for r in rollouts]
-        judged = scorer.collect(rollouts)
+    scorer = MonitorScorer([_Ticking(j, judge_bar) for j in judges],
+                           skip=lambda r: invalid_reason(env, r) is not None)
+    rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
+                            max_tokens=cfg["max_tokens"], temperature=1.0,
+                            seed=args.seed, think_budget=think_budget,
+                            answer_tokens=cfg["answer_tokens"], on_rollout=on_rollout)
+    wall_s = time.time() - t0
+    results = [env.score(r) for r in rollouts]
+    judged = scorer.collect(rollouts)
     ep_bar.close()
     judge_bar.close()
 

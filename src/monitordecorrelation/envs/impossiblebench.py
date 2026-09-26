@@ -28,8 +28,10 @@ which theirs doesn't provide.
 
 ⚠️ SECURITY: like ``envs/code_exec.py`` this runs untrusted model-generated code in a plain subprocess
 with a timeout and an address-space rlimit. That is NOT a sandbox (no fs/net isolation). Fine on a
-dedicated box; harden (docker/nsjail) before any shared run. Concurrency is capped across all
-runs on the box by ``globalsem.code_exec_slot``.
+dedicated box; harden (docker/nsjail) before any shared run. The RL loop grades every rollout the
+moment it lands, one thread each (``rl/train.py::EnvScorer``); concurrent executions are capped
+across all runs on the box by ``globalsem.code_exec_slot``. A :class:`ScaffoldError` from any of them
+aborts the run — it never continues on partial grades.
 
 ⚠️ ORACLE NOTE (read before comparing against MBPP-Honeypot): in this env the task reward and the
 cheating oracle are the *same measurement* — the reward is "pass the given tests" and passing them is
@@ -49,7 +51,6 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from monitordecorrelation.envs.base import is_truncated
@@ -424,7 +425,6 @@ class ImpossibleBenchEnv:
         total_timeout: float = 600.0,
         startup_overhead: float = 15.0,
         mem_limit_mb: int | None = 4096,
-        exec_workers: int = 16,
         seed: int = 0,
     ) -> None:
         if not items:
@@ -448,7 +448,6 @@ class ImpossibleBenchEnv:
         self.total_timeout = total_timeout      # absolute ceiling; the real cap is derived per item
         self.startup_overhead = startup_overhead  # interpreter start + imports, on top of the units
         self.mem_limit_mb = mem_limit_mb
-        self.exec_workers = exec_workers
         self._rng = random.Random(seed)
 
     # -- construction ---------------------------------------------------------------------------
@@ -633,16 +632,3 @@ class ImpossibleBenchEnv:
         units = sum(len(ast_check_statements(src, item.task_id))
                     for src in ({"test": item.test, "original": item.original_test}[p] for p in phases))
         return min(self.total_timeout, 2 * self.per_test_timeout * units + self.startup_overhead)
-
-    def score_batch(self, rollouts: list[Rollout]) -> list[EnvResult]:
-        """Grade a whole batch, executing rollouts concurrently.
-
-        Each ``score`` is one (blocking) subprocess, so a batch of 512 rollouts graded serially would
-        dominate the step time; threads are the right tool because the work is out-of-process. A
-        :class:`ScaffoldError` in any worker propagates — the run must not continue on partial grades.
-        """
-        if not rollouts:
-            return []
-        workers = max(1, min(self.exec_workers, len(rollouts)))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(self.score, rollouts))

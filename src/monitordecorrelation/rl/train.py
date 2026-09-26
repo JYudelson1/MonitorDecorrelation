@@ -2,12 +2,12 @@
 
 reward = task_reward − penalty_coef · mean(train_against monitor scores), except for an INVALID rollout
 (``envs.base.invalid_reason``: truncated by max_tokens, or output the env could not parse), whose reward
-is a flat ``INVALID_ROLLOUT_REWARD`` = -1 (``EnvResult.reward_override``, enforced in ``_score_env``).
+is a flat ``INVALID_ROLLOUT_REWARD`` = -1 (``EnvResult.reward_override``, enforced in ``_check_env_results``).
 **No monitor ever scores an invalid rollout**, in training or eval (``MonitorScorer`` skips it), so every
 monitor statistic — AUROC, d′, class means, n_pos/n_neg/n_scored, the train-against suspiciousness — is
 over the valid rollouts only; ``invalid_rate`` logs the excluded fraction. The oracle rates
 (``behavior_rate`` …) stay over ALL rollouts; single-turn envs do not grade a truncated rollout at all
-(``_score_env`` checks), so there it counts as task 0 / no behavior, like an unparseable one. Held-out monitors are scored every eval but never enter the
+(``_check_env_results`` checks), so there it counts as task 0 / no behavior, like an unparseable one. Held-out monitors are scored every eval but never enter the
 reward. The ground-truth behavior rate is logged as the primary metric (see docs/EXPERIMENT_PLAN.md
 "Ground truth is the crux").
 """
@@ -20,9 +20,11 @@ import inspect
 import json
 import random
 import re
+import sys
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+import traceback
+from concurrent.futures import Future
 from pathlib import Path
 from statistics import mean
 from typing import Callable, Sequence
@@ -36,12 +38,21 @@ from monitordecorrelation.eval.metric_keys import absent_score_key, present_scor
 from monitordecorrelation.eval.metrics import _mean_for_class, accuracy, brier, dprime_margin, roc_auc
 from monitordecorrelation.monitors.base import Monitor
 from monitordecorrelation.rl import sdk_watch as sdk_watch_mod
+from monitordecorrelation.rl.episodes import derive_sample_seed
 from monitordecorrelation.types import INVALID_ROLLOUT_REWARD, MonitorResult, Rollout
 
 
+_log_lock = threading.Lock()
+
+
 def _log(msg: str) -> None:
-    """Print with an [HH:MM:SS] wall-clock prefix, flushed (so it survives pipe buffering)."""
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    """Print with an [HH:MM:SS] wall-clock prefix, flushed (so it survives pipe buffering). One write
+    per line under a lock: the training thread and a background eval log concurrently, and print()'s
+    separate message / newline writes would otherwise interleave two lines into one."""
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}\n"
+    with _log_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def _label_metrics(prefix: str, scores: list[float], preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -112,13 +123,15 @@ def _accepts(fn, name: str) -> bool:
     return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
-def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: int | None,
-            think_budget: int | None = None, answer_tokens: int | None = None,
+def _sample(backend, env: Env, prompts: list, *, sampler, seed: int, num_samples: int,
+            max_tokens: int | None, think_budget: int | None = None, answer_tokens: int | None = None,
             on_rollout: Callable[[int, Rollout], None] | None = None) -> tuple[list[Rollout], bool]:
     """Sample rollouts the way the env needs: a multi-turn (tool-loop) env goes through the backend's
     episode driver (``sample_episodes``: sample a turn → env executes it → continue), a single-turn env
     through plain ``sample``. The rest of the loop is agnostic — both return Rollouts, ``group_size``
-    consecutive per prompt.
+    consecutive per prompt. ``sampler`` is the weights to sample (``backend.current_sampler()``, taken
+    when the batch was launched); ``seed`` the batch's seed (``derive_sample_seed(run seed, phase,
+    step)``), which the backend fans out per sampling call by position.
 
     Returns ``(rollouts, streamed)``. When the backend supports it, ``on_rollout(index, rollout)`` is
     called as each rollout lands — from the thread that finished it — so per-rollout work (the judge
@@ -133,12 +146,13 @@ def _sample(backend, env: Env, prompts: list, *, num_samples: int, max_tokens: i
         # full stop — the env's default_think_budget is the config layer's business, not the loop's.
         stream = stream and _accepts(backend.sample_episodes, "on_rollout")
         return backend.sample_episodes(
-            env, prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
-            think_budget=think_budget, answer_tokens=answer_tokens,
+            env, prompts, sampler=sampler, seed=seed, num_samples=num_samples, max_tokens=max_tokens,
+            temperature=1.0, think_budget=think_budget, answer_tokens=answer_tokens,
             **({"on_rollout": on_rollout} if stream else {}),
         ), stream
     stream = stream and _accepts(backend.sample, "on_rollout")
-    return backend.sample(prompts, num_samples=num_samples, max_tokens=max_tokens, temperature=1.0,
+    return backend.sample(prompts, sampler=sampler, seed=seed, num_samples=num_samples,
+                          max_tokens=max_tokens, temperature=1.0,
                           **({"on_rollout": on_rollout} if stream else {})), stream
 
 
@@ -153,12 +167,59 @@ def _env_metrics(results: Sequence, env) -> dict[str, float]:
     return out
 
 
-def _score_env(env: Env, rollouts: list[Rollout]) -> list:
-    """Grade a batch of rollouts, using the env's ``score_batch`` when it has one.
+def _in_thread(fn: Callable[..., object], *args, name: str) -> Future:
+    """Run ``fn(*args)`` in a new daemon thread; its result — or exception — lands in the returned
+    future. A daemon, so a run that aborts never waits on work nobody will read."""
+    fut: Future = Future()
 
-    Envs whose grading is expensive and out-of-process (running generated code) implement
-    ``score_batch`` to execute rollouts concurrently; otherwise this is the plain serial loop. Errors
-    propagate deliberately — a grading failure is never coerced into a reward.
+    def body() -> None:
+        fut.set_running_or_notify_cancel()
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as e:  # noqa: BLE001 — re-raised to whoever calls fut.result()
+            fut.set_exception(e)
+
+    threading.Thread(target=body, daemon=True, name=name).start()
+    return fut
+
+
+class EnvScorer:
+    """Grades each rollout with ``env.score`` the moment it exists — the RL loop hands it every
+    rollout through the sampler's ``on_rollout`` hook, next to the judges (``MonitorScorer``) — rather
+    than after the whole batch. One daemon thread per rollout and no per-run cap: the only bounds are
+    the grading's own cross-process ones (``globalsem.code_exec_slot`` around executed code,
+    ``openrouter_slot`` around an LLM oracle call). So ``env.score`` must be safe to call concurrently
+    — every env's is a pure function of the rollout plus a subprocess / API call.
+
+    Usage: ``sc = EnvScorer(env)`` → ``sc.submit(i, rollout)`` per rollout (thread-safe, any order) →
+    ``sc.collect(rollouts)`` → the checked ``EnvResult`` list, indexed like ``rollouts``. A grading
+    error is re-raised by ``collect`` — never coerced into a reward.
+    """
+
+    def __init__(self, env: Env) -> None:
+        self.env = env
+        self._futs: dict[int, Future] = {}
+        self._lock = threading.Lock()
+
+    def submit(self, index: int, rollout: Rollout) -> None:
+        with self._lock:
+            if index in self._futs:
+                raise RuntimeError(f"rollout {index} submitted twice for grading")
+            self._futs[index] = _in_thread(self.env.score, rollout, name=f"env-score-{index}")
+
+    def collect(self, rollouts: Sequence[Rollout]) -> list:
+        """Wait for every rollout's grade (re-raising the first failure, in index order), then run
+        ``_check_env_results`` over them."""
+        missing = [i for i in range(len(rollouts)) if i not in self._futs]
+        if missing or len(self._futs) != len(rollouts):
+            raise RuntimeError(f"{len(self._futs)} rollouts submitted for grading, {len(rollouts)} collected "
+                               f"(never submitted: {missing[:10]})")
+        return _check_env_results(self.env, rollouts, [self._futs[i].result() for i in range(len(rollouts))])
+
+
+def _check_env_results(env: Env, rollouts: Sequence[Rollout], results: list) -> list:
+    """Enforce the loop-wide grading rules on a batch's ``EnvResult`` s (``results[i]`` =
+    ``env.score(rollouts[i])``); returns them.
 
     Every INVALID rollout (``invalid_reason``: truncated by ``max_tokens``, or unparseable) then gets
     ``reward_override = INVALID_ROLLOUT_REWARD``, whatever the env made of it — the one place this is
@@ -172,15 +233,6 @@ def _score_env(env: Env, rollouts: list[Rollout]) -> list:
     ``meta["truncated"] = True``, ``task_reward = 0`` and ``behavior_present = False`` without looking at
     the cut-off text (so no hack is ever counted on a rollout no monitor saw). Multi-turn envs are exempt:
     their episode's earlier, complete turns are still graded (e.g. the terminal env's tampering)."""
-    if hasattr(env, "score_batch"):
-        results = list(env.score_batch(rollouts))  # type: ignore[attr-defined]
-        if len(results) != len(rollouts):
-            raise RuntimeError(
-                f"{type(env).__name__}.score_batch returned {len(results)} results for "
-                f"{len(rollouts)} rollouts"
-            )
-    else:
-        results = [env.score(r) for r in rollouts]
     check = getattr(env, "unparseable", None)
     single_turn = not getattr(env, "multi_turn", False)
     for i, (r, er) in enumerate(zip(rollouts, results)):
@@ -255,18 +307,21 @@ class MonitorScorer:
 
     Two monitor families, deliberately treated differently:
 
-    - **API judges** (no ``score_batch``): one thread-pool task per (monitor, rollout), submitted by
-      whichever thread finished the rollout — the episode's own driver thread. This is what decouples
-      a fast episode's judge latency from the slowest episode in the batch: by the time sampling ends,
-      most judge calls are already done.
+    - **API judges** (no ``score_batch``): one thread per (monitor, rollout), started by whichever
+      thread finished the rollout — the episode's own driver thread. This is what decouples a fast
+      episode's judge latency from the slowest episode in the batch: by the time sampling ends, most
+      judge calls are already done. There is no per-run cap on concurrent calls; the only bounds are
+      the provider's — OpenRouter's cross-process ``globalsem.openrouter_slot``, a vLLM server's own
+      scheduling. The threads are daemons, so a run that aborts mid-step exits without waiting on
+      judge calls nobody will read (the normal path waits for all of them in ``collect``).
     - **White-box probes** (``score_batch``): ONE batched local forward over the whole set, run in
       ``collect`` once every rollout is in. This keeps the batch barrier **on purpose** — a probe is a
       single local torch model, so N one-rollout forwards would be strictly slower than one batched
       forward of N, and threading one torch model is pointless (GIL/CUDA-stream serialized) and
       unsafe. Nothing else waits on the probe: the judges have already run.
 
-    Usage: ``with MonitorScorer(monitors, workers) as sc:`` → ``sc.submit(i, rollout)`` per rollout
-    (thread-safe, any order) → ``sc.collect(rollouts)`` → ``{name: [MonitorResult | None]}`` indexed
+    Usage: ``sc = MonitorScorer(monitors)`` → ``sc.submit(i, rollout)`` per rollout (thread-safe, any
+    order) → ``sc.collect(rollouts)`` → ``{name: [MonitorResult | None]}`` indexed
     exactly like ``rollouts``.
 
     ``skip(rollout) -> bool`` (the RL loop passes "is it invalid?", ``envs.base.invalid_reason``): a
@@ -275,37 +330,27 @@ class MonitorScorer:
     ``collect`` each evaluate it.
     """
 
-    def __init__(self, monitors: Sequence[Monitor], workers: int,
+    def __init__(self, monitors: Sequence[Monitor],
                  skip: Callable[[Rollout], bool] | None = None) -> None:
         self.monitors = list(monitors)
         self.skip = skip
         self.batched = [m for m in self.monitors if hasattr(m, "score_batch")]
         self.threaded = [m for m in self.monitors if not hasattr(m, "score_batch")]
-        self._ex = (ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="monitor")
-                    if self.threaded else None)
         self._futs: dict[tuple[str, int], Future] = {}
         self._lock = threading.Lock()
 
-    def __enter__(self) -> "MonitorScorer":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._ex is not None:
-            # cancel_futures: on an aborted step, don't keep paying for judge calls nobody will read.
-            self._ex.shutdown(wait=True, cancel_futures=True)
-            self._ex = None
-
     def submit(self, index: int, rollout: Rollout) -> None:
-        """Queue every API judge on one rollout. Called from the sampling threads, so it only touches
-        ``_futs`` under the lock; ``ThreadPoolExecutor.submit`` is itself thread-safe."""
-        if self._ex is None or (self.skip is not None and self.skip(rollout)):
+        """Start every API judge on one rollout, each in its own thread. Called from the sampling
+        threads, so it only touches ``_futs`` under the lock."""
+        if not self.threaded or (self.skip is not None and self.skip(rollout)):
             return
         with self._lock:
             for m in self.threaded:
                 key = (m.name, index)
                 if key in self._futs:
                     raise RuntimeError(f"rollout {index} submitted twice to monitor {m.name!r}")
-                self._futs[key] = self._ex.submit(m.score, rollout)
+                # an exception is surfaced by collect() as a NaN sentinel (which aborts the run)
+                self._futs[key] = _in_thread(m.score, rollout, name=f"monitor-{m.name}-{index}")
 
     def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult | None]]:
         """Drain the judge futures and run the probes; aborts the run if anything failed to score.
@@ -369,6 +414,44 @@ def _check_penalty(cfg: RunConfig, train_against: Sequence[Monitor]) -> None:
             f"/ penalty_schedule={sched!r} would be ignored — pass neither for a control run")
 
 
+class _BackgroundEval:
+    """At most ONE eval in flight, running in a background thread while training continues.
+
+    ``launch`` first waits for the previous eval — blocking the caller, i.e. training — so an eval is
+    never more than ``eval_every`` train steps behind, and the sampling client it was handed is never
+    more than that many refreshes old. Errors are never lost: the eval's exception (anything raised
+    in it, including by the episode and judge threads it waits on) is logged the moment it happens and
+    re-raised in the training thread by the next ``check`` / ``launch`` / ``wait``. The thread is a
+    daemon, so a training-thread crash exits without waiting on an eval nobody will read.
+    """
+
+    def __init__(self) -> None:
+        self._fut: Future | None = None
+
+    def launch(self, fn: Callable[..., None], *args) -> None:
+        self.wait()
+
+        def logged() -> None:
+            try:
+                fn(*args)
+            except BaseException:  # re-raised in the training thread by wait()
+                _log(f"⚠️  background eval failed; the run aborts at its next check:\n{traceback.format_exc()}")
+                raise
+
+        self._fut = _in_thread(logged, name="eval")
+
+    def wait(self) -> None:
+        """Block until the in-flight eval (if any) is done; re-raise its error."""
+        fut, self._fut = self._fut, None
+        if fut is not None:
+            fut.result()
+
+    def check(self) -> None:
+        """Non-blocking: re-raise the in-flight eval's error if it has already failed."""
+        if self._fut is not None and self._fut.done():
+            self.wait()
+
+
 def run_grpo(
     cfg: RunConfig,
     env: Env,
@@ -379,12 +462,6 @@ def run_grpo(
     max_tokens: int | None = None,
     think_budget: int | None = None,
     answer_tokens: int | None = None,
-    # Concurrent judge API calls, shared across ALL monitors × rollouts. Now that scoring is
-    # pipelined into sampling this is the binding constraint on how much of it can overlap: one eval
-    # is len(monitors) × eval rollouts of calls (6 × 64 = 384 on the terminal matrix), so 16 meant 24
-    # serial waves. Sized to drain an eval in a handful of waves while leaving headroom for several
-    # runs sharing one OpenRouter key (queue_runs.sh -j 4 → 4 × this).
-    monitor_workers: int = 64,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
 ) -> None:
@@ -396,7 +473,15 @@ def run_grpo(
     the two, enforced by ``run_episodes``; ``experiment_config.validate_token_budgets`` is where a
     config gets the same treatment. See
     rl/episodes.py. ``think_budget=None`` is taken literally (no budget); resolve the env default
-    before calling (``experiment_config.resolve_think_budget``)."""
+    before calling (``experiment_config.resolve_think_budget``).
+
+    Evals (step 0, every ``eval_every``, and after the last step) sample the weights of the step they
+    are labelled with: each step takes ``backend.current_sampler()`` once, and both the eval launched
+    at that step and the step's train batch sample from it. On a backend with ``async_eval`` (tinker)
+    the eval then runs in the background while training continues (``_BackgroundEval``: at most one
+    in flight — launching the next waits for it — and its errors abort the run); otherwise it runs
+    inline. The run returns only once every eval is done. Every sampling call is seeded by position:
+    ``derive_sample_seed(cfg.seed, "train"|"eval", step)`` per batch, then (group, sample, call)."""
     # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
     # (run_episodes enforces it; see the docstring).
     _check_penalty(cfg, train_against)
@@ -404,9 +489,11 @@ def run_grpo(
                     if think_budget is not None else f"max_tokens={max_tokens}")
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
-    # The tinker sampler is seeded per call → per SAMPLE inside the backend (one single-sample request
-    # per rollout; a seeded n-sample request collapses the GRPO group — rl/rollout.py); env construction
-    # + holdout + this rng + the LoRA init all take cfg.seed. So one cfg.seed pins the whole run.
+    # Every sampling call's seed is a pure function of (cfg.seed, train|eval, step, group, sample, call)
+    # — never of the order calls are issued in, which a background eval makes timing-dependent (one
+    # single-sample request per rollout; a seeded n-sample request collapses the GRPO group —
+    # rl/rollout.py); env construction + holdout + this rng + the LoRA init all take cfg.seed. So one
+    # cfg.seed pins the whole run.
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     _log(f"seed={cfg.seed} (env, holdout, log-sampling, numpy, LoRA init, and per-sample tinker seeds all derive from it)")
@@ -426,6 +513,19 @@ def run_grpo(
             mode=cfg.logging.wandb_mode,
             config=cfg.__dict__,
         )
+        # Each namespace is plotted against its own RL step, logged as a field, NOT as wandb's own
+        # `step=` — that one must only increase, and a background eval's row lands after later train
+        # rows (wandb would drop it). So eval/N plots at x=N whenever it arrives.
+        run.define_metric("train/step")
+        run.define_metric("train/*", step_metric="train/step")
+        run.define_metric("eval/step")
+        run.define_metric("eval/*", step_metric="eval/step")
+    wandb_lock = threading.Lock()  # the training thread and a background eval both log
+
+    def wandb_log(prefix: str, row: dict) -> None:
+        if run is not None:
+            with wandb_lock:  # `sampler` (a session id string) stays in the jsonl only
+                run.log({f"{prefix}/{k}": v for k, v in row.items() if k != "sampler"})
 
     rollout_log_dir = Path("data/runs") / (cfg.logging.run_name or "smoke")
     rollout_log_dir.mkdir(parents=True, exist_ok=True)
@@ -472,8 +572,10 @@ def run_grpo(
         _log("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
         eval_prompts = [env.sample_prompt() for _ in range(cfg.eval_size)]
 
-    def run_eval(step: int) -> None:
-        """Sample the current policy on the fixed eval set; log every monitor's degradation metrics.
+    def run_eval(step: int, sampler) -> None:
+        """Sample ``sampler`` (the policy after ``step`` optim steps) on the fixed eval set; log every
+        monitor's degradation metrics. May run in a background thread (``_BackgroundEval``): it only
+        writes the eval logs, which nothing else touches.
 
         AUROC is the headline but goes NaN at single-class (behavior≈0 or ≈1); ``brier`` and the
         behavior-present mean score (``mean_score_<behavior>``) stay defined there, so the
@@ -488,23 +590,30 @@ def run_grpo(
         # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
         # instant its episode finishes, so `sample_s` already contains most of the scoring and
         # `score_s` is only whatever was still in flight when the last episode landed.
-        with MonitorScorer(all_monitors, monitor_workers, skip=is_invalid) as scorer:
-            ev, streamed = _sample(backend, env, eval_prompts, num_samples=n_per,
-                                   max_tokens=max_tokens, think_budget=think_budget,
-                                   answer_tokens=answer_tokens, on_rollout=scorer.submit)
-            if not streamed:  # backend has no per-rollout hook — score the finished batch
-                for i, r in enumerate(ev):
-                    scorer.submit(i, r)
-            ev_env = _score_env(env, ev)
-            gt = [er.behavior_present for er in ev_env]
-            invalid = [invalid_reason(env, r) for r in ev]  # None = valid = monitored
-            t_sample = time.perf_counter() - t0
-            _log(f"  [eval @ {step}] draining {len(all_monitors)} monitors…")
-            t1 = time.perf_counter()
-            res = scorer.collect(ev)
-            t_score = time.perf_counter() - t1
+        scorer, grader = MonitorScorer(all_monitors, skip=is_invalid), EnvScorer(env)
+
+        def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
+            grader.submit(i, r)
+            scorer.submit(i, r)
+
+        ev, streamed = _sample(backend, env, eval_prompts, sampler=sampler,
+                               seed=derive_sample_seed(cfg.seed, "eval", step), num_samples=n_per,
+                               max_tokens=max_tokens, think_budget=think_budget,
+                               answer_tokens=answer_tokens, on_rollout=on_rollout)
+        if not streamed:  # backend has no per-rollout hook — grade + score the finished batch
+            for i, r in enumerate(ev):
+                on_rollout(i, r)
+        ev_env = grader.collect(ev)
+        gt = [er.behavior_present for er in ev_env]
+        invalid = [invalid_reason(env, r) for r in ev]  # None = valid = monitored
+        t_sample = time.perf_counter() - t0
+        _log(f"  [eval @ {step}] draining {len(all_monitors)} monitors…")
+        t1 = time.perf_counter()
+        res = scorer.collect(ev)
+        t_score = time.perf_counter() - t1
         row: dict = {
             "step": step,
+            "sampler": backend.sampler_id(sampler),  # the weights sampled — = the train row's at this step
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
             # single-turn envs: a truncated rollout is not graded, so it is NOT unparsed — there,
             # unparsed_rate + truncated_rate = invalid_rate
@@ -582,8 +691,7 @@ def run_grpo(
             eval_rollouts_slim_log.write(json.dumps(slim_record(rec), default=str) + "\n")
         eval_rollouts_log.flush()
         eval_rollouts_slim_log.flush()
-        if run is not None:
-            run.log({f"eval/{k}": v for k, v in row.items() if k != "step"}, step=step)
+        wandb_log("eval", row)
         # Print AUROC, but fall back to Brier in the readout so a NaN-AUROC eval still shows a number.
         summ = " ".join(
             f"{m.name}:auc={row[f'monitor/{m.name}/auroc']:.2f}/brier={row[f'monitor/{m.name}/brier']:.2f}"
@@ -592,11 +700,27 @@ def run_grpo(
         _log(f"  [eval @ {step}] behavior={row['behavior_rate']:.2f} invalid={row['invalid_rate']:.2f} | {summ} "
              f"| {t_sample + t_score:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s)")
 
+    evals = _BackgroundEval()
+    async_eval = bool(getattr(backend, "async_eval", False))
+
+    def launch_eval(step: int, sampler) -> None:
+        """Held-out eval of ``sampler`` labelled ``step``: in the background on an ``async_eval``
+        backend (after the previous one finished — ``launch`` blocks until then), inline otherwise."""
+        evals.launch(run_eval, step, sampler)
+        if not async_eval:
+            evals.wait()
+
     for step in range(cfg.n_steps):
-        sdk_watch.step = step  # so each persisted warning names the step it landed on
+        # so each persisted warning names the step it landed on (a background eval's warnings get the
+        # train step current when they fire)
+        sdk_watch.step = step
+        evals.check()  # a background eval that already failed aborts the run now
+        # The weights after `step` optim steps, pinned for everything this step samples: the eval
+        # launched now and the train batch below.
+        sampler = backend.current_sampler()
         if step % cfg.eval_every == 0:
-            run_eval(step)  # held-out eval at step 0 and every eval_every
-            
+            launch_eval(step, sampler)  # held-out eval at step 0 and every eval_every
+
         if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint"):
             # TTL only where checkpoints can expire (tinker-hosted state). A backend that writes to
             # local disk says so with checkpoints_expire = False and is asked for no TTL at all —
@@ -615,22 +739,29 @@ def run_grpo(
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
         # As in run_eval, their calls are pipelined into sampling: a rollout is handed to the judges
         # the moment its episode finishes, so t_score below is only the tail still in flight.
-        with MonitorScorer(train_against, monitor_workers, skip=is_invalid) as scorer:
-            rollouts, streamed = _sample(backend, env, prompts, num_samples=cfg.group_size,
-                                         max_tokens=max_tokens, think_budget=think_budget,
-                                         answer_tokens=answer_tokens, on_rollout=scorer.submit)
-            if not streamed:  # backend has no per-rollout hook — score the finished batch
-                for i, r in enumerate(rollouts):
-                    scorer.submit(i, r)
-            env_results = _score_env(env, rollouts)
-            invalid = [invalid_reason(env, r) for r in rollouts]  # None = valid = monitored
-            valid = [i for i, why in enumerate(invalid) if why is None]
-            t_sample = time.perf_counter() - t0
-            if train_against:
-                _log(f"step {step}: draining train-against monitor(s)…")
-            t1 = time.perf_counter()
-            ta_res = scorer.collect(rollouts) if train_against else {}
-            t_score = time.perf_counter() - t1
+        scorer, grader = MonitorScorer(train_against, skip=is_invalid), EnvScorer(env)
+
+        def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
+            grader.submit(i, r)
+            scorer.submit(i, r)
+
+        rollouts, streamed = _sample(backend, env, prompts, sampler=sampler,
+                                     seed=derive_sample_seed(cfg.seed, "train", step),
+                                     num_samples=cfg.group_size,
+                                     max_tokens=max_tokens, think_budget=think_budget,
+                                     answer_tokens=answer_tokens, on_rollout=on_rollout)
+        if not streamed:  # backend has no per-rollout hook — grade + score the finished batch
+            for i, r in enumerate(rollouts):
+                on_rollout(i, r)
+        env_results = grader.collect(rollouts)
+        invalid = [invalid_reason(env, r) for r in rollouts]  # None = valid = monitored
+        valid = [i for i, why in enumerate(invalid) if why is None]
+        t_sample = time.perf_counter() - t0
+        if train_against:
+            _log(f"step {step}: draining train-against monitor(s)…")
+        t1 = time.perf_counter()
+        ta_res = scorer.collect(rollouts) if train_against else {}
+        t_score = time.perf_counter() - t1
 
         # ``penalties[i]`` = raw mean train-against suspiciousness for rollout i (BEFORE the coefficient).
         # This is the obfuscation signal (drops as the policy evades) — logged as monitor_suspiciousness_mean.
@@ -656,7 +787,7 @@ def run_grpo(
         # A ``reward_override`` (truncated by max_tokens / unparseable output → -1) IS the reward: the
         # monitor penalty is not applied to it, though its monitor scores are still logged.
         applied = [0.0 if er.reward_override is not None else pen_coef * pen
-                   for er, pen in zip(env_results, penalties)]  # _score_env: override ⇔ invalid ⇔ pen None
+                   for er, pen in zip(env_results, penalties)]  # _check_env_results: override ⇔ invalid ⇔ pen None
         rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
                    for er, ap in zip(env_results, applied)]
         t2 = time.perf_counter()
@@ -695,6 +826,7 @@ def run_grpo(
         logp_mean = step_metrics.get("train/logprob_mean", float("nan"))
         row = {
             "step": step,
+            "sampler": backend.sampler_id(sampler),  # the weights this batch sampled
             "behavior_rate": gt_rate,  # = strict_rh (training rollouts; eval has the held-out version)
             **({"loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results),
                 "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
@@ -709,7 +841,7 @@ def run_grpo(
             "reward/penalty_coef": pen_coef,                        # effective λ this step (schedule-aware)
             "reward/penalty_mean": mean(applied),  # APPLIED penalty = λ · suspiciousness (0 where overridden)
             "reward/override_rate": mean(float(er.reward_override is not None) for er in env_results),
-            # = override_rate (_score_env enforces override ⇔ invalid): the fraction NOT monitored.
+            # = override_rate (_check_env_results enforces override ⇔ invalid): the fraction NOT monitored.
             "invalid_rate": mean(float(why is not None) for why in invalid),
             "reward/total_mean": mean(rewards),
             **_rollout_metrics(rollouts, rewards, cfg.group_size),  # reward spread, lengths, truncation
@@ -725,8 +857,7 @@ def run_grpo(
             **{f"loss/{k}": v for k, v in step_metrics.items()},
             **mon,  # per-train-against-monitor metrics (strict + loose), built above
         }
-        if run is not None:
-            run.log({f"train/{k}": v for k, v in row.items() if k != "step"}, step=step)
+        wandb_log("train", row)
         metrics_log.write(json.dumps(row) + "\n")
         metrics_log.flush()
         kl_note = f" kl={row['kl/mean']:.3f}" if row["kl/mean"] else ""
@@ -780,7 +911,8 @@ def run_grpo(
             )
         rollout_log.flush()
 
-    run_eval(cfg.n_steps)  # final held-out eval
+    launch_eval(cfg.n_steps, backend.current_sampler())  # final held-out eval
+    evals.wait()  # the run is done only once every eval is (and re-raises a failed one)
 
     # Save the final training state on tinker (7-day TTL) so we can resume / sample / inspect the
     # trained model later — important when we don't yet know how long these runs should take.

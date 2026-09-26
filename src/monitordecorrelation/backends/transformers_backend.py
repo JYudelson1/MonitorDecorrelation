@@ -35,6 +35,9 @@ def _pick_device() -> str:
 class TransformersBackend:
     name = "transformers"
     checkpoints_expire = False  # local directories; a TTL cannot be honoured (see save_checkpoint)
+    # Sampling and training share ONE in-process model that optim steps update in place, so an eval
+    # overlapping training would sample from weights changing under it: the RL loop runs evals inline.
+    async_eval = False
 
     def __init__(
         self,
@@ -52,11 +55,10 @@ class TransformersBackend:
 
         self.base_model = base_model
         self.learning_rate = learning_rate
-        # Seeding, mirroring TinkerBackend: the seed pins LoRA init (below) and every sampling call
-        # gets its own derived seed, so a run is reproducible on this backend too.
-        self.seed = seed
-        self._sample_calls = 0
+        # Seeding, mirroring TinkerBackend: the seed pins LoRA init (below); sampling is seeded by the
+        # caller per batch (``seed=``), so a run is reproducible on this backend too.
         torch.manual_seed(seed)
+        self._weights_version = 0  # optim steps taken; what ``current_sampler`` hands out
         self.device = device or _pick_device()
         self.dtype = torch.bfloat16 if self.device in ("cuda", "mps") else torch.float32
 
@@ -78,23 +80,38 @@ class TransformersBackend:
         )
 
     # --- sampling -------------------------------------------------------------------------------
+    def current_sampler(self) -> int:
+        """The weights version to sample from — there is only the live model, so this is just the
+        number of optim steps taken, which ``sample`` checks it is still at."""
+        return self._weights_version
+
+    @staticmethod
+    def sampler_id(sampler: int) -> str:
+        return f"local-weights-v{sampler}"
+
     def sample(
         self,
         prompts: list[Prompt],
         *,
+        sampler: int,
+        seed: int,
         num_samples: int = 1,
         max_tokens: int = 1024,
         temperature: float = 1.0,
     ) -> list[Rollout]:
         import torch
 
-        # generate() samples from the global torch RNG, so seed it per call (not once at init):
-        # otherwise a retry or a differently-ordered batch would silently change what was sampled.
-        torch.manual_seed(derive_sample_seed(self.seed, self._sample_calls))
-        self._sample_calls += 1
+        if sampler != self._weights_version:
+            raise RuntimeError(
+                f"asked to sample weights v{sampler}, but the model has taken {self._weights_version} "
+                "optim steps — this backend only has the live weights"
+            )
         self.model.eval()
         rollouts: list[Rollout] = []
-        for prompt in prompts:
+        for i, prompt in enumerate(prompts):
+            # generate() samples from the global torch RNG, so seed it per group from its position
+            # (batch seed, group index): a differently-ordered batch can't change what was sampled.
+            torch.manual_seed(derive_sample_seed(seed, i))
             prompt_ids = build_prompt_tokens(self.tokenizer, prompt.text)
             inp = torch.tensor([prompt_ids], device=self.device)
             attn = torch.ones_like(inp)
@@ -179,6 +196,7 @@ class TransformersBackend:
             (p for p in self.model.parameters() if p.requires_grad), 1.0
         )
         self.optimizer.step()
+        self._weights_version += 1
         return {"loss": float(loss.detach().cpu()), "n_data": float(len(rollouts))}
 
     def save_checkpoint(self, label: str, ttl_seconds: int | None = None) -> str:

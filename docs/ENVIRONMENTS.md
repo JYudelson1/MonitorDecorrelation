@@ -22,7 +22,7 @@ oracle label detectors are graded against. The RL loop combines `task_reward −
 via `EnvResult.reward_override`, which replaces `task − λ·penalty` outright), and **no monitor ever
 scores them, in training or eval** (`envs/base.py::invalid_reason`; `rl/train.py::MonitorScorer` skips
 them before any judge call or probe forward): (a) any rollout whose sampling stopped on
-`max_tokens` (`stop_reason != "stop"`) — enforced once in `rl/train.py::_score_env`, so no env can
+`max_tokens` (`stop_reason != "stop"`) — enforced once in `rl/train.py::_check_env_results`, so no env can
 opt out; (b) any rollout whose output the env cannot parse — MBPP-Honeypot / ImpossibleBench: no
 fenced code block; sycophancy: no answer letter; terminal-verifier: a turn with no `<command>`. Rule (b)
 is the env's optional `unparseable(rollout)`, a cheap pure check the loop runs as each rollout is
@@ -30,7 +30,7 @@ sampled; it must agree with `score`'s `meta["unparsed"]` (checked, like "overrid
 **Single-turn envs (MBPP, ImpossibleBench, sycophancy, MASK) do not grade a truncated rollout at all** —
 even when a complete code block / answer letter made it out before the cut: `score` returns task 0,
 `behavior_present = False` (all labels False), `meta["truncated"] = True`, `unparsed = False`, runs no
-code and calls no oracle judge (`_score_env` enforces this for every single-turn env). So there,
+code and calls no oracle judge (`_check_env_results` enforces this for every single-turn env). So there,
 `unparsed_rate + truncated_rate = invalid_rate`. The multi-turn terminal env still grades a truncated
 episode's earlier, complete turns (e.g. a verifier edited before the cut-off counts as cheating).
 `task_reward` stays the task score (0) for these, so `reward/task_mean` remains a success rate;
@@ -40,8 +40,11 @@ is over the valid rollouts only; the oracle rates (`behavior_rate`, `loose_rate`
 Dumps record `invalid_reason` (null / `truncated` / `unparsed`) and `monitors: {}` for invalid rollouts.
 (MASK has no policy-side parse — its answer is classified by the oracle judge — so only rule (a)
 applies there.)
-An env may also implement `score_batch(rollouts) -> list[EnvResult]`; the RL loop uses it when present
-(`rl/train.py::_score_env`), which is how the code-executing envs grade a step's rollouts in parallel.
+The RL loop grades each rollout the moment it lands (`rl/train.py::EnvScorer`: one thread per rollout,
+started from the sampler's `on_rollout` hook next to the judges, no per-run cap), so `score` must be safe
+to call concurrently — a pure function of the rollout plus its own subprocess / API call. Executed code
+is capped across all runs on the box by `globalsem.code_exec_slot`, oracle LLM calls by the OpenRouter
+slot.
 
 > **The live setting is #2, MBPP-Honeypot reward-hacking** (the headline matrix runs here). Sycophancy
 > (#1) + MASK deception were the earlier derisking settings. **ImpossibleBench (#3) is now built** as a

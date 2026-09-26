@@ -98,19 +98,19 @@ def sample_rollouts(
     long-standing call sites. Each prompt is expanded into ``num_samples`` rollouts (the GRPO group).
     Token ids + logprobs of the *completion* are stored for the policy-gradient step.
 
-    **Seeding (2026-09-22 fix).** Tinker applies one seed to the whole request, so a seeded
-    ``sample(num_samples=8)`` returns ~1–2 distinct sequences (measured on base Qwen3-8B: 1.4 of 8
-    unique; unseeded 8 of 8; 8 single-sample calls with distinct seeds: 8 of 8) — i.e. the GRPO group
-    collapses and its advantages are all zero. So when ``seed`` is set, each of the ``num_samples``
-    completions is its OWN single-sample request with its own derived seed
-    (``derive_sample_seed(seed, i*num_samples + k)``), which keeps the run (near-)reproducible AND
-    the group distinct. With ``seed=None`` a single n-sample request is used (cheapest: shared
-    prefill). Never pass a seed on an n-sample request.
+    **Every completion is its own single-sample request** — never one ``num_samples=G`` request per
+    prompt. Tinker applies one seed to the whole request, so a seeded ``sample(num_samples=8)`` returns
+    ~1–2 distinct sequences (measured on base Qwen3-8B: 1.4 of 8 unique; 8 single-sample calls with
+    distinct seeds: 8 of 8) — i.e. the GRPO group collapses and its advantages are all zero. With
+    ``seed`` set, completion k of prompt i is seeded ``derive_sample_seed(seed, i, k, 0)`` (group,
+    sample, call 0 — the same position scheme as the multi-turn driver, ``rl/episodes.py``), which
+    keeps the run reproducible AND the group distinct; ``seed=None`` sends the same requests unseeded.
 
-    ``on_rollout(index, rollout)`` (optional) is called as each prompt's completions come back, so a
-    caller can start per-rollout work (monitor API calls) on the prompts that already landed instead
-    of waiting for the slowest one. Given it, each prompt is awaited in its own thread so no prompt
-    holds back another's callbacks; the returned list keeps prompt order either way.
+    ``on_rollout(index, rollout)`` (optional) is called as each completion comes back, so a caller
+    can start per-rollout work (monitor API calls) on the completions that already landed instead of
+    waiting for the slowest one. Given it, each completion is awaited in its own thread so none holds
+    back another's callback; the returned list keeps the prompt-major, group-consecutive order either
+    way.
     """
     rend = as_renderer(renderer)
     if hasattr(rend, "enable_thinking"):  # HF-chat only; TML conditions on effort, not a flag
@@ -121,23 +121,20 @@ def sample_rollouts(
         # Inkling's end-of-turn token is not an EOS the sampler knows about; the renderer supplies it.
         return tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature, seed=sample_seed, **stop)
 
-    # futures[i] = the list of API futures whose sequences (concatenated, in order) form prompt i's
-    # group: ONE n-sample future when unseeded, ``num_samples`` single-sample futures when seeded.
-    futures: list[tuple[Prompt, list]] = []
+    # futures[i*num_samples + k] = (prompt i, the single-sample request for its completion k): the
+    # prompt-major, group-consecutive layout GRPO expects.
+    futures: list[tuple[Prompt, object]] = []
     for i, p in enumerate(prompts):
         mi = rend.model_input(p.text)
-        if seed is None:
-            futs = [sampling_client.sample(mi, num_samples, _params(None))]
-        else:
-            futs = [sampling_client.sample(mi, 1, _params(derive_sample_seed(seed, i * num_samples + k)))
+        futures += [(p, sampling_client.sample(
+                        mi, 1, _params(None if seed is None else derive_sample_seed(seed, i, k, 0))))
                     for k in range(num_samples)]
-        futures.append((p, futs))
 
-    def _group_seqs(i: int) -> list:
-        seqs = [seq for fut in futures[i][1] for seq in fut.result().sequences]
-        if len(seqs) != num_samples:
-            raise RuntimeError(f"asked for {num_samples} samples, got {len(seqs)}")
-        return seqs
+    def _seq(idx: int):
+        seqs = list(futures[idx][1].result().sequences)
+        if len(seqs) != 1:
+            raise RuntimeError(f"asked for 1 sample, got {len(seqs)}")
+        return seqs[0]
 
     def _to_rollout(prompt: Prompt, seq) -> Rollout:
         cot, answer, text = rend.parse(list(seq.tokens))
@@ -151,27 +148,19 @@ def sample_rollouts(
         )
 
     if on_rollout is None:
-        rollouts: list[Rollout] = []
-        for i, (prompt, _) in enumerate(futures):
-            for seq in _group_seqs(i):
-                rollouts.append(_to_rollout(prompt, seq))
-        return rollouts
+        return [_to_rollout(futures[idx][0], _seq(idx)) for idx in range(len(futures))]
 
-    # Streaming path: a thread per prompt, writing into pre-allocated slots so the output order is
-    # the same prompt-major, group-consecutive layout GRPO expects. It needs a fixed stride to index
-    # those slots, hence the group-size check in _group_seqs.
-    slots: list[Rollout | None] = [None] * (len(prompts) * num_samples)
+    # Streaming path: a thread per completion, writing into pre-allocated slots so the output keeps
+    # the same prompt-major, group-consecutive layout.
+    slots: list[Rollout | None] = [None] * len(futures)
 
-    def _collect(i: int) -> None:
-        prompt = futures[i][0]
-        for k, seq in enumerate(_group_seqs(i)):
-            idx = i * num_samples + k
-            r = _to_rollout(prompt, seq)
-            slots[idx] = r
-            on_rollout(idx, r)
+    def _collect(idx: int) -> None:
+        r = _to_rollout(futures[idx][0], _seq(idx))
+        slots[idx] = r
+        on_rollout(idx, r)
 
-    if prompts:
-        with ThreadPoolExecutor(max_workers=len(prompts), thread_name_prefix="sample") as ex:
-            for fut in [ex.submit(_collect, i) for i in range(len(prompts))]:
+    if futures:
+        with ThreadPoolExecutor(max_workers=len(futures), thread_name_prefix="sample") as ex:
+            for fut in [ex.submit(_collect, idx) for idx in range(len(futures))]:
                 fut.result()
     return [r for r in slots if r is not None]

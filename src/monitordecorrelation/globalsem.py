@@ -3,12 +3,13 @@
 Why
 ---
 Two resources are shared by every process the repo starts — the machine's CPUs (untrusted model
-code runs in subprocesses) and our OpenRouter account (judge calls). Both are already capped
-*inside* a run (``episodes.step_workers``, the ``MonitorScorer`` thread pool), but those caps are
-per-process, so launching k runs in parallel (separate terminals / tmux windows) multiplies them by
-k: the box thrashes, and OpenRouter starts answering the burst with the in-flight-budget 402 that
-``monitors.openrouter`` has to retry around. Dividing each run's worker count by k fixes that but
-wastes the elasticity — one run grading while another samples should be allowed the whole budget.
+code runs in subprocesses) and our OpenRouter account (judge calls). Nothing inside a run caps them
+(the episode driver runs every ready command at once, ``MonitorScorer`` starts every judge call at
+once), and a per-process cap would be the wrong tool anyway: launching k runs in parallel (separate
+terminals / tmux windows) multiplies it by k — the box thrashes, and OpenRouter starts answering the
+burst with the in-flight-budget 402 that ``monitors.openrouter`` has to retry around — while
+dividing it by k wastes the elasticity: one run grading while another samples should be allowed the
+whole budget. These semaphores are the only caps on either resource.
 
 So: a semaphore whose permits live outside any one process.
 
@@ -39,8 +40,8 @@ holds measured in seconds. It is also *only* a resource cap: it delays work, nev
 semantically meaningful (per-call seeds are position-addressed), so it cannot change a run's
 results, only its timing.
 
-Deadlock: the two semaphores must never be nested. Today they can't be — env steps and monitor
-scoring run in different thread pools — and no call site should start.
+Deadlock: the two semaphores must never be nested. Today they can't be — env steps run in episode
+threads, monitor scoring in its own per-call threads — and no call site should start.
 """
 
 from __future__ import annotations

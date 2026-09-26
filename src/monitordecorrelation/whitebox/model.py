@@ -12,6 +12,7 @@ accelerators, fp32 on CPU.
 
 from __future__ import annotations
 
+import threading
 from typing import Sequence, Union
 
 import numpy as np
@@ -53,6 +54,13 @@ def fold_assistant(cot: str, answer: str) -> str:
 
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
+    # Serializes local activation reads. One model is shared by every probe on it
+    # (experiment_config.build_monitors), and the RL loop can score it from the training thread and a
+    # background eval at once — neither the forward pass nor the tokenizer (``padding_side`` is set per
+    # call) is safe to run concurrently. ``__init__`` gives each local instance its own; this class
+    # default only serves __init__-bypassing stubs. (A remote model needs none: probe_server.py
+    # serializes the GPU work itself.)
+    _lock = threading.Lock()
 
     def __init__(self, model_name: str = "Qwen/Qwen3-0.6B", device: str | None = None,
                  server_url: str | None = None) -> None:
@@ -88,6 +96,7 @@ class WhiteBoxModel:
         )
         self.model.to(self.device)
         self.model.eval()
+        self._lock = threading.Lock()
 
     def _extract_remote(self, items, follow_up, batch_size, preserve_thinking) -> np.ndarray:
         """POST the (question, cot, answer) triples to the shared server; it renders + reads activations
@@ -188,7 +197,11 @@ class WhiteBoxModel:
         ``progress=True`` shows a tqdm bar (handy on slow MPS runs)."""
         if self.remote:
             return self._extract_remote(items, follow_up, batch_size, preserve_thinking)
+        with self._lock:
+            return self._extract_local(items, follow_up, batch_size, preserve_thinking, progress)
 
+    def _extract_local(self, items, follow_up, batch_size, preserve_thinking, progress) -> np.ndarray:
+        """``extract_activations`` on the in-process model (the caller holds ``_lock``)."""
         import torch
 
         if not items:

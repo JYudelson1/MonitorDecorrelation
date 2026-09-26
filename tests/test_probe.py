@@ -330,3 +330,33 @@ if __name__ == "__main__":
     test_extract_activations_logic_offline()
     test_whitebox_model_end_to_end()
     print("ALL PASS")
+
+
+def test_local_activation_reads_are_serialized():
+    """One WhiteBoxModel is shared by every probe on it, and the RL loop may score it from the training
+    thread and a background eval at once: local reads must never overlap (the forward pass and the
+    tokenizer's per-call padding_side are not thread-safe)."""
+    import threading
+    import time
+
+    from monitordecorrelation.whitebox.model import WhiteBoxModel
+
+    m = WhiteBoxModel.__new__(WhiteBoxModel)
+    guard, active, peak = threading.Lock(), [0], [0]
+
+    def fake_local(*args):
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.05)
+        with guard:
+            active[0] -= 1
+        return np.zeros((1, 2, 3), dtype=np.float32)
+
+    m._extract_local = fake_local
+    threads = [threading.Thread(target=m.extract_activations, args=([("q", "", "a")],)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak[0] == 1

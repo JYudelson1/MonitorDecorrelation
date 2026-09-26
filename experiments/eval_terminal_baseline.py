@@ -138,7 +138,6 @@ def main() -> None:
     ap.add_argument("--price", default=None,
                     help="override the $/1M rates as JSON, e.g. '{\"sample\": 0.6, \"prefill\": 0.2, "
                          "\"cached\": 0.04, \"train\": 0.44}'")
-    ap.add_argument("--workers", type=int, default=16, help="concurrent env steps (command execution)")
     args = ap.parse_args()
 
     # The two turn-sizing modes are disjoint (run_episodes rejects the unused argument), so settle it
@@ -190,14 +189,14 @@ def main() -> None:
 
     t0 = time.time()
     # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
-    with MonitorScorer(judges, args.workers, skip=lambda r: invalid_reason(env, r) is not None) as scorer:
-        rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
-                                max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
-                                think_budget=args.think_budget, answer_tokens=args.answer_tokens,
-                                step_workers=args.workers, on_rollout=scorer.submit)
-        wall_s = time.time() - t0
-        results = [env.score(r) for r in rollouts]
-        judged = scorer.collect(rollouts)
+    scorer = MonitorScorer(judges, skip=lambda r: invalid_reason(env, r) is not None)
+    rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
+                            max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
+                            think_budget=args.think_budget, answer_tokens=args.answer_tokens,
+                            on_rollout=scorer.submit)
+    wall_s = time.time() - t0
+    results = [env.score(r) for r in rollouts]
+    judged = scorer.collect(rollouts)
 
     short = args.model.split("/")[-1]
     out = Path(args.out) if args.out else Path("data/runs") / f"tv_baseline_{short}" / "episodes.jsonl"

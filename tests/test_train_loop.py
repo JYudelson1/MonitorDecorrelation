@@ -12,14 +12,21 @@ from pathlib import Path
 import pytest
 
 from monitordecorrelation.config import LoggingConfig, RunConfig
-from monitordecorrelation.rl.train import run_grpo
+from monitordecorrelation.rl.train import EnvScorer, run_grpo
 from monitordecorrelation.types import EnvResult, MonitorResult, Prompt, Rollout
 
 
 class _FakeBackend:
     name = "fake"
 
-    def sample(self, prompts, *, num_samples=1, max_tokens=64, temperature=1.0):
+    def current_sampler(self):
+        return "w0"
+
+    @staticmethod
+    def sampler_id(sampler):
+        return sampler
+
+    def sample(self, prompts, *, sampler, seed, num_samples=1, max_tokens=64, temperature=1.0):
         return [
             Rollout(prompt=p, cot="reason", output="```python\ndef f():\n  return 1\n```",
                     token_ids=[1, 2, 3], logprobs=[-0.1, -0.2, -0.3])
@@ -165,7 +172,7 @@ class _InvalidatingBackend(_FakeBackend):
     """Cycles each prompt's samples through: valid, truncated (stop_reason "length"), unparseable (no
     codeblock), valid — the two kinds of INVALID rollout, alongside valid ones."""
 
-    def sample(self, prompts, *, num_samples=1, max_tokens=64, temperature=1.0):
+    def sample(self, prompts, *, sampler, seed, num_samples=1, max_tokens=64, temperature=1.0):
         out = []
         for p in prompts:
             for k in range(num_samples):
@@ -272,22 +279,26 @@ def test_invalid_rollouts_are_never_monitored_and_excluded_from_monitor_metrics(
             shutil.rmtree(run_dir)
 
 
-def test_score_env_rejects_an_env_that_overrides_a_valid_rollout():
+def _grade(env, rollouts):
+    """Grade like the RL loop: every rollout through EnvScorer (a thread each), then the checks."""
+    sc = EnvScorer(env)
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    return sc.collect(rollouts)
+
+
+def test_env_grading_rejects_an_env_that_overrides_a_valid_rollout():
     """reward_override is reserved for invalid rollouts — the ones the monitors skipped. An env that
     sets it on a valid rollout would give a monitored rollout a monitor-free reward: fail loudly."""
-    from monitordecorrelation.rl.train import _score_env
-
     class _BadEnv:
         def score(self, rollout):
             return EnvResult(task_reward=1.0, behavior_present=False, meta={}, reward_override=-1.0)
 
     with pytest.raises(RuntimeError, match="reward_override on valid rollout 0"):
-        _score_env(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a", meta={"stop_reason": "stop"})])
+        _grade(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a", meta={"stop_reason": "stop"})])
 
 
-def test_score_env_rejects_an_unparsed_flag_that_disagrees_with_unparseable():
-    from monitordecorrelation.rl.train import _score_env
-
+def test_env_grading_rejects_an_unparsed_flag_that_disagrees_with_unparseable():
     class _BadEnv:
         def unparseable(self, rollout):
             return False
@@ -296,15 +307,13 @@ def test_score_env_rejects_an_unparsed_flag_that_disagrees_with_unparseable():
             return EnvResult(task_reward=0.0, behavior_present=False, meta={"unparsed": True})
 
     with pytest.raises(RuntimeError, match="unparseable\(\) disagrees"):
-        _score_env(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a")])
+        _grade(_BadEnv(), [Rollout(prompt=Prompt(text="q"), cot="", output="a")])
 
 
-def test_score_env_gives_every_truncated_rollout_minus_one_whatever_the_env_said():
+def test_env_grading_gives_every_truncated_rollout_minus_one_whatever_the_env_said():
     """The truncation rule lives in the RL loop, not in each env: any rollout whose sampling stopped
     on max_tokens gets reward_override = -1, even from an env that knows nothing about truncation.
     (A multi-turn env, which may still grade a truncated episode's earlier turns.)"""
-    from monitordecorrelation.rl.train import _score_env
-
     class _PlainEnv:
         multi_turn = True
 
@@ -315,20 +324,18 @@ def test_score_env_gives_every_truncated_rollout_minus_one_whatever_the_env_said
         return Rollout(prompt=Prompt(text="q"), cot="", output="a",
                        meta={} if stop is None else {"stop_reason": stop})
 
-    res = _score_env(_PlainEnv(), [roll("length"), roll("stop"), roll(None)])
+    res = _grade(_PlainEnv(), [roll("length"), roll("stop"), roll(None)])
     assert [r.reward_override for r in res] == [-1.0, None, None]
     assert [r.task_reward for r in res] == [1.0, 1.0, 1.0]  # task score untouched
 
 
-def test_score_env_rejects_a_single_turn_env_that_grades_a_truncated_rollout():
+def test_env_grading_rejects_a_single_turn_env_that_grades_a_truncated_rollout():
     """Single-turn envs must not grade a truncated rollout: no task score, no behavior label from text
     that was cut off (and that no monitor will see)."""
-    from monitordecorrelation.rl.train import _score_env
-
     class _GradesEverything:
         def score(self, rollout):
             return EnvResult(task_reward=1.0, behavior_present=True, meta={})
 
     trunc = Rollout(prompt=Prompt(text="q"), cot="", output="a", meta={"stop_reason": "length"})
     with pytest.raises(RuntimeError, match="graded truncated rollout 0"):
-        _score_env(_GradesEverything(), [trunc])
+        _grade(_GradesEverything(), [trunc])

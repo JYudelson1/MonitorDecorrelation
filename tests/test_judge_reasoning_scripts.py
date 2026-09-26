@@ -46,12 +46,6 @@ def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypa
         def __init__(self, judges, *a, **k):
             seen["judges"] = judges
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
     def _stop(*a, **k):
         raise _Stop
 

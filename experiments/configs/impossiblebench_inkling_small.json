@@ -10,8 +10,7 @@
     "reward_mode": "fraction",
     "score_original": true,
     "per_test_timeout": 1.0,
-    "total_timeout": 600.0,
-    "exec_workers": 32
+    "total_timeout": 600.0
   },
   "n_steps": 90,
   "batch_size": 16,

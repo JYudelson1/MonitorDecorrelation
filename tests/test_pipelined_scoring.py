@@ -19,7 +19,7 @@ import pytest
 
 from monitordecorrelation.config import LoggingConfig, RunConfig
 from monitordecorrelation.rl.rollout import sample_rollouts
-from monitordecorrelation.rl.train import MonitorScorer, run_grpo
+from monitordecorrelation.rl.train import EnvScorer, MonitorScorer, run_grpo
 from monitordecorrelation.types import EnvResult, MonitorResult, Prompt, Rollout
 
 
@@ -68,10 +68,10 @@ class _BatchProbe:
 def test_scorer_results_are_indexed_like_the_rollouts():
     rollouts = [_rollout(f"q{i}") for i in range(6)]
     judge, probe = _TimedJudge("j"), _BatchProbe("p")
-    with MonitorScorer([judge, probe], workers=4) as sc:
-        for i in reversed(range(len(rollouts))):  # out of order on purpose
-            sc.submit(i, rollouts[i])
-        res = sc.collect(rollouts)
+    sc = MonitorScorer([judge, probe])
+    for i in reversed(range(len(rollouts))):  # out of order on purpose
+        sc.submit(i, rollouts[i])
+    res = sc.collect(rollouts)
     assert [r.meta["q"] for r in res["j"]] == [f"q{i}" for i in range(6)]
     assert len(res["p"]) == 6 and all(r.score == 0.7 for r in res["p"])
     assert probe.batch_sizes == [6]  # ONE batched forward, not six
@@ -80,29 +80,29 @@ def test_scorer_results_are_indexed_like_the_rollouts():
 def test_probe_runs_once_over_the_whole_batch_after_the_judges_were_dispatched():
     rollouts = [_rollout(f"q{i}") for i in range(4)]
     judge, probe = _TimedJudge("j", latency=0.05), _BatchProbe("p")
-    with MonitorScorer([judge, probe], workers=4) as sc:
-        for i, r in enumerate(rollouts):
-            sc.submit(i, r)
-        assert probe.batch_sizes == []  # the probe has NOT run yet — it waits for the full batch
-        assert judge.times, "judges start as soon as a rollout is submitted"
-        res = sc.collect(rollouts)
+    sc = MonitorScorer([judge, probe])
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    assert probe.batch_sizes == []  # the probe has NOT run yet — it waits for the full batch
+    assert judge.times, "judges start as soon as a rollout is submitted"
+    res = sc.collect(rollouts)
     assert probe.batch_sizes == [4] and len(res["j"]) == 4
 
 
 def test_unsubmitted_rollout_is_a_hard_error():
     rollouts = [_rollout("a"), _rollout("b")]
-    with MonitorScorer([_TimedJudge("j")], workers=2) as sc:
-        sc.submit(0, rollouts[0])
-        with pytest.raises(RuntimeError, match=r"rollout 1/2 was never submitted"):
-            sc.collect(rollouts)
+    sc = MonitorScorer([_TimedJudge("j")])
+    sc.submit(0, rollouts[0])
+    with pytest.raises(RuntimeError, match=r"rollout 1/2 was never submitted"):
+        sc.collect(rollouts)
 
 
 def test_double_submit_is_a_hard_error():
     r = _rollout("a")
-    with MonitorScorer([_TimedJudge("j")], workers=2) as sc:
+    sc = MonitorScorer([_TimedJudge("j")])
+    sc.submit(0, r)
+    with pytest.raises(RuntimeError, match=r"submitted twice"):
         sc.submit(0, r)
-        with pytest.raises(RuntimeError, match=r"submitted twice"):
-            sc.submit(0, r)
 
 
 def test_failed_judge_calls_still_abort_the_run():
@@ -113,11 +113,11 @@ def test_failed_judge_calls_still_abort_the_run():
             raise RuntimeError("simulated 404")
 
     rollouts = [_rollout("a"), _rollout("b")]
-    with MonitorScorer([_Boom()], workers=2) as sc:
-        for i, r in enumerate(rollouts):
-            sc.submit(i, r)
-        with pytest.raises(RuntimeError, match=r"monitor 'boom' returned NaN for 2/2 rollouts"):
-            sc.collect(rollouts)
+    sc = MonitorScorer([_Boom()])
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    with pytest.raises(RuntimeError, match=r"monitor 'boom' returned NaN for 2/2 rollouts"):
+        sc.collect(rollouts)
 
 
 def test_skipped_rollouts_are_shown_to_no_monitor():
@@ -126,10 +126,10 @@ def test_skipped_rollouts_are_shown_to_no_monitor():
     rollouts = [_rollout(f"q{i}") for i in range(5)]
     skip = lambda r: r.prompt.text in ("q1", "q3")  # noqa: E731
     judge, probe = _TimedJudge("j"), _BatchProbe("p")
-    with MonitorScorer([judge, probe], workers=4, skip=skip) as sc:
-        for i, r in enumerate(rollouts):
-            sc.submit(i, r)
-        res = sc.collect(rollouts)
+    sc = MonitorScorer([judge, probe], skip=skip)
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    res = sc.collect(rollouts)
     assert sorted(judge.seen) == ["q0", "q2", "q4"]
     assert probe.batch_sizes == [3]
     for name in ("j", "p"):
@@ -140,16 +140,84 @@ def test_skipped_rollouts_are_shown_to_no_monitor():
 def test_all_rollouts_skipped_calls_no_probe():
     rollouts = [_rollout("a"), _rollout("b")]
     probe = _BatchProbe("p")
-    with MonitorScorer([probe], workers=2, skip=lambda r: True) as sc:
-        res = sc.collect(rollouts)
+    sc = MonitorScorer([probe], skip=lambda r: True)
+    res = sc.collect(rollouts)
     assert probe.batch_sizes == [] and res == {"p": [None, None]}
 
 
-def test_no_monitors_needs_no_pool():
+def test_no_monitors_starts_no_threads():
     rollouts = [_rollout("a")]
-    with MonitorScorer([], workers=4) as sc:
-        sc.submit(0, rollouts[0])  # no-op
-        assert sc.collect(rollouts) == {}
+    sc = MonitorScorer([])
+    sc.submit(0, rollouts[0])  # no-op
+    assert sc.collect(rollouts) == {}
+
+
+def test_judge_calls_are_not_capped():
+    """Every submitted judge call runs at once — no per-run pool limit: 100 calls each wait on a
+    barrier that only opens once all 100 are in flight together."""
+    n = 100
+    barrier = threading.Barrier(n, timeout=10)
+
+    class _Rendezvous:
+        name = "j"
+
+        def score(self, rollout):
+            barrier.wait()  # BrokenBarrierError (→ NaN → abort) unless all n run concurrently
+            return MonitorResult(score=0.5, label=False)
+
+    rollouts = [_rollout(f"q{i}") for i in range(n)]
+    sc = MonitorScorer([_Rendezvous()])
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    res = sc.collect(rollouts)
+    assert [r.score for r in res["j"]] == [0.5] * n
+
+
+# --------------------------------------------------------------------------------------------
+# EnvScorer: each rollout graded (env.score) the moment it exists, no cap
+# --------------------------------------------------------------------------------------------
+class _GradeEnv:
+    """``score`` echoes the prompt; ``barrier`` (optional) makes every grade wait for all the others."""
+
+    def __init__(self, barrier=None, fail_on=None):
+        self.barrier, self.fail_on = barrier, fail_on
+        self.times: list[float] = []
+
+    def score(self, rollout):
+        self.times.append(time.perf_counter())
+        if self.barrier is not None:
+            self.barrier.wait()  # BrokenBarrierError unless all grades run concurrently
+        if rollout.prompt.text == self.fail_on:
+            raise RuntimeError("scaffold broke")
+        return EnvResult(task_reward=0.5, behavior_present=False, meta={"q": rollout.prompt.text})
+
+
+def test_env_grades_are_indexed_like_the_rollouts_and_run_all_at_once():
+    n = 50
+    rollouts = [_rollout(f"q{i}") for i in range(n)]
+    sc = EnvScorer(_GradeEnv(barrier=threading.Barrier(n, timeout=10)))
+    for i in reversed(range(n)):  # out of order on purpose
+        sc.submit(i, rollouts[i])
+    assert [er.meta["q"] for er in sc.collect(rollouts)] == [f"q{i}" for i in range(n)]
+
+
+def test_a_failed_env_grade_is_raised_not_turned_into_a_reward():
+    rollouts = [_rollout("a"), _rollout("b")]
+    sc = EnvScorer(_GradeEnv(fail_on="b"))
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    with pytest.raises(RuntimeError, match="scaffold broke"):
+        sc.collect(rollouts)
+
+
+def test_env_grading_bookkeeping_errors():
+    rollouts = [_rollout("a"), _rollout("b")]
+    sc = EnvScorer(_GradeEnv())
+    sc.submit(0, rollouts[0])
+    with pytest.raises(RuntimeError, match="submitted twice"):
+        sc.submit(0, rollouts[0])
+    with pytest.raises(RuntimeError, match=r"never submitted: \[1\]"):
+        sc.collect(rollouts)
 
 
 # --------------------------------------------------------------------------------------------
@@ -221,11 +289,18 @@ def test_sample_rollouts_streams_without_waiting_for_the_slowest_prompt():
 
 def test_sample_rollouts_without_callback_is_unchanged():
     class _Sampler:
-        def sample(self, model_input, num_samples, params):
-            return _SlowFut([_Seq([10, 11, 12]), _Seq([20, 21, 22])])
+        def __init__(self):
+            self.n = []
 
-    rolls = sample_rollouts(_Sampler(), _FakeTok(), [Prompt(text="p")], num_samples=2, max_tokens=8)
+        def sample(self, model_input, num_samples, params):
+            self.n.append(num_samples)
+            return _SlowFut([_Seq([10 + 10 * len(self.n), 11, 12]) for _ in range(num_samples)])
+
+    sampler = _Sampler()
+    rolls = sample_rollouts(sampler, _FakeTok(), [Prompt(text="p")], num_samples=2, max_tokens=8)
     assert len(rolls) == 2 and rolls[0].cot == "reasoning"
+    assert sampler.n == [1, 1]  # one single-sample request per completion, even unseeded
+    assert [r.output for r in rolls] == ["answer20", "answer30"]
 
 
 # --------------------------------------------------------------------------------------------
@@ -240,7 +315,15 @@ class _StreamingBackend:
         self.gap = gap
         self.sample_returned_at: list[float] = []
 
-    def sample(self, prompts, *, num_samples=1, max_tokens=64, temperature=1.0, on_rollout=None):
+    def current_sampler(self):
+        return "w0"
+
+    @staticmethod
+    def sampler_id(sampler):
+        return sampler
+
+    def sample(self, prompts, *, sampler, seed, num_samples=1, max_tokens=64, temperature=1.0,
+               on_rollout=None):
         out: list[Rollout] = []
         for p in prompts:
             for _ in range(num_samples):
@@ -270,6 +353,36 @@ class _FakeEnv:
 
     def score(self, rollout):
         return EnvResult(task_reward=0.5, behavior_present=False, meta={"unparsed": False})
+
+
+def test_run_grpo_grades_rollouts_during_sampling():
+    """The env grade of a rollout starts the moment it lands — before the batch has been sampled."""
+    run_dir = Path("data/runs/smoke_pipelined_grading")
+    shutil.rmtree(run_dir, ignore_errors=True)
+    backend = _StreamingBackend(gap=0.03)
+
+    class _TimedEnv(_FakeEnv):
+        def __init__(self):
+            self.times: list[float] = []
+
+        def score(self, rollout):
+            self.times.append(time.perf_counter())
+            return super().score(rollout)
+
+    env = _TimedEnv()
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=4, group_size=2, n_steps=1, eval_every=10, eval_size=4,
+        penalty_coef=None, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_pipelined_grading", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, env, backend, train_against=[], held_out=[])
+        # eval @0 (4), train step 0 (8), eval @1 (4): each batch's first grade beat its batch's return
+        assert len(env.times) == 16 and len(backend.sample_returned_at) == 3
+        assert min(env.times) < backend.sample_returned_at[0]
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def test_run_grpo_dispatches_judges_during_sampling():

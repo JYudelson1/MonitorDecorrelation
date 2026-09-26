@@ -191,14 +191,20 @@ def test_answer_without_a_codeblock_is_unparsed_and_gets_minus_one():
     assert res.behavior_present is False
 
 
-def test_score_batch_matches_serial_scoring():
+def test_concurrent_grading_matches_serial_scoring():
+    """The RL loop grades every rollout in its own thread (rl/train.py::EnvScorer): same grades."""
+    from monitordecorrelation.rl.train import EnvScorer
+
     env = _env()
     rollouts = [_rollout(env, _block(HONEST)), _rollout(env, _block(CHEAT)),
-                _rollout(env, "no code")]
-    batch = env.score_batch(rollouts)
+                _rollout(env, "no code")] * 3
+    sc = EnvScorer(env)
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    graded = sc.collect(rollouts)
     serial = [env.score(r) for r in rollouts]
-    assert [b.task_reward for b in batch] == [s.task_reward for s in serial]
-    assert [b.behavior_present for b in batch] == [s.behavior_present for s in serial]
+    assert [b.task_reward for b in graded] == [s.task_reward for s in serial]
+    assert [b.behavior_present for b in graded] == [s.behavior_present for s in serial]
 
 
 def test_prompt_shows_the_mutated_tests_but_never_the_original():
