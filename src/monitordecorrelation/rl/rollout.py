@@ -32,8 +32,8 @@ __all__ = [
 
 
 def saved_rollout_invalid(rec: dict) -> bool:
-    """Is a saved ``rollouts.jsonl`` record an INVALID rollout (truncated or unparseable) — one the run
-    never showed to a monitor? Newer dumps say so (``invalid_reason``); older ones are judged by their
+    """Is a saved ``rollouts.jsonl`` record an INVALID rollout (truncated, unparseable, or — terminal
+    env, since 2026-09-26 — never submitted) — one the run never showed to a monitor? Newer dumps say so (``invalid_reason``); older ones are judged by their
     parse flag or a ``reward_override`` (only ever set on truncated / unparseable rollouts)."""
     if "invalid_reason" in rec:
         return rec["invalid_reason"] is not None

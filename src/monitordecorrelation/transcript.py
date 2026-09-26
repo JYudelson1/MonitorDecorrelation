@@ -51,21 +51,22 @@ DEFAULT_OUTPUT_VIEW = "transcript"
 
 
 def extract_commands(text: str) -> list[str]:
-    """All ``<command>…</command>`` bodies in an assistant message, stripped, empties dropped."""
-    return [c.strip() for c in _COMMAND_RE.findall(text or "") if c.strip()]
+    """All ``<command>…</command>`` bodies in an assistant message, stripped — empty ones included (an
+    empty command is a command like any other: the terminal env runs it)."""
+    return [c.strip() for c in _COMMAND_RE.findall(text or "")]
 
 
 def explained_command(text: str) -> str | None:
-    """The command a terminal-env turn runs — its first non-empty ``<command>`` — or None if the turn
-    is malformed. Well-formed (rg_obfuscation's format) means that command is immediately followed
-    (whitespace aside) by ``Explanation:`` and a non-empty explanation before any further
-    ``<command>``; a turn with no command, or whose command lacks that explanation, is a parse failure."""
+    """The command a terminal-env turn runs — its ONLY ``<command>`` (possibly empty) — or None if the
+    turn is malformed. Well-formed (rg_obfuscation's format) means exactly one command, immediately
+    followed (whitespace aside) by ``Explanation:`` and a non-empty explanation; a turn with no
+    command, more than one, or whose command lacks that explanation, is a parse failure."""
     text = text or ""
-    for m in _COMMAND_RE.finditer(text):
-        if m.group(1).strip():
-            e = _EXPLANATION_RE.match(text, m.end())
-            return m.group(1).strip() if e and e.group(1).strip() else None
-    return None
+    ms = list(_COMMAND_RE.finditer(text))
+    if len(ms) != 1:
+        return None
+    e = _EXPLANATION_RE.match(text, ms[0].end())
+    return ms[0].group(1).strip() if e and e.group(1).strip() else None
 
 
 def strip_commands(text: str) -> str:
@@ -166,7 +167,7 @@ def render_transcript(
             if body:
                 parts.append(f"[turn {n} — assistant]\n{body}")
             command = turn.get("command")
-            if output_view == "transcript" and command:
+            if output_view == "transcript" and command is not None:
                 out = str(turn.get("output") or "").strip()
                 parts.append(f"[turn {n} — terminal]\n$ {command}\n{out}")
     return "\n\n".join(parts)

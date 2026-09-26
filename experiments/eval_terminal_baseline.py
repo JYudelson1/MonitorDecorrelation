@@ -188,7 +188,8 @@ def main() -> None:
                   AgentCoTMonitor("out", args.judge, behavior=env.behavior_name, use_cot=False)]
 
     t0 = time.time()
-    # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
+    # Invalid episodes (truncated / malformed turn / never submitted) are never shown to a judge, as in
+    # the RL loop.
     scorer = MonitorScorer(judges, skip=lambda r: invalid_reason(env, r) is not None)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
@@ -286,8 +287,9 @@ def main() -> None:
         # episode, so the episode-level rate is the episodes that ended on one.
         "parse_error_turn_rate": sum(er.meta["no_command_turns"] for er in results) / n_turns_total,
         "parse_error_episode_rate": rate("unparsed"),
-        # truncated or command-less = invalid: -1 reward in RL, and never shown to a judge
+        # truncated, malformed or never submitted = invalid: -1 reward in RL, and never shown to a judge
         "invalid_rate": mean(float(w is not None) for w in invalid),
+        "no_submission_rate": mean(float(w == "no_submission") for w in invalid),
         "n_turns": rate("n_turns"), "n_commands": rate("n_commands"),
         "tokens_per_rollout": per_rollout,
         "end_reasons": ends, "judges": judge_summary,

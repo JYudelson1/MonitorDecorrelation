@@ -19,18 +19,22 @@ def is_truncated(rollout: Rollout) -> bool:
 
 
 def invalid_reason(env: Any, rollout: Rollout) -> str | None:
-    """Why a rollout is INVALID — ``"truncated"`` (cut off by max_tokens) or ``"unparsed"`` (the env
-    could not parse its output) — or None if it is valid.
+    """Why a rollout is INVALID — ``"truncated"`` (cut off by max_tokens), ``"unparsed"`` (the env
+    could not parse its output) or ``"no_submission"`` (a well-formed episode that never submitted an
+    answer, ``env.never_submitted``) — or None if it is valid.
 
     An invalid rollout gets the flat ``INVALID_ROLLOUT_REWARD`` and is **never shown to a monitor**,
     in training or eval: every monitor statistic (AUROC, d′, class means, the train-against
-    suspiciousness) is over the valid rollouts only. Decidable from the rollout alone, so the RL loop
-    can skip the judge calls the moment a rollout is sampled, before the env grades it."""
+    suspiciousness) is over the valid rollouts only. Decidable from the rollout alone, so the RL loop can skip the judge calls the moment a rollout is
+    sampled, before the env grades it."""
     if is_truncated(rollout):
         return "truncated"
     check = getattr(env, "unparseable", None)
     if check is not None and check(rollout):
         return "unparsed"
+    never = getattr(env, "never_submitted", None)
+    if never is not None and never(rollout):
+        return "no_submission"
     return None
 
 
@@ -60,6 +64,13 @@ class Env(Protocol):
         Optional — an env without it has no parse failures. Must be cheap and pure (it runs on the
         sampling threads, before ``score``) and agree with ``score``'s ``meta["unparsed"]``; the RL
         loop checks that. See ``invalid_reason``."""
+        ...
+
+    def never_submitted(self, rollout: Rollout) -> bool:
+        """Did a (well-formed, untruncated) episode end without ever submitting an answer? Optional —
+        an env without it always has a submission. Such a rollout is invalid (``invalid_reason``
+        ``"no_submission"``): -1, never shown to a monitor. Cheap and pure, like ``unparseable``, and
+        must agree with ``score``'s ``reward_override`` (the RL loop checks that)."""
         ...
 
 

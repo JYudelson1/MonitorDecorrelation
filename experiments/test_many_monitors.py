@@ -87,7 +87,7 @@ def main() -> None:
             num_samples=args.num_samples, max_tokens=args.max_tokens, temperature=1.0,
         )
         ers = [env.score(r) for r in rollouts]
-        # drop INVALID rollouts (truncated or unparsed) — monitors are never evaluated on them
+        # drop INVALID rollouts (truncated, unparsed or never submitted) — monitors are never evaluated on them
         parsed = [(r, er.behavior_present) for r, er in zip(rollouts, ers)
                   if invalid_reason(env, r) is None]
         n_unparsed = len(rollouts) - len(parsed)

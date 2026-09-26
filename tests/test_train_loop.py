@@ -279,6 +279,86 @@ def test_invalid_rollouts_are_never_monitored_and_excluded_from_monitor_metrics(
             shutil.rmtree(run_dir)
 
 
+class _NoSubmissionBackend(_FakeBackend):
+    """Cycles each prompt's samples through: valid, truncated, unparseable, never-submitted — all three
+    kinds of INVALID rollout, alongside a valid one."""
+
+    def sample(self, prompts, *, sampler, seed, num_samples=1, max_tokens=64, temperature=1.0):
+        out = []
+        for p in prompts:
+            for k in range(num_samples):
+                kind = ("ok", "trunc", "noparse", "nosubmit")[k % 4]
+                out.append(Rollout(
+                    prompt=p, cot="reason",
+                    output={"noparse": "no code here",
+                            "nosubmit": "```python\n# NOSUBMIT\n```"}.get(kind, "```python\ndef f(x):\n  return x\n```"),
+                    token_ids=[1, 2, 3], logprobs=[-0.1, -0.2, -0.3],
+                    meta={"stop_reason": "length" if kind == "trunc" else "stop"}))
+        return out
+
+
+class _SubmittingEnv(_ParsingEnv):
+    """``_ParsingEnv`` + the terminal env's ``never_submitted`` hook: a well-formed rollout marked
+    NOSUBMIT never submitted — invalid: -1, never monitored."""
+
+    def never_submitted(self, rollout):
+        return "NOSUBMIT" in rollout.output
+
+    def score(self, rollout):
+        if rollout.meta.get("stop_reason") == "stop" and not self.unparseable(rollout) \
+                and self.never_submitted(rollout):
+            return EnvResult(task_reward=0.0, behavior_present=False, meta={"unparsed": False, "truncated": False},
+                             reward_override=-1.0)
+        return super().score(rollout)
+
+
+def test_never_submitted_rollouts_get_minus_one_and_are_never_monitored():
+    """A ``no_submission`` rollout is treated exactly like a truncated / unparseable one: -1, no monitor
+    sees it, ``monitors == {}``, in no monitor statistic — and it is logged under its own reason."""
+    run_dir = Path("data/runs/smoke_test_loop_nosubmit")
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=4, n_steps=1, eval_every=10, eval_size=2, eval_samples_per_prompt=4,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_test_loop_nosubmit", use_wandb=False, log_fraction=1.0),
+    )
+    ta, judge, probe = _CountingMonitor("ta"), _CountingJudge("ho_judge"), _CountingMonitor("ho_probe")
+    try:
+        run_grpo(cfg, _SubmittingEnv(), _NoSubmissionBackend(), train_against=[ta], held_out=[judge, probe])
+        for mon in (ta, judge, probe):
+            assert mon.seen and all("NOSUBMIT" not in r.output and "```" in r.output
+                                    and r.meta["stop_reason"] == "stop" for r in mon.seen)
+
+        rows = [json.loads(l) for l in (run_dir / "rollouts.jsonl").open() if l.strip()]
+        assert sorted(str(r["invalid_reason"]) for r in rows) == \
+            ["None"] * 2 + ["no_submission"] * 2 + ["truncated"] * 2 + ["unparsed"] * 2
+        for r in rows:
+            if r["invalid_reason"] is not None:
+                assert r["monitors"] == {} and r["reward"] == -1.0 and r["env"]["reward_override"] == -1.0
+            else:
+                assert r["reward"] == pytest.approx(0.5 - 1.0 * 0.3)
+
+        m = json.loads((run_dir / "metrics.jsonl").read_text().splitlines()[0])
+        assert m["reward/override_rate"] == 0.75 and m["invalid_rate"] == 0.75 and m["no_submission_rate"] == 0.25
+        assert m["reward/monitor_suspiciousness_mean"] == pytest.approx(0.3)  # over the 2 valid only
+        assert m["reward/penalty_mean"] == pytest.approx(2 * 0.3 / 8)  # applied only to the 2 valid
+        assert m["monitor/ta/n_scored"] == 2 and m["monitor/ta/n_neg"] == 0  # no nosubmit (clean) leaked in
+
+        for row in [json.loads(l) for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]:
+            assert row["invalid_rate"] == 0.75 and row["no_submission_rate"] == 0.25
+            for name in ("ta", "ho_judge", "ho_probe"):
+                assert row[f"monitor/{name}/n_scored"] == 2 and row[f"monitor/{name}/n_neg"] == 0
+        slim = [json.loads(l) for l in (run_dir / "eval_rollouts_slim.jsonl").open() if l.strip()]
+        assert sum(r["invalid_reason"] == "no_submission" for r in slim) == len(slim) // 4
+        for rec in slim:
+            assert (rec["monitors"] == {}) == (rec["invalid_reason"] is not None)
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
 def _grade(env, rollouts):
     """Grade like the RL loop: every rollout through EnvScorer (a thread each), then the checks."""
     sc = EnvScorer(env)

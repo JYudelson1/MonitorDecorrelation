@@ -22,8 +22,8 @@ from __future__ import annotations
 from typing import Any
 
 # step + task identity + the 3-way hacking labels + parse flag + invalid reason + every monitor's
-# {score, label}. ``invalid_reason`` (null | "truncated" | "unparsed"; absent → None in runs that predate
-# it) marks a rollout no monitor was shown — its ``monitors`` is {}.
+# {score, label}. ``invalid_reason`` (null | "truncated" | "unparsed" | "no_submission" (since 2026-09-26);
+# absent → None in runs that predate it) marks a rollout no monitor was shown — its ``monitors`` is {}.
 SLIM_FIELDS = ("step", "task_id", "behavior_present", "loose_rh", "hardcoding", "unparsed", "invalid_reason",
                "monitors")
 

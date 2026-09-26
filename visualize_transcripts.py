@@ -313,7 +313,8 @@ def _summarize(rec: dict, off: int, length: int) -> dict:
         "loose_rh": pick("loose_rh"),
         "hardcoding": pick("hardcoding"),
         "unparsed": pick("unparsed"),
-        # null | "truncated" | "unparsed": such a rollout was shown to no monitor (dumps since 2026-09-18)
+        # null | "truncated" | "unparsed" | "no_submission" (since 2026-09-26): such a rollout was shown to
+        # no monitor (dumps since 2026-09-18)
         "invalid_reason": rec.get("invalid_reason"),
         "reward": _nan_safe(rec.get("reward")),
         "task_reward": _nan_safe(env.get("task_reward") if env else meta.get("reward")),
@@ -1697,7 +1698,7 @@ function renderRollouts(c) {
   controls.appendChild(behSel);
   const upSel = el('select', {class:'btn', onchange:e => { S.ro.unparsed = e.target.value; S.ro.offset = 0; loadRollouts(); }});
   for (const [v, t] of [['','parse: any'],['0','parsed ok'],['1','unparsed'],
-                         ['val','valid (monitored)'],['inv','invalid (truncated/unparsed, not monitored)']]) {
+                         ['val','valid (monitored)'],['inv','invalid (truncated/unparsed/no submission, not monitored)']]) {
     const o = el('option', {value:v}, t); if (v === S.ro.unparsed) o.selected = true; upSel.appendChild(o);
   }
   controls.appendChild(upSel);

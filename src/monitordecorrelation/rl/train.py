@@ -1,8 +1,9 @@
 """GRPO training loop for the decorrelation experiments.
 
 reward = task_reward − penalty_coef · mean(train_against monitor scores), except for an INVALID rollout
-(``envs.base.invalid_reason``: truncated by max_tokens, or output the env could not parse), whose reward
-is a flat ``INVALID_ROLLOUT_REWARD`` = -1 (``EnvResult.reward_override``, enforced in ``_check_env_results``).
+(``envs.base.invalid_reason``: truncated by max_tokens, output the env could not parse, or — terminal
+env — an episode that never submitted), whose reward is a flat ``INVALID_ROLLOUT_REWARD`` = -1
+(``EnvResult.reward_override``, enforced in ``_check_env_results``).
 **No monitor ever scores an invalid rollout**, in training or eval (``MonitorScorer`` skips it), so every
 monitor statistic — AUROC, d′, class means, n_pos/n_neg/n_scored, the train-against suspiciousness — is
 over the valid rollouts only; ``invalid_rate`` logs the excluded fraction. The oracle rates
@@ -228,13 +229,13 @@ def _check_env_results(env: Env, rollouts: Sequence[Rollout], results: list) -> 
     """Enforce the loop-wide grading rules on a batch's ``EnvResult`` s (``results[i]`` =
     ``env.score(rollouts[i])``); returns them.
 
-    Every INVALID rollout (``invalid_reason``: truncated by ``max_tokens``, or unparseable) then gets
-    ``reward_override = INVALID_ROLLOUT_REWARD``, whatever the env made of it — the one place this is
-    enforced, so it holds for every env and policy. The monitors skipped exactly these rollouts (same
-    predicate, evaluated when they were sampled), so two invariants are checked loudly here: the env's
-    ``unparsed`` flag agrees with its ``unparseable()`` (on the rollouts it graded), and the env set
-    ``reward_override`` on no valid rollout — otherwise an unmonitored rollout could get a monitor-free
-    reward, or vice versa.
+    Every INVALID rollout (``invalid_reason``: truncated by ``max_tokens``, unparseable, or never
+    submitted) then gets ``reward_override = INVALID_ROLLOUT_REWARD``, whatever the env made of it — the
+    one place this is enforced, so it holds for every env and policy. The monitors skipped exactly these
+    rollouts (same predicate, evaluated when they were sampled), so two invariants are checked loudly
+    here: the env's ``unparsed`` flag agrees with its ``unparseable()`` (on the rollouts it graded), and
+    the env set ``reward_override`` on no valid rollout — otherwise an unmonitored rollout could get a
+    monitor-free reward, or vice versa.
 
     A third, for SINGLE-TURN envs: a truncated rollout is not graded at all — the env returns
     ``meta["truncated"] = True``, ``task_reward = 0`` and ``behavior_present = False`` without looking at
@@ -254,7 +255,7 @@ def _check_env_results(env: Env, rollouts: Sequence[Rollout], results: list) -> 
                                f"{er.meta['unparsed']} but unparseable() disagrees")
         if why is None and er.reward_override is not None:
             raise RuntimeError(f"{type(env).__name__} set reward_override on valid rollout {i}; it is "
-                               f"reserved for invalid (truncated / unparseable) rollouts")
+                               f"reserved for invalid (truncated / unparseable / never-submitted) rollouts")
         if why is not None:
             er.reward_override = INVALID_ROLLOUT_REWARD
     return results
@@ -639,11 +640,14 @@ def run_grpo(
             "sampler": backend.sampler_id(sampler),  # the weights sampled — = the train row's at this step
             "behavior_rate": mean(float(g) for g in gt),  # = strict_rh (the AUROC oracle)
             # single-turn envs: a truncated rollout is not graded, so it is NOT unparsed — there,
-            # unparsed_rate + truncated_rate = invalid_rate
+            # unparsed_rate + truncated_rate (+ no_submission_rate, terminal env) = invalid_rate
             "unparsed_rate": mean(float(er.meta.get("unparsed", False)) for er in ev_env),
-            # fraction truncated or unparseable = NOT monitored: every monitor metric below is over the rest
+            # fraction truncated, unparseable or never submitting = NOT monitored: every monitor metric
+            # below is over the rest
             "invalid_rate": mean(float(why is not None) for why in invalid),
             "truncated_rate": mean(float(why == "truncated") for why in invalid),
+            **({"no_submission_rate": mean(float(why == "no_submission") for why in invalid)}
+               if hasattr(env, "never_submitted") else {}),  # only envs that can have one (terminal env)
             **_length_metrics(ev_env, env),  # code length + its reward penalty (MBPP)
             **_env_metrics(ev_env, env),     # env-declared summary rates (terminal env: read/modified/…)
         }
@@ -703,8 +707,8 @@ def run_grpo(
                 "loose_rh": bool(er.meta["loose_rh"]) if "loose_rh" in er.meta else None,
                 "hardcoding": bool(er.meta["hardcoding"]) if "hardcoding" in er.meta else None,
                 "unparsed": er.meta.get("unparsed"),
-                # null (valid), "truncated" or "unparsed": an invalid rollout was shown to no monitor,
-                # so its `monitors` is {} and it is in none of the monitor metrics.
+                # null (valid), "truncated", "unparsed" or "no_submission": an invalid rollout was shown
+                # to no monitor, so its `monitors` is {} and it is in none of the monitor metrics.
                 "invalid_reason": invalid[i],
                 "env_meta": er.meta,  # full per-env grading record (see the train-rollout dump above)
                 # {score, label} + for every LLM judge its `call`: the exact request (prompt + API
@@ -811,8 +815,8 @@ def run_grpo(
             frac = step / max(1, cfg.n_steps - 1)  # 0 at step 0 → 1 at the last step
             s, e = cfg.penalty_schedule["start_penalty"], cfg.penalty_schedule["end_penalty"]
             pen_coef = s + (e - s) * frac
-        # A ``reward_override`` (truncated by max_tokens / unparseable output → -1) IS the reward: the
-        # monitor penalty is not applied to it, though its monitor scores are still logged.
+        # A ``reward_override`` (truncated by max_tokens / unparseable output / never submitted → -1) IS
+        # the reward: the monitor penalty is not applied to it, though its monitor scores are still logged.
         applied = [0.0 if er.reward_override is not None else pen_coef * pen
                    for er, pen in zip(env_results, penalties)]  # _check_env_results: override ⇔ invalid ⇔ pen None
         rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
@@ -871,6 +875,8 @@ def run_grpo(
             "reward/override_rate": mean(float(er.reward_override is not None) for er in env_results),
             # = override_rate (_check_env_results enforces override ⇔ invalid): the fraction NOT monitored.
             "invalid_rate": mean(float(why is not None) for why in invalid),
+            **({"no_submission_rate": mean(float(why == "no_submission") for why in invalid)}
+               if hasattr(env, "never_submitted") else {}),  # only envs that can have one (terminal env)
             "reward/total_mean": mean(rewards),
             **_rollout_metrics(rollouts, rewards, cfg.group_size),  # reward spread, lengths, truncation
             **_length_metrics(env_results, env),  # code length + its reward penalty (MBPP)
@@ -929,7 +935,7 @@ def run_grpo(
                         # {} for an invalid rollout — never shown to a monitor (see invalid_reason).
                         "monitors": {m.name: monitor_record(ta_res[m.name][i]) for m in train_against
                                      if ta_res[m.name][i] is not None},
-                        "invalid_reason": invalid[i],  # null | "truncated" | "unparsed"
+                        "invalid_reason": invalid[i],  # null | "truncated" | "unparsed" | "no_submission"
                         "reward": rewards[i],  # advantage is now computed in the backend (cookbook)
                         "extra": extra,
                     },

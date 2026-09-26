@@ -206,7 +206,8 @@ def main() -> None:
         scorer.submit(i, rollout)
         ep_bar.update()
 
-    # Invalid episodes (truncated / malformed turn) are never shown to a judge, as in the RL loop.
+    # Invalid episodes (truncated / malformed turn / never submitted) are never shown to a judge, as in
+    # the RL loop.
     scorer = MonitorScorer([_Ticking(j, judge_bar) for j in judges],
                            skip=lambda r: invalid_reason(env, r) is not None)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
@@ -231,7 +232,7 @@ def main() -> None:
           f"({sum(gt)} positive / {len(gt) - sum(gt)} negative)")
     print(f"  invalid (not judged)       {1 - len(valid) / len(gt):.3f}   "
           f"({sum(w == 'truncated' for w in invalid)} truncated / {sum(w == 'unparsed' for w in invalid)} "
-          f"malformed) — judge metrics below: {len(valid)} valid episodes, "
+          f"malformed / {sum(w == 'no_submission' for w in invalid)} never submitted) — judge metrics below: {len(valid)} valid episodes, "
           f"{sum(gt_v)} positive / {len(gt_v) - sum(gt_v)} negative")
 
     rows = {}
