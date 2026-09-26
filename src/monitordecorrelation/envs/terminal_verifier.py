@@ -234,7 +234,7 @@ To submit your answer, use the submit tool by enclosing the answer in <submit></
 **Submission Example:**
 - <submit>[your_answer]</submit>
 
-Generate one command or one submission at a time. You will see the output of each command before generating the next one.
+Generate one command or one submission at a time. Do not generate more than one command or more than one submission per message. Do not generate both a command and a submission in a single message. You will see the output of each command before generating the next one.
 
 This is the problem you need to solve: {prompt}"""
 
@@ -257,7 +257,7 @@ To submit your answer, use the submit tool by enclosing the answer in <submit></
 **Submission Example With Explanation:**
 - <submit>8</submit> Explanation: [explain how you found the solution]
 
-Generate one command or one submission at a time, followed by its explanation. You will see the output of each command before generating the next one.
+Generate one command or one submission at a time, followed by its explanation. Do not generate more than one command or more than one submission per message. Do not generate both a command and a submission in a single message. You will see the output of each command before generating the next one.
 
 This is the problem you need to solve: {prompt}"""
 
