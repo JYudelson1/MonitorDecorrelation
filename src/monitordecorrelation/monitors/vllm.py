@@ -11,7 +11,13 @@ An OpenRouter judge is just a model id (plus its per-model ``reasoning`` object,
   template switch);
 * ``thinking_budget`` — ``None`` (the default) for no budget, or N: vLLM's
   ``thinking_token_budget``, which force-closes the thinking after N tokens so the answer is
-  written within the rest of ``max_tokens``. Only with ``enable_thinking``, and N < ``max_tokens``.
+  written within the rest of ``max_tokens``. Only with ``enable_thinking``, and N < ``max_tokens``;
+* ``thinking_effort`` — sent as ``chat_template_kwargs.reasoning_effort``, for the models whose chat
+  template has that knob (``VLLM_JUDGES``: Qwen3.8's template takes ``low`` / ``medium`` / ``xhigh``
+  and turns it into a system instruction — "Reasoning effort is set to low. Keep your thinking brief
+  …"). REQUIRED on such a model with ``enable_thinking`` (its template's own default is ``xhigh``, which
+  a config should say rather than inherit); rejected with thinking off (the template drops it) and on
+  models without the knob (Qwen3 / Qwen3.5).
 
 The server must run with a reasoning parser (``vllm serve … --reasoning-parser qwen3``): that is what
 splits the thinking into ``message.reasoning`` — leaving ``content`` as the answer the ``SCORE:`` /
@@ -47,8 +53,15 @@ import httpx
 
 from monitordecorrelation.monitors.openrouter import _JUDGE_ANSWER_RE, JudgeCall, post_chat
 
-# Judge models whose thinking controls were verified on a running vLLM server (see the module doc).
-VLLM_JUDGES = frozenset({"Qwen/Qwen3-30B-A3B-FP8", "Qwen/Qwen3.5-35B-A3B-FP8"})
+# Judge models whose thinking controls were verified on a running vLLM server (see the module doc),
+# each with the ``thinking_effort`` values its chat template accepts (() = no such knob). Qwen3.8's
+# template (``reasoning_effort``: xhigh default / medium / low) was checked 2026-09-27 by rendering the
+# prompt through the server's /tokenize: each value becomes its own system instruction.
+VLLM_JUDGES: dict[str, tuple[str, ...]] = {
+    "Qwen/Qwen3-30B-A3B-FP8": (),
+    "Qwen/Qwen3.5-35B-A3B-FP8": (),
+    "Qwen/Qwen3.8-27B-FP8": ("low", "medium", "xhigh"),
+}
 
 # Client-side request timeout. A non-streaming call sends nothing until the whole completion is done,
 # and an unbudgeted thinker can write 16k tokens on a server shared by hundreds of concurrent calls
@@ -69,6 +82,7 @@ def validate_vllm_judge(
     max_tokens,
     enable_thinking,
     thinking_budget,
+    thinking_effort=None,
     monitor: str,
 ) -> None:
     """Reject a vLLM judge setting that could not take effect as written. Offline (no server call) —
@@ -103,17 +117,35 @@ def validate_vllm_judge(
                 f"{where}: thinking_budget must be null (no budget) or an int in [1, {max_tokens}) — "
                 f"below max_tokens={max_tokens}, which must also fit the answer — got {thinking_budget!r}"
             )
+    efforts = VLLM_JUDGES[model_id]
+    if not efforts:
+        if thinking_effort is not None:
+            raise ValueError(f"{where}: thinking_effort={thinking_effort!r} would be ignored — this model's "
+                             "chat template has no reasoning-effort knob; drop it (null)")
+    elif not enable_thinking:
+        if thinking_effort is not None:
+            raise ValueError(f"{where}: thinking_effort={thinking_effort!r} with enable_thinking=false would "
+                             "be ignored (the chat template drops it) — drop it (null) or enable thinking")
+    elif thinking_effort not in efforts:
+        raise ValueError(
+            f"{where}: thinking_effort must be one of {list(efforts)} (sent as "
+            f"chat_template_kwargs.reasoning_effort; required with enable_thinking — the template's "
+            f"implicit default is xhigh), got {thinking_effort!r}"
+        )
 
 
 def request_body(model_id: str, prompt: str, *, max_tokens: int, enable_thinking: bool,
-                 thinking_budget: int | None) -> dict:
+                 thinking_budget: int | None, thinking_effort: str | None = None) -> dict:
     """The exact JSON body a vLLM judge POSTs (persisted verbatim in the call record)."""
+    kwargs: dict = {"enable_thinking": enable_thinking}
+    if thinking_effort is not None:
+        kwargs["reasoning_effort"] = thinking_effort
     body = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 1.0,
         "max_tokens": max_tokens,
-        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        "chat_template_kwargs": kwargs,
     }
     if thinking_budget is not None:
         body["thinking_token_budget"] = thinking_budget

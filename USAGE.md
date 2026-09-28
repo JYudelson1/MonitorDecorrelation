@@ -93,14 +93,15 @@ it is a parse error, scored 0. Both are logged per judge (see "Judge call health
 
 | key | | |
 | --- | --- | --- |
-| `model_id` | required | a model the server serves; only `Qwen/Qwen3-30B-A3B-FP8` and `Qwen/Qwen3.5-35B-A3B-FP8` are accepted (verified: `vllm.VLLM_JUDGES`) |
+| `model_id` | required | a model the server serves; only `Qwen/Qwen3-30B-A3B-FP8`, `Qwen/Qwen3.5-35B-A3B-FP8` and `Qwen/Qwen3.8-27B-FP8` are accepted (verified: `vllm.VLLM_JUDGES`) |
 | `base_url` | required | the server's OpenAI-compatible base **ending in `/v1`**, e.g. `http://localhost:8001/v1` |
 | `max_tokens` | required | completion cap, thinking + answer |
 | `enable_thinking` | required | sent as `chat_template_kwargs.enable_thinking` |
 | `thinking_budget` | optional, default `null` | `null` = no budget; N = vLLM's `thinking_token_budget` (thinking force-closed after N tokens, then the answer), only with `enable_thinking`, 1 ≤ N < `max_tokens` |
+| `thinking_effort` | required on Qwen3.8 with `enable_thinking`; rejected otherwise | sent as `chat_template_kwargs.reasoning_effort`; Qwen3.8: `low` / `medium` / `xhigh` (the template's implicit default, which a config must spell out). Rejected with thinking off (the template drops it) and on Qwen3 / Qwen3.5 (no such knob) |
 
 `reasoning` is rejected on a vLLM judge, and `base_url` / `enable_thinking` / a non-null
-`thinking_budget` on an OpenRouter one. The server must run with a reasoning parser (`vllm serve …
+`thinking_budget` / `thinking_effort` on an OpenRouter one. The server must run with a reasoning parser (`vllm serve …
 --reasoning-parser qwen3`): the thinking comes back in `message.reasoning`, the verdict is read from
 `content` only (a draft `SCORE:` in the thinking is never used), and a reply with `</think>` still in
 its content aborts as a config error. Building the monitor checks `GET <base_url>/models` lists the
@@ -306,7 +307,9 @@ force-closed at `think_budget`, and turns with no parseable `<command>`. Every r
 forward over each episode's datum on top of these numbers.
 
 Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json` + the four
-`terminal_verifier_gemini{25,35}_{cot,out}.json` rows. `env_options`: `verifier_mode`
+`terminal_verifier_gemini{25,35}_{cot,out}.json` rows + the six local-Qwen rows
+`terminal_verifier_q{3,35,38}_{cot,out}.json` (identical to the Gemini rows except the monitors: train
+against one vLLM Qwen judge, hold out the other five; needs the :8001/:8002/:8003 servers). `env_options`: `verifier_mode`
 (`corrupted` = perturbed verifier, the paper's variant and every config's setting; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option
 with `--set env_options.verifier_mode=possible`), `offset_range`, `max_turns`,

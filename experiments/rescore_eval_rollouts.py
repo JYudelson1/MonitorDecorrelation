@@ -279,7 +279,7 @@ def main() -> int:
     def thinking(s) -> str:
         if s.provider == "vllm":
             return (f"vllm {s.base_url}, max_tokens={s.max_tokens}, enable_thinking={s.enable_thinking}, "
-                    f"thinking_budget={s.thinking_budget}")
+                    f"thinking_budget={s.thinking_budget}, thinking_effort={s.thinking_effort}")
         return "reasoning=" + str(validate_judge_settings(
             "openrouter", model_id=s.model_id, monitor=s.name, max_tokens=s.max_tokens, reasoning=s.reasoning))
 

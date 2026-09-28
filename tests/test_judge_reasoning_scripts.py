@@ -45,7 +45,8 @@ class _Stop(Exception):
 @pytest.mark.parametrize("cfg_name", sorted(p.name for p in (_REPO / "experiments" / "configs").glob("terminal_verifier_*.json")))
 def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypatch, tmp_path, cfg_name):
     """Config file + ``--set`` → the AgentCoTMonitors this script scores with (and its run_info), for
-    every terminal config: none sets ``reasoning``, so each judge runs on its model's default."""
+    every terminal config: none sets ``reasoning``, so each judge runs on its model's default (and each
+vLLM judge sends its configured thinking settings)."""
     mod = _load_script("eval_terminal_monitors_baseline")
     seen = {}
 
@@ -74,18 +75,24 @@ def test_eval_terminal_monitors_baseline_sends_the_configured_reasoning(monkeypa
                                           "--out", str(tmp_path / "b.json"), "--set", *sets])
         with pytest.raises(_Stop):
             mod.main()
-        # vLLM judges (the control config's q3_* / q35_*) take no `reasoning` — their thinking
+        # vLLM judges (the control config's q3_* / q35_* / q38_*) take no `reasoning` — their thinking
         # settings must reach the request as configured instead
         for j in seen["judges"]:
             if j.backend.provider == "vllm":
                 spec = next(m for m in cfg_monitors if m["name"] == j.name)
                 body = j._request_body("p")
                 assert "reasoning" not in body and body["max_tokens"] == spec["max_tokens"]
-                assert body["chat_template_kwargs"] == {"enable_thinking": spec["enable_thinking"]}
+                assert body["chat_template_kwargs"] == {
+                    "enable_thinking": spec["enable_thinking"],
+                    **({"reasoning_effort": spec["thinking_effort"]} if spec.get("thinking_effort") else {})}
                 assert body.get("thinking_token_budget") == spec.get("thinking_budget")
         return {j.name: j._request_body("p")["reasoning"] for j in seen["judges"]
                 if j.backend.provider == "openrouter"}
 
+    if not any(m.get("provider", "openrouter") == "openrouter" for m in cfg_monitors):
+        # the local-Qwen rows (terminal_verifier_q*): vLLM judges only, checked inside sent()
+        assert sent() == {}
+        return
     assert sent() == {"g25_cot": {"max_tokens": 2048}, "g25_out": {"max_tokens": 2048},
                       "g35_cot": {"effort": "low"}, "g35_out": {"effort": "low"}}
     assert sent('monitors.model:gemini-2.5.reasoning={"enabled":false}',

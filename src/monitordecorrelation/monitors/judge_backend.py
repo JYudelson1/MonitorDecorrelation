@@ -8,8 +8,10 @@ be silently ignored"):
 
 * ``openrouter`` (the default) — ``model_id``, ``reasoning`` (the per-model OpenRouter object,
   ``monitors.judge_reasoning``) and ``max_tokens`` (optional: ``OPENROUTER_DEFAULT_MAX_TOKENS``).
-* ``vllm`` — ``model_id``, ``base_url``, ``max_tokens``, ``enable_thinking`` (all required) and
-  ``thinking_budget`` (optional: ``None`` = no budget). See ``monitors.vllm``.
+* ``vllm`` — ``model_id``, ``base_url``, ``max_tokens``, ``enable_thinking`` (all required),
+  ``thinking_budget`` (optional: ``None`` = no budget) and ``thinking_effort`` (required on a model
+  whose chat template has a reasoning-effort knob, with thinking on; rejected otherwise). See
+  ``monitors.vllm``.
 
 ``validate_judge_settings`` is the offline check the config schema runs at LOAD; ``make_judge_backend``
 runs the same check (plus, for vLLM, a server check) when a monitor is built.
@@ -24,7 +26,7 @@ from monitordecorrelation.monitors.openrouter import JudgeCall, chat, resolve_ap
 PROVIDERS = ("openrouter", "vllm")
 
 # The settings only a vLLM judge takes / only an OpenRouter judge takes.
-_VLLM_ONLY = ("base_url", "enable_thinking", "thinking_budget")
+_VLLM_ONLY = ("base_url", "enable_thinking", "thinking_budget", "thinking_effort")
 _OPENROUTER_ONLY = ("reasoning",)
 
 # Client-side request timeout of an OpenRouter judge call.
@@ -41,11 +43,12 @@ def validate_judge_settings(
     base_url=None,
     enable_thinking=None,
     thinking_budget=None,
+    thinking_effort=None,
 ) -> dict | None:
     """Reject settings the provider would not honour as written. Offline. Returns the resolved OpenRouter
     ``reasoning`` object (``None`` for vLLM)."""
     given = {"reasoning": reasoning, "base_url": base_url, "enable_thinking": enable_thinking,
-             "thinking_budget": thinking_budget}
+             "thinking_budget": thinking_budget, "thinking_effort": thinking_effort}
     if provider not in PROVIDERS:
         raise ValueError(f"monitor {monitor!r}: provider must be one of {list(PROVIDERS)}, got {provider!r}")
     foreign = _VLLM_ONLY if provider == "openrouter" else _OPENROUTER_ONLY
@@ -53,14 +56,14 @@ def validate_judge_settings(
         raise ValueError(
             f"monitor {monitor!r} ({model_id}) is a {provider} judge, so {stray} would be ignored — drop "
             f"{'it' if len(stray) == 1 else 'them'} (openrouter judges take reasoning; vllm judges take "
-            "base_url, enable_thinking and thinking_budget)"
+            "base_url, enable_thinking, thinking_budget and thinking_effort)"
         )
     if provider == "openrouter":
         cap = OPENROUTER_DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
         return resolve_reasoning(model_id, reasoning, max_tokens=cap, monitor=monitor)
     vllm.validate_vllm_judge(model_id=model_id, base_url=base_url, max_tokens=max_tokens,
                              enable_thinking=enable_thinking, thinking_budget=thinking_budget,
-                             monitor=monitor)
+                             thinking_effort=thinking_effort, monitor=monitor)
     return None
 
 
@@ -103,13 +106,15 @@ class VLLMJudge:
     provider = "vllm"
 
     def __init__(self, *, name: str, model_id: str, base_url: str, max_tokens: int, enable_thinking: bool,
-                 thinking_budget: int | None, timeout: float | None, check_server: bool = True) -> None:
+                 thinking_budget: int | None, timeout: float | None, thinking_effort: str | None = None,
+                 check_server: bool = True) -> None:
         validate_judge_settings("vllm", model_id=model_id, monitor=name, max_tokens=max_tokens,
                                 base_url=base_url, enable_thinking=enable_thinking,
-                                thinking_budget=thinking_budget)
+                                thinking_budget=thinking_budget, thinking_effort=thinking_effort)
         self.name, self.model_id = name, model_id
         self.base_url = base_url.rstrip("/")
         self.max_tokens, self.enable_thinking, self.thinking_budget = max_tokens, enable_thinking, thinking_budget
+        self.thinking_effort = thinking_effort
         self.reasoning = None  # an OpenRouter-only setting
         self.timeout = vllm.VLLM_TIMEOUT if timeout is None else timeout
         if check_server:
@@ -117,7 +122,8 @@ class VLLMJudge:
 
     def request_body(self, prompt: str) -> dict:
         return vllm.request_body(self.model_id, prompt, max_tokens=self.max_tokens,
-                                 enable_thinking=self.enable_thinking, thinking_budget=self.thinking_budget)
+                                 enable_thinking=self.enable_thinking, thinking_budget=self.thinking_budget,
+                                 thinking_effort=self.thinking_effort)
 
     def call(self, prompt: str, *, warn_after: int) -> JudgeCall:
         return vllm.chat(self.request_body(prompt), base_url=self.base_url, timeout=self.timeout,
@@ -125,7 +131,8 @@ class VLLMJudge:
 
     def info(self) -> dict:
         return {"provider": self.provider, "base_url": self.base_url, "max_tokens": self.max_tokens,
-                "enable_thinking": self.enable_thinking, "thinking_budget": self.thinking_budget}
+                "enable_thinking": self.enable_thinking, "thinking_budget": self.thinking_budget,
+                "thinking_effort": self.thinking_effort}
 
 
 def make_judge_backend(
@@ -138,17 +145,19 @@ def make_judge_backend(
     base_url: str | None = None,
     enable_thinking: bool | None = None,
     thinking_budget: int | None = None,
+    thinking_effort: str | None = None,
     timeout: float | None = None,
     api_key: str | None = None,
 ) -> OpenRouterJudge | VLLMJudge:
     """The backend of one judge. Settings the provider does not take raise (``validate_judge_settings``)."""
     validate_judge_settings(provider, model_id=model_id, monitor=name, max_tokens=max_tokens,
                             reasoning=reasoning, base_url=base_url, enable_thinking=enable_thinking,
-                            thinking_budget=thinking_budget)
+                            thinking_budget=thinking_budget, thinking_effort=thinking_effort)
     if provider == "vllm":
         if api_key is not None:
             raise ValueError(f"monitor {name!r}: a vllm judge takes no api_key")
         return VLLMJudge(name=name, model_id=model_id, base_url=base_url, max_tokens=max_tokens,
-                         enable_thinking=enable_thinking, thinking_budget=thinking_budget, timeout=timeout)
+                         enable_thinking=enable_thinking, thinking_budget=thinking_budget,
+                         thinking_effort=thinking_effort, timeout=timeout)
     return OpenRouterJudge(name=name, model_id=model_id, reasoning=reasoning, max_tokens=max_tokens,
                            timeout=timeout, api_key=api_key)

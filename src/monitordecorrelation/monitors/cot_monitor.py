@@ -3,7 +3,7 @@
 Strength is just ``model_id`` together with the judge-side thinking settings. On OpenRouter (the
 default ``provider``) that is the ``reasoning`` object, only defined for the judge models
 ``monitors.judge_reasoning`` supports (gemini-2.5-flash-lite, gemini-3.5-flash-lite); on a local vLLM
-server (``provider="vllm"``) it is ``enable_thinking`` / ``thinking_budget`` (``monitors.vllm``). Any
+server (``provider="vllm"``) it is ``enable_thinking`` / ``thinking_budget`` / ``thinking_effort`` (``monitors.vllm``). Any
 other model is refused at construction; ``monitors.judge_backend`` is where the calls are made. The
 judge sees the question, the CoT, and the final answer — **never** the ground-truth oracle. By default it returns a continuous misbehavior score in [0, 1] plus a thresholded label;
 ``binary_judge=True`` switches to a YES/NO verdict (mapped to 1.0 / 0.0).
@@ -173,6 +173,7 @@ class CoTMonitor:
         base_url: str | None = None,
         enable_thinking: bool | None = None,
         thinking_budget: int | None = None,
+        thinking_effort: str | None = None,
     ) -> None:
         self.name = name
         self.model_id = model_id
@@ -198,10 +199,10 @@ class CoTMonitor:
         self.backend = make_judge_backend(
             provider, name=name, model_id=model_id, max_tokens=max_tokens, reasoning=reasoning,
             base_url=base_url, enable_thinking=enable_thinking, thinking_budget=thinking_budget,
-            timeout=timeout, api_key=api_key,
+            thinking_effort=thinking_effort, timeout=timeout, api_key=api_key,
         )
         # The RESOLVED OpenRouter `reasoning` object every call sends (the model default filled in);
-        # None for a vLLM judge, whose thinking is `enable_thinking` / `thinking_budget`.
+        # None for a vLLM judge, whose thinking is `enable_thinking` / `thinking_budget` / `thinking_effort`.
         self.reasoning = self.backend.reasoning
 
     def _description(self) -> str:

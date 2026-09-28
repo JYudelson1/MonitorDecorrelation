@@ -66,6 +66,7 @@ class AgentCoTMonitor:
         base_url: str | None = None,
         enable_thinking: bool | None = None,
         thinking_budget: int | None = None,
+        thinking_effort: str | None = None,
     ) -> None:
         assert behavior == "reward_hacking", (
             f"AgentCoTMonitor only judges reward hacking, got behavior={behavior!r}"
@@ -90,10 +91,10 @@ class AgentCoTMonitor:
         self.backend = make_judge_backend(
             provider, name=name, model_id=model_id, max_tokens=max_tokens, reasoning=reasoning,
             base_url=base_url, enable_thinking=enable_thinking, thinking_budget=thinking_budget,
-            timeout=timeout, api_key=api_key,
+            thinking_effort=thinking_effort, timeout=timeout, api_key=api_key,
         )
         # The RESOLVED OpenRouter `reasoning` object every call sends (the model default filled in);
-        # None for a vLLM judge, whose thinking is `enable_thinking` / `thinking_budget`.
+        # None for a vLLM judge, whose thinking is `enable_thinking` / `thinking_budget` / `thinking_effort`.
         self.reasoning = self.backend.reasoning
 
     def _build_prompt(self, rollout: Rollout) -> str:

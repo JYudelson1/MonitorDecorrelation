@@ -20,6 +20,7 @@ from monitordecorrelation.monitors.cot_monitor import CoTMonitor
 from monitordecorrelation.types import MonitorResult, Prompt, Rollout
 
 Q3 = "Qwen/Qwen3-30B-A3B-FP8"
+Q38 = "Qwen/Qwen3.8-27B-FP8"  # the one judge whose chat template takes a reasoning effort
 URL = "http://localhost:8001/v1"
 VLLM = dict(provider="vllm", model_id=Q3, base_url=URL, max_tokens=16384, enable_thinking=True)
 
@@ -93,6 +94,10 @@ def test_vllm_spec_requires_its_settings_and_defaults_to_no_budget():
     ({"base_url": "localhost:8001/v1"}, "ending in /v1"),
     ({"max_tokens": 0}, "max_tokens"),
     ({"model_id": "Qwen/Qwen3-8B"}, "specialized to"),                      # unverified model
+    ({"thinking_effort": "low"}, "no reasoning-effort knob"),               # Qwen3's template has none
+    ({"model_id": Q38}, "thinking_effort must be one of"),                  # required with thinking on
+    ({"model_id": Q38, "thinking_effort": "high"}, "thinking_effort must be one of"),  # not a Qwen3.8 level
+    ({"model_id": Q38, "enable_thinking": False, "thinking_effort": "low"}, "would be ignored"),
 ])
 def test_vllm_spec_rejects_what_would_not_take_effect(bad, msg):
     with pytest.raises(ValueError, match=msg):
@@ -101,7 +106,8 @@ def test_vllm_spec_rejects_what_would_not_take_effect(bad, msg):
 
 def test_openrouter_spec_rejects_vllm_settings_and_takes_max_tokens():
     base = {"name": "g", "role": "held_out", "model_id": "google/gemini-2.5-flash-lite"}
-    for k, v in [("base_url", URL), ("enable_thinking", True), ("thinking_budget", 512)]:
+    for k, v in [("base_url", URL), ("enable_thinking", True), ("thinking_budget", 512),
+                 ("thinking_effort", "low")]:
         with pytest.raises(ValueError, match="would be ignored"):
             CoTMonitorSpec(**base, **{k: v})
     assert CoTMonitorSpec(**base).max_tokens is None  # absent = the 4096 default, applied by the monitor
@@ -140,7 +146,19 @@ def test_request_body_is_what_the_config_says(cls):
     assert j._request_body("p")["chat_template_kwargs"] == {"enable_thinking": False}
     assert "thinking_token_budget" not in j._request_body("p")
     assert j.backend.info() == {"provider": "vllm", "base_url": URL, "max_tokens": 16384,
-                                "enable_thinking": False, "thinking_budget": None}
+                                "enable_thinking": False, "thinking_budget": None, "thinking_effort": None}
+
+
+@pytest.mark.parametrize("cls", [CoTMonitor, AgentCoTMonitor])
+def test_thinking_effort_is_sent_as_the_chat_template_reasoning_effort(cls):
+    kw = {k: v for k, v in VLLM.items() if k != "model_id"}
+    j = cls("q", Q38, behavior="reward_hacking", **kw, thinking_effort="low")
+    assert j._request_body("p")["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": "low"}
+    assert j.backend.info()["thinking_effort"] == "low"
+    # thinking off: no effort (the template would drop it)
+    j = cls("q", Q38, behavior="reward_hacking", **{**kw, "enable_thinking": False})
+    assert j._request_body("p")["chat_template_kwargs"] == {"enable_thinking": False}
+    assert _spec(model_id=Q38, thinking_effort="xhigh").thinking_effort == "xhigh"
 
 
 def test_score_reads_content_only_and_records_the_call(monkeypatch):

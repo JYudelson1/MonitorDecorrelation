@@ -566,6 +566,7 @@ class Store:
                 "base_url": m.get("base_url"),
                 "enable_thinking": m.get("enable_thinking"),
                 "thinking_budget": m.get("thinking_budget"),
+                "thinking_effort": m.get("thinking_effort"),
                 "probe_path": m.get("probe_path"),
                 "probe_model": m.get("probe_model"),
             })
@@ -1295,7 +1296,8 @@ function renderOverview(c) {
           : fmt(m.reasoning)),
       el('td', {class:'mono small'}, m.provider === 'vllm'
         ? `vllm ${m.base_url} · max_tokens ${fmt(m.max_tokens)} · thinking ${m.enable_thinking ? 'on' : 'off'}` +
-          (m.enable_thinking ? ` · budget ${m.thinking_budget === null || m.thinking_budget === undefined ? 'none' : m.thinking_budget}` : '')
+          (m.enable_thinking ? ` · budget ${m.thinking_budget === null || m.thinking_budget === undefined ? 'none' : m.thinking_budget}` : '') +
+          (m.thinking_effort ? ` · effort ${m.thinking_effort}` : '')
         : m.provider ? `${m.provider} · max_tokens ${fmt(m.max_tokens)}` : '—')));
     t.appendChild(tb);
     c.appendChild(el('div', {class:'card'}, el('h3', {}, `Monitors (${monitors.length}) — train-against rows are in the gradient`), t));

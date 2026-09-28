@@ -151,6 +151,15 @@ A judge can also run on a local vLLM server (`monitors/vllm.py`, dispatched by
 `--reasoning-parser qwen3`): thinking on → the thinking in `message.reasoning`, the answer alone in
 `content`; off → no reasoning at all; budget 64 → 63–64 reasoning tokens, then a normal answer.
 
+`Qwen/Qwen3.8-27B-FP8` (added 2026-09-27, same three checks passed) also has a reasoning-effort knob
+in its chat template: `thinking_effort` → `chat_template_kwargs.reasoning_effort` ∈ `low` / `medium` /
+`xhigh`, which the template turns into a system instruction ("Reasoning effort is set to low. Keep your
+thinking brief…"; verified by rendering through the server's `/tokenize`). It is **required** on
+Qwen3.8 with thinking on — the template silently defaults to `xhigh` otherwise — and rejected with
+thinking off or on the other Qwens. The knob is weak: replaying 44 terminal-verifier judge prompts ×3
+(Inkling-Small pre-RL episodes), mean reasoning tokens were low ≈1180, xhigh ≈1400, and medium ≈1460
+(medium thinks *longest*). The control config's `q38_*` judges run at `low`.
+
 Two deliberate differences from the OpenRouter client: the verdict is read from `content` **only**
 (a thinking Qwen drafts `SCORE:` lines while deliberating, so there is no reasoning-channel fallback)
 — its **last** `SCORE:`/`VERDICT:` line, and a `length` stop is always a parse error (after a

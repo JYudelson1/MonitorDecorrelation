@@ -118,7 +118,8 @@ def main() -> None:
                                      binary_judge=spec.binary_judge, threshold=spec.threshold,
                                      provider=spec.provider, max_tokens=spec.max_tokens,
                                      base_url=spec.base_url, enable_thinking=spec.enable_thinking,
-                                     thinking_budget=spec.thinking_budget)
+                                     thinking_budget=spec.thinking_budget,
+                                     thinking_effort=spec.thinking_effort)
         else:
             judges[name] = judge_cls(name=name, model_id=spec[0], behavior=args.behavior,
                                      use_cot=(spec[1] == "cot"))

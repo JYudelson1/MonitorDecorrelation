@@ -54,7 +54,7 @@ load_dotenv()
 READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
                        "reasoning", "binary_judge", "provider", "max_tokens", "base_url",
-                       "enable_thinking", "thinking_budget"}
+                       "enable_thinking", "thinking_budget", "thinking_effort"}
 
 
 def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -191,7 +191,7 @@ def main() -> None:
                               binary_judge=bool(m.get("binary_judge")),
                               provider=m["provider"], max_tokens=m["max_tokens"],
                               base_url=m["base_url"], enable_thinking=m["enable_thinking"],
-                              thinking_budget=m["thinking_budget"])
+                              thinking_budget=m["thinking_budget"], thinking_effort=m["thinking_effort"])
               for m in specs]
     n_ep = len(prompts) * args.samples
     print(f"sampling {n_ep} episodes ({len(prompts)}x{args.samples}) from {args.model} "
@@ -270,7 +270,8 @@ def main() -> None:
     print(f"  {'monitor':<14}{'backend':<40}{'calls':>7}{'length':>9}{'len rate':>10}{'parse err':>11}{'err rate':>10}")
     for j in judges:
         r, b = rows[j.name], j.backend.info()
-        where = (f"vllm max={b['max_tokens']} think={b['enable_thinking']} budget={b['thinking_budget']}"
+        where = (f"vllm max={b['max_tokens']} think={b['enable_thinking']} budget={b['thinking_budget']} "
+                 f"effort={b['thinking_effort']}"
                  if b["provider"] == "vllm" else f"openrouter max={b['max_tokens']}")
         print(f"  {j.name:<14}{where:<40}{r['n_scored']:>7}{r['n_finish_length']:>9}"
               f"{r['finish_length_rate']:>10.3f}{r['n_parse_error']:>11}{r['parse_error_rate']:>10.3f}")

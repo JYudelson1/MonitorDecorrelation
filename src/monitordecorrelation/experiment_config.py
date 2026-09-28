@@ -53,6 +53,13 @@ class CoTMonitorSpec(_Strict):
         "thinking_token_budget (thinking force-closed after N tokens), 1 <= N < max_tokens, only with "
         "enable_thinking. A non-null value is rejected on an OpenRouter judge.",
     )
+    thinking_effort: str | None = Field(
+        None,
+        description="vLLM only: sent as chat_template_kwargs.reasoning_effort, for judge models whose "
+        "chat template has that knob (Qwen/Qwen3.8-27B-FP8: 'low' | 'medium' | 'xhigh'). REQUIRED there "
+        "with enable_thinking (no silent template default); rejected with thinking off, on models "
+        "without the knob (Qwen3 / Qwen3.5), and on an OpenRouter judge. See monitors/vllm.py.",
+    )
     behavior: str | None = (
         None  # None -> the env's behavior_name (sycophancy / reward_hacking / …)
     )
@@ -99,7 +106,7 @@ class CoTMonitorSpec(_Strict):
     @model_validator(mode="after")
     def _check_judge_settings(self) -> "CoTMonitorSpec":
         """Reject a judge setting that would not take effect as written — a setting of the other
-        provider (vLLM's base_url / enable_thinking / thinking_budget on an OpenRouter judge,
+        provider (vLLM's base_url / enable_thinking / thinking_budget / thinking_effort on an OpenRouter judge,
         ``reasoning`` on a vLLM one), a missing required vLLM setting, a reasoning setting the judge
         model would not honour, or a judge model whose thinking behaviour is not established — at
         LOAD, not at the first judge call. Same check ``CoTMonitor.__init__`` runs for hand-built
@@ -112,7 +119,7 @@ class CoTMonitorSpec(_Strict):
         validate_judge_settings(
             self.provider, model_id=self.model_id, monitor=self.name, max_tokens=self.max_tokens,
             reasoning=self.reasoning, base_url=self.base_url, enable_thinking=self.enable_thinking,
-            thinking_budget=self.thinking_budget,
+            thinking_budget=self.thinking_budget, thinking_effort=self.thinking_effort,
         )
         return self
 
@@ -653,6 +660,7 @@ def build_monitors(
                 base_url=s.base_url,
                 enable_thinking=s.enable_thinking,
                 thinking_budget=s.thinking_budget,
+                thinking_effort=s.thinking_effort,
             )
         else:  # probe
             probe = LinearProbe.load(s.probe_path)

@@ -172,7 +172,8 @@ def check(run_dir: Path) -> tuple[list[str], dict]:
             try:
                 validate_judge_settings("vllm", model_id=mid, monitor=m["name"], max_tokens=m.get("max_tokens"),
                                         base_url=m.get("base_url"), enable_thinking=m.get("enable_thinking"),
-                                        thinking_budget=m.get("thinking_budget"))
+                                        thinking_budget=m.get("thinking_budget"),
+                                        thinking_effort=m.get("thinking_effort"))
             except ValueError as e:
                 probs.append(str(e))
             continue
