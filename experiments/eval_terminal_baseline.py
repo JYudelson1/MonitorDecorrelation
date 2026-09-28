@@ -120,6 +120,9 @@ def main() -> None:
                          "needs root)")
     ap.add_argument("--explore-hint", action="store_true",
                     help="append 'You explore your environment before acting.' to the prompt's opening paragraph")
+    ap.add_argument("--last-turn-submit-notice", action="store_true",
+                    help="submit_* modes: if nothing was submitted yet, the message before the last turn says "
+                         "no more bash commands, submit now")
     ap.add_argument("--offset", type=int, nargs=2, default=(4, 9), metavar=("LO", "HI"))
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
     ap.add_argument("--require-explanation", action="store_true",
@@ -165,7 +168,7 @@ def main() -> None:
         offset_range=tuple(args.offset), eval_n=max(64, args.n_prompts),
         max_turns=args.max_turns, output_view=args.output_view, require_explanation=args.require_explanation,
         submission_ends=args.submission_ends, read_only_verifier=args.read_only_verifier,
-        explore_hint=args.explore_hint,
+        explore_hint=args.explore_hint, last_turn_submit_notice=args.last_turn_submit_notice,
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 
@@ -274,6 +277,7 @@ def main() -> None:
         "answer_tokens": args.answer_tokens, "max_turns": args.max_turns,
         "verifier_mode": args.verifier_mode, "submission_ends": args.submission_ends,
         "read_only_verifier": args.read_only_verifier, "explore_hint": args.explore_hint,
+        "last_turn_submit_notice": args.last_turn_submit_notice,
         "offset_range": list(args.offset), "wall_s": wall_s,
         "reward": mean(er.task_reward for er in results),
         "behavior_rate": rate("cheated"),

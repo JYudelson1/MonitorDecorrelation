@@ -10,6 +10,8 @@ import pytest
 from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import (
     EXPLORE_HINT,
+    LAST_TURN_EXPLAIN_REMINDER,
+    LAST_TURN_SUBMIT_MESSAGE,
     NO_COMMAND_MESSAGE,
     NORMAL_TERMINAL_MESSAGE,
     NORMAL_TERMINAL_MESSAGE_EXPLAINED,
@@ -1204,3 +1206,50 @@ def test_explore_hint_off_by_default_and_in_every_prompt_when_on():
             assert text == f"{head} {EXPLORE_HINT}\n\n{rest}" and text.count(EXPLORE_HINT) == 1
     m = _play(ITEM, "cat verifier.py")
     assert m["explore_hint"] is False
+
+
+# ---- last_turn_submit_notice: the message before the last turn says "no more commands, submit" ----
+
+def _sobs(item, turns, *, ends, expl, max_turns, notice):
+    env = TerminalVerifierEnv([item], max_turns=max_turns, submission_ends=ends, require_explanation=expl,
+                              last_turn_submit_notice=notice)
+    st = env.start(env._to_prompt(item))
+    obs = []
+    for t in turns:
+        o, done = env.step(st, "", t + (" Explanation: x" if expl else ""))
+        obs.append(o)
+        if done:
+            break
+    return obs, env.finish(st).meta
+
+
+def test_last_turn_submit_notice_changes_only_the_last_message_before_any_submission():
+    cmds = ["<command>echo a</command>", "<command>echo b</command>", "<command>echo c</command>"]
+    for item in SUBMIT_ITEMS:
+        for ends in SUBMISSION_ENDS:
+            for expl in (False, True):
+                kw = dict(ends=ends, expl=expl, max_turns=4)
+                # nothing submitted: identical except the message before the 4th (last) turn
+                off, m_off = _sobs(item, [*cmds, "<submit>4</submit>"], notice=False, **kw)
+                on, m_on = _sobs(item, [*cmds, "<submit>4</submit>"], notice=True, **kw)
+                assert on[:2] == off[:2] and on[3] == off[3] is None
+                out = m_on["turns"][2]["output"]
+                assert out.strip() == "c"
+                want = LAST_TURN_SUBMIT_MESSAGE.format(output=out) + (LAST_TURN_EXPLAIN_REMINDER if expl else "")
+                assert on[2] == want and off[2] != want
+                assert m_on["reward"] == m_off["reward"] and m_on["end_reason"] == m_off["end_reason"]
+                assert m_on["last_turn_submit_notice"] and not m_off["last_turn_submit_notice"]
+                # a command on the last turn is still run, as before
+                on, m_on = _sobs(item, [*cmds, "<command>echo d</command>"], notice=True, **kw)
+                assert m_on["end_reason"] == "turn_limit" and m_on["turns"][-1]["output"].strip() == "d"
+                if ends == "correct":  # already submitted (wrongly): nothing changes
+                    turns = ["<submit>99</submit>", *cmds[1:], "<submit>4</submit>"]
+                    assert _sobs(item, turns, notice=True, **kw)[0] == _sobs(item, turns, notice=False, **kw)[0]
+
+
+def test_last_turn_submit_notice_is_rejected_where_it_would_be_ignored():
+    TerminalVerifierEnv([S_CORRUPTED], submission_ends="first", max_turns=2, last_turn_submit_notice=True)
+    with pytest.raises(ValueError, match="submit_"):
+        TerminalVerifierEnv([ITEM], last_turn_submit_notice=True)
+    with pytest.raises(ValueError, match="max_turns"):
+        TerminalVerifierEnv([S_CORRUPTED], submission_ends="first", max_turns=1, last_turn_submit_notice=True)
