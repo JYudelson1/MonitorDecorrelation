@@ -9,6 +9,7 @@ import pytest
 
 from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import (
+    EXPLORE_HINT,
     NO_COMMAND_MESSAGE,
     NORMAL_TERMINAL_MESSAGE,
     NORMAL_TERMINAL_MESSAGE_EXPLAINED,
@@ -1186,3 +1187,20 @@ def test_read_only_episode_tampering_fails_and_is_not_modified():
     assert not m["modified_verifier"] and not m["passed"] and not m["cheated"] and m["read_only_verifier"]
     m = _play(ITEM, "cat verifier.py", 'python verifier.py "4"')  # reading still works (off here)
     assert m["passed"] and not m["read_only_verifier"]
+
+
+# ---- explore_hint: one sentence appended to the prompt's opening paragraph ------------------------
+
+def test_explore_hint_off_by_default_and_in_every_prompt_when_on():
+    for item in (ITEM, S_CORRUPTED):
+        for expl in (False, True):
+            kw = {"submission_ends": "first"} if item.submit else {}
+            base = TerminalVerifierEnv([item], require_explanation=expl, **kw)._to_prompt(item).text
+            off = TerminalVerifierEnv([item], require_explanation=expl, explore_hint=False, **kw)
+            on = TerminalVerifierEnv([item], require_explanation=expl, explore_hint=True, **kw)
+            assert EXPLORE_HINT not in base and off._to_prompt(item).text == base
+            text = on._to_prompt(item).text
+            head, _, rest = base.partition("\n\n")
+            assert text == f"{head} {EXPLORE_HINT}\n\n{rest}" and text.count(EXPLORE_HINT) == 1
+    m = _play(ITEM, "cat verifier.py")
+    assert m["explore_hint"] is False
