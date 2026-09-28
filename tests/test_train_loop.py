@@ -105,6 +105,83 @@ def test_run_grpo_control_smoke():
             shutil.rmtree(run_dir)
 
 
+@pytest.mark.parametrize("patience,expect_steps", [(None, 5), (3, 3), (5, 5), (6, 5)])
+def test_run_grpo_stops_after_n_consecutive_zero_behavior_steps(patience, expect_steps, capsys):
+    """_FakeEnv never shows the behavior, so every train step has behavior_rate 0: a patience of N stops
+    after N steps (N >= n_steps just runs them all), and None is the old behavior — all n_steps."""
+    name = "smoke_test_early_stop"
+    run_dir = Path("data/runs") / name
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=5, eval_every=2, eval_size=2,
+        penalty_coef=None, kl_coef=0.0, seed=0, stop_after_zero_behavior_steps=patience,
+        logging=LoggingConfig(run_name=name, use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, _FakeEnv(), _FakeBackend(), train_against=[], held_out=[_FakeMonitor("probe_x")])
+        m = [json.loads(l) for l in (run_dir / "metrics.jsonl").open() if l.strip()]
+        assert [r["step"] for r in m] == list(range(expect_steps))
+        ev = [json.loads(l)["step"] for l in (run_dir / "eval_metrics.jsonl").open() if l.strip()]
+        # the periodic evals that fell inside the run, then the final one at the steps actually taken
+        assert ev == sorted({s for s in range(0, expect_steps, 2)} | {expect_steps})
+        info = json.loads((run_dir / "run_info.json").read_text())
+        out = capsys.readouterr().out
+        if expect_steps < cfg.n_steps:
+            assert info["stopped_early"]["after_steps"] == expect_steps
+            assert "behavior_rate was exactly 0 on 3 consecutive training steps" in info["stopped_early"]["reason"]
+            assert "run stopped early after 3/5 steps" in out
+        else:
+            assert "stopped_early" not in info and "stopped early" not in out.lower()
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
+class _HacksOnEvenStepsBackend(_FakeBackend):
+    """Tags each train batch with its step parity so _AlternatingEnv can hack on even steps only."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def sample(self, prompts, *, sampler, seed, num_samples=1, max_tokens=64, temperature=1.0):
+        out = super().sample(prompts, sampler=sampler, seed=seed, num_samples=num_samples)
+        if len(prompts) == 2:  # a train batch (batch_size=2; the eval set has eval_size=3)
+            hack = self.calls % 2 == 0
+            self.calls += 1
+            for r in out:
+                r.output = "HACK" if hack else r.output
+        return out
+
+
+class _AlternatingEnv(_FakeEnv):
+    def score(self, rollout):
+        return EnvResult(task_reward=0.5, behavior_present=rollout.output == "HACK", meta={"unparsed": False})
+
+
+def test_run_grpo_early_stop_needs_consecutive_zero_steps():
+    """behavior 1,0,1,0,… never has two zero steps in a row, so a patience of 2 never fires."""
+    name = "smoke_test_early_stop_streak"
+    run_dir = Path("data/runs") / name
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=2, group_size=2, n_steps=6, eval_every=10, eval_size=3,
+        penalty_coef=None, kl_coef=0.0, seed=0, stop_after_zero_behavior_steps=2,
+        logging=LoggingConfig(run_name=name, use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, _AlternatingEnv(), _HacksOnEvenStepsBackend(), train_against=[], held_out=[])
+        m = [json.loads(l) for l in (run_dir / "metrics.jsonl").open() if l.strip()]
+        assert [r["behavior_rate"] for r in m] == [1.0, 0.0] * 3
+        assert "stopped_early" not in json.loads((run_dir / "run_info.json").read_text())
+    finally:
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+
 @pytest.mark.parametrize("coef,sched,ta,match", [
     (1.0, None, False, "no train_against monitor"),          # a control's λ multiplies nothing
     (None, {"start_penalty": 0.0, "end_penalty": 1.0}, False, "no train_against monitor"),

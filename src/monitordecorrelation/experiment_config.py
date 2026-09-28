@@ -185,6 +185,15 @@ class ExperimentConfig(_Strict):
         "at eval_size×this monitor-scoring cost)",
     )
     save_every: int = Field(500, description="save the policy every N steps")
+    stop_after_zero_behavior_steps: int | None = Field(
+        None,
+        ge=1,
+        strict=True,
+        description="early stop: end the run once the TRAIN `behavior_rate` (the env's "
+        "`behavior_present` rate over the step's rollouts) has been exactly 0 on this many consecutive "
+        "training steps — the final held-out eval + checkpoint still run, labelled with the steps "
+        "actually taken. null (the default) = never stop early, i.e. always run all n_steps.",
+    )
     probe_server_url: str | None = Field(
         None,
         description="if set, probes read activations from a shared probe_server.py instead of "

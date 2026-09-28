@@ -163,6 +163,7 @@ def main() -> None:
         penalty_coef=cfg.penalty_coef, penalty_schedule=cfg.penalty_schedule, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed, save_every=cfg.save_every,
+        stop_after_zero_behavior_steps=cfg.stop_after_zero_behavior_steps,
         logging=LoggingConfig(run_name=cfg.run_name, wandb_mode=_resolve_wandb_mode(),
                               wandb_project=_wandb_project,
                               wandb_group=_wandb_group, wandb_tags=_wandb_tags, log_fraction=1.0),

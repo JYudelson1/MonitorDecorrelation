@@ -53,6 +53,10 @@ env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_optio
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
 thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank lr seed
 n_prompts_pool probe_server_url monitors`.
+`stop_after_zero_behavior_steps` (null = off, the default) = N ends training once the **train**
+`behavior_rate` has been exactly 0 on N consecutive steps (any env); the final eval + checkpoint still
+run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
+The terminal baseline scripts never train, so they refuse it as a `--set`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
 `env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier).
 

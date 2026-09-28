@@ -551,7 +551,10 @@ def run_grpo(
     at that step and the step's train batch sample from it. On a backend with ``async_eval`` (tinker)
     the eval then runs in the background while training continues (``_BackgroundEval``: at most one
     in flight — launching the next waits for it — and its errors abort the run); otherwise it runs
-    inline. The run returns only once every eval is done. Every sampling call is seeded by position:
+    inline. The run returns only once every eval is done. ``cfg.stop_after_zero_behavior_steps`` = N
+    (None = off) ends training once the train ``behavior_rate`` has been exactly 0 on N consecutive
+    steps; the final eval + checkpoint still run, and ``run_info.json`` records ``stopped_early``.
+    Every sampling call is seeded by position:
     ``derive_sample_seed(cfg.seed, "train"|"eval", step)`` per batch, then (group, sample, call)."""
     # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
     # (run_episodes enforces it; see the docstring).
@@ -788,6 +791,11 @@ def run_grpo(
         if not async_eval:
             evals.wait()
 
+    # Early stop (cfg.stop_after_zero_behavior_steps; None = off): consecutive train steps whose
+    # behavior_rate was exactly 0. Env-independent — it reads only the loop's own behavior_rate.
+    zero_streak = 0
+    stop_reason: str | None = None
+    steps_done = cfg.n_steps
     for step in range(cfg.n_steps):
         # so each persisted warning names the step it landed on (a background eval's warnings get the
         # train step current when they fire)
@@ -992,7 +1000,22 @@ def run_grpo(
             )
         rollout_log.flush()
 
-    launch_eval(cfg.n_steps, backend.current_sampler())  # final held-out eval
+        zero_streak = zero_streak + 1 if gt_rate == 0.0 else 0
+        patience = cfg.stop_after_zero_behavior_steps
+        # (on the last step there is nothing left to cut short, so the run just ends normally)
+        if patience is not None and zero_streak >= patience and step + 1 < cfg.n_steps:
+            steps_done = step + 1
+            stop_reason = (f"behavior_rate was exactly 0 on {zero_streak} consecutive training steps "
+                           f"(steps {step - zero_streak + 1}..{step}; stop_after_zero_behavior_steps="
+                           f"{patience})")
+            _log(f"⏹  STOPPING EARLY after {steps_done}/{cfg.n_steps} steps: {stop_reason}")
+            break
+
+    if stop_reason is not None:
+        info["stopped_early"] = {"after_steps": steps_done, "reason": stop_reason}
+        (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
+    # final held-out eval, labelled with the optim steps actually taken (= n_steps unless stopped early)
+    launch_eval(steps_done, backend.current_sampler())
     evals.wait()  # the run is done only once every eval is (and re-raises a failed one)
 
     # Save the final training state on tinker (7-day TTL) so we can resume / sample / inspect the
@@ -1026,3 +1049,5 @@ def run_grpo(
             _log(f"plot: {p}")
     except Exception as e:  # noqa: BLE001
         _log(f"(auto-plot skipped: {e})")
+    if stop_reason is not None:  # repeated last, so it is not buried under the final eval's logs
+        _log(f"⏹  run stopped early after {steps_done}/{cfg.n_steps} steps: {stop_reason}")

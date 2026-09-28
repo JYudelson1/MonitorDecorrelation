@@ -400,6 +400,22 @@ def test_set_refuses_fields_the_script_never_reads():
         apply_overrides(_gemini_cfg(), ["max_tokns=99"], **kw)
 
 
+
+def test_stop_after_zero_behavior_steps_is_null_or_a_positive_int():
+    from monitordecorrelation.experiment_config import apply_overrides
+
+    assert _cfg().stop_after_zero_behavior_steps is None  # absent = never stop early
+    assert _cfg(stop_after_zero_behavior_steps=3).stop_after_zero_behavior_steps == 3
+    for bad in (0, -1, 2.5, 2.0, True, "3"):
+        with pytest.raises(ValueError):
+            _cfg(stop_after_zero_behavior_steps=bad)
+    cfg = apply_overrides(_cfg(), ["stop_after_zero_behavior_steps=4"])
+    assert cfg.stop_after_zero_behavior_steps == 4
+    assert apply_overrides(cfg, ["stop_after_zero_behavior_steps=null"]).stop_after_zero_behavior_steps is None
+    with pytest.raises(ValueError):
+        apply_overrides(_cfg(), ["stop_after_zero_behavior_steps=0"])
+
+
 # ---- env_options.<key> overrides + propagation into the terminal-verifier env ---------------------
 
 _TV_CONFIG = "experiments/configs/terminal_verifier_control.json"
@@ -691,7 +707,7 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
     overrides = {"n_steps": 9, "batch_size": 3, "group_size": 5, "eval_every": 2, "eval_size": 7,
                  "eval_samples_per_prompt": 4, "save_every": 6, "lora_rank": 8, "seed": 11,
                  "penalty_coef": 0.25, "kl_coef": 0.001, "kl_discount_factor": 0.5, "max_tokens": 321,
-                 "lr": 0.0007, "n_prompts_pool": 16}
+                 "lr": 0.0007, "n_prompts_pool": 16, "stop_after_zero_behavior_steps": 4}
     # a config that trains against a monitor, so penalty_coef is one of the fields in play
     cfg_path = _REPO / "experiments" / "configs" / "terminal_verifier_gemini25_out.json"
     monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--config", str(cfg_path),
@@ -702,7 +718,7 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
     rc = seen["cfg"]
     for field in ("n_steps", "batch_size", "group_size", "eval_every", "eval_size",
                   "eval_samples_per_prompt", "save_every", "lora_rank", "seed", "penalty_coef",
-                  "kl_coef"):
+                  "kl_coef", "stop_after_zero_behavior_steps"):
         assert getattr(rc, field) == overrides[field], f"{field} never reached RunConfig"
     assert rc.learning_rate == overrides["lr"]
     assert seen["kw"]["max_tokens"] == overrides["max_tokens"]  # this config runs with no think_budget

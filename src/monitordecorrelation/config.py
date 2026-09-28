@@ -71,5 +71,8 @@ class RunConfig:
     learning_rate: float = 1e-5
     seed: int = 0
     save_every: int = 500  # save checkpoint every N train steps
+    # Early stop once the train behavior_rate has been exactly 0 on this many consecutive steps
+    # (None = never; always run n_steps). See ExperimentConfig.stop_after_zero_behavior_steps.
+    stop_after_zero_behavior_steps: int | None = None
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)
