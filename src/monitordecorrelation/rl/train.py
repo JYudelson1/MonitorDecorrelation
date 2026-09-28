@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import inspect
+import collections
 import json
 import random
 import re
@@ -191,6 +192,44 @@ def _in_thread(fn: Callable[..., object], *args, name: str) -> Future:
     return fut
 
 
+class _DaemonPool:
+    """``_in_thread`` with at most ``size`` threads alive: calls queue FIFO and run as threads free
+    up. Same future contract, and the threads are daemons for the same reason — a stdlib
+    ``ThreadPoolExecutor`` would instead drain its whole queue at interpreter exit, so an aborted run
+    would hang on work nobody will read. Threads start on demand and exit once the queue is empty."""
+
+    def __init__(self, size: int) -> None:
+        if size < 1:
+            raise ValueError(f"pool size must be >= 1 (got {size})")
+        self.size = size
+        self._queue: collections.deque = collections.deque()
+        self._lock = threading.Lock()
+        self._n_threads = 0
+
+    def submit(self, fn: Callable[..., object], *args, name: str) -> Future:
+        fut: Future = Future()
+        with self._lock:  # the same lock the workers' exit check holds, so no call is stranded
+            self._queue.append((fut, fn, args, name))
+            if self._n_threads < self.size:
+                self._n_threads += 1
+                threading.Thread(target=self._work, daemon=True).start()
+        return fut
+
+    def _work(self) -> None:
+        while True:
+            with self._lock:
+                if not self._queue:
+                    self._n_threads -= 1
+                    return
+                fut, fn, args, name = self._queue.popleft()
+            threading.current_thread().name = name
+            fut.set_running_or_notify_cancel()
+            try:
+                fut.set_result(fn(*args))
+            except BaseException as e:  # noqa: BLE001 — re-raised to whoever calls fut.result()
+                fut.set_exception(e)
+
+
 class EnvScorer:
     """Grades each rollout with ``env.score`` the moment it exists — the RL loop hands it every
     rollout through the sampler's ``on_rollout`` hook, next to the judges (``MonitorScorer``) — rather
@@ -338,6 +377,9 @@ class MonitorScorer:
       the provider's — OpenRouter's cross-process ``globalsem.openrouter_slot``, a vLLM server's own
       scheduling. The threads are daemons, so a run that aborts mid-step exits without waiting on
       judge calls nobody will read (the normal path waits for all of them in ``collect``).
+      ``max_concurrent`` (default ``None``: no cap) instead bounds each judge to that many calls in
+      flight — threads, too — with the rest queued FIFO; for a run whose judges fall far behind
+      sampling, where a thread per queued call would exhaust the process's thread/pid limit.
     - **White-box probes** (``score_batch``): ONE batched local forward over the whole set, run in
       ``collect`` once every rollout is in. This keeps the batch barrier **on purpose** — a probe is a
       single local torch model, so N one-rollout forwards would be strictly slower than one batched
@@ -355,11 +397,14 @@ class MonitorScorer:
     """
 
     def __init__(self, monitors: Sequence[Monitor],
-                 skip: Callable[[Rollout], bool] | None = None) -> None:
+                 skip: Callable[[Rollout], bool] | None = None,
+                 max_concurrent: int | None = None) -> None:
         self.monitors = list(monitors)
         self.skip = skip
         self.batched = [m for m in self.monitors if hasattr(m, "score_batch")]
         self.threaded = [m for m in self.monitors if not hasattr(m, "score_batch")]
+        self._pools = (None if max_concurrent is None
+                       else {m.name: _DaemonPool(max_concurrent) for m in self.threaded})
         self._futs: dict[tuple[str, int], Future] = {}
         self._lock = threading.Lock()
 
@@ -374,7 +419,9 @@ class MonitorScorer:
                 if key in self._futs:
                     raise RuntimeError(f"rollout {index} submitted twice to monitor {m.name!r}")
                 # an exception is surfaced by collect() as a NaN sentinel (which aborts the run)
-                self._futs[key] = _in_thread(m.score, rollout, name=f"monitor-{m.name}-{index}")
+                name = f"monitor-{m.name}-{index}"
+                self._futs[key] = (_in_thread(m.score, rollout, name=name) if self._pools is None
+                                   else self._pools[m.name].submit(m.score, rollout, name=name))
 
     def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult | None]]:
         """Drain the judge futures and run the probes; aborts the run if anything failed to score.

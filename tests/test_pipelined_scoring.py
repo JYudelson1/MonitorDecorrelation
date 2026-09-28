@@ -173,6 +173,53 @@ def test_judge_calls_are_not_capped():
     assert [r.score for r in res["j"]] == [0.5] * n
 
 
+def test_max_concurrent_caps_each_judge_and_still_scores_everything():
+    """``max_concurrent=k``: each judge has at most k calls (threads) in flight, counted separately
+    per judge, and every queued call still runs; results stay indexed like the rollouts."""
+    n, cap = 40, 3
+
+    class _Counting:
+        def __init__(self, name):
+            self.name, self.live, self.peak = name, 0, 0
+            self._lock = threading.Lock()
+
+        def score(self, rollout):
+            with self._lock:
+                self.live += 1
+                self.peak = max(self.peak, self.live)
+            time.sleep(0.01)
+            with self._lock:
+                self.live -= 1
+            return MonitorResult(score=0.5, label=False, meta={"q": rollout.prompt.text})
+
+    judges = [_Counting("a"), _Counting("b")]
+    rollouts = [_rollout(f"q{i}") for i in range(n)]
+    threads_before = threading.active_count()
+    sc = MonitorScorer(judges, max_concurrent=cap)
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    assert threading.active_count() - threads_before <= cap * len(judges)
+    res = sc.collect(rollouts)
+    for j in judges:
+        assert j.peak == cap  # saturated, never exceeded
+        assert [r.meta["q"] for r in res[j.name]] == [f"q{i}" for i in range(n)]
+
+
+def test_max_concurrent_failures_still_abort_the_run():
+    class _Boom:
+        name = "boom"
+
+        def score(self, rollout):
+            raise RuntimeError("simulated 404")
+
+    rollouts = [_rollout(f"q{i}") for i in range(5)]
+    sc = MonitorScorer([_Boom()], max_concurrent=2)
+    for i, r in enumerate(rollouts):
+        sc.submit(i, r)
+    with pytest.raises(RuntimeError, match=r"monitor 'boom' returned NaN for 5/5 rollouts"):
+        sc.collect(rollouts)
+
+
 # --------------------------------------------------------------------------------------------
 # EnvScorer: each rollout graded (env.score) the moment it exists, no cap
 # --------------------------------------------------------------------------------------------

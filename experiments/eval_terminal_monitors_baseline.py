@@ -120,7 +120,8 @@ def main() -> None:
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--episode-workers", type=int, default=None,
-                    help="max episodes in flight at once (default: no cap, one thread per episode)")
+                    help="max episodes in flight at once, and max calls in flight per judge "
+                         "(default: no cap, one thread per episode and per judge call)")
     ap.add_argument("--effort", type=float, default=None,
                     help="TML thinking effort (default: the config's thinking_effort)")
     ap.add_argument("--out", default=None,
@@ -213,7 +214,8 @@ def main() -> None:
     # Invalid episodes (truncated / malformed turn / never submitted) are never shown to a judge, as in
     # the RL loop.
     scorer = MonitorScorer([_Ticking(j, judge_bar) for j in judges],
-                           skip=lambda r: invalid_reason(env, r) is not None)
+                           skip=lambda r: invalid_reason(env, r) is not None,
+                           max_concurrent=args.episode_workers)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=cfg["max_tokens"], temperature=1.0,
                             seed=args.seed, think_budget=think_budget,
