@@ -50,8 +50,7 @@ def to_trajectory_groups(
                 # Multi-turn episode (rl/episodes.py): one transition per turn, observation tokens
                 # recorded verbatim at sampling time. The scalar episode reward sits on the LAST
                 # transition (cookbook sums per-transition rewards into the trajectory reward), and
-                # where each ob extends the previous ob+ac (normally: every turn) the cookbook folds
-                # the episode into one datum; a turn that breaks it starts a new one.
+                # because each ob prefix-extends the previous ob+ac the cookbook emits one datum.
                 trans = []
                 for i, tr in enumerate(multi):
                     ob = tinker.ModelInput.from_ints(list(tr["ob"]))

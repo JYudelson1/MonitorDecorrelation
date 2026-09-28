@@ -11,17 +11,15 @@ transcript in the order it happened::
     <turn 1 reasoning>
     </thinking>
 
-    <turn 1 visible text, if any>
-
-    [tool call: bash] {"command": "cat verifier.py"}
+    <turn 1 message, e.g. <command>cat verifier.py</command>>
 
     TOOL: <what the command printed>
 
     ASSISTANT: …
 
 ``use_cot=False`` drops the ``<thinking>`` blocks (an output-only judge). ``use_output=False`` is the
-reasoning-only view: the task, then each turn's ``<thinking>`` block alone — the tool call (command,
-explanation) and the tool output are all withheld, and the prompt (``JUDGE_PROMPT_COT_ONLY``) says so.
+reasoning-only view: the task, then each turn's ``<thinking>`` block alone — the command, the
+explanation and the tool output are all withheld, and the prompt (``JUDGE_PROMPT_COT_ONLY``) says so.
 
 Only the terminal-verifier env (``envs/terminal_verifier.py``) produces these rollouts today, and the
 per-turn record it stores is the format ``_format_rollout`` renders. Every assumption about that
@@ -42,7 +40,7 @@ from monitordecorrelation.monitors.rubrics import (
     Rubric,
     get_rubric,
 )
-from monitordecorrelation.transcript import format_tool_call
+from monitordecorrelation.transcript import NO_COMMAND_MESSAGE, SUBMISSION_INCORRECT_MESSAGE
 from monitordecorrelation.types import MonitorResult, Prompt, Rollout
 
 
@@ -108,10 +106,10 @@ class AgentCoTMonitor:
 
     def _format_rollout(self, rollout: Rollout) -> str:
         """The episode as a chat transcript: ``SYSTEM:`` (only if there is one), ``USER:``, then per
-        turn ``ASSISTANT:`` (``<thinking>…</thinking>`` first when ``use_cot``, then its visible text
-        and its tool call) followed by the messages the env sent back before the next turn, as the
-        policy saw them — ``TOOL:`` for a tool result (what the command printed, or the submit tool's
-        "incorrect"), ``USER:`` for a user message (the last-turn submit notice).
+        turn ``ASSISTANT:`` (``<thinking>…</thinking>`` first when ``use_cot``) and ``TOOL:`` with
+        what its command printed. A ``<submit>`` turn (the env's submit_* modes) that did not end the
+        episode is followed by the ``USER:`` message the env sent (``SUBMISSION_INCORRECT_MESSAGE``);
+        any other turn that ran no command mid-episode by ``NO_COMMAND_MESSAGE``.
 
         Every assumption about ``rollout.meta["episode"]["turns"]`` is asserted (see
         ``agentic_turns``), including that the turns are the ones this rollout's flattened
@@ -132,11 +130,12 @@ class AgentCoTMonitor:
             blocks.append(f"SYSTEM: {system.strip()}")
         blocks.append(f"USER: {prompt.text.strip()}")
 
-        for turn in turns:
+        last = len(turns) - 1
+        for i, turn in enumerate(turns):
             if not self.use_output:
-                # Reasoning-only view: each turn is its <thinking> block and nothing else. The tool
-                # call, the tool output and the env's other messages are all withheld — the header
-                # tells the judge so.
+                # Reasoning-only view: each turn is its <thinking> block and nothing else. The
+                # command, the explanation, the tool output and the env's no-command nudge are all
+                # withheld — the header tells the judge so.
                 blocks.append(f"ASSISTANT: <thinking>\n{turn['cot'].strip()}\n</thinking>")
                 continue
             parts: list[str] = []
@@ -145,10 +144,19 @@ class AgentCoTMonitor:
             text = turn["text"].strip()
             if text:
                 parts.append(text)
-            parts.extend(format_tool_call(c) for c in turn["tool_calls"])
             blocks.append(("ASSISTANT: " + "\n\n".join(parts)).rstrip())
-            for reply in turn["replies"]:
-                blocks.append((f"{_REPLY_ROLES[reply['role']]}: " + reply["content"].strip()).rstrip())
+
+            if turn["command"] is not None:
+                blocks.append(("TOOL: " + turn["output"].strip()).rstrip())
+            elif turn.get("submission") is not None:
+                # A submission ends the episode unless it was wrong under submission_ends="correct".
+                if i < last:
+                    blocks.append(f"USER: {SUBMISSION_INCORRECT_MESSAGE.format(answer=turn['submission']).strip()}")
+            elif i < last:
+                # No command and the episode went on: the env replied with its "no command" user
+                # message (a turn cut off by max_tokens ends the episode, so it is always last).
+                assert not turn["truncated"]
+                blocks.append(f"USER: {NO_COMMAND_MESSAGE.strip()}")
         return "\n\n".join(blocks)
 
     def _request_body(self, prompt: str) -> dict:
@@ -195,14 +203,10 @@ class AgentCoTMonitor:
 _TURN_FIELDS: dict[str, tuple[type, ...]] = {
     "cot": (str,),
     "text": (str,),
-    "tool_calls": (list,),
     "command": (str, type(None)),
     "output": (str, type(None)),
     "truncated": (bool,),
-    "replies": (list,),
 }
-# How a message the env sent back is labelled in the transcript, by its chat role.
-_REPLY_ROLES = {"tool": "TOOL", "user": "USER"}
 
 
 def agentic_turns(rollout: Rollout) -> list[dict]:
@@ -212,10 +216,8 @@ def agentic_turns(rollout: Rollout) -> list[dict]:
     shape raises instead of being rendered wrong:
 
     - the rollout carries a dict ``meta["episode"]`` with a non-empty list ``turns`` of dicts;
-    - each turn has ``cot`` / ``text`` (str), ``tool_calls`` (a list of ``{"name", "arguments"}``),
-      ``command`` / ``output`` (str, or both None), ``truncated`` (bool) and ``replies`` (a list of
-      ``{"role": "tool" | "user", "content": str}``);
-    - every turn but the last got at least one reply (the episode went on after it), the last none;
+    - each turn has ``cot`` / ``text`` (str), ``command`` / ``output`` (str, or both None) and
+      ``truncated`` (bool);
     - a truncated turn (cut off by max_tokens) ran no command and ended the episode, so it is last;
     - ``episode["n_turns"]``, when recorded, equals the number of turns;
     - the turns are THIS rollout's: every turn's reasoning appears in ``rollout.cot`` and, unless
@@ -256,18 +258,7 @@ def agentic_turns(rollout: Rollout) -> list[dict]:
         assert (turn["command"] is None) == (turn["output"] is None), (
             f"turn {i}: command and output must both be set or both be None"
         )
-        for c in turn["tool_calls"]:
-            assert isinstance(c, dict) and isinstance(c.get("name"), str) and isinstance(c.get("arguments"), str), (
-                f"turn {i}: malformed tool call record {c!r}"
-            )
-        assert bool(turn["replies"]) == (i < last), (
-            f"turn {i}: {len(turn['replies'])} replies, but only turns before the last one get replies"
-        )
-        for reply in turn["replies"]:
-            assert isinstance(reply, dict) and reply.get("role") in _REPLY_ROLES and isinstance(reply.get("content"), str), (
-                f"turn {i}: malformed reply {reply!r}"
-            )
-        submission = turn.get("submission")
+        submission = turn.get("submission")  # submit_* modes only; absent from older records
         assert submission is None or isinstance(submission, str), (
             f"turn {i}: submission must be str | None, got {type(submission).__name__}"
         )

@@ -1847,17 +1847,13 @@ function renderEpisode(turns, meta) {
     el('button', {class:'btn small', onclick:e =>
       e.target.closest('.card').querySelectorAll('details.msg').forEach(d => d.open = false)}, 'collapse all'));
   card.appendChild(head);
-  const KNOWN = ['cot','text','tool_calls','command','output','is_submission','verifier_value','truncated',
-                 'submission','replies'];
+  const KNOWN = ['cot','text','command','output','is_submission','verifier_value','truncated'];
   turns.forEach((t, i) => {
-    const calls = Array.isArray(t.tool_calls) ? t.tool_calls : [];
     const badges = [
       t.is_submission ? el('span', {class:'flag n'}, 'submission') : null,
       t.verifier_value !== undefined && t.verifier_value !== null ? el('span', {class:'flag n'}, 'verifier → ' + fmt(t.verifier_value)) : null,
       t.truncated ? el('span', {class:'flag yes'}, 'truncated') : null,
-      t.error ? el('span', {class:'flag yes'}, 'invalid tool call') : null,
-      t.submission !== null && t.submission !== undefined ? el('span', {class:'flag n'}, 'submitted') :
-        t.command === null || t.command === undefined ? el('span', {class:'flag n'}, 'no command') : null,
+      t.command === null || t.command === undefined ? el('span', {class:'flag n'}, 'no command') : null,
     ].filter(Boolean);
     card.appendChild(el('div', {class:'turnsep'},
       el('span', {class:'n'}, `TURN ${i + 1} / ${turns.length}`), el('span', {class:'ln'}), badges));
@@ -1865,21 +1861,14 @@ function renderEpisode(turns, meta) {
       {emptyNote: 'no thinking in this turn'}));
     card.appendChild(msgBlock('msg', `turn ${i + 1} · assistant message`, t.text,
       {emptyNote: 'the assistant emitted no visible text'}));
-    calls.forEach(c => card.appendChild(msgBlock('cmd', `turn ${i + 1} · tool call: ${c.name}`, c.arguments)));
     if (t.command !== null && t.command !== undefined) {
       card.appendChild(msgBlock('cmd', `turn ${i + 1} · command executed`, '$ ' + t.command));
       card.appendChild(msgBlock('out', `turn ${i + 1} · terminal output`, t.output,
         {emptyNote: 'the command produced no output'}));
-    } else if (t.submission !== null && t.submission !== undefined) {
-      card.appendChild(msgBlock('cmd', `turn ${i + 1} · submitted answer`, t.submission));
-    } else if (!calls.length) {
+    } else {
       card.appendChild(el('div', {class:'msg msg-cmd'}, el('div', {class:'inner'},
-        el('div', {class:'empty'}, 'no tool call in this turn — nothing was executed'))));
+        el('div', {class:'empty'}, 'no <command> in this turn — nothing was executed'))));
     }
-    // The env's other replies (a command's tool result is the terminal output above).
-    const ranCommand = t.command !== null && t.command !== undefined;
-    (Array.isArray(t.replies) ? t.replies : []).filter(r => !(ranCommand && r.role === 'tool')).forEach(r =>
-      card.appendChild(msgBlock('msg', `turn ${i + 1} · ${r.role} message`, r.content)));
     const rest = Object.fromEntries(Object.entries(t).filter(([k]) => !KNOWN.includes(k)));
     if (Object.keys(rest).length)
       card.appendChild(msgBlock('msg', `turn ${i + 1} · other turn fields`, rest, {closed: true}));

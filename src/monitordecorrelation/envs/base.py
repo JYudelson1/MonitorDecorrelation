@@ -60,7 +60,7 @@ class Env(Protocol):
         ...
 
     def unparseable(self, rollout: Rollout) -> bool:
-        """Could the rollout's output NOT be parsed (no codeblock / answer letter / a well-formed tool call)?
+        """Could the rollout's output NOT be parsed (no codeblock / answer letter / explained ``<command>``)?
         Optional — an env without it has no parse failures. Must be cheap and pure (it runs on the
         sampling threads, before ``score``) and agree with ``score``'s ``meta["unparsed"]``; the RL
         loop checks that. See ``invalid_reason``."""
@@ -76,35 +76,22 @@ class Env(Protocol):
 
 @runtime_checkable
 class MultiTurnEnv(Env, Protocol):
-    """A tool-loop env: the policy acts over several turns through tool calls, the env replies after
-    each one.
+    """A tool-loop env: the policy acts over several turns, the env replies after each one.
 
     ``multi_turn = True`` is the flag the RL loop dispatches on (``rl/train.py::_sample`` →
     ``backend.sample_episodes`` → ``rl/episodes.py::run_episodes``). The driver threads an opaque
-    ``state`` through ``start`` → ``step``* → ``finish``, speaking tinker-cookbook ``Message``s: the
-    env declares its tools (``tool_specs``), consumes each parsed assistant message and returns the
-    messages to append (tool results, …). ``finish`` returns the monitor-facing ``cot``/``output``
-    views plus the grading record, which the driver stores at ``Rollout.meta["episode"]`` so ``score``
-    stays a pure function of the rollout.
+    ``state`` through ``start`` → ``step``* → ``finish``; ``finish`` returns the monitor-facing
+    ``cot``/``output`` views plus the grading record, which the driver stores at
+    ``Rollout.meta["episode"]`` so ``score`` stays a pure function of the rollout.
     """
 
     multi_turn: bool
     max_turns: int
 
-    def check_policy(self, model_name: str) -> None:
-        """Raise unless the env can run this policy (tool-call formats are model specific)."""
-        ...
-
-    def tool_specs(self) -> list[Any]:
-        """The cookbook ``ToolSpec``s declared to the policy."""
-        ...
-
     def start(self, prompt: Prompt) -> Any: ...
 
-    def step(
-        self, state: Any, message: Any, *, truncated: bool = False, parse_error: bool = False
-    ) -> tuple[list[Any], bool]:
-        """Consume one parsed assistant message -> (messages to append after it, episode done)."""
+    def step(self, state: Any, cot: str, text: str, *, truncated: bool = False) -> tuple[str | None, bool]:
+        """Consume one assistant turn -> (next user message or None, episode done)."""
         ...
 
     def finish(self, state: Any) -> Any:

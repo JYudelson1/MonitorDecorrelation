@@ -8,6 +8,7 @@ from monitordecorrelation.experiment_config import (
     ENVS_WITH_SUBSET,
     ExperimentConfig,
     build_monitors,
+    validate_token_budgets,
 )
 
 
@@ -23,7 +24,6 @@ def _cfg(**kw) -> ExperimentConfig:
     that have slices, and a λ only when something is trained against."""
     base = dict(
         run_name="t",
-        max_tokens=1024,
         monitors=[
             {
                 "kind": "cot",
@@ -135,13 +135,41 @@ def _runner():
     return mod
 
 
-def test_set_null_clears_a_field():
-    """`--set key=null` must yield None, not the string 'null' — which would only blow up later."""
+def test_set_null_clears_the_thinking_budget():
+    """`--set think_budget=null` must yield None (no budget → one sampling call per turn), not the
+    string 'null' — which would only blow up once sampling started."""
     run = _runner()
-    cfg = run.apply_overrides(_cfg(stop_after_zero_behavior_steps=3), ["stop_after_zero_behavior_steps=null"])
-    assert cfg.stop_after_zero_behavior_steps is None
-    assert run.apply_overrides(_cfg(stop_after_zero_behavior_steps=3),
-                               ["stop_after_zero_behavior_steps=None"]).stop_after_zero_behavior_steps is None
+    cfg = run.apply_overrides(_cfg(think_budget=1536), ["think_budget=null"])
+    assert cfg.think_budget is None
+    assert run.apply_overrides(_cfg(), ["think_budget=None"]).think_budget is None
+
+
+class _EnvWithDefault:
+    default_think_budget = 1536
+
+
+class _EnvWithoutDefault:
+    pass
+
+
+def test_think_budget_resolution_null_means_no_budget_auto_means_env_default():
+    """The bug this guards: `--set think_budget=null` used to be silently replaced by the env's
+    default_think_budget (1536) in the training loop, so 'no budget' was unreachable on the terminal
+    env. Now: absent key → "auto" → env default; explicit null → None → no budget; int → int."""
+    from monitordecorrelation.experiment_config import resolve_think_budget
+
+    run = _runner()
+    assert _cfg().think_budget == "auto"  # the key absent from a config == env default
+    assert _cfg(think_budget=None).think_budget is None  # "think_budget": null in a config
+    assert resolve_think_budget("auto", _EnvWithDefault()) == 1536
+    assert resolve_think_budget("auto", _EnvWithoutDefault()) is None
+    assert resolve_think_budget(None, _EnvWithDefault()) is None
+    assert resolve_think_budget(1024, _EnvWithDefault()) == 1024
+    # end to end through the CLI override path
+    cfg = run.apply_overrides(_cfg(think_budget=1536), ["think_budget=null"])
+    assert resolve_think_budget(cfg.think_budget, _EnvWithDefault()) is None
+    cfg = run.apply_overrides(_cfg(think_budget=None), ["think_budget=auto"])
+    assert resolve_think_budget(cfg.think_budget, _EnvWithDefault()) == 1536
 
 
 def test_set_overrides_are_validated_not_just_assigned():
@@ -167,7 +195,6 @@ def _gemini_cfg() -> ExperimentConfig:
         dict(
             run_name="t",
             subset="nlp",
-            max_tokens=1024,
             penalty_coef=1.0,
             monitors=[
                 {"kind": "cot", "name": "g25_out", "role": "held_out",
@@ -182,7 +209,7 @@ def _gemini_cfg() -> ExperimentConfig:
 
 
 def _one_judge(model_id: str, **kw) -> ExperimentConfig:
-    return ExperimentConfig.model_validate(dict(run_name="t", subset="nlp", max_tokens=1024, monitors=[
+    return ExperimentConfig.model_validate(dict(run_name="t", subset="nlp", monitors=[
         {"kind": "cot", "name": "j", "role": "held_out", "model_id": model_id, **kw}]))
 
 
@@ -532,8 +559,7 @@ def test_terminal_verifier_rejects_an_unknown_task_instead_of_coercing_it():
     import monitordecorrelation.envs.factory as factory
 
     with pytest.raises(ValueError, match="unknown task 'not_a_task'"):
-        factory.make_env(_cfg(env="terminal_verifier", subset="not_a_task", n_prompts_pool=2,
-                              policy="thinkingmachines/Inkling-Small", thinking_effort=0.5))
+        factory.make_env(_cfg(env="terminal_verifier", subset="not_a_task", n_prompts_pool=2))
 
 
 def test_thinking_effort_is_required_by_tml_policies_and_refused_by_the_others():
@@ -574,21 +600,53 @@ def test_transformers_backend_refuses_the_knobs_it_does_not_implement():
     )
 
 
-def test_max_tokens_is_required_and_the_thinking_budget_keys_are_gone():
-    """Every sampling call — a single-turn rollout or one turn of a terminal episode — is one call of
-    max_tokens. The old budget-forcing keys (think_budget / answer_tokens) are unknown now."""
-    assert "max_tokens" in _err(max_tokens=None)
-    assert "max_tokens" in _err(max_tokens=0)
-    assert "think_budget" in _err(think_budget=None)
-    assert "answer_tokens" in _err(answer_tokens=512)
+class _SingleTurnEnv:
+    multi_turn = False
 
 
-def test_terminal_verifier_runs_only_inkling_policies():
-    """The env is built on Inkling's native tool calls: any other policy fails the config."""
-    kw = dict(env="terminal_verifier", subset="largest_island")
-    for ok in ("thinkingmachines/Inkling-Small", "thinkingmachines/Inkling"):
-        assert _cfg(policy=ok, thinking_effort=0.5, **kw).policy == ok
-    assert "runs only" in _err(policy="Qwen/Qwen3-8B", **kw)
+class _MultiTurnEnv:
+    multi_turn = True
+    max_turns = 4
+    default_think_budget = 1536
+
+
+def test_token_budget_keys_must_match_how_a_turn_is_sampled():
+    """max_tokens sizes a whole call; think_budget + answer_tokens size the two calls of a budgeted
+    turn. Whichever pair is not in force would be read by nobody, so it is refused."""
+    # single-turn env: one call of max_tokens, no budgeting at all
+    assert validate_token_budgets(_cfg(max_tokens=1024), _SingleTurnEnv()) is None
+    with pytest.raises(ValueError, match="max_tokens"):
+        validate_token_budgets(_cfg(), _SingleTurnEnv())
+    with pytest.raises(ValueError, match="would be ignored"):
+        validate_token_budgets(_cfg(max_tokens=1024, answer_tokens=512), _SingleTurnEnv())
+    with pytest.raises(ValueError, match="single-turn"):
+        validate_token_budgets(_cfg(max_tokens=1024, think_budget=256), _SingleTurnEnv())
+
+    # multi-turn with a budget (from the env, or explicit): the answer call needs its own size
+    assert validate_token_budgets(_cfg(answer_tokens=512), _MultiTurnEnv()) == 1536
+    assert validate_token_budgets(_cfg(think_budget=256, answer_tokens=512), _MultiTurnEnv()) == 256
+    with pytest.raises(ValueError, match="answer_tokens"):
+        validate_token_budgets(_cfg(), _MultiTurnEnv())
+    with pytest.raises(ValueError, match="max_tokens=3072 would be ignored"):
+        validate_token_budgets(_cfg(max_tokens=3072, answer_tokens=512), _MultiTurnEnv())
+
+    # multi-turn, budget explicitly off: back to one call of max_tokens
+    assert validate_token_budgets(_cfg(think_budget=None, max_tokens=3072), _MultiTurnEnv()) is None
+    with pytest.raises(ValueError, match="answer_tokens=512 would be ignored"):
+        validate_token_budgets(_cfg(think_budget=None, max_tokens=3072, answer_tokens=512), _MultiTurnEnv())
+
+
+def test_run_episodes_enforces_the_same_split_as_the_config():
+    """The config layer is not the only guard: the episode driver itself refuses the argument it
+    would not read, so a hand-written call cannot pass one either."""
+    from monitordecorrelation.rl.episodes import run_episodes
+
+    with pytest.raises(ValueError, match="max_tokens"):
+        run_episodes(None, None, _MultiTurnEnv(), [], max_tokens=999, think_budget=100, answer_tokens=20)
+    with pytest.raises(ValueError, match="answer_tokens"):
+        run_episodes(None, None, _MultiTurnEnv(), [], max_tokens=999, answer_tokens=20)
+    with pytest.raises(ValueError, match="max_tokens must be given"):
+        run_episodes(None, None, _MultiTurnEnv(), [])
 
 
 def test_every_repo_config_satisfies_the_relevance_rules():
@@ -617,7 +675,9 @@ def test_every_repo_config_satisfies_the_relevance_rules():
             with pytest.raises(ValidationError, match="specialized to"):
                 load_config(p)
             continue
-        load_config(p)  # schema + relevance rules
+        cfg = load_config(p)  # schema + relevance rules
+        env = _MultiTurnEnv() if cfg.env == "terminal_verifier" else _SingleTurnEnv()
+        validate_token_budgets(cfg, env)
         n_loaded += 1
     assert n_loaded > 10
 
@@ -661,7 +721,8 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
                   "kl_coef", "stop_after_zero_behavior_steps"):
         assert getattr(rc, field) == overrides[field], f"{field} never reached RunConfig"
     assert rc.learning_rate == overrides["lr"]
-    assert seen["kw"]["max_tokens"] == overrides["max_tokens"]
+    assert seen["kw"]["max_tokens"] == overrides["max_tokens"]  # this config runs with no think_budget
+    assert seen["kw"]["think_budget"] is None and seen["kw"]["answer_tokens"] is None
 
 
 def _gemini_configs() -> list[str]:
@@ -693,6 +754,12 @@ def test_judge_reasoning_reaches_every_judge_call(monkeypatch, tmp_path, cfg_nam
     class _Env:
         behavior_name = "reward_hacking"
         multi_turn = False
+        default_think_budget = None
+
+    class _TermEnv(_Env):
+        multi_turn = True
+        max_turns = 4
+        default_think_budget = 1536
 
     cfg_path = _REPO / "experiments" / "configs" / cfg_name
     multi_turn = json.loads(cfg_path.read_text())["env"] == "terminal_verifier"  # AgentCoTMonitor judges

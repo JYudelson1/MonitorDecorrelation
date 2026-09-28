@@ -133,7 +133,8 @@ def _accepts(fn, name: str) -> bool:
 
 
 def _sample(backend, env: Env, prompts: list, *, sampler, seed: int, num_samples: int,
-            max_tokens: int | None, on_rollout: Callable[[int, Rollout], None] | None = None) -> tuple[list[Rollout], bool]:
+            max_tokens: int | None, think_budget: int | None = None, answer_tokens: int | None = None,
+            on_rollout: Callable[[int, Rollout], None] | None = None) -> tuple[list[Rollout], bool]:
     """Sample rollouts the way the env needs: a multi-turn (tool-loop) env goes through the backend's
     episode driver (``sample_episodes``: sample a turn → env executes it → continue), a single-turn env
     through plain ``sample``. The rest of the loop is agnostic — both return Rollouts, ``group_size``
@@ -150,10 +151,12 @@ def _sample(backend, env: Env, prompts: list, *, sampler, seed: int, num_samples
         if not hasattr(backend, "sample_episodes"):
             raise TypeError(f"{type(env).__name__} is multi-turn but backend {type(backend).__name__} "
                             f"has no sample_episodes()")
+        # think_budget arrives RESOLVED (experiment_config.resolve_think_budget): None means no budget,
+        # full stop — the env's default_think_budget is the config layer's business, not the loop's.
         stream = stream and _accepts(backend.sample_episodes, "on_rollout")
         return backend.sample_episodes(
             env, prompts, sampler=sampler, seed=seed, num_samples=num_samples, max_tokens=max_tokens,
-            temperature=1.0,
+            temperature=1.0, think_budget=think_budget, answer_tokens=answer_tokens,
             **({"on_rollout": on_rollout} if stream else {}),
         ), stream
     stream = stream and _accepts(backend.sample, "on_rollout")
@@ -528,14 +531,20 @@ def run_grpo(
     held_out: Sequence[Monitor] = (),
     *,
     max_tokens: int | None = None,
+    think_budget: int | None = None,
+    answer_tokens: int | None = None,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
 ) -> None:
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
     (use it for anything the caller knows but the loop doesn't, e.g. the dataset subset).
-    Every sampling call — a single-turn rollout, or one turn of a multi-turn episode (rl/episodes.py)
-    — is sized by ``max_tokens``.
+    Sampling is sized EITHER by ``max_tokens`` (one call per turn) OR by ``think_budget`` +
+    ``answer_tokens`` (multi-turn envs only: capped thinking, then a forced answer) — exactly one of
+    the two, enforced by ``run_episodes``; ``experiment_config.validate_token_budgets`` is where a
+    config gets the same treatment. See
+    rl/episodes.py. ``think_budget=None`` is taken literally (no budget); resolve the env default
+    before calling (``experiment_config.resolve_think_budget``).
 
     Evals (step 0, every ``eval_every``, and after the last step) sample the weights of the step they
     are labelled with: each step takes ``backend.current_sampler()`` once, and both the eval launched
@@ -547,8 +556,11 @@ def run_grpo(
     steps; the final eval + checkpoint still run, and ``run_info.json`` records ``stopped_early``.
     Every sampling call is seeded by position:
     ``derive_sample_seed(cfg.seed, "train"|"eval", step)`` per batch, then (group, sample, call)."""
+    # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
+    # (run_episodes enforces it; see the docstring).
     _check_penalty(cfg, train_against)
-    _budget_note = f"max_tokens={max_tokens}"  # how a call is sized, for the sampling logs
+    _budget_note = (f"think_budget={think_budget}+answer_tokens={answer_tokens}"
+                    if think_budget is not None else f"max_tokens={max_tokens}")
     rng = random.Random(cfg.seed)
     # Global RNG seeding for any library that reaches for the default generator (numpy/sklearn paths).
     # Every sampling call's seed is a pure function of (cfg.seed, train|eval, step, group, sample, call)
@@ -660,7 +672,8 @@ def run_grpo(
 
         ev, streamed = _sample(backend, env, eval_prompts, sampler=sampler,
                                seed=derive_sample_seed(cfg.seed, "eval", step), num_samples=n_per,
-                               max_tokens=max_tokens, on_rollout=on_rollout)
+                               max_tokens=max_tokens, think_budget=think_budget,
+                               answer_tokens=answer_tokens, on_rollout=on_rollout)
         if not streamed:  # backend has no per-rollout hook — grade + score the finished batch
             for i, r in enumerate(ev):
                 on_rollout(i, r)
@@ -821,7 +834,8 @@ def run_grpo(
         rollouts, streamed = _sample(backend, env, prompts, sampler=sampler,
                                      seed=derive_sample_seed(cfg.seed, "train", step),
                                      num_samples=cfg.group_size,
-                                     max_tokens=max_tokens, on_rollout=on_rollout)
+                                     max_tokens=max_tokens, think_budget=think_budget,
+                                     answer_tokens=answer_tokens, on_rollout=on_rollout)
         if not streamed:  # backend has no per-rollout hook — grade + score the finished batch
             for i, r in enumerate(rollouts):
                 on_rollout(i, r)
