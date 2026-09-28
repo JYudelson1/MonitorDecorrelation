@@ -14,6 +14,11 @@ datum assembly, monitors) stays family-agnostic:
 
 ``as_renderer`` lets every existing call site keep passing a bare tokenizer (it is wrapped in
 ``HFChatRenderer``), so adding Inkling costs no churn at the call sites.
+
+Multi-turn tool use (the terminal env) is NOT rendered here: it goes through tinker-cookbook's own
+Inkling renderer (``TmlRenderer.chat_renderer``, the ``tml_v0`` renderer the cookbook recommends for
+Inkling), which owns tool declaration, tool-call parsing and tool-result rendering — see
+``rl/episodes.py``.
 """
 
 from __future__ import annotations
@@ -22,21 +27,7 @@ from typing import Any
 
 import tinker
 
-_THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
-# Qwen3's documented "thinking budget" forcing text: when the <think> block hits its token budget, this
-# is appended and the model continues with the answer (Qwen3 tech report §"thinking budget").
-THINK_BUDGET_SUFFIX = (
-    "\n\nConsidering the limited time by the user, I have to give the solution based on the "
-    "thinking directly now.\n</think>\n\n"
-)
-# The same wrap-up cue, for TML's *structured* thinking: it is appended as ordinary text inside the
-# open thinking message, which is then closed and handed to a text message (no "</think>" — the
-# channel switch is a control token, not a tag). See TmlRenderer.force_answer_tokens.
-TML_THINK_BUDGET_CUE = (
-    "\n\nConsidering the limited time by the user, I have to give the solution based on the "
-    "thinking directly now."
-)
 # Inkling's default reasoning effort (tml_renderers takes [0, 1); 0.9 = "high", the model default).
 DEFAULT_THINKING_EFFORT = 0.9
 
@@ -90,67 +81,6 @@ class HFChatRenderer:
         cot, answer = split_cot_answer(raw)
         return cot, answer, raw
 
-    @property
-    def eos_token_id(self) -> int:
-        return int(self.tokenizer.eos_token_id)
-
-    def in_open_think(self, tokens: list[int]) -> bool:
-        """True iff the sampled tokens opened a ``<think>`` block and never closed it (cut off
-        mid-thought) — the case a thinking budget has to force-close."""
-        raw = self.tokenizer.decode(tokens)
-        return _THINK_OPEN in raw and _THINK_CLOSE not in raw
-
-    def force_answer_tokens(self) -> list[int]:
-        """Tokens that close an open ``<think>`` block and hand over to the answer (Qwen3's
-        budget-forcing suffix). Appended as OBSERVATION tokens (masked in training) between the
-        truncated thinking and the answer continuation."""
-        return list(self.tokenizer.encode(THINK_BUDGET_SUFFIX, add_special_tokens=False))
-
-    def continuation_tokens(self, observation: str, *, ended_cleanly: bool = True) -> list[int]:
-        """Tokens to APPEND after a sampled assistant turn so the conversation continues with a new
-        user message ``observation`` and a fresh generation prompt (multi-turn tool loops).
-
-        Taken from the chat template's own rendering of a (user, assistant, user) stub — the tokens
-        after the assistant's end-of-turn token — so it is the template's inter-turn framing, not a
-        hand-written one. The sampled turn is expected to end
-        in the assistant end-of-turn token (``<|im_end|>`` for Qwen); when it does not
-        (``ended_cleanly=False``, e.g. truncated by max_tokens) that token is prepended so the turn is
-        closed before the user message starts.
-
-        Because this appends to the tokens the policy actually produced (thinking included), every
-        observation is a strict prefix-extension of the previous one — tinker-cookbook then folds the
-        whole episode into ONE datum with the observation tokens masked out. (The HF template itself
-        would strip earlier turns' ``<think>`` blocks and break that prefix property; we deliberately
-        keep the sampled tokens verbatim instead — which also matches rg_obfuscation's conversation
-        rendering for this setting.)
-        """
-        # Terminal output is untrusted text: a literal special-token string in it (a model echoing
-        # "<|im_end|>") would be tokenized as the real control token and corrupt the turn structure.
-        for special in getattr(self.tokenizer, "all_special_tokens", None) or []:
-            if special and special in observation:
-                observation = observation.replace(special, special[:2] + " " + special[2:])
-        stub = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"},
-                {"role": "user", "content": observation}]
-        full = self.tokenizer.apply_chat_template(
-            stub, add_generation_prompt=True, enable_thinking=self.enable_thinking,
-            tokenize=True, return_dict=False,
-        )
-        full = list(getattr(full, "input_ids", full))
-        eos = self.eos_token_id
-        # The rendered stub has exactly three end-of-turn tokens (user, assistant, user). Everything
-        # after the SECOND one is the framing that follows an assistant turn: "\n<|im_start|>user\n…
-        # <|im_end|>\n<|im_start|>assistant\n" for Qwen. (Diffing two renders doesn't work: the
-        # template rewrites the assistant turn — e.g. inserts an empty <think> block — depending on
-        # whether it is the last message.)
-        ends = [i for i, t in enumerate(full) if t == eos]
-        if len(ends) != 3:
-            raise ValueError(
-                f"expected 3 end-of-turn tokens in the rendered stub, found {len(ends)} — cannot "
-                f"locate the inter-turn framing for this chat template"
-            )
-        out = full[ends[1] + 1:]
-        return ([eos] if not ended_cleanly else []) + out
-
 
 class TmlRenderer:
     """TML (Inkling) rendering + structured-thinking parsing via ``tml-renderers``.
@@ -165,7 +95,7 @@ class TmlRenderer:
 
     name = "tml_v0"
 
-    def __init__(self, effort: float = DEFAULT_THINKING_EFFORT) -> None:
+    def __init__(self, model_name: str, effort: float = DEFAULT_THINKING_EFFORT) -> None:
         try:
             from tml_renderers import chat, tinker as tml_tinker, tokenizers, v0
         except ImportError as e:  # pragma: no cover — dependency is declared in pyproject
@@ -173,25 +103,36 @@ class TmlRenderer:
                 "Inkling policies need the `tml-renderers` package (their prompts are not HF chat "
                 "templates). Install it with `uv sync` / `uv add tml-renderers`."
             ) from e
+        if not is_tml_policy(model_name):
+            raise ValueError(f"TmlRenderer renders thinkingmachines/* policies only, got {model_name!r}")
         if not 0.0 <= effort < 1.0:
             raise ValueError(f"thinking effort must be in [0, 1), got {effort}")
         self._chat = chat
         self._tml_tinker = tml_tinker
         self._v0 = v0
+        self.model_name = model_name
         self.effort = effort
         self.tokenizer = tokenizers.o200k_base_chat()
         self._renderer = v0.Renderer(self.tokenizer)
         self.stop_tokens: list[int] | None = list(self._renderer.stop())
-        # TML control tokens, from the tokenizer itself (never hard-coded ids). A TML turn is
-        # <|message_model|><|content_thinking|>…<|end_message|><|message_model|><|content_text|>…
-        # <|end_message|><|content_model_end_sampling|>, and a prompt ends after a user message's
-        # <|end_message|> (the model emits its own header) — so the multi-turn framing below is
-        # exactly "close the model turn, add a user message".
-        self._sp = {
-            name: int(self.tokenizer.encode_special(name))
-            for name in ("message_user", "message_model", "content_text", "content_thinking",
-                         "end_message", "content_model_end_sampling")
-        }
+        self._chat_renderer = None
+
+    @property
+    def chat_renderer(self):
+        """tinker-cookbook's renderer for this policy — the one ``model_info`` recommends (``tml_v0``
+        for Inkling / Inkling-Small), over the cookbook's tokenizer for it. The multi-turn episode
+        driver renders whole conversations (tool declarations, tool calls, tool results) and parses
+        tool calls with it, exactly as the cookbook's Inkling docs do; built on first use."""
+        if self._chat_renderer is None:
+            from tinker_cookbook import model_info
+            from tinker_cookbook.renderers import get_renderer
+            from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+            self._chat_renderer = get_renderer(
+                model_info.get_recommended_renderer_name(self.model_name),
+                get_tokenizer(self.model_name),
+            )
+        return self._chat_renderer
 
     def _user_messages(self, text: str) -> list:
         chat = self._chat
@@ -215,40 +156,6 @@ class TmlRenderer:
                 )
             toks.extend(int(t) for t in chunk_tokens)
         return toks
-
-    def in_open_think(self, tokens: list[int]) -> bool:
-        """True iff the completion is cut off *inside* a thinking message — the case a thinking
-        budget has to force-close. TML thinking is structured, so this is a control-token question,
-        not a string one: find the last channel/boundary marker and ask whether it opened thinking."""
-        markers = {self._sp["content_thinking"], self._sp["content_text"],
-                   self._sp["end_message"], self._sp["content_model_end_sampling"]}
-        last = next((t for t in reversed(tokens) if t in markers), None)
-        return last == self._sp["content_thinking"]
-
-    def force_answer_tokens(self) -> list[int]:
-        """Tokens that close an open thinking message and open the text message the answer is
-        sampled into (the TML equivalent of Qwen3's budget-forcing suffix). Appended as OBSERVATION
-        tokens — masked in training — between the truncated thinking and the answer continuation."""
-        return (list(self.tokenizer.encode_ordinary(TML_THINK_BUDGET_CUE))
-                + [self._sp["end_message"], self._sp["message_model"], self._sp["content_text"]])
-
-    def continuation_tokens(self, observation: str, *, ended_cleanly: bool = True) -> list[int]:
-        """Tokens to APPEND after a sampled model turn so the conversation continues with a new user
-        message ``observation`` (multi-turn tool loops).
-
-        A cleanly-stopped turn already ends with ``<|content_model_end_sampling|>`` (tinker returns
-        the stop token), so all that is needed is the user message; a turn cut off by ``max_tokens``
-        is closed first. The observation is encoded with ``encode_ordinary``, so terminal output that
-        happens to contain a literal ``<|end_message|>`` stays *text* and cannot forge turn structure.
-
-        As on the HF side, this appends to the tokens the policy actually produced (thinking
-        included), so every observation is a strict prefix-extension of the previous one and the
-        whole episode folds into ONE training datum with the observation tokens masked.
-        """
-        close = ([] if ended_cleanly
-                 else [self._sp["end_message"], self._sp["content_model_end_sampling"]])
-        return (close + [self._sp["message_user"], self._sp["content_text"]]
-                + list(self.tokenizer.encode_ordinary(observation)) + [self._sp["end_message"]])
 
     def parse(self, tokens: list[int]) -> tuple[str, str, str]:
         """-> (cot, answer, raw_text). ``cot`` = the thinking channel, ``answer`` = the text channel."""
@@ -321,7 +228,7 @@ def make_renderer(
     publicly installable — ``tml_renderers.tokenizers.o200k_base_chat()`` is the public equivalent.
     """
     if is_tml_policy(model_name):
-        return TmlRenderer(effort=effort)
+        return TmlRenderer(model_name, effort=effort)
     if tokenizer is None:
         if training_client is None:
             raise ValueError("make_renderer needs a tokenizer or a training_client for HF policies")

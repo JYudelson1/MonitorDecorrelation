@@ -35,23 +35,19 @@ import tinker
 
 from monitordecorrelation.envs.base import invalid_reason
 from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
-from monitordecorrelation.experiment_config import (
-    apply_overrides,
-    load_config,
-    validate_token_budgets,
-)
+from monitordecorrelation.experiment_config import apply_overrides, load_config
 from monitordecorrelation.eval.metrics import accuracy, brier, dprime_margin, judge_call_rates, judge_finish_reason, roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record, slim_record
 from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
 from monitordecorrelation.rl.episodes import run_episodes
-from monitordecorrelation.rl.renderers import is_tml_policy, make_renderer
+from monitordecorrelation.rl.renderers import make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
 
 # The only config fields this script reads. --set on anything else (policy, seed, n_steps, …) would be
 # silently ignored, so apply_overrides refuses it; the policy and seed are the --model / --seed flags.
-READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
+READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens"}
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
                        "reasoning", "binary_judge", "provider", "max_tokens", "base_url",
                        "enable_thinking", "thinking_budget", "thinking_effort"}
@@ -166,23 +162,14 @@ def main() -> None:
     )
     prompts = env.holdout(args.n_prompts, seed=args.seed)
 
-    # The same check the training loop makes, now that the env (hence the resolved budget) exists:
-    # max_tokens under a thinking budget, or answer_tokens without one, would be sampled with and
-    # never used, so they are rejected rather than ignored.
     try:
-        think_budget = validate_token_budgets(cfg_obj, env)
+        env.check_policy(args.model)  # the env runs on Inkling's native tool calls only
     except ValueError as e:
-        raise SystemExit(f"config {args.config}: {e}") from e
+        raise SystemExit(str(e)) from e
 
     sc = tinker.ServiceClient()
     sampler = sc.create_sampling_client(base_model=args.model)
-    is_tml = is_tml_policy(args.model)
-    if not is_tml and args.effort is not None:
-        raise SystemExit(
-            f"--effort/{args.effort} applies only to TML-rendered policies; {args.model} has no such knob"
-        )
-    renderer = make_renderer(args.model, effort=args.effort,
-                            tokenizer=None if is_tml else sampler.get_tokenizer())
+    renderer = make_renderer(args.model, effort=args.effort)
 
     judges = [AgentCoTMonitor(m["name"], m["model_id"], behavior=behavior,
                               use_cot=m.get("use_cot", True), use_output=m.get("use_output", True),
@@ -218,8 +205,7 @@ def main() -> None:
                            max_concurrent=args.episode_workers)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=cfg["max_tokens"], temperature=1.0,
-                            seed=args.seed, think_budget=think_budget,
-                            answer_tokens=cfg["answer_tokens"], episode_workers=args.episode_workers,
+                            seed=args.seed, episode_workers=args.episode_workers,
                             on_rollout=on_rollout)
     wall_s = time.time() - t0
     results = [env.score(r) for r in rollouts]
@@ -235,6 +221,12 @@ def main() -> None:
     print(f"  verifier_mode              {opts.get('verifier_mode', 'corrupted')}")
     for k in ("used_verifier", "read_verifier", "modified_verifier", "passed", "submitted_true_answer"):
         print(f"  env/{k:<22} {mean(float(er.meta[k]) for er in results):.3f}")
+    ends: dict[str, int] = {}
+    for er in results:
+        ends[er.meta["end_reason"]] = ends.get(er.meta["end_reason"], 0) + 1
+    print(f"  end reasons                {ends}")
+    print(f"  turns/episode              {mean(er.meta['n_turns'] for er in results):.2f}   "
+          f"(prefix breaks: {sum(r.meta['n_prefix_breaks'] for r in rollouts)} turns)")
     print(f"  behavior_present (oracle)  {mean(map(float, gt)):.3f}   "
           f"({sum(gt)} positive / {len(gt) - sum(gt)} negative)")
     print(f"  invalid (not judged)       {1 - len(valid) / len(gt):.3f}   "
@@ -321,7 +313,16 @@ def main() -> None:
             }
             full.write(json.dumps(rec, default=str) + "\n")
             slim.write(json.dumps(slim_record(rec), default=str) + "\n")
-    print(f"\nwrote {out}, run_info.json, eval_rollouts.jsonl, eval_rollouts_slim.jsonl in {out.parent}")
+    # The exact tokens of every sampling call — what the policy was shown (ob) and what it sampled (ac)
+    # — so an episode can be read back exactly as the model saw it (rl/episodes.py transitions).
+    with (out.parent / "eval_episode_tokens.jsonl").open("w") as f:
+        for i, (r, er) in enumerate(zip(rollouts, results)):
+            f.write(json.dumps({"index": i, "task_id": er.meta["task_id"],
+                                "n_prefix_breaks": r.meta["n_prefix_breaks"],
+                                "transitions": [{"ob": tr["ob"], "ac": tr["ac"]}
+                                                for tr in r.meta["transitions"]]}) + "\n")
+    print(f"\nwrote {out}, run_info.json, eval_rollouts.jsonl, eval_rollouts_slim.jsonl, "
+          f"eval_episode_tokens.jsonl in {out.parent}")
 
 
 if __name__ == "__main__":

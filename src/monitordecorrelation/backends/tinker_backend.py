@@ -126,24 +126,20 @@ class TinkerBackend:
         sampler: tinker.SamplingClient,
         seed: int,
         num_samples: int = 1,
-        max_tokens: int | None = None,
+        max_tokens: int,
         temperature: float = 1.0,
-        think_budget: int | None = None,
-        answer_tokens: int | None = None,
         on_rollout: Callable[[int, Rollout], None] | None = None,
     ) -> list[Rollout]:
         """Multi-turn counterpart of ``sample`` for tool-loop envs (``env.multi_turn``): the episode
-        driver samples a turn, the env executes it and replies, repeat. Returns one Rollout per
-        episode carrying its per-turn transitions (see rl/episodes.py) for ``train_step``.
-        ``think_budget``/``answer_tokens`` cap the per-turn thinking (budget forcing; see episodes.py) —
-        give either those two or ``max_tokens``, never both (``run_episodes`` rejects the unused one).
+        driver samples a turn, the env executes its tool call and replies, repeat. Returns one Rollout
+        per episode carrying its per-turn transitions (see rl/episodes.py) for ``train_step``; each
+        turn is one sampling call of ``max_tokens``.
         Every episode runs in its own thread and never waits on its peers; ``on_rollout(index,
         rollout)`` fires from that thread the moment an episode is done. ``sampler`` / ``seed``: as in
         ``sample``."""
         return run_episodes(
             sampler, self.renderer, env, prompts, num_samples=num_samples,
             max_tokens=max_tokens, temperature=temperature, seed=seed,
-            think_budget=think_budget, answer_tokens=answer_tokens,
             episode_workers=getattr(env, "episode_workers", None),
             on_rollout=on_rollout,
         )

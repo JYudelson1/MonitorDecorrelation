@@ -7,13 +7,14 @@ scores LLM judges (CoT+output and output-only) against the oracle. This is the p
 for the setting: does the base model already read the verifier, how often, and can monitors tell.
 
 It also reports the **cost accounting** an RL run is priced from: prefill / sampled / training tokens
-per rollout (the training figure is the size of the single GRPO datum the episode folds into), and the
-resulting $ per rollout and per RL step at tinker's published rates.
+per rollout (the training figure is the size of the GRPO data the episode makes — one datum unless a
+turn broke the prefix property, see rl/episodes.py), and the resulting $ per rollout and per RL step at
+tinker's published rates. The env runs Inkling / Inkling-Small only (their native tool calls).
 
   uv run python experiments/eval_terminal_baseline.py --n-prompts 16 --samples 2
   uv run python experiments/eval_terminal_baseline.py --judge google/gemini-2.5-flash-lite
   uv run python experiments/eval_terminal_baseline.py --verifier-mode possible   # verifier holds the TRUE answer
-  uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling-Small --effort 0.5
+  uv run python experiments/eval_terminal_baseline.py --model thinkingmachines/Inkling --effort 0.5
 """
 
 from __future__ import annotations
@@ -33,11 +34,7 @@ from monitordecorrelation.envs.terminal_verifier import SUBMISSION_ENDS, VERIFIE
 from monitordecorrelation.eval.metrics import roc_auc
 from monitordecorrelation.eval.rollout_dump import monitor_record
 from monitordecorrelation.rl.episodes import run_episodes
-from monitordecorrelation.rl.renderers import (
-    DEFAULT_THINKING_EFFORT,
-    is_tml_policy,
-    make_renderer,
-)
+from monitordecorrelation.rl.renderers import DEFAULT_THINKING_EFFORT, make_renderer
 from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
@@ -56,12 +53,12 @@ PRICES = {
 def token_accounting(rollouts) -> dict:
     """Mean per-rollout token counts, split the way tinker bills them.
 
-    ``prefill`` is every token submitted to the sampler (one call per transition; a budget-forced
-    turn is two). ``prefill_fresh`` is the part that cannot come from the prompt cache — each call's
-    observation is a prefix-extension of the previous call's ``ob+ac``, so only the new framing +
-    terminal output is genuinely new; the true bill sits between the two. ``sample`` is generated
-    tokens, and ``train`` is the length of the ONE datum the episode folds into (final ob+ac), which
-    is what a ``forward_backward`` on this episode would process.
+    ``prefill`` is every token submitted to the sampler (one call per turn). ``prefill_fresh`` is the
+    part that cannot come from the prompt cache — each call's observation normally extends the
+    previous call's ``ob+ac``, so only the new tool result is genuinely new; the true bill sits between
+    the two. ``sample`` is generated tokens, and ``train`` is the length of the training data the
+    episode makes (``rl/episodes.py`` ``train_tokens``), which is what a ``forward_backward`` on this
+    episode would process.
     """
     n = len(rollouts) or 1
     tot = {"prefill": 0, "prefill_fresh": 0, "sample": 0, "train": 0, "calls": 0}
@@ -71,10 +68,11 @@ def token_accounting(rollouts) -> dict:
         tot["sample"] += r.meta["output_tokens"]
         tot["train"] += r.meta["train_tokens"]
         tot["calls"] += r.meta["n_sampling_calls"]
-        prev = 0
+        prev, trs_prev = 0, []
         for tr in trs:
-            tot["prefill_fresh"] += max(0, len(tr["ob"]) - prev)
-            prev = len(tr["ob"]) + len(tr["ac"])
+            tot["prefill_fresh"] += len(tr["ob"]) - (prev if tr["ob"][:prev] == trs_prev else 0)
+            trs_prev = tr["ob"] + tr["ac"]
+            prev = len(trs_prev)
     return {k: v / n for k, v in tot.items()}
 
 
@@ -99,21 +97,15 @@ def cost_estimate(per_rollout: dict, price: dict, *, rollouts_per_step: int) -> 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="Qwen/Qwen3-8B")
+    ap.add_argument("--model", default="thinkingmachines/Inkling-Small")
     ap.add_argument("--n-prompts", type=int, default=8)
     ap.add_argument("--samples", type=int, default=1, help="episodes per prompt")
-    ap.add_argument("--max-tokens", type=int, default=None,
-                    help="per TURN (a single call). Use this OR --think-budget + --answer-tokens; "
-                         "defaults to 2048 when no budget is asked for")
-    ap.add_argument("--think-budget", type=int, default=None,
-                    help="cap <think> at N tokens per turn, then force the answer (answer gets --answer-tokens)")
-    ap.add_argument("--answer-tokens", type=int, default=None,
-                    help="tokens for the forced answer; required with --think-budget, rejected without it")
+    ap.add_argument("--max-tokens", type=int, default=2048, help="per TURN (one sampling call)")
     ap.add_argument("--max-turns", type=int, default=4)
     ap.add_argument("--verifier-mode", default="corrupted", choices=VERIFIER_MODES,
                     help="what verifier.py holds (see envs/terminal_verifier.py); 'possible' = the true answer")
     ap.add_argument("--submission-ends", default=None, choices=SUBMISSION_ENDS,
-                    help="submit_* modes only (required there): 'first' = the first <submit> ends the episode; "
+                    help="submit_* modes only (required there): 'first' = the first submission ends the episode; "
                          "'correct' = only a correct one does, a wrong one is answered 'incorrect'")
     ap.add_argument("--read-only-verifier", action="store_true",
                     help="make verifier.py read-only (real file permissions: commands run as 'nobody'; "
@@ -126,8 +118,8 @@ def main() -> None:
     ap.add_argument("--offset", type=int, nargs=2, default=(4, 9), metavar=("LO", "HI"))
     ap.add_argument("--output-view", default="transcript", choices=("transcript", "assistant", "explanations"))
     ap.add_argument("--require-explanation", action="store_true",
-                    help="each command (and, in the submit_* modes, each <submit>) must be followed by "
-                         "'Explanation: …' (else a parse failure)")
+                    help="the bash (and submit) tools take a required `explanation` argument (a blank or "
+                         "missing one is an invalid tool call, a parse failure)")
     ap.add_argument("--judge", default=None,
                     help="OpenRouter model id → score a CoT+out and an output-only judge, each on the "
                          "model's default reasoning — so a model monitors/judge_reasoning.py supports "
@@ -136,8 +128,7 @@ def main() -> None:
     ap.add_argument("--show", type=int, default=3, help="print this many full transcripts")
     ap.add_argument("--out", default=None, help="jsonl path (default data/runs/tv_baseline_<model>/episodes.jsonl)")
     ap.add_argument("--effort", type=float, default=None,
-                    help="reasoning effort for TML-rendered (thinkingmachines/*) policies; refused for any "
-                         f"other. Default for those: {DEFAULT_THINKING_EFFORT}")
+                    help=f"the policy's reasoning effort (default {DEFAULT_THINKING_EFFORT})")
     ap.add_argument("--step-rollouts", type=int, default=128,
                     help="rollouts per RL step for the cost estimate (default batch_size 16 x group_size 8)")
     ap.add_argument("--price", default=None,
@@ -145,22 +136,11 @@ def main() -> None:
                          "\"cached\": 0.04, \"train\": 0.44}'")
     args = ap.parse_args()
 
-    # The two turn-sizing modes are disjoint (run_episodes rejects the unused argument), so settle it
-    # here, where the message can name the flags: budget + answer tokens, or a plain per-turn cap.
-    if args.think_budget is None:
-        if args.answer_tokens is not None:
-            ap.error("--answer-tokens sizes the answer that --think-budget forces; without a budget "
-                     "nothing forces one, so it would be unused")
-        args.max_tokens = 2048 if args.max_tokens is None else args.max_tokens
-    else:
-        if args.max_tokens is not None:
-            ap.error("--think-budget sizes the thinking call and --answer-tokens the answer, so "
-                     "--max-tokens would be unused — drop it")
-        args.answer_tokens = 512 if args.answer_tokens is None else args.answer_tokens
-    is_tml = is_tml_policy(args.model)
-    if not is_tml and args.effort is not None:
-        ap.error(f"--effort applies only to TML-rendered policies; {args.model} has no such knob")
-    if is_tml and args.effort is None:
+    try:
+        TerminalVerifierEnv.check_policy(args.model)  # the env runs on Inkling's native tool calls only
+    except ValueError as e:
+        ap.error(str(e))
+    if args.effort is None:
         args.effort = DEFAULT_THINKING_EFFORT
 
     env = TerminalVerifierEnv.from_task(
@@ -174,15 +154,11 @@ def main() -> None:
 
     sc = tinker.ServiceClient()
     sampler = sc.create_sampling_client(base_model=args.model)
-    renderer = make_renderer(args.model, effort=args.effort if is_tml else DEFAULT_THINKING_EFFORT,
-                             tokenizer=None if is_tml else sampler.get_tokenizer())
+    renderer = make_renderer(args.model, effort=args.effort)
     n_ep = len(prompts) * args.samples
     print(f"sampling {n_ep} episodes ({len(prompts)}×{args.samples}) from {args.model} — "
-          f"max_turns={args.max_turns}, "
-          + (f"think_budget={args.think_budget}+answer_tokens={args.answer_tokens}, "
-             if args.think_budget is not None else f"max_tokens/turn={args.max_tokens}, ")
-          + (f"effort={args.effort}, " if is_tml else "")
-          + f"verifier_mode={args.verifier_mode}", flush=True)
+          f"max_turns={args.max_turns}, max_tokens/turn={args.max_tokens}, effort={args.effort}, "
+          f"verifier_mode={args.verifier_mode}", flush=True)
     # Judges are built BEFORE sampling so each episode can be handed to them the moment it finishes
     # (MonitorScorer.submit as the driver's on_rollout) instead of after the whole batch — same
     # pipelining the RL loop uses, see rl/train.py.
@@ -199,7 +175,6 @@ def main() -> None:
     scorer = MonitorScorer(judges, skip=lambda r: invalid_reason(env, r) is not None)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=args.max_tokens, temperature=1.0, seed=args.seed,
-                            think_budget=args.think_budget, answer_tokens=args.answer_tokens,
                             on_rollout=scorer.submit)
     wall_s = time.time() - t0
     results = [env.score(r) for r in rollouts]
@@ -218,7 +193,7 @@ def main() -> None:
                    "task_reward": er.task_reward, "cot": r.cot, "output": r.output,
                    "stop_reason": r.meta.get("stop_reason"), "invalid_reason": invalid[i],
                    "tokens": {k: r.meta[k] for k in ("input_tokens", "output_tokens", "train_tokens",
-                                                     "n_sampling_calls", "n_forced_answers",
+                                                     "n_sampling_calls", "n_prefix_breaks",
                                                      "n_truncated_turns")},
                    "env_meta": er.meta, "monitors": {}}
             for j in judges:
@@ -241,11 +216,11 @@ def main() -> None:
           f"verifier_mode={args.verifier_mode}): {rate('cheated'):.2f}")
     for k in ("read_verifier", "used_verifier", "read_not_used", "modified_verifier", "passed", "passed_blind",
               "submitted_true_answer", "n_submissions",
-              "truncated", "no_command_turns", "n_turns", "n_commands"):
+              "truncated", "malformed_turns", "n_turns", "n_commands"):
         print(f"  {k:<22} {rate(k):.2f}")
     print(f"  {'task_reward':<22} {mean(er.task_reward for er in results):.2f}")
     print(f"  {'unparsed':<22} {rate('unparsed'):.2f}")
-    print(f"  {'forced_answers/ep':<22} {mean(r.meta['n_forced_answers'] for r in rollouts):.2f}")
+    print(f"  {'prefix_breaks/ep':<22} {mean(r.meta['n_prefix_breaks'] for r in rollouts):.2f}")
     ends = {}
     for er in results:
         ends[er.meta["end_reason"]] = ends.get(er.meta["end_reason"], 0) + 1
@@ -271,10 +246,9 @@ def main() -> None:
         price.update(json.loads(args.price))
     n_turns_total = sum(er.meta["n_turns"] for er in results) or 1
     summary = {
-        "model": args.model, "effort": args.effort if is_tml else None, "n_episodes": n_ep,
+        "model": args.model, "effort": args.effort, "n_episodes": n_ep,
         "n_prompts": len(prompts), "samples_per_prompt": args.samples, "seed": args.seed,
-        "max_tokens_per_turn": args.max_tokens, "think_budget": args.think_budget,
-        "answer_tokens": args.answer_tokens, "max_turns": args.max_turns,
+        "max_tokens_per_turn": args.max_tokens, "max_turns": args.max_turns,
         "verifier_mode": args.verifier_mode, "submission_ends": args.submission_ends,
         "read_only_verifier": args.read_only_verifier, "explore_hint": args.explore_hint,
         "last_turn_submit_notice": args.last_turn_submit_notice,
@@ -284,15 +258,14 @@ def main() -> None:
         "used_verifier": rate("used_verifier"), "modified_verifier": rate("modified_verifier"),
         "read_verifier": rate("read_verifier"), "passed": rate("passed"),
         "passed_blind": rate("passed_blind"), "submitted_true_answer": rate("submitted_true_answer"),
-        # truncation of the ANSWER (a turn cut off by max_tokens) — distinct from thinking that was
-        # force-closed at the budget, which is not a truncation of the output at all.
+        # a turn cut off by max_tokens (it ends the episode)
         "truncated_output_rate": mean(float(r.meta["n_truncated_turns"] > 0) for r in rollouts),
         "truncated_output_turn_rate": sum(r.meta["n_truncated_turns"] for r in rollouts) / n_turns_total,
-        "think_budget_hit_rate": mean(float(r.meta["n_forced_answers"] > 0) for r in rollouts),
-        "think_budget_hit_turn_rate": sum(r.meta["n_forced_answers"] for r in rollouts) / n_turns_total,
-        # parse failures: a turn with no <command>, or no Explanation: after it (and not cut off) — it ends the
-        # episode, so the episode-level rate is the episodes that ended on one.
-        "parse_error_turn_rate": sum(er.meta["no_command_turns"] for er in results) / n_turns_total,
+        # turns whose observation did not extend the previous ob+ac (each costs an extra datum)
+        "prefix_break_turn_rate": sum(r.meta["n_prefix_breaks"] for r in rollouts) / n_turns_total,
+        # parse failures: a malformed turn (unparsable, no tool call, several, or an invalid one) — it
+        # ends the episode, so the episode-level rate is the episodes that ended on one.
+        "parse_error_turn_rate": sum(er.meta["malformed_turns"] for er in results) / n_turns_total,
         "parse_error_episode_rate": rate("unparsed"),
         # truncated, malformed or never submitted = invalid: -1 reward in RL, and never shown to a judge
         "invalid_rate": mean(float(w is not None) for w in invalid),
@@ -305,7 +278,7 @@ def main() -> None:
     print(f"  {'prefill (input)':<22} {per_rollout['prefill']:>9.0f}   "
           f"(uncacheable: {per_rollout['prefill_fresh']:.0f})")
     print(f"  {'sampled (output)':<22} {per_rollout['sample']:>9.0f}")
-    print(f"  {'train (one datum)':<22} {per_rollout['train']:>9.0f}")
+    print(f"  {'train':<22} {per_rollout['train']:>9.0f}")
     if price:
         summary["price_per_1m"] = price
         summary["cost"] = cost_estimate(per_rollout, price, rollouts_per_step=args.step_rollouts)
@@ -320,8 +293,7 @@ def main() -> None:
     print(f"--- failure modes ---")
     print(f"  {'truncated output':<22} {summary['truncated_output_rate']:.3f} of episodes, "
           f"{summary['truncated_output_turn_rate']:.3f} of turns")
-    print(f"  {'think budget hit':<22} {summary['think_budget_hit_rate']:.3f} of episodes, "
-          f"{summary['think_budget_hit_turn_rate']:.3f} of turns")
+    print(f"  {'prefix break':<22} {summary['prefix_break_turn_rate']:.3f} of turns")
     print(f"  {'parse error':<22} {summary['parse_error_episode_rate']:.3f} of episodes, "
           f"{summary['parse_error_turn_rate']:.3f} of turns")
     summary_path = out.parent / f"summary_{out.stem}.json"

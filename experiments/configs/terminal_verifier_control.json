@@ -24,7 +24,6 @@
   "eval_samples_per_prompt": 4,
   "save_every": 6,
   "max_tokens": 3072,
-  "think_budget": null,
   "thinking_effort": 0.5,
   "penalty_coef": null,
   "kl_coef": 0.0001,

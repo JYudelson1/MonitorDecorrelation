@@ -199,31 +199,11 @@ class ExperimentConfig(_Strict):
         description="if set, probes read activations from a shared probe_server.py instead of "
         "each run loading the base model locally (env PROBE_SERVER_URL is the fallback)",
     )
-    max_tokens: int | None = Field(
-        None,
-        description="tokens per sampling call, for the runs where a call IS the whole turn: every "
-        "single-turn env, and a multi-turn env with NO thinking budget. REQUIRED there, and REJECTED "
-        "when a `think_budget` is in force (the budget sizes the thinking call and `answer_tokens` "
-        "the answer, so `max_tokens` would be silently ignored). Checked by "
-        "`validate_token_budgets` once the env — hence the resolved budget — is known.",
-    )
-    think_budget: int | None | Literal["auto"] = Field(
-        "auto",
-        description="multi-turn envs, thinking policies (Qwen3, Inkling): cap each turn's thinking at "
-        "N tokens — when hit, the renderer's budget-forcing suffix closes it and the answer is sampled "
-        "with `answer_tokens`. 'auto' (the default, i.e. the key is absent) = the env's "
-        "`default_think_budget` (None for envs without one). null/None = NO budget: a turn is one call "
-        "of max_tokens (a long think then eats the turn) — explicit, never overridden by the env default. "
-        "Resolved once by `resolve_think_budget`; the training loop only ever sees int | None. "
-        "MULTI-TURN ENVS ONLY: a single-turn env samples one call per rollout and never budgets it, so "
-        "anything but 'auto' there is rejected by `validate_token_budgets` rather than ignored.",
-    )
-    answer_tokens: int | None = Field(
-        None,
-        description="tokens for the post-<think> answer that a `think_budget` forces. REQUIRED "
-        "exactly when a budget is in force, and REJECTED otherwise (no budget → no forced answer → "
-        "the value would be silently ignored). The mirror image of `max_tokens`; both are checked by "
-        "`validate_token_budgets`.",
+    max_tokens: int = Field(
+        ...,
+        ge=1,
+        description="tokens per sampling call: a single-turn env's whole completion, a multi-turn env's "
+        "per-turn budget (thinking + message + tool call; a turn that hits it ends the episode, -1).",
     )
     thinking_effort: float | None = Field(
         None,
@@ -294,10 +274,7 @@ class ExperimentConfig(_Strict):
     # ---- no key may be silently ignored -------------------------------------------------------
     # House rule (see the field descriptions): a key that only applies to SOME runs defaults to
     # None, is REQUIRED where it applies, and is REJECTED where it does not — so a setting that
-    # cannot take effect fails the config instead of quietly doing nothing. The checks that need
-    # only the config live here; the ones that need the constructed env (``max_tokens`` /
-    # ``answer_tokens`` / ``think_budget``) live in ``validate_token_budgets``, which the runner
-    # calls once the env exists.
+    # cannot take effect fails the config instead of quietly doing nothing.
     @model_validator(mode="after")
     def _check_nothing_is_ignored(self) -> "ExperimentConfig":
         from monitordecorrelation.rl.renderers import is_tml_policy
@@ -314,6 +291,15 @@ class ExperimentConfig(_Strict):
             errs.append(
                 f"env {self.env!r} has no slices, so subset={self.subset!r} would be ignored — drop the key"
             )
+
+        if self.env == "terminal_verifier":
+            # The env is built on its policy's native tool calls; fail here, not once the run samples.
+            from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
+
+            try:
+                TerminalVerifierEnv.check_policy(self.policy)
+            except ValueError as e:
+                errs.append(str(e))
 
         tml = is_tml_policy(self.policy)
         if tml and self.thinking_effort is None:
@@ -377,59 +363,6 @@ class ExperimentConfig(_Strict):
         return self
 
 
-def validate_token_budgets(cfg: "ExperimentConfig", env) -> int | None:
-    """Resolve ``think_budget`` against ``env`` and reject every token-budget key this run would ignore.
-
-    The three keys divide by how a turn is sampled, which only the env knows:
-
-    * single-turn env — one call per rollout, no budgeting: ``max_tokens`` sizes it; ``think_budget``
-      (anything but the ``"auto"`` default) and ``answer_tokens`` are meaningless and rejected.
-    * multi-turn env, budget in force — the thinking call is ``think_budget`` long and the forced
-      answer ``answer_tokens`` long; ``max_tokens`` is never read, so it is rejected.
-    * multi-turn env, ``think_budget: null`` — a turn is one call of ``max_tokens``; nothing forces an
-      answer, so ``answer_tokens`` is rejected.
-
-    Returns the resolved budget (``int | None``), which is what the training loop takes.
-    """
-    multi_turn = bool(getattr(env, "multi_turn", False))
-    env_default = getattr(env, "default_think_budget", None)
-    if not multi_turn:
-        if env_default is not None:  # an env bug, not a config one — a single turn is never budgeted
-            raise ValueError(
-                f"{type(env).__name__} is single-turn but declares default_think_budget={env_default}, "
-                "which nothing would apply"
-            )
-        if cfg.think_budget != "auto":
-            raise ValueError(
-                f"env {cfg.env!r} is single-turn: a rollout is ONE sampling call of max_tokens and no "
-                f"thinking budget is ever applied, so think_budget={cfg.think_budget!r} would be ignored — "
-                "drop the key (its default, \"auto\", resolves to no budget here)"
-            )
-    budget = resolve_think_budget(cfg.think_budget, env)
-    if budget is None:
-        if cfg.max_tokens is None:
-            raise ValueError(
-                "no thinking budget is in force, so each sampling call is sized by `max_tokens` — set it"
-            )
-        if cfg.answer_tokens is not None:
-            raise ValueError(
-                f"no thinking budget is in force (think_budget={cfg.think_budget!r} → None), so no answer is "
-                f"ever forced and answer_tokens={cfg.answer_tokens} would be ignored — drop the key"
-            )
-    else:
-        if cfg.answer_tokens is None:
-            raise ValueError(
-                f"think_budget={budget} caps each turn's thinking, after which the answer is sampled "
-                "separately — set `answer_tokens` to size it"
-            )
-        if cfg.max_tokens is not None:
-            raise ValueError(
-                f"think_budget={budget} sizes the thinking call and answer_tokens the answer, so "
-                f"max_tokens={cfg.max_tokens} would be ignored — drop the key"
-            )
-    return budget
-
-
 def load_config(path: str | Path) -> ExperimentConfig:
     """Load + validate a JSON or YAML experiment config. Raises pydantic ValidationError if invalid."""
     path = Path(path)
@@ -467,7 +400,7 @@ def load_monitor_specs(path: str | Path) -> list[MonitorSpec]:
 
 def _coerce(v: str):
     if v.lower() in ("null", "none", ""):
-        return None  # e.g. --set think_budget=null → NO thinking budget (one call per turn, no env default)
+        return None  # e.g. --set penalty_coef=null
     if v[:1] in ("{", "["):
         # A JSON object / list, e.g. --set 'monitors.g25_cot.reasoning={"enabled":false}'. Malformed
         # JSON is an error, never a fallback to the raw string.
@@ -610,19 +543,6 @@ def apply_overrides(
             mon[field] = value
     data["env_options"] = {**data["env_options"], **env_option_overrides}
     return type(cfg).model_validate({**data, **overrides})
-
-
-def resolve_think_budget(think_budget: int | None | Literal["auto"], env) -> int | None:
-    """The ONE place the config's ``think_budget`` becomes the ``int | None`` the sampling code takes.
-
-    ``"auto"`` (the field default) → the env's ``default_think_budget`` (None if the env declares
-    none, e.g. any single-turn env); an int → that int; ``None`` (``"think_budget": null`` in the
-    config, ``--set think_budget=null``, or ``None`` in code) → **no budget**. The env default is a
-    fallback for configs that don't mention the key, never an override of an explicit null — that
-    was the bug where ``--set think_budget=null`` still ran with the env's 1536."""
-    if think_budget == "auto":
-        return getattr(env, "default_think_budget", None)
-    return think_budget
 
 
 def build_monitors(

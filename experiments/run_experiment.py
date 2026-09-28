@@ -39,7 +39,6 @@ from monitordecorrelation.experiment_config import (
     apply_overrides,
     build_monitors,
     load_config,
-    validate_token_budgets,
 )
 from monitordecorrelation.hyperparams import get_lr
 from monitordecorrelation.rl.train import run_grpo
@@ -100,12 +99,9 @@ def main() -> None:
                 f"(or --set lr=2e-4)."
             ) from e
 
-    # Env FIRST: it decides how a turn is sampled, so the token-budget keys can only be checked
-    # once it exists — and a config error should cost nothing, i.e. land before the backend opens a
-    # tinker session.
+    # Env FIRST: a config error should cost nothing, i.e. land before the backend opens a tinker session.
     try:
         env = make_env(cfg)  # each env validates its own subset / env_options values
-        think_budget = validate_token_budgets(cfg, env)  # int | None from here on
     except ValueError as e:
         raise SystemExit(f"config {args.config}: {e}") from e
 
@@ -180,16 +176,12 @@ def main() -> None:
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
     if getattr(env, "multi_turn", False):
-        src = "env default" if cfg.think_budget == "auto" else "config"
-        print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={think_budget} ({src}) "
-              + (f"answer_tokens={cfg.answer_tokens}" if think_budget
-                 else f"— NO thinking budget: max_tokens/turn={cfg.max_tokens}"))
+        print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} max_tokens/turn={cfg.max_tokens}")
 
     run_grpo(
         run_config, env, backend, train_against=train_against, held_out=held_out,
-        max_tokens=cfg.max_tokens, think_budget=think_budget, answer_tokens=cfg.answer_tokens,
+        max_tokens=cfg.max_tokens,
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
-                  "think_budget": think_budget,  # the RESOLVED value (config.json may say "auto")
                   "config": cfg.model_dump()},
     )
     print(f"\n{cfg.experiment} finished OK")

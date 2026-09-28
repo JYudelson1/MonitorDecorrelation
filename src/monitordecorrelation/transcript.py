@@ -8,72 +8,33 @@ prompt → turn 1 CoT → turn 1 assistant message → turn 1 terminal output �
 it from the per-turn record the env stores in ``Rollout.meta["episode"]["turns"]``.
 
 The judge prompt for such an episode is built by ``monitors.agent_cot_monitor.AgentCoTMonitor``
-(a chat-style ``USER:`` / ``ASSISTANT:`` / ``TOOL:`` transcript); ``render_transcript`` here is the
-older turn-tagged rendering, kept for the viewer and tests. The prompt a judge was actually sent is
-persisted with the rollout (``monitors.<name>.call`` in the dumps), so nothing downstream needs to
+(a chat-style ``USER:`` / ``ASSISTANT:`` / ``TOOL:`` transcript). The prompt a judge was actually sent
+is persisted with the rollout (``monitors.<name>.call`` in the dumps), so nothing downstream needs to
 rebuild it.
 
-Also home to the terminal env's command grammar and its "no command" user message, because
-monitors need both and must not import envs; ``envs.terminal_verifier`` re-exports them.
+Also home to how a turn's tool call is written out as text (``format_tool_call``), because the env's
+flattened views and the judge both need it and monitors must not import envs.
 
 Stdlib-only and dependency-light on purpose (like ``types``).
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-# The command grammar of the terminal env. It lives here rather than in ``envs/terminal_verifier``
-# because the judge-facing "explanations" view needs to strip commands too, and monitors must not
-# import envs; ``envs.terminal_verifier`` re-exports both helpers for its long-standing callers.
-_COMMAND_RE = re.compile(r"<command>(.*?)</command>", re.S)
-# What must follow the executed command: "Explanation: <text>", the text running to the next <command>.
-_EXPLANATION_RE = re.compile(r"\s*Explanation:(.*?)(?=<command>|\Z)", re.S)
-
-# What the terminal env sends the policy as the next user message when a turn contained no
-# ``<command>`` (verbatim from rg_obfuscation/prompts/terminal_prompts.py). Lives here so the agentic
-# judge prompt can show the policy's turn-by-turn conversation without importing the env.
-NO_COMMAND_MESSAGE = """You didn't generate any command. Please generate a command now."""
-
-# What the terminal env's submit_* modes (with ``submission_ends="correct"``) send the policy after a
-# wrong ``<submit>``. Here for the same reason: the agentic judge shows it without importing the env.
-SUBMISSION_INCORRECT_MESSAGE = """You submitted "{answer}". This answer is incorrect.
-
-What's your next command or submission?"""
-
 # How much of each turn the flattened ``output`` view (and hence a judge that reads it) contains:
-#   transcript   — the assistant's visible text AND the terminal output its command produced
-#   assistant    — the assistant's visible text only (commands + explanations)
-#   explanations — the paper's judge view: commands stripped, only what the model *says* it is doing
+#   transcript   — the assistant's visible text and tool call, AND the terminal output its command produced
+#   assistant    — the assistant's visible text and tool call only
+#   explanations — the paper's judge view: the visible text and the tool call's `explanation` argument,
+#                  without the command / answer — only what the model *says* it is doing
 OUTPUT_VIEWS = ("transcript", "assistant", "explanations")
 DEFAULT_OUTPUT_VIEW = "transcript"
 
 
-def extract_commands(text: str) -> list[str]:
-    """All ``<command>…</command>`` bodies in an assistant message, stripped — empty ones included (an
-    empty command is a command like any other: the terminal env runs it)."""
-    return [c.strip() for c in _COMMAND_RE.findall(text or "")]
-
-
-def explained_command(text: str) -> str | None:
-    """The command a terminal-env turn runs — its ONLY ``<command>`` (possibly empty) — or None if the
-    turn is malformed. Well-formed (rg_obfuscation's format) means exactly one command, immediately
-    followed (whitespace aside) by ``Explanation:`` and a non-empty explanation; a turn with no
-    command, more than one, or whose command lacks that explanation, is a parse failure."""
-    text = text or ""
-    ms = list(_COMMAND_RE.finditer(text))
-    if len(ms) != 1:
-        return None
-    e = _EXPLANATION_RE.match(text, ms[0].end())
-    return ms[0].group(1).strip() if e and e.group(1).strip() else None
-
-
-def strip_commands(text: str) -> str:
-    """The paper's judge view: the assistant's text with the ``<command>`` tags (and bodies) removed."""
-    out = _COMMAND_RE.sub("", text or "")
-    out = re.sub(r"</?command>", "", out)
-    return re.sub(r"\n\s*\n", "\n", out).strip()
+def format_tool_call(call: dict) -> str:
+    """One recorded tool call (``{"name", "arguments"}``, arguments a JSON string as the renderer
+    parsed it) as a line of text: ``[tool call: bash] {"command": "ls"}``."""
+    return f"[tool call: {call['name']}] {call['arguments']}"
 
 
 def episode_turns(rollout: Any) -> list[dict] | None:
@@ -127,9 +88,9 @@ def describe_contents(
         bits.append("the assistant's reasoning")
     if include_output:
         bits.append(
-            "the assistant's explanations (commands stripped)"
+            "the assistant's messages and explanations (commands stripped)"
             if output_view == "explanations"
-            else "the assistant's messages"
+            else "the assistant's messages and tool calls"
         )
         if output_view == "transcript":
             bits.append("the terminal output of each command")
@@ -137,37 +98,3 @@ def describe_contents(
         return "nothing"
     listed = bits[0] if len(bits) == 1 else f"{', '.join(bits[:-1])} and {bits[-1]}"
     return f"{listed}, turn by turn"
-
-
-def render_transcript(
-    turns: list[dict],
-    *,
-    include_cot: bool = True,
-    include_output: bool = True,
-    output_view: str = DEFAULT_OUTPUT_VIEW,
-) -> str:
-    """The episode in the order it happened: per turn, thinking → assistant message → terminal.
-
-    ``include_cot`` / ``include_output`` are the monitor's own view flags (a CoT-only judge gets the
-    reasoning blocks only; an output-only judge gets the message + terminal blocks only), and
-    ``output_view`` decides how much of a turn's action half is shown — the same three settings the
-    env's flattened ``output`` field honours. Turn numbers stay absolute, so a dropped block reads as
-    a gap rather than renumbering the episode. Empty blocks are omitted.
-    """
-    parts: list[str] = []
-    for i, turn in enumerate(turns):
-        n = i + 1
-        if include_cot:
-            cot = str(turn.get("cot") or "").strip()
-            if cot:
-                parts.append(f"[turn {n} — assistant reasoning (chain of thought)]\n{cot}")
-        if include_output:
-            text = str(turn.get("text") or "")
-            body = strip_commands(text) if output_view == "explanations" else text.strip()
-            if body:
-                parts.append(f"[turn {n} — assistant]\n{body}")
-            command = turn.get("command")
-            if output_view == "transcript" and command is not None:
-                out = str(turn.get("output") or "").strip()
-                parts.append(f"[turn {n} — terminal]\n$ {command}\n{out}")
-    return "\n\n".join(parts)
