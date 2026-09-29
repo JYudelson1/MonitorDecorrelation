@@ -75,7 +75,7 @@ vLLM judge sends its configured thinking settings)."""
                                           "--out", str(tmp_path / "b.json"), "--set", *sets])
         with pytest.raises(_Stop):
             mod.main()
-        # vLLM judges (the control config's q3_* / q35_* / q38_*) take no `reasoning` — their thinking
+        # vLLM judges (the control config's q3_* / q35_*) take no `reasoning` — their thinking
         # settings must reach the request as configured instead
         for j in seen["judges"]:
             if j.backend.provider == "vllm":

@@ -311,9 +311,9 @@ force-closed at `think_budget`, and turns with no parseable `<command>`. Every r
 forward over each episode's datum on top of these numbers.
 
 Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json` + the four
-`terminal_verifier_gemini{25,35}_{cot,out}.json` rows + the six local-Qwen rows
-`terminal_verifier_q{3,35,38}_{cot,out}.json` (identical to the Gemini rows except the monitors: train
-against one vLLM Qwen judge, hold out the other five; needs the :8001/:8002/:8003 servers). `env_options`: `verifier_mode`
+`terminal_verifier_gemini{25,35}_{cot,out}.json` rows + the four local-Qwen rows
+`terminal_verifier_q{3,35}_{cot,out}.json` (identical to the Gemini rows except the monitors: train
+against one vLLM Qwen judge, hold out the other three; needs the :8001/:8002 servers). `env_options`: `verifier_mode`
 (`corrupted` = perturbed verifier, the paper's variant and every config's setting; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option
 with `--set env_options.verifier_mode=possible`), `offset_range`, `max_turns`,

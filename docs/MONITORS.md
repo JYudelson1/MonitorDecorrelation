@@ -158,7 +158,7 @@ thinking brief…"; verified by rendering through the server's `/tokenize`). It 
 Qwen3.8 with thinking on — the template silently defaults to `xhigh` otherwise — and rejected with
 thinking off or on the other Qwens. The knob is weak: replaying 44 terminal-verifier judge prompts ×3
 (Inkling-Small pre-RL episodes), mean reasoning tokens were low ≈1180, xhigh ≈1400, and medium ≈1460
-(medium thinks *longest*). The control config's `q38_*` judges run at `low`.
+(medium thinks *longest*). The control config's `q38_*` judges ran at `low` (removed from all configs 2026-09-29).
 
 Two deliberate differences from the OpenRouter client: the verdict is read from `content` **only**
 (a thinking Qwen drafts `SCORE:` lines while deliberating, so there is no reasoning-channel fallback)

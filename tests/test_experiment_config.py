@@ -447,7 +447,7 @@ def test_every_terminal_verifier_config_uses_the_corrupted_verifier():
 
     paths = sorted((_REPO / "experiments" / "configs").glob("*.json"))
     tv = [p for p in paths if json.loads(p.read_text()).get("env") == "terminal_verifier"]
-    assert len(tv) == 11  # control + 4 gemini rows + 6 qwen rows
+    assert len(tv) == 9  # control + 4 gemini rows + 4 qwen rows
     for p in tv:
         opts = json.loads(p.read_text())["env_options"]
         assert opts["verifier_mode"] == "corrupted" and "impossible" not in opts, p.name
