@@ -155,7 +155,8 @@ slot.
   through `rl/episodes.py` (sample a turn → env executes it → append → continue), producing one
   prefix-chained token sequence per episode so GRPO trains on all the policy's turns with the
   observations masked.
-- **What the verifier holds — `env_options.verifier_mode`** (every config uses `corrupted`; override
+- **What the verifier holds — `env_options.verifier_mode`** (every config uses `submit_corrupted` with `submission_ends: first`, `require_explanation`,
+  `read_only_verifier` and `last_turn_submit_notice` all on; override
   with `--set env_options.verifier_mode=<mode>` on `run_experiment.py` /
   `eval_terminal_monitors_baseline.py`, `--verifier-mode` on `eval_terminal_baseline.py`):
   - `corrupted` (the paper's honeypot): the true answer plus a random non-zero offset (`offset_range`

@@ -318,7 +318,7 @@ Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json
 `terminal_verifier_gemini{25,35}_{cot,out}.json` rows + the four local-Qwen rows
 `terminal_verifier_q{3,35}_{cot,out}.json` (identical to the Gemini rows except the monitors: train
 against one vLLM Qwen judge, hold out the other three; needs the :8001/:8002 servers). `env_options`: `verifier_mode`
-(`corrupted` = perturbed verifier, the paper's variant and every config's setting; `corrupted_negative`
+(every config: `submit_corrupted` with `submission_ends: first`, `require_explanation`, `read_only_verifier`, `last_turn_submit_notice`; `corrupted` = perturbed verifier, the paper's variant; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option
 with `--set env_options.verifier_mode=possible`), `offset_range`, `max_turns`,
 `output_view` (`transcript` | `assistant` | `explanations` — what the *output* monitors see),
