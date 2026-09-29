@@ -46,6 +46,8 @@ from monitordecorrelation.eval.metrics import (
     roc_auc,
 )
 from monitordecorrelation.monitors.base import Monitor
+from monitordecorrelation.monitors.judge_backend import judge_priority
+from monitordecorrelation.monitors.vllm import EVAL_PRIORITY, TRAIN_PRIORITY
 from monitordecorrelation.rl import sdk_watch as sdk_watch_mod
 from monitordecorrelation.rl.episodes import derive_sample_seed
 from monitordecorrelation.types import INVALID_ROLLOUT_REWARD, MonitorResult, Rollout
@@ -364,6 +366,13 @@ def _assert_scored(results: dict[str, list[MonitorResult | None]]) -> None:
             )
 
 
+def _score_at(score: Callable[[Rollout], MonitorResult], priority: int, rollout: Rollout) -> MonitorResult:
+    """``score(rollout)`` with its vLLM judge calls at ``priority`` — run in the judge's own thread,
+    since the priority is a context variable that does not follow work into a new thread."""
+    with judge_priority(priority):
+        return score(rollout)
+
+
 class MonitorScorer:
     """Scores a set of monitors over a batch of rollouts, **starting each rollout's work the moment
     that rollout exists** rather than after the whole batch has been sampled.
@@ -394,13 +403,20 @@ class MonitorScorer:
     skipped rollout is never shown to any monitor — no judge call, not in the probes' batch — and its
     entry in every result list is ``None``. It must be a pure function of the rollout: ``submit`` and
     ``collect`` each evaluate it.
+
+    ``priority``: the vLLM request priority of every judge call this scorer makes (lower = served
+    first; ``judge_backend.judge_priority``, entered in each judge thread). The RL loop's train steps
+    use ``TRAIN_PRIORITY`` (the default) and its evals ``EVAL_PRIORITY``, so a vLLM server started with
+    ``--scheduling-policy priority`` serves the calls a train step blocks on ahead of the background
+    eval's. No effect on OpenRouter judges or probes.
     """
 
     def __init__(self, monitors: Sequence[Monitor],
                  skip: Callable[[Rollout], bool] | None = None,
-                 max_concurrent: int | None = None) -> None:
+                 max_concurrent: int | None = None, priority: int = TRAIN_PRIORITY) -> None:
         self.monitors = list(monitors)
         self.skip = skip
+        self.priority = priority
         self.batched = [m for m in self.monitors if hasattr(m, "score_batch")]
         self.threaded = [m for m in self.monitors if not hasattr(m, "score_batch")]
         self._pools = (None if max_concurrent is None
@@ -420,8 +436,9 @@ class MonitorScorer:
                     raise RuntimeError(f"rollout {index} submitted twice to monitor {m.name!r}")
                 # an exception is surfaced by collect() as a NaN sentinel (which aborts the run)
                 name = f"monitor-{m.name}-{index}"
-                self._futs[key] = (_in_thread(m.score, rollout, name=name) if self._pools is None
-                                   else self._pools[m.name].submit(m.score, rollout, name=name))
+                args = (m.score, self.priority, rollout)
+                self._futs[key] = (_in_thread(_score_at, *args, name=name) if self._pools is None
+                                   else self._pools[m.name].submit(_score_at, *args, name=name))
 
     def collect(self, rollouts: Sequence[Rollout]) -> dict[str, list[MonitorResult | None]]:
         """Drain the judge futures and run the probes; aborts the run if anything failed to score.
@@ -664,7 +681,7 @@ def run_grpo(
         # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
         # instant its episode finishes, so `sample_s` already contains most of the scoring and
         # `score_s` is only whatever was still in flight when the last episode landed.
-        scorer, grader = MonitorScorer(all_monitors, skip=is_invalid), EnvScorer(env)
+        scorer, grader = MonitorScorer(all_monitors, skip=is_invalid, priority=EVAL_PRIORITY), EnvScorer(env)
 
         def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
             grader.submit(i, r)
@@ -825,7 +842,8 @@ def run_grpo(
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
         # As in run_eval, their calls are pipelined into sampling: a rollout is handed to the judges
         # the moment its episode finishes, so t_score below is only the tail still in flight.
-        scorer, grader = MonitorScorer(train_against, skip=is_invalid), EnvScorer(env)
+        scorer = MonitorScorer(train_against, skip=is_invalid, priority=TRAIN_PRIORITY)
+        grader = EnvScorer(env)
 
         def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
             grader.submit(i, r)

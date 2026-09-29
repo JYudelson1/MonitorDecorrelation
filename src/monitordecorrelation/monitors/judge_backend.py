@@ -13,11 +13,19 @@ be silently ignored"):
   whose chat template has a reasoning-effort knob, with thinking on; rejected otherwise). See
   ``monitors.vllm``.
 
+A vLLM call's request ``priority`` is not a setting but the context it is made in: ``judge_priority``
+(a context manager, default ``vllm.TRAIN_PRIORITY``), which the RL loop's ``MonitorScorer`` enters in
+each judge thread — train vs eval. OpenRouter calls carry no priority.
+
 ``validate_judge_settings`` is the offline check the config schema runs at LOAD; ``make_judge_backend``
 runs the same check (plus, for vLLM, a server check) when a monitor is built.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from monitordecorrelation.monitors import vllm
 from monitordecorrelation.monitors.judge_reasoning import OPENROUTER_DEFAULT_MAX_TOKENS, resolve_reasoning
@@ -28,6 +36,24 @@ PROVIDERS = ("openrouter", "vllm")
 # The settings only a vLLM judge takes / only an OpenRouter judge takes.
 _VLLM_ONLY = ("base_url", "enable_thinking", "thinking_budget", "thinking_effort")
 _OPENROUTER_ONLY = ("reasoning",)
+
+# The vLLM request priority of the judge calls made in this context (see ``judge_priority``).
+_PRIORITY: ContextVar[int] = ContextVar("judge_priority", default=vllm.TRAIN_PRIORITY)
+
+
+@contextmanager
+def judge_priority(priority: int) -> Iterator[None]:
+    """vLLM judge calls made inside this block (in this thread) carry ``priority`` (lower = served
+    first; ``vllm.TRAIN_PRIORITY`` / ``vllm.EVAL_PRIORITY``). A context variable, so it does NOT
+    follow the work into a new thread — enter it in the thread that makes the call."""
+    if not isinstance(priority, int) or isinstance(priority, bool):
+        raise TypeError(f"judge priority must be an int, got {priority!r}")
+    token = _PRIORITY.set(priority)
+    try:
+        yield
+    finally:
+        _PRIORITY.reset(token)
+
 
 # Client-side request timeout of an OpenRouter judge call.
 OPENROUTER_TIMEOUT = 60.0
@@ -123,7 +149,7 @@ class VLLMJudge:
     def request_body(self, prompt: str) -> dict:
         return vllm.request_body(self.model_id, prompt, max_tokens=self.max_tokens,
                                  enable_thinking=self.enable_thinking, thinking_budget=self.thinking_budget,
-                                 thinking_effort=self.thinking_effort)
+                                 priority=_PRIORITY.get(), thinking_effort=self.thinking_effort)
 
     def call(self, prompt: str, *, warn_after: int) -> JudgeCall:
         return vllm.chat(self.request_body(prompt), base_url=self.base_url, timeout=self.timeout,

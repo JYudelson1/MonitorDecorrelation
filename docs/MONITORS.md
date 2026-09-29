@@ -150,6 +150,11 @@ A judge can also run on a local vLLM server (`monitors/vllm.py`, dispatched by
 `Qwen/Qwen3-30B-A3B-FP8` and `Qwen/Qwen3.5-35B-A3B-FP8`, checked against running servers (vLLM 0.30,
 `--reasoning-parser qwen3`): thinking on → the thinking in `message.reasoning`, the answer alone in
 `content`; off → no reasoning at all; budget 64 → 63–64 reasoning tokens, then a normal answer.
+Every vLLM call also carries the request `priority` of the context it is made in
+(`judge_backend.judge_priority`; `MonitorScorer(priority=…)` enters it in each judge thread): train
+steps `vllm.TRAIN_PRIORITY` = 0, evals `vllm.EVAL_PRIORITY` = 1, so on a server started with
+`--scheduling-policy priority` the train step's judge calls are scheduled (and, under KV pressure,
+kept running by preempting eval calls) ahead of the background eval's. FCFS servers ignore it.
 
 `Qwen/Qwen3.8-27B-FP8` (added 2026-09-27, same three checks passed) also has a reasoning-effort knob
 in its chat template: `thinking_effort` → `chat_template_kwargs.reasoning_effort` ∈ `low` / `medium` /

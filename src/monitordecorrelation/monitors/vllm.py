@@ -25,6 +25,13 @@ splits the thinking into ``message.reasoning`` — leaving ``content`` as the an
 without one with a 400). A reply whose ``content`` still carries ``</think>`` means the server is
 not splitting reasoning, and raises (a config error) rather than being scored.
 
+Every call carries vLLM's request ``priority`` (lower = scheduled first; vLLM's default is 0): the
+``judge_priority`` of the context the call is made in (``monitors.judge_backend``). The RL loop scores
+train rollouts at ``TRAIN_PRIORITY`` and the (background) eval's at ``EVAL_PRIORITY``, so on a server
+both share, the train-against judge calls a train step blocks on go ahead of the eval's. It only takes
+effect on a server started with ``--scheduling-policy priority`` — the default FCFS scheduler ignores
+it, and a server does not expose which policy it runs, so this cannot be checked from here.
+
 Unlike an OpenRouter judge, the answer is **only ever read from content** — never mined from the
 thinking — and it is the content's LAST ``SCORE:`` / ``VERDICT:`` line: a thinking-enabled Qwen drafts
 such lines while it deliberates, and after a budget force-closes its thinking it can go on
@@ -67,6 +74,12 @@ VLLM_JUDGES: dict[str, tuple[str, ...]] = {
 # and an unbudgeted thinker can write 16k tokens on a server shared by hundreds of concurrent calls
 # (judge calls are uncapped within a run, and a timed-out call is retried from scratch). Two hours.
 VLLM_TIMEOUT = 7200.0
+
+# vLLM request priorities (lower = scheduled first; with ``--scheduling-policy priority`` a waiting
+# higher-priority request can also preempt a running lower-priority one). Train = vLLM's default, so
+# callers outside the RL loop (the baseline scripts) sit with train.
+TRAIN_PRIORITY = 0
+EVAL_PRIORITY = 1
 
 _FATAL_STATUS = frozenset({400, 401, 403, 404, 422})
 
@@ -135,7 +148,7 @@ def validate_vllm_judge(
 
 
 def request_body(model_id: str, prompt: str, *, max_tokens: int, enable_thinking: bool,
-                 thinking_budget: int | None, thinking_effort: str | None = None) -> dict:
+                 thinking_budget: int | None, priority: int, thinking_effort: str | None = None) -> dict:
     """The exact JSON body a vLLM judge POSTs (persisted verbatim in the call record)."""
     kwargs: dict = {"enable_thinking": enable_thinking}
     if thinking_effort is not None:
@@ -146,6 +159,7 @@ def request_body(model_id: str, prompt: str, *, max_tokens: int, enable_thinking
         "temperature": 1.0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": kwargs,
+        "priority": priority,
     }
     if thinking_budget is not None:
         body["thinking_token_budget"] = thinking_budget

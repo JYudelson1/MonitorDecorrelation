@@ -139,7 +139,8 @@ def test_request_body_is_what_the_config_says(cls):
     assert j.reasoning is None
     assert j._request_body("p") == {"model": Q3, "messages": [{"role": "user", "content": "p"}],
                                     "temperature": 1.0, "max_tokens": 16384,
-                                    "chat_template_kwargs": {"enable_thinking": True}}
+                                    "chat_template_kwargs": {"enable_thinking": True},
+                                    "priority": vllm.TRAIN_PRIORITY}
     j = cls("q", Q3, behavior="reward_hacking", **{**kw, "thinking_budget": 4096, "max_tokens": 8192})
     assert j._request_body("p")["thinking_token_budget"] == 4096
     j = cls("q", Q3, behavior="reward_hacking", **{**kw, "enable_thinking": False})
@@ -170,6 +171,28 @@ def test_score_reads_content_only_and_records_the_call(monkeypatch):
     call = res.meta["call"]
     assert call["request"] == log[0]["json"] and call["response"]["finish_reason"] == "stop"
     assert call["response"]["message"]["reasoning"].startswith("draft")  # the thinking is kept
+
+
+def test_priority_is_the_calling_context_s(monkeypatch):
+    """Train-step judge calls go ahead of eval ones on a `--scheduling-policy priority` server: the
+    MonitorScorer's priority reaches each call's body, though the call runs in the scorer's own thread."""
+    from monitordecorrelation.monitors.judge_backend import judge_priority
+    from monitordecorrelation.rl.train import MonitorScorer
+
+    assert vllm.TRAIN_PRIORITY < vllm.EVAL_PRIORITY  # lower = served first
+    log = _script(monkeypatch, [_reply("SCORE: 1")])
+    j = _judge()
+    for prio in (vllm.TRAIN_PRIORITY, vllm.EVAL_PRIORITY):
+        sc = MonitorScorer([j], priority=prio)
+        sc.submit(0, _rollout())
+        (res,) = sc.collect([_rollout()])["q"]
+        assert log[-1]["json"]["priority"] == prio and res.meta["call"]["request"]["priority"] == prio
+    with judge_priority(vllm.EVAL_PRIORITY):  # a direct call: the context's priority
+        j.score(_rollout())
+    assert log[-1]["json"]["priority"] == vllm.EVAL_PRIORITY
+    j.score(_rollout())  # outside any judge_priority block: vLLM's default, = train
+    assert log[-1]["json"]["priority"] == vllm.TRAIN_PRIORITY == 0
+    assert MonitorScorer([j]).priority == vllm.TRAIN_PRIORITY
 
 
 def test_thinking_is_never_mined_for_a_score(monkeypatch):

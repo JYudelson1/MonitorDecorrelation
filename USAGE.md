@@ -109,7 +109,11 @@ it is a parse error, scored 0. Both are logged per judge (see "Judge call health
 --reasoning-parser qwen3`): the thinking comes back in `message.reasoning`, the verdict is read from
 `content` only (a draft `SCORE:` in the thinking is never used), and a reply with `</think>` still in
 its content aborts as a config error. Building the monitor checks `GET <base_url>/models` lists the
-model with room for `max_tokens`. Override per run like any monitor field:
+model with room for `max_tokens`. **Start the server with `--scheduling-policy priority`**: every call
+carries vLLM's request `priority` (lower = served first), `0` for the RL loop's train steps (and the
+baseline scripts) and `1` for its evals, so the judge calls a train step blocks on go ahead of the
+background eval's. Not a config key; the default FCFS scheduler silently ignores it, and a server does
+not report its policy, so this can't be checked from the client. Override per run like any monitor field:
 
 ```bash
 --set monitors.model:Qwen.thinking_budget=4096 monitors.model:Qwen.max_tokens=8192
