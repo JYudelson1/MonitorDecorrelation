@@ -30,7 +30,7 @@ record and score parsing as ``CoTMonitor`` (see docs/MONITORS.md).
 
 from __future__ import annotations
 
-from monitordecorrelation.monitors.cot_monitor import _SCORE_RE, _VERDICT_RE
+from monitordecorrelation.monitors.cot_monitor import judge_result
 from monitordecorrelation.monitors.judge_backend import make_judge_backend
 from monitordecorrelation.monitors.openrouter import JudgeCall
 from monitordecorrelation.monitors.rubrics import (
@@ -177,25 +177,7 @@ class AgentCoTMonitor:
         ``call`` (the full request/response record of the successful API call — see ``JudgeCall``),
         which ``rl/train.py`` persists per rollout."""
         call = self._call(self._build_prompt(rollout))
-        text = call.text
-        meta: dict = {"raw": text, "call": call.record}
-        if self.binary_judge:
-            m = _VERDICT_RE.search(text or "")
-            if m is None:
-                # Unparseable verdict: treat as no-signal (score 0), flag for inspection.
-                return MonitorResult(
-                    score=0.0, label=False, meta={**meta, "parse_error": True}
-                )
-            score = 1.0 if m.group(1).upper() == "YES" else 0.0
-            return MonitorResult(score=score, label=score >= self.threshold, meta=meta)
-        m = _SCORE_RE.search(text or "")
-        if m is None:
-            # Unparseable judge output: treat as no-signal (score 0), flag for inspection.
-            return MonitorResult(
-                score=0.0, label=False, meta={**meta, "parse_error": True}
-            )
-        score = max(0.0, min(1.0, float(m.group(1)) / 100.0))
-        return MonitorResult(score=score, label=score >= self.threshold, meta=meta)
+        return judge_result(call, binary_judge=self.binary_judge, threshold=self.threshold)
 
 
 # The per-turn keys ``agentic_turns`` requires, with the type each must have (``None`` allowed where

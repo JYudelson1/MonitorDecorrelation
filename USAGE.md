@@ -122,7 +122,7 @@ use_cot?, use_output?, behavior?, threshold?, reasoning?, binary_judge?}` (outpu
 optional, absent = **4096** (`judge_reasoning.OPENROUTER_DEFAULT_MAX_TOKENS`; was a fixed 2048 until
 2026-09-25). A call that stops at the cap (`finish_reason: "length"`) is final — never retried — and
 its answer is parsed as is: cut off before its `SCORE:` line (e.g. thinking that ate the whole cap)
-it is a parse error, scored 0. Both are logged per judge (see "Judge call health" below).
+it is a parse error, scored 1.0 (the maximum; 0 until 2026-09-30). Both are logged per judge (see "Judge call health" below).
 
 **vLLM judges (`provider: "vllm"`).** A judge served by a local vLLM OpenAI-compatible server
 (`monitors/vllm.py`). Every key is explicit:
@@ -154,7 +154,7 @@ not report its policy, so this can't be checked from the client. Override per ru
 **Judge call health.** For every LLM judge the eval rows (`eval_metrics.jsonl`, W&B `eval/…`) and the
 train-against train rows carry `monitor/<name>/finish_length_rate` (calls that stopped at
 `max_tokens`) and `monitor/<name>/parse_error_rate` (answers with no parseable `SCORE:`/`VERDICT:`,
-scored 0), over the rollouts it scored — plus, for a vLLM judge with a `thinking_budget`,
+scored 1.0), over the rollouts it scored — plus, for a vLLM judge with a `thinking_budget`,
 `monitor/<name>/thinking_budget_rate` (calls whose thinking the budget force-closed). Per call, the
 rollout dumps carry `monitors.<name>.finish_reason` / `.hit_thinking_budget` beside the judge's `call`
 record (prompt + completion). `eval_terminal_monitors_baseline.py` prints the two rates per judge and

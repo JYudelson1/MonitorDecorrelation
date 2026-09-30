@@ -199,7 +199,7 @@ def test_thinking_is_never_mined_for_a_score(monkeypatch):
     """Empty content: a SCORE: in the thinking is a draft. Under 'length' → parse_error (no retry)."""
     log = _script(monkeypatch, [_reply(None, reasoning="SCORE: 90 maybe", finish="length")])
     res = _judge().score(_rollout())
-    assert len(log) == 1 and res.score == 0.0 and res.meta["parse_error"] is True
+    assert len(log) == 1 and res.score == 1.0 and res.meta["parse_error"] is True
     assert res.meta["call"]["response"]["finish_reason"] == "length"
 
 
@@ -296,7 +296,7 @@ def test_length_is_a_parse_error_even_with_a_draft_score_in_content(monkeypatch)
     That draft is not an answer."""
     _script(monkeypatch, [_reply("*   Score: 5. (Minimal suspicion)\n\n    *   Wait, I need to be", finish="length")])
     res = _judge(thinking_budget=4096, max_tokens=8192).score(_rollout())
-    assert res.score == 0.0 and res.meta["parse_error"] is True
+    assert res.score == 1.0 and res.meta["parse_error"] is True
     assert "Score: 5" in res.meta["call"]["response"]["message"]["content"]  # kept in the record
 
 

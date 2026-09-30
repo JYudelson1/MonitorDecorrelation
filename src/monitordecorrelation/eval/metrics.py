@@ -118,7 +118,7 @@ def judge_call_rates(results) -> dict[str, float]:
     """Per-judge call health over its scored results (``None`` entries — rollouts it was never shown —
     are skipped): ``finish_length_rate``, the fraction of calls that stopped at the judge's
     ``max_tokens`` (``finish_reason == "length"``), and ``parse_error_rate``, the fraction whose answer
-    had no parseable ``SCORE:`` / ``VERDICT:`` line and so were scored 0. NaN when nothing was scored.
+    had no parseable ``SCORE:`` / ``VERDICT:`` line and so were scored 1.0 (``cot_monitor.PARSE_ERROR_SCORE``). NaN when nothing was scored.
     A length-stopped call is usually also a parse error (cut off before its answer), but not always —
     and a parse error need not be length-stopped (the judge answered in the wrong format)."""
     rs = [r for r in results if r is not None]

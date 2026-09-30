@@ -36,7 +36,7 @@ Unlike an OpenRouter judge, the answer is **only ever read from content** — ne
 thinking — and it is the content's LAST ``SCORE:`` / ``VERDICT:`` line: a thinking-enabled Qwen drafts
 such lines while it deliberates, and after a budget force-closes its thinking it can go on
 deliberating in the content. A reply cut off by ``max_tokens`` (``finish_reason == "length"``) never
-finished its answer and is a parse_error (score 0) whatever it contains; both are counted per monitor
+finished its answer and is a parse_error (score 1.0, ``cot_monitor.PARSE_ERROR_SCORE``) whatever it contains; both are counted per monitor
 as ``finish_length_rate`` / ``parse_error_rate``. See ``judge_output``. A call whose thinking a
 ``thinking_budget`` force-closed is told from its reasoning-token count (``hit_thinking_budget``) and
 counted as ``thinking_budget_rate``.
@@ -192,7 +192,7 @@ def judge_output(message: dict, finish: str | None) -> str | None:
     """The judge's answer from a vLLM ``message``: from ``content`` only (never the thinking — see the
     module doc). Raises if the thinking was not split off by the server.
 
-    * ``finish == "length"`` → ``None`` (the caller's parse_error, score 0), whatever the content
+    * ``finish == "length"`` → ``None`` (the caller's parse_error, score 1.0), whatever the content
       holds: the judge never finished its answer. When a ``thinking_budget`` force-closes the thinking,
       Qwen3.5 sometimes keeps deliberating in the content channel — drafting ``Score: 5`` mid-thought —
       until it runs out of ``max_tokens`` (measured: 1/44 calls, a draft that would have been read as

@@ -51,7 +51,7 @@ _RETRYABLE_402_REASON = "in_flight_budget_exhausted"
 #   "length" — it hit max_tokens. That is FINAL: the call is returned as is, and whatever answer text
 #              it carries is parsed. A reply cut off before its `SCORE:` line — including one whose
 #              thinking ate the whole completion budget, leaving the content channel empty (routine
-#              for an unbudgeted vLLM thinker) — becomes the caller's parse_error (score 0), and is
+#              for an unbudgeted vLLM thinker) — becomes the caller's parse_error (score 1.0), and is
 #              counted in the per-monitor `finish_length_rate` / `parse_error_rate` metrics.
 #              Retrying does not help — back when the judge was called at temperature 0 every retry
 #              returned the identical truncated text (measured: 4/4 byte-identical replays on
@@ -247,8 +247,8 @@ def post_chat(
                             text = ""  # cut off before any answer: the caller's parse_error, no retry
                         if text is None:
                             # Null content with no SCORE:/VERDICT: in reasoning (Gemini
-                            # sometimes empties both). Retry rather than parse_error->score 0
-                            # (that would silently under-flag).
+                            # sometimes empties both). Retry rather than parse_error->score 1.0
+                            # (that would silently over-flag).
                             err = (
                                 "empty judge output (no content / no SCORE:|VERDICT: in "
                                 "reasoning)"

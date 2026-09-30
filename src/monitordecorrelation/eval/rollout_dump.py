@@ -43,7 +43,7 @@ def monitor_record(result: Any) -> dict:
     Always ``score`` / ``label``. Then, when the monitor's ``MonitorResult.meta`` carries them:
     ``call`` (the LLM judge's successful API call — request + response, see
     ``cot_monitor.JudgeCall``), ``parse_error`` (the judge answered but not in the instructed
-    format, so the score is a no-signal 0) and ``error`` (the monitor never answered — NaN score).
+    format, so the score is ``PARSE_ERROR_SCORE`` = 1.0) and ``error`` (the monitor never answered — NaN score).
     With a ``call``, also its health flags (``_call_flags``): ``finish_reason`` and, for a budgeted
     vLLM call, ``hit_thinking_budget``. Probes carry none of these, so their record stays
     ``{score, label}``.

@@ -874,7 +874,7 @@ def run_grpo(
             row[f"monitor/{m.name}/n_pos"] = sum(mgt)
             row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
             row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
-            # judge call health: stopped at max_tokens / answer unparseable (scored 0)
+            # judge call health: stopped at max_tokens / answer unparseable (scored 1.0)
             row.update(_judge_call_metrics(m, res[m.name]))
             if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
                 row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))

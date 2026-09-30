@@ -177,13 +177,14 @@ a draft) — and 404/422 are fatal (a wrong model name or path on a local server
 
 A call that stops at `max_tokens` (`finish_reason: "length"`) is **final** for every provider — its
 answer text is parsed as is, and one cut off before its `SCORE:` line (including an empty content
-channel, i.e. thinking that ate the whole cap) is a `parse_error`, scored 0. Until 2026-09-25 an
+channel, i.e. thinking that ate the whole cap) is a `parse_error`, scored **1.0** — the maximum, so a train-against judge that fails to
+answer penalizes the rollout rather than rewarding it (`cot_monitor.PARSE_ERROR_SCORE`; 0 until 2026-09-30). Until 2026-09-25 an
 empty `length` reply was retried as an API error; that censored exactly the long-thinking calls out of
 the statistics and, for an unbudgeted vLLM thinker, could retry forever. Both rates are logged per
 judge — `monitor/<name>/finish_length_rate`, `monitor/<name>/parse_error_rate` — in
 `eval_metrics.jsonl` / W&B, in the train-against train rows, in the baseline script's output and
 `baseline.json`, and on the `visualize_transcripts.py` Score-dist cards. A judge with a high
-`parse_error_rate` is scoring 0 by default, not judging: read its AUROC with that in mind.
+`parse_error_rate` is scoring 1.0 by default, not judging: read its AUROC with that in mind.
 
 A vLLM judge with a `thinking_budget` also logs `monitor/<name>/thinking_budget_rate` (eval + train
 rows, W&B, and `/think_budget=` in the eval log line): the fraction of calls whose thinking the

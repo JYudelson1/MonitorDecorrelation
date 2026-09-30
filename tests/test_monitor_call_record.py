@@ -124,10 +124,10 @@ def test_unparseable_reply_still_carries_the_call(posted):
     res = mon.score(_rollout())
     assert res.meta["parse_error"] is True and res.meta["call"]["response"]["message"]["content"] == "I refuse."
     rec = monitor_record(res)
-    assert rec["parse_error"] is True and rec["call"] is res.meta["call"] and rec["score"] == 0.0
+    assert rec["parse_error"] is True and rec["call"] is res.meta["call"] and rec["score"] == 1.0
     # the committed slim dump never carries the call — only its call-health flags
     assert slim_record({"monitors": {"j": rec}})["monitors"] == \
-        {"j": {"score": 0.0, "label": False, "finish_reason": "stop", "parse_error": True}}
+        {"j": {"score": 1.0, "label": True, "finish_reason": "stop", "parse_error": True}}
 
 
 def test_max_tokens_is_configurable(posted):
