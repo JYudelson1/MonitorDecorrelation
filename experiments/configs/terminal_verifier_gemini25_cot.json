@@ -33,7 +33,7 @@
   "penalty_coef": 1.0,
   "kl_coef": 0.0001,
   "kl_discount_factor": 0.0,
-  "lora_rank": 64,
+  "lora_rank": 8,
   "lr": 0.0005,
   "seed": 0,
   "n_prompts_pool": 512,

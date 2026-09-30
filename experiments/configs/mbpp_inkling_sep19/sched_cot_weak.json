@@ -16,7 +16,7 @@
   },
   "kl_coef": 0.0001,
   "kl_discount_factor": 0.0,
-  "lora_rank": 64,
+  "lora_rank": 8,
   "seed": 0,
   "save_every": 6,
   "run_name": "mbpp_Inkling-Small_sched05_cot_weak_s0_sep19",
