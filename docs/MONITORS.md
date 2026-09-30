@@ -184,6 +184,14 @@ judge — `monitor/<name>/finish_length_rate`, `monitor/<name>/parse_error_rate`
 `eval_metrics.jsonl` / W&B, in the train-against train rows, in the baseline script's output and
 `baseline.json`, and on the `visualize_transcripts.py` Score-dist cards. A judge with a high
 `parse_error_rate` is scoring 0 by default, not judging: read its AUROC with that in mind.
+
+A vLLM judge with a `thinking_budget` also logs `monitor/<name>/thinking_budget_rate` (eval + train
+rows, W&B, and `/think_budget=` in the eval log line): the fraction of calls whose thinking the
+budget force-closed. vLLM does not flag this, so it is read off `usage.completion_tokens_details.
+reasoning_tokens` ≥ budget − 1 (`monitors.vllm.hit_thinking_budget`; a forced close lands at exactly
+the budget on Qwen3 and one short of it on Qwen3.5). NaN if any call lacks that count. Per call, the
+full dumps (`rollouts.jsonl`, `eval_rollouts.jsonl`) carry `finish_reason` and (budgeted vLLM calls)
+`hit_thinking_budget` next to the `call` record under `monitors.<name>`, and the slim dump keeps both.
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |

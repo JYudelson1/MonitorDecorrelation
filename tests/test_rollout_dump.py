@@ -43,7 +43,8 @@ def test_slim_record_projects_exactly_the_slim_fields():
 
 def test_monitor_record_keeps_the_judges_call_and_flags():
     judged = MonitorResult(score=0.9, label=True, meta={"raw": "SCORE: 90", "call": CALL})
-    assert monitor_record(judged) == {"score": 0.9, "label": True, "call": CALL}  # raw lives inside call
+    # raw lives inside call; the call's finish_reason is lifted out of it
+    assert monitor_record(judged) == {"score": 0.9, "label": True, "call": CALL, "finish_reason": "stop"}
     probe = MonitorResult(score=0.2, label=False, meta={"probe": "probe_ood"})
     assert monitor_record(probe) == {"score": 0.2, "label": False}
     bad = MonitorResult(score=0.0, label=False, meta={"raw": "no", "call": CALL, "parse_error": True})
@@ -67,3 +68,26 @@ def test_slim_script_skips_corrupt_lines_and_keeps_nan(tmp_path: Path):
     recs = [json.loads(l) for l in (run / "eval_rollouts_slim.jsonl").read_text().splitlines()]
     assert len(recs) == 2 and all(tuple(r) == SLIM_FIELDS for r in recs)
     assert math.isnan(recs[0]["monitors"]["probe_ood"]["score"])
+
+
+def _vllm_call(budget, reasoning_tokens, finish="stop"):
+    return {**CALL, "request": {**CALL["request"], "thinking_token_budget": budget},
+            "response": {**CALL["response"], "finish_reason": finish,
+                         "usage": {"completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}}}
+
+
+def test_budgeted_vllm_call_records_whether_it_hit_the_thinking_budget():
+    hit = monitor_record(MonitorResult(score=0.9, label=True, meta={"call": _vllm_call(4096, 4095)}))
+    assert hit["hit_thinking_budget"] is True and hit["finish_reason"] == "stop"
+    cut = monitor_record(MonitorResult(score=0.0, label=False, meta={"call": _vllm_call(4096, 4096, "length"),
+                                                                     "parse_error": True}))
+    assert cut["hit_thinking_budget"] is True and cut["finish_reason"] == "length"
+    under = monitor_record(MonitorResult(score=0.9, label=True, meta={"call": _vllm_call(4096, 4000)}))
+    assert under["hit_thinking_budget"] is False
+    # no budget on the call (an OpenRouter judge) → no flag at all
+    assert "hit_thinking_budget" not in monitor_record(MonitorResult(score=0.9, label=True, meta={"call": CALL}))
+    # the slim dump keeps the flag, and re-slimming is a no-op
+    slim = slim_record({"monitors": {"j": cut}})["monitors"]
+    assert slim == {"j": {"score": 0.0, "label": False, "finish_reason": "length", "hit_thinking_budget": True,
+                          "parse_error": True}}
+    assert slim_record({"monitors": slim})["monitors"] == slim

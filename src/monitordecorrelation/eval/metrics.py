@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from monitordecorrelation.monitors.vllm import hit_thinking_budget
+
 
 def roc_auc(scores: list[float], labels: list[bool]) -> float:
     """Rank-based ROC-AUC (Mann–Whitney). NaN if only one class present."""
@@ -91,6 +93,25 @@ def judge_finish_reason(result) -> str | None:
     record — a probe, or a provider that omitted it)."""
     call = (getattr(result, "meta", None) or {}).get("call") or {}
     return (call.get("response") or {}).get("finish_reason")
+
+
+def judge_hit_thinking_budget(result) -> bool | None:
+    """Whether the vLLM judge call behind one ``MonitorResult`` hit its ``thinking_token_budget``
+    (``monitors.vllm.hit_thinking_budget``); ``None`` if it had no budget (or no call record) or the
+    server did not report its reasoning-token count."""
+    call = (getattr(result, "meta", None) or {}).get("call")
+    return hit_thinking_budget(call) if isinstance(call, dict) else None
+
+
+def judge_thinking_budget_rate(results) -> float:
+    """The fraction of a budgeted vLLM judge's scored calls whose thinking was force-closed by its
+    ``thinking_token_budget`` (``None`` entries — rollouts it was never shown — are skipped). NaN when
+    nothing was scored, or when any call's hit cannot be told (see ``judge_hit_thinking_budget``) —
+    a rate over the calls that happen to report it would not be the rate."""
+    hits = [judge_hit_thinking_budget(r) for r in results if r is not None]
+    if not hits or any(h is None for h in hits):
+        return float("nan")
+    return sum(hits) / len(hits)
 
 
 def judge_call_rates(results) -> dict[str, float]:

@@ -122,7 +122,10 @@ not report its policy, so this can't be checked from the client. Override per ru
 **Judge call health.** For every LLM judge the eval rows (`eval_metrics.jsonl`, W&B `eval/…`) and the
 train-against train rows carry `monitor/<name>/finish_length_rate` (calls that stopped at
 `max_tokens`) and `monitor/<name>/parse_error_rate` (answers with no parseable `SCORE:`/`VERDICT:`,
-scored 0), over the rollouts it scored. `eval_terminal_monitors_baseline.py` prints them per judge and
+scored 0), over the rollouts it scored — plus, for a vLLM judge with a `thinking_budget`,
+`monitor/<name>/thinking_budget_rate` (calls whose thinking the budget force-closed). Per call, the
+rollout dumps carry `monitors.<name>.finish_reason` / `.hit_thinking_budget` beside the judge's `call`
+record (prompt + completion). `eval_terminal_monitors_baseline.py` prints the two rates per judge and
 writes them into `baseline.json`; `visualize_transcripts.py` shows them per judge on the Score-dist
 cards and as a Metrics preset.
 

@@ -11,7 +11,7 @@ import math
 import httpx
 import pytest
 
-from monitordecorrelation.eval.metrics import judge_call_rates
+from monitordecorrelation.eval.metrics import judge_call_rates, judge_thinking_budget_rate
 from monitordecorrelation.experiment_config import CoTMonitorSpec, apply_overrides, build_monitors
 from monitordecorrelation.monitors import openrouter as orc
 from monitordecorrelation.monitors import vllm
@@ -243,8 +243,12 @@ def test_check_server(monkeypatch):
 # ---- call-health metrics -----------------------------------------------------------------------
 
 
-def _res(finish, parse_error=False):
+def _res(finish, parse_error=False, think=None):
+    """``think=(budget, reasoning_tokens)`` makes it a budgeted vLLM call reporting its reasoning tokens."""
     meta = {"call": {"response": {"finish_reason": finish}}}
+    if think is not None:
+        meta["call"]["request"] = {"thinking_token_budget": think[0]}
+        meta["call"]["response"]["usage"] = {"completion_tokens_details": {"reasoning_tokens": think[1]}}
     if parse_error:
         meta["parse_error"] = True
     return MonitorResult(score=0.0, label=False, meta=meta)
@@ -256,12 +260,30 @@ def test_judge_call_rates():
     assert all(math.isnan(v) for v in judge_call_rates([None]).values())
 
 
+def test_thinking_budget_hit_is_read_from_the_reasoning_token_count():
+    # a forced close lands at the budget (Qwen3) or one short of it (Qwen3.5); a natural stop does not
+    assert [vllm.hit_thinking_budget(_res("stop", think=(12288, n)).meta["call"])
+            for n in (12288, 12287, 12285, 100)] == [True, True, False, False]
+    assert vllm.hit_thinking_budget(_res("stop").meta["call"]) is None  # no budget
+    unreported = {"request": {"thinking_token_budget": 12288}, "response": {"usage": {}}}
+    assert vllm.hit_thinking_budget(unreported) is None
+    assert judge_thinking_budget_rate([_res("stop", think=(8, 8)), _res("stop", think=(8, 1)), None]) == 0.5
+    # a rate over only the calls that report it would not be the rate
+    assert math.isnan(judge_thinking_budget_rate([_res("stop", think=(8, 8)),
+                                                  MonitorResult(0.0, False, {"call": unreported})]))
+    assert math.isnan(judge_thinking_budget_rate([None]))
+
+
 def test_train_loop_logs_call_rates_for_judges_only():
     from monitordecorrelation.rl.train import _judge_call_metrics, _monitor_info
 
     j = _judge(thinking_budget=4096, max_tokens=8192)
-    assert _judge_call_metrics(j, [_res("length", True), _res("stop")]) == {
-        "monitor/q/finish_length_rate": 0.5, "monitor/q/parse_error_rate": 0.5}
+    assert _judge_call_metrics(j, [_res("length", True, think=(4096, 4096)), _res("stop", think=(4096, 100))]) == {
+        "monitor/q/finish_length_rate": 0.5, "monitor/q/parse_error_rate": 0.5,
+        "monitor/q/thinking_budget_rate": 0.5}
+    # no thinking budget → no thinking_budget_rate
+    assert "monitor/q/thinking_budget_rate" not in _judge_call_metrics(
+        _judge(thinking_budget=None, max_tokens=8192), [_res("stop")])
     probe = type("P", (), {"name": "p"})()
     assert _judge_call_metrics(probe, [MonitorResult(score=0.1, label=False)]) == {}
     info = _monitor_info(j, "held_out")

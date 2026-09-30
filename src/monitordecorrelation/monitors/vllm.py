@@ -37,7 +37,9 @@ thinking — and it is the content's LAST ``SCORE:`` / ``VERDICT:`` line: a thin
 such lines while it deliberates, and after a budget force-closes its thinking it can go on
 deliberating in the content. A reply cut off by ``max_tokens`` (``finish_reason == "length"``) never
 finished its answer and is a parse_error (score 0) whatever it contains; both are counted per monitor
-as ``finish_length_rate`` / ``parse_error_rate``. See ``judge_output``.
+as ``finish_length_rate`` / ``parse_error_rate``. See ``judge_output``. A call whose thinking a
+``thinking_budget`` force-closed is told from its reasoning-token count (``hit_thinking_budget``) and
+counted as ``thinking_budget_rate``.
 
 Only the models in ``VLLM_JUDGES`` are accepted — the ones whose chat template is known to honour
 ``enable_thinking`` and whose thinking the ``qwen3`` parser splits (checked against the running
@@ -213,6 +215,26 @@ def judge_output(message: dict, finish: str | None) -> str | None:
         return None
     matches = list(_JUDGE_ANSWER_RE.finditer(content))
     return matches[-1].group(0) if matches else content
+
+
+def hit_thinking_budget(record: dict) -> bool | None:
+    """Whether the vLLM judge call behind ``record`` (a ``JudgeCall.record``) had its thinking
+    force-closed by its ``thinking_token_budget``. ``None`` when the call had no budget, or the server
+    did not report ``usage.completion_tokens_details.reasoning_tokens`` (so it cannot be told).
+
+    vLLM does not flag a forced close, but it reports the reasoning-token count, and a forced close
+    lands at exactly the budget: measured over 309,551 saved calls at budget 12288, every one within 50
+    tokens of it sat at 12288 (Qwen3-30B-A3B, 26 calls) or 12287 (Qwen3.5-35B-A3B, 553 — its count
+    stops one short) — mostly looping drafts of the answer — against two natural stops at -3 and -27.
+    Hence ``>= budget - 1``."""
+    budget = (record.get("request") or {}).get("thinking_token_budget")
+    if budget is None:
+        return None
+    usage = (record.get("response") or {}).get("usage") or {}
+    n = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if not _is_int(n):
+        return None
+    return n >= budget - 1
 
 
 def chat(body: dict, *, base_url: str, timeout: float, name: str, warn_after: int = 6) -> JudgeCall:
