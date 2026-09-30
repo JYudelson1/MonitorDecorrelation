@@ -101,7 +101,7 @@ uv run python -c "from monitordecorrelation.eval.degradation import build_degrad
 # ── 6. repeat 5 per seed (glob *_s1*, *_s2*); average grids MANUALLY across seeds ─
 ```
 
-Batch: `batch_size=64 × group_size=8` = 512 rollouts/step (Rauno-matched — time-to-hack scales with
+Batch: `batch_size=32 × group_size=16` = 512 rollouts/step (was 64 × 8 until 2026-09-30) (Rauno-matched — time-to-hack scales with
 total rollouts, so the dip-then-climb lands in ~10-12 steps, not ~100), `eval_every=4`, `kl_coef=1e-4`,
 `max_tokens=2048`. W&B: runs auto-sync iff logged in and share a group per (experiment, model). Final
 weights are saved on tinker with a 7-day TTL (`final_checkpoint.txt`).
