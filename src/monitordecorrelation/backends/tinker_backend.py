@@ -26,6 +26,7 @@ __all__ = ["TinkerBackend", "derive_sample_seed"]  # derive_sample_seed re-expor
 class TinkerBackend:
     name = "tinker"
     checkpoints_expire = True  # tinker-hosted state: save_checkpoint takes a ttl_seconds
+    resumable = True  # save_checkpoint saves weights + optimizer; resume_from= loads them back
     # The RL loop may run an eval in the background while training continues: an eval samples from a
     # sampling client pinned at launch (``current_sampler``), which later optim steps never touch —
     # each ``refresh_sampler`` makes a NEW client on a new sampling session and leaves old ones valid
@@ -36,7 +37,7 @@ class TinkerBackend:
     def __init__(
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
-        thinking_effort: float | None = None,
+        thinking_effort: float | None = None, resume_from: str | None = None,
     ) -> None:
         # thinking_effort reaches the policy only through TmlRenderer, so an effort set for an
         # HF-templated policy would vanish — say so instead. None on a TML policy takes the model
@@ -57,6 +58,11 @@ class TinkerBackend:
         self.training_client = self._sc.create_lora_training_client(
             base_model, rank=lora_rank, seed=seed
         )
+        # Resuming a run: overwrite the fresh LoRA init with a saved training state — weights AND the
+        # optimizer's (Adam moments + step count), so the next optim step is the one the uninterrupted
+        # run would have taken (a ``save_checkpoint`` path; see rl/train.py "Resuming").
+        if resume_from is not None:
+            self.training_client.load_state_with_optimizer(resume_from).result()
         # Prompt framing + CoT parsing are model-family specific (HF chat template vs Inkling's TML
         # rendering) — the renderer owns both, and is shared by sampling and the GRPO datum path so
         # the observation tokens always match what was sampled.
@@ -73,7 +79,8 @@ class TinkerBackend:
         )
 
     def refresh_sampler(self) -> None:
-        """Pull current policy weights into a fresh sampling client (call after each optim step)."""
+        """Pull current policy weights into a fresh, ephemeral sampling client (``current_sampler`` does
+        this lazily after each optim step)."""
         self._sampler = self.training_client.save_weights_and_get_sampling_client()
 
     def current_sampler(self) -> tinker.SamplingClient:
@@ -181,7 +188,10 @@ class TinkerBackend:
             )
 
         asyncio.run(_optimize())
-        self.refresh_sampler()  # next round samples from updated policy
+        # The next round samples the updated policy: ``current_sampler`` (or ``checkpoint_sampler``, at
+        # an eval step) builds its client from the new weights. Lazily, so an eval step saves the new
+        # weights once (persistently) rather than an ephemeral copy first.
+        self._sampler = None
         # cb_train_step returns the forward pass's per-datum logprobs (not a loss). With one substep
         # that forward runs on the PRE-update weights, so together with the sampling logprobs in
         # data_D they give the exact IS loss plus the sampler/trainer-mismatch diagnostics.
@@ -201,3 +211,14 @@ class TinkerBackend:
         """Save the full training state (weights + optimizer) on tinker; ``ttl_seconds`` sets an
         expiry (None = never). Returns the tinker checkpoint path to resume/sample from later."""
         return self.training_client.save_state(name=label, ttl_seconds=ttl_seconds).result().path
+
+    def checkpoint_sampler(self, label: str) -> tuple[tinker.SamplingClient, str]:
+        """Save the CURRENT weights as a persistent, never-expiring sampler checkpoint named ``label``
+        and return ``(sampling client on exactly that checkpoint, its tinker path)``. The client also
+        becomes ``current_sampler`` until the next optim step, so everything the loop samples at this
+        step (the eval AND the train batch) is the saved checkpoint itself — the path is usable for
+        inference later (``ServiceClient().create_sampling_client(model_path=path)``). Weights only (no
+        optimizer state): for resuming training use ``save_checkpoint``."""
+        path = self.training_client.save_weights_for_sampler(name=label, ttl_seconds=None).result().path
+        self._sampler = self.training_client.create_sampling_client(path)
+        return self._sampler, path

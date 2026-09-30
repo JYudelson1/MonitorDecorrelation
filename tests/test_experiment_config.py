@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from monitordecorrelation.experiment_config import (
@@ -783,6 +785,8 @@ def test_judge_reasoning_reaches_every_judge_call(monkeypatch, tmp_path, cfg_nam
 
     def launch(*sets):
         seen = {}
+        # each launch is a fresh run named r: the runner refuses to reuse an existing run dir
+        shutil.rmtree(tmp_path / "data/runs/r", ignore_errors=True)
 
         def spy(run_config, env, backend, **kw):
             seen.update(kw)

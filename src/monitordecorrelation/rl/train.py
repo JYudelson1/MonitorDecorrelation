@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import hashlib
 import inspect
 import collections
 import json
@@ -550,6 +551,70 @@ class _BackgroundEval:
             self.wait()
 
 
+# ---- Resuming -------------------------------------------------------------------------------------
+# Every saved training state (weights + optimizer) gets a resume snapshot next to it in
+# ``<run>/resume_states/step_<k>.json``: its checkpoint path plus every piece of loop state the steps
+# after k depend on. One is written at each ``save_every`` step k (its checkpoint expires after 4 weeks)
+# and one at the end of a finished run (k = steps taken; its checkpoint never expires).
+# ``run_grpo(..., resume=load_resume_state(run_dir))`` — the LATEST snapshot — with the same config and
+# an ``n_steps`` > k then continues the run from step k as if it had never stopped: a crashed run with
+# its own n_steps, or a finished run with a larger one. Same optimizer state, same training-prompt
+# stream (the env is re-built and replayed, and the prompts drawn are checked against a hash), same
+# log-sampling RNG, early-stop streak, sampling seeds (a pure function of the step) and wandb run,
+# appending to the same logs. What remains different: after a FINISHED run, its final eval at its last
+# step is kept even if that step is not a multiple of eval_every; wandb keeps any rows a crashed run
+# logged past k (the local logs do not); and tinker's sampling is only as reproducible across sampling
+# sessions as tinker makes it. The global ``random`` / ``numpy`` RNGs are not restored — nothing in the
+# training path draws from them.
+RESUME_STATES_DIR = "resume_states"
+# The append-only logs a resumed run appends to. Their sizes at snapshot time are recorded, and a
+# resume truncates them back to those sizes first — dropping whatever a crashed run (or a crashed
+# earlier resume) wrote after the snapshot.
+_RESUMABLE_LOGS = ("rollouts.jsonl", "metrics.jsonl", "eval_metrics.jsonl", "eval_rollouts.jsonl",
+                   "eval_rollouts_slim.jsonl", "eval_checkpoints.jsonl")
+
+
+def _resume_state_path(run_dir: str | Path, step: int) -> Path:
+    return Path(run_dir) / RESUME_STATES_DIR / f"step_{step:06d}.json"
+
+
+def load_resume_state(run_dir: str | Path) -> dict:
+    """The LATEST resume snapshot of ``run_dir`` (see "Resuming"), or a SystemExit saying why there
+    is none."""
+    paths = sorted((Path(run_dir) / RESUME_STATES_DIR).glob("step_*.json"))
+    if not paths:
+        raise SystemExit(
+            f"cannot resume {run_dir}: it has no {RESUME_STATES_DIR}/step_*.json. A run can be resumed "
+            "from its last save_every checkpoint or, once finished, from its final state; this one saved "
+            "neither (it crashed before its first save_every step, or predates resume support)."
+        )
+    return json.loads(paths[-1].read_text())
+
+
+def check_resumable(state: dict, *, n_steps: int, penalty_schedule, stop_after_zero_behavior_steps) -> None:
+    """Refuse (ValueError) a resume that could not equal one uninterrupted run of ``n_steps`` steps."""
+    done = state["steps_done"]
+    if state.get("stopped_early"):
+        raise ValueError(f"the run stopped early after {done} steps ({state['stopped_early']}); a longer "
+                         "run with the same config would have stopped there too, so there is nothing to resume")
+    if n_steps <= done:
+        raise ValueError(f"n_steps={n_steps} must be strictly greater than the {done} steps already run")
+    if penalty_schedule is not None:
+        raise ValueError("penalty_schedule ramps λ over n_steps, so the steps already run used a different "
+                         "λ than a longer run would have; a run with a penalty_schedule cannot be resumed")
+    if (stop_after_zero_behavior_steps is not None
+            and state["zero_streak"] >= stop_after_zero_behavior_steps):
+        raise ValueError(f"the run ended on {state['zero_streak']} consecutive zero-behavior steps, so a longer "
+                         f"run would have stopped early there (stop_after_zero_behavior_steps="
+                         f"{stop_after_zero_behavior_steps}); nothing to resume")
+
+
+def _hash_prompts(h, prompts: Sequence) -> None:
+    """Fold a training batch's prompts into the running hash that pins the training-prompt stream."""
+    for p in prompts:
+        h.update(json.dumps([p.text, p.meta], sort_keys=True, default=str).encode())
+
+
 def run_grpo(
     cfg: RunConfig,
     env: Env,
@@ -562,6 +627,7 @@ def run_grpo(
     answer_tokens: int | None = None,
     extra_rollout_fields: Callable[[Rollout, int], dict] | None = None,
     run_info: dict | None = None,
+    resume: dict | None = None,
 ) -> None:
     """Run GRPO. ``extra_rollout_fields(rollout, idx) -> dict`` lets callers attach arbitrary
     per-rollout metadata to saved rollouts. ``run_info`` is merged into the saved ``run_info.json``
@@ -582,10 +648,23 @@ def run_grpo(
     (None = off) ends training once the train ``behavior_rate`` has been exactly 0 on N consecutive
     steps; the final eval + checkpoint still run, and ``run_info.json`` records ``stopped_early``.
     Every sampling call is seeded by position:
-    ``derive_sample_seed(cfg.seed, "train"|"eval", step)`` per batch, then (group, sample, call)."""
+    ``derive_sample_seed(cfg.seed, "train"|"eval", step)`` per batch, then (group, sample, call).
+
+    Every eval step's weights are also saved as a persistent (never-expiring) sampler checkpoint, and
+    the eval AND that step's train batch sample from exactly that checkpoint
+    (``backend.checkpoint_sampler``); the paths go to ``<run>/eval_checkpoints.jsonl``. The final
+    training state (weights + optimizer) is saved without expiry; it and every ``save_every`` state
+    get a resume snapshot, and ``resume`` (the latest one, ``load_resume_state``) continues such a
+    run from its latest saved state — the backend must already hold that training state (see
+    "Resuming" above)."""
     # How a turn is sized, for the sampling logs: exactly one of the two modes is in force
     # (run_episodes enforces it; see the docstring).
     _check_penalty(cfg, train_against)
+    start_step = 0  # the first optim step this invocation takes (> 0 only when resuming)
+    if resume is not None:
+        check_resumable(resume, n_steps=cfg.n_steps, penalty_schedule=cfg.penalty_schedule,
+                        stop_after_zero_behavior_steps=cfg.stop_after_zero_behavior_steps)
+        start_step = resume["steps_done"]
     _budget_note = (f"think_budget={think_budget}+answer_tokens={answer_tokens}"
                     if think_budget is not None else f"max_tokens={max_tokens}")
     rng = random.Random(cfg.seed)
@@ -613,6 +692,9 @@ def run_grpo(
             tags=cfg.logging.wandb_tags or None,
             mode=cfg.logging.wandb_mode,
             config=cfg.__dict__,
+            # a resumed run continues the same wandb run (its rows are keyed by train/eval step)
+            **({"id": resume["wandb_run_id"], "resume": "allow"}
+               if resume is not None and resume.get("wandb_run_id") else {}),
         )
         # Each namespace is plotted against its own RL step, logged as a field, NOT as wandb's own
         # `step=` — that one must only increase, and a background eval's row lands after later train
@@ -643,23 +725,44 @@ def run_grpo(
         "held_out": [_monitor_info(m, "held_out") for m in held_out],
         **(run_info or {}),
     }
+    if resume is not None:
+        # Keep the first run's record (started_at, its checkpoints, …) and note this continuation.
+        prev = json.loads((rollout_log_dir / "run_info.json").read_text())
+        info = {**prev, **{k: v for k, v in info.items() if k != "started_at"},
+                "resumes": [*prev.get("resumes", []),
+                            {"resumed_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                             "from_step": start_step, "state_checkpoint": resume["state_checkpoint"],
+                             "n_steps": cfg.n_steps}]}
+        # Back to exactly what the finished run left (drops the partial steps of a crashed resume).
+        for name, size in resume["log_sizes"].items():
+            with (rollout_log_dir / name).open("r+b") as f:
+                if f.seek(0, 2) < size:
+                    raise RuntimeError(f"{rollout_log_dir / name} is shorter than the {size} bytes "
+                                       f"recorded in the step-{start_step} resume snapshot; refusing to resume")
+                f.truncate(size)
     (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
+    log_mode = "a" if resume is not None else "w"
 
     # Backend (tinker SDK) warnings -> <run>/sdk_warnings.log + a cumulative counter in the metrics
     # rows, so "did this run stall on a queue pause?" is answerable from the COMMITTED artifacts.
     sdk_watch = sdk_watch_mod.install(rollout_log_dir)
+    if resume is not None:  # the counters are cumulative over the whole run
+        sdk_watch.n_pause, sdk_watch.n_warnings = resume["sdk_counters"]
 
-    rollout_log = (rollout_log_dir / "rollouts.jsonl").open("w")
+    rollout_log = (rollout_log_dir / "rollouts.jsonl").open(log_mode)
     # TRAIN metrics (per step, on the training rollouts) and EVAL metrics (periodic, on a FIXED
     # held-out set) go to separate files + wandb namespaces. Degradation curves come from EVAL.
-    metrics_log = (rollout_log_dir / "metrics.jsonl").open("w")
-    eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open("w")
+    metrics_log = (rollout_log_dir / "metrics.jsonl").open(log_mode)
+    eval_metrics_log = (rollout_log_dir / "eval_metrics.jsonl").open(log_mode)
     # Per-eval-prompt record: EVERY monitor's score on EVERY held-out eval prompt+continuation, each
     # eval step (the full bookkeeping for post-hoc recalibration / the suspiciousness-gap analysis).
-    eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open("w")
+    eval_rollouts_log = (rollout_log_dir / "eval_rollouts.jsonl").open(log_mode)
     # The SLIM companion (labels + every monitor's score per rollout, no text) — small enough to COMMIT;
     # it is what the split-half / cross-fit coupling analyses read. Schema: eval/rollout_dump.SLIM_FIELDS.
-    eval_rollouts_slim_log = (rollout_log_dir / "eval_rollouts_slim.jsonl").open("w")
+    eval_rollouts_slim_log = (rollout_log_dir / "eval_rollouts_slim.jsonl").open(log_mode)
+    # One row per eval step: the persistent sampler checkpoint that eval (and that step's train batch)
+    # sampled — {step, path, sampler}; `sampler` matches the eval_metrics row of the same step.
+    eval_ckpt_log = (rollout_log_dir / "eval_checkpoints.jsonl").open(log_mode)
 
     def is_invalid(r: Rollout) -> bool:
         """The monitors' skip predicate: an invalid rollout is never shown to any monitor."""
@@ -672,6 +775,20 @@ def run_grpo(
     else:
         _log("⚠️  env has no holdout(); eval prompts overlap the training pool (not disjoint).")
         eval_prompts = [env.sample_prompt() for _ in range(cfg.eval_size)]
+
+    # Running hash of every training prompt drawn — pins the prompt stream a resume must reproduce.
+    train_prompts_hash = hashlib.sha256()
+    if resume is not None:
+        # The env was rebuilt from the same config (and seed), so drawing the prompts the finished run
+        # drew leaves it exactly where that run left it; the hash proves it did.
+        for _ in range(start_step):
+            _hash_prompts(train_prompts_hash, [env.sample_prompt() for _ in range(cfg.batch_size)])
+        if train_prompts_hash.hexdigest() != resume["train_prompts_sha256"]:
+            raise RuntimeError("replaying the env did not reproduce the training prompts the finished run "
+                               "drew (the env or its data changed?); refusing to resume")
+        rng.setstate((resume["log_rng_state"][0], tuple(resume["log_rng_state"][1]),
+                      resume["log_rng_state"][2]))
+        _log(f"RESUMING at step {start_step} → {cfg.n_steps} from {resume['state_checkpoint']}")
 
     def run_eval(step: int, sampler) -> None:
         """Sample ``sampler`` (the policy after ``step`` optim steps) on the fixed eval set; log every
@@ -812,6 +929,21 @@ def run_grpo(
 
     evals = _BackgroundEval()
     async_eval = bool(getattr(backend, "async_eval", False))
+    if not hasattr(backend, "checkpoint_sampler"):
+        _log(f"⚠️  backend {getattr(backend, 'name', '?')!r} has no checkpoint_sampler: evals sample the "
+             "live weights and NO eval checkpoints are saved")
+
+    def eval_sampler(step: int):
+        """The weights after ``step`` optim steps, saved as a persistent sampler checkpoint; the
+        returned sampler samples exactly that checkpoint (and stays ``current_sampler`` for the rest of
+        the step)."""
+        if not hasattr(backend, "checkpoint_sampler"):
+            return backend.current_sampler()
+        sampler, path = backend.checkpoint_sampler(f"{cfg.logging.run_name or 'run'}-eval-{step}")
+        eval_ckpt_log.write(json.dumps({"step": step, "path": path, "sampler": backend.sampler_id(sampler)}) + "\n")
+        eval_ckpt_log.flush()
+        _log(f"saved eval checkpoint at step {step}: {path}")
+        return sampler
 
     def launch_eval(step: int, sampler) -> None:
         """Held-out eval of ``sampler`` labelled ``step``: in the background on an ``async_eval``
@@ -822,21 +954,53 @@ def run_grpo(
 
     # Early stop (cfg.stop_after_zero_behavior_steps; None = off): consecutive train steps whose
     # behavior_rate was exactly 0. Env-independent — it reads only the loop's own behavior_rate.
-    zero_streak = 0
+    zero_streak = resume["zero_streak"] if resume is not None else 0
+
+    def write_resume_state(steps_done: int, state_checkpoint: str, *, eval_done: bool,
+                           stopped_early: str | None = None) -> None:
+        """Snapshot everything a resume from ``state_checkpoint`` (the weights after ``steps_done``
+        optim steps) needs, as it stands NOW (see "Resuming"). ``eval_done``: the eval at
+        ``steps_done`` is already in the logs (a finished run's final eval), so a resume skips it.
+        Every log must be complete up to here, and no background eval in flight."""
+        if not getattr(backend, "resumable", False):
+            return
+        for f in (rollout_log, metrics_log, eval_metrics_log, eval_rollouts_log, eval_rollouts_slim_log,
+                  eval_ckpt_log):
+            f.flush()
+        state = {
+            "steps_done": steps_done,
+            "n_steps": cfg.n_steps,
+            "eval_done": eval_done,
+            "stopped_early": stopped_early,
+            "state_checkpoint": state_checkpoint,
+            "config": info["config"],  # what a resume's config must equal (except n_steps)
+            "zero_streak": zero_streak,
+            "log_rng_state": rng.getstate(),
+            "train_prompts_sha256": train_prompts_hash.hexdigest(),
+            "sdk_counters": [sdk_watch.n_pause, sdk_watch.n_warnings],
+            "wandb_run_id": run.id if run is not None else None,
+            "log_sizes": {name: (rollout_log_dir / name).stat().st_size for name in _RESUMABLE_LOGS},
+        }
+        path = _resume_state_path(rollout_log_dir, steps_done)
+        path.parent.mkdir(exist_ok=True)
+        tmp = path.with_suffix(".tmp")  # atomic: a snapshot file is always complete
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.replace(path)
     stop_reason: str | None = None
     steps_done = cfg.n_steps
-    for step in range(cfg.n_steps):
+    for step in range(start_step, cfg.n_steps):
         # so each persisted warning names the step it landed on (a background eval's warnings get the
         # train step current when they fire)
         sdk_watch.step = step
         evals.check()  # a background eval that already failed aborts the run now
-        # The weights after `step` optim steps, pinned for everything this step samples: the eval
-        # launched now and the train batch below.
-        sampler = backend.current_sampler()
-        if step % cfg.eval_every == 0:
-            launch_eval(step, sampler)  # held-out eval at step 0 and every eval_every
-
-        if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint"):
+        resuming_here = resume is not None and step == start_step
+        # (On resume, the state at start_step is the one resumed from — already saved, with its snapshot.)
+        if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint") and not resuming_here:
+            # The snapshot must describe complete logs up to this step, so let an in-flight eval of an
+            # earlier step finish first. Free when this is also an eval step (launching its eval waits
+            # for the previous one anyway); a save_every that is not a multiple of eval_every can stall
+            # the step here until that eval is done.
+            evals.wait()
             # TTL only where checkpoints can expire (tinker-hosted state). A backend that writes to
             # local disk says so with checkpoints_expire = False and is asked for no TTL at all —
             # passing one it cannot honour is an error there, not a silently dropped request.
@@ -844,9 +1008,21 @@ def run_grpo(
             ckpt = backend.save_checkpoint(f"{cfg.logging.run_name or 'run'}-{step}", **ttl)
             (rollout_log_dir / f"checkpoint_{step}.txt").write_text(ckpt + "\n")
             info[f"checkpoint_{step}"] = ckpt
+            write_resume_state(step, ckpt, eval_done=False)  # before this step's eval touches any log
             _log(f"saved checkpoint at step {step}: {ckpt}")
 
+        # The weights after `step` optim steps, pinned for everything this step samples: the eval
+        # launched now and the train batch below. On resume, the first step's eval is skipped only if
+        # the snapshot says it already ran (a finished run's final eval); after a save_every snapshot
+        # it runs, exactly as in the uninterrupted run.
+        if step % cfg.eval_every == 0 and not (resuming_here and resume["eval_done"]):
+            sampler = eval_sampler(step)
+            launch_eval(step, sampler)  # held-out eval at step 0 and every eval_every
+        else:
+            sampler = backend.current_sampler()
+
         prompts = [env.sample_prompt() for _ in range(cfg.batch_size)]
+        _hash_prompts(train_prompts_hash, prompts)
         _log(f"step {step}: sampling {cfg.batch_size}×{cfg.group_size} train rollouts "
              f"({_budget_note})…")
         t0 = time.perf_counter()
@@ -1045,11 +1221,12 @@ def run_grpo(
         info["stopped_early"] = {"after_steps": steps_done, "reason": stop_reason}
         (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
     # final held-out eval, labelled with the optim steps actually taken (= n_steps unless stopped early)
-    launch_eval(steps_done, backend.current_sampler())
+    launch_eval(steps_done, eval_sampler(steps_done))
     evals.wait()  # the run is done only once every eval is (and re-raises a failed one)
 
-    # Save the final training state on tinker (7-day TTL) so we can resume / sample / inspect the
-    # trained model later — important when we don't yet know how long these runs should take.
+    # Save the final training state (weights + optimizer; no expiry) so we can resume / sample /
+    # inspect the trained model later — important when we don't yet know how long runs should take.
+    final_ckpt: str | None = None
     if hasattr(backend, "save_checkpoint"):
         try:
             # ttl_seconds=None = no expiry (tinker rejects 0: "must be at least 3600"), which is
@@ -1058,16 +1235,22 @@ def run_grpo(
             (rollout_log_dir / "final_checkpoint.txt").write_text(ckpt + "\n")
             info["final_checkpoint"] = ckpt
             (rollout_log_dir / "run_info.json").write_text(json.dumps(info, indent=2))
-            _log(f"saved final weights on tinker (no expiry): {ckpt}")
+            final_ckpt = ckpt
+            _log(f"saved final training state (weights + optimizer, no expiry): {ckpt}")
         except Exception as e:  # noqa: BLE001 — never let a save hiccup fail a completed run
-            _log(f"⚠️  final checkpoint save failed: {type(e).__name__}: {e}")
+            _log(f"⚠️  final checkpoint save failed: {type(e).__name__}: {e} — a resume can only start "
+                 "from this run's last save_every state")
 
     sdk_watch_mod.uninstall(sdk_watch)
+    if final_ckpt is not None:
+        # The finished run's snapshot, after every eval (the final one included) is in the logs.
+        write_resume_state(steps_done, final_ckpt, eval_done=True, stopped_early=stop_reason)
     rollout_log.close()
     metrics_log.close()
     eval_metrics_log.close()
     eval_rollouts_log.close()
     eval_rollouts_slim_log.close()
+    eval_ckpt_log.close()
     if run is not None:
         run.finish()
 

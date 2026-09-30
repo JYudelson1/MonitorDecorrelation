@@ -19,6 +19,8 @@
 #   -j J      max parallel jobs (default: 4).
 #   -d        dry-run: print the plan and exit, launch nothing.
 #   -s        skip-existing: skip any run that already finished (data/runs/<run>/QUEUE_DONE present).
+#             Without -s (or for an unfinished one) an existing data/runs/<run>/ makes that job FAIL —
+#             runs are never overwritten; rm -rf the directory to re-run it.
 #   -D        detach: after printing the plan, run the whole batch in the background under nohup
 #             (survives SSH disconnect). Prints a PID + a batch logfile to tail; returns immediately.
 #   -P        shared probe server: load the base model ONCE (probe_server.py) and point every run at it,
@@ -60,6 +62,13 @@ REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 if [ "${1:-}" = "__worker" ]; then
     cd "$REPO_ROOT"
     IFS=$'\t' read -r seed cfg runname logpath <<<"$2"
+    # An existing run dir is a previous run: never write into it (run_experiment.py refuses too, but
+    # only after the redirect below would have clobbered that run's run.log). Delete it to re-run.
+    if [ -e "$(dirname "$logpath")" ]; then
+        printf '✗ %s  %-44s FAILED: %s already exists (unfinished earlier run?) — rm -rf it to re-run\n' \
+            "$(date +%H:%M:%S)" "$runname" "$(dirname "$logpath")"
+        exit 1
+    fi
     mkdir -p "$(dirname "$logpath")"
     # shellcheck disable=SC2086  # QR_EXTRA_SETS is intentionally word-split into separate k=v tokens
     printf '▶ %s  %-44s seed=%s  → %s\n' "$(date +%H:%M:%S)" "$runname" "$seed" "$logpath"
@@ -90,7 +99,7 @@ while getopts ":c:n:j:U:p:dsDPh" opt; do
         s) SKIP_EXISTING=1 ;;
         D) DETACH=1 ;;
         P) PROBE_SERVER=1 ;;
-        h) sed -n '2,48p' "$SELF"; exit 0 ;;
+        h) sed -n '2,50p' "$SELF"; exit 0 ;;
         \?) echo "unknown option -$OPTARG (try -h)" >&2; exit 2 ;;
         :) echo "option -$OPTARG needs an argument" >&2; exit 2 ;;
     esac

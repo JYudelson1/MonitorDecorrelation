@@ -22,6 +22,26 @@ Usage:
       --set 'monitors.model:gemini-2.5.reasoning={"enabled":false}' run_name=<...>_g25-off
 
 The config is schema-validated (pydantic, extra keys forbidden) — a malformed config fails fast.
+
+Run directories and resuming
+  A run writes to data/runs/<run_name>/. Launching a run whose directory already exists FAILS (nothing
+  in it is touched) unless --resume is given. To reuse a name whose old run you no longer want, delete
+  its directory first:
+      rm -rf data/runs/<run_name>
+  (its tinker checkpoints live on tinker and are not deleted by this; manage them with
+  `uv run tinker checkpoint list` / `uv run tinker checkpoint delete <tinker://…>`.)
+
+  --resume continues a run from its LATEST saved training state (weights + optimizer): the final one
+  of a finished run, else the last save_every checkpoint of a crashed / killed one (those expire
+  after 4 weeks). Same config, with n_steps greater than the step resumed from:
+      # a crashed run, to its original length (the config it saved):
+      uv run python experiments/run_experiment.py --config data/runs/<run_name>/config.json --resume
+      # a finished 90-step run → 180 steps:
+      uv run python experiments/run_experiment.py --config data/runs/<run_name>/config.json \
+          --set n_steps=180 --resume
+  It appends to the same directory (first dropping whatever was logged after the saved state),
+  equivalent to having run n_steps in one go (details: rl/train.py, "Resuming"). Every other config
+  field must equal the saved state's, and --resume on a name with no saved state fails.
 """
 
 from __future__ import annotations
@@ -42,7 +62,7 @@ from monitordecorrelation.experiment_config import (
     validate_token_budgets,
 )
 from monitordecorrelation.hyperparams import get_lr
-from monitordecorrelation.rl.train import run_grpo
+from monitordecorrelation.rl.train import check_resumable, load_resume_state, run_grpo
 
 load_dotenv()
 
@@ -81,9 +101,53 @@ def main() -> None:
                          "per-monitor field via monitors.<name|model:substr|*>.<field> (e.g. --set "
                          "'monitors.model:gemini-3.5.reasoning={\"effort\":\"medium\"}'), or one env option via "
                          "env_options.<key> (e.g. --set env_options.verifier_mode=possible)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue the run in data/runs/<run_name>/ from its latest saved training state "
+                         "(weights + optimizer: the final one, or the last save_every one of an unfinished "
+                         "run) up to this config's n_steps (must exceed that state's step); every other "
+                         "config field must match the run's. Without it, an existing run dir is an error.")
     args = ap.parse_args()
 
     cfg = apply_overrides(load_config(args.config), args.set)
+
+    # The run directory decides fresh-vs-resume, before anything costs time or touches the disk.
+    # `run.log` alone does not count as a run: scripts/queue_runs.sh creates it just before launching.
+    run_dir = Path("data/runs") / cfg.run_name
+    existing = run_dir.is_dir() and any(p.name != "run.log" for p in run_dir.iterdir())
+    resume_state = None
+    if not args.resume and existing:
+        raise SystemExit(
+            f"{run_dir} already exists — refusing to overwrite a previous run named {cfg.run_name!r}.\n"
+            f"  • to CONTINUE that run from its latest saved state, add --resume (finished run: and a "
+            f"larger n_steps);\n"
+            f"  • to start over under this name, delete the old run first:  rm -rf {run_dir}\n"
+            f"  • or pick another name:  --set run_name=<new name>"
+        )
+    if args.resume:
+        if not existing:
+            raise SystemExit(f"--resume: there is no run to resume in {run_dir} (nothing is started from "
+                             "scratch under --resume; drop the flag to start a new run)")
+        if cfg.backend != "tinker":
+            raise SystemExit(f"--resume needs the tinker backend (backend={cfg.backend!r} does not save "
+                             "optimizer state)")
+        resume_state = load_resume_state(run_dir)
+        # Everything but n_steps must be what the run ran with (both sides JSON-normalised, which is
+        # how the snapshot stored it).
+        now = json.loads(json.dumps(cfg.model_dump()))
+        then = resume_state["config"]
+        diff = sorted(k for k in now.keys() | then.keys() if k != "n_steps" and now.get(k) != then.get(k))
+        if diff:
+            raise SystemExit(
+                f"--resume: the config differs from the run's in {', '.join(diff)}:\n"
+                + "\n".join(f"  {k}: run had {then.get(k)!r}, now {now.get(k)!r}" for k in diff)
+            )
+        try:
+            check_resumable(resume_state, n_steps=cfg.n_steps, penalty_schedule=cfg.penalty_schedule,
+                            stop_after_zero_behavior_steps=cfg.stop_after_zero_behavior_steps)
+        except ValueError as e:
+            raise SystemExit(f"--resume: {e}") from e
+        print(f"  resuming from the step-{resume_state['steps_done']} state "
+              f"({'final' if resume_state['eval_done'] else 'save_every'}): {resume_state['state_checkpoint']}")
 
     # LR: the config's explicit value, else TM's LoRA-LR heuristic. That heuristic is only calibrated
     # for some families (it refuses Inkling outright), so translate its exception into instructions
@@ -116,7 +180,8 @@ def main() -> None:
                                 kl_coef=cfg.kl_coef,
                                 # None exactly when kl_coef is 0, i.e. when the discount is unused.
                                 kl_discount_factor=cfg.kl_discount_factor or 0.0,
-                                thinking_effort=cfg.thinking_effort)
+                                thinking_effort=cfg.thinking_effort,
+                                resume_from=resume_state["state_checkpoint"] if resume_state else None)
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
         # kl_coef / thinking_effort are rejected by ExperimentConfig for this backend (it implements
@@ -135,10 +200,13 @@ def main() -> None:
     # Write the EFFECTIVE config (after --set overrides are applied) into the run folder, so a run is
     # trivially + exactly reproducible — copying the raw source file would drop the overrides:
     #   uv run python experiments/run_experiment.py --config data/runs/<run>/config.<ext>
-    run_dir = Path("data/runs") / cfg.run_name
+    # On --resume this replaces the run's config with the one that now describes the directory
+    # (the larger n_steps), in the format the run already used.
     run_dir.mkdir(parents=True, exist_ok=True)
     effective = cfg.model_dump()
-    if Path(args.config).suffix.lower() in (".yaml", ".yml"):
+    as_yaml = (Path(args.config).suffix.lower() in (".yaml", ".yml") if not args.resume
+               else (run_dir / "config.yaml").exists())
+    if as_yaml:
         import yaml
 
         (run_dir / "config.yaml").write_text(yaml.safe_dump(effective, sort_keys=False))
@@ -191,6 +259,7 @@ def main() -> None:
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
                   "think_budget": think_budget,  # the RESOLVED value (config.json may say "auto")
                   "config": cfg.model_dump()},
+        resume=resume_state,
     )
     print(f"\n{cfg.experiment} finished OK")
 

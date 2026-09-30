@@ -35,6 +35,7 @@ def _pick_device() -> str:
 class TransformersBackend:
     name = "transformers"
     checkpoints_expire = False  # local directories; a TTL cannot be honoured (see save_checkpoint)
+    resumable = False  # save_checkpoint keeps the LoRA weights only, not the optimizer state
     # Sampling and training share ONE in-process model that optim steps update in place, so an eval
     # overlapping training would sample from weights changing under it: the RL loop runs evals inline.
     async_eval = False
@@ -213,3 +214,9 @@ class TransformersBackend:
         path = f"data/checkpoints/{label}"
         self.model.save_pretrained(path)
         return path
+
+    def checkpoint_sampler(self, label: str) -> tuple[int, str]:
+        """Persist the CURRENT weights (``save_checkpoint``, local, never expires) and return
+        ``(current_sampler(), path)``: this backend samples the live model, and evals run inline, so
+        what is sampled at this step is exactly what was saved."""
+        return self.current_sampler(), self.save_checkpoint(label)

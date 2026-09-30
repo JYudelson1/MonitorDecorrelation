@@ -48,6 +48,38 @@ uv run python experiments/run_experiment.py --config <cfg> \
     --set 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' run_name=<...>_eff-medium
 ```
 
+**Run directories are never overwritten.** A run writes to `data/runs/<run_name>/`; launching a run
+whose directory already exists fails (without touching it) unless `--resume` is given. To reuse a name
+whose old run you don't want any more, delete it first: `rm -rf data/runs/<run_name>` (its tinker
+checkpoints are separate — `uv run tinker checkpoint list` / `uv run tinker checkpoint delete <tinker://…>`).
+
+**Resuming (a crashed run, or a finished one for more steps).** Every saved training state — each
+`save_every` checkpoint (4-week TTL) and a finished run's final one (never expires); all are weights
+**+ optimizer** — gets a snapshot of the loop state in `resume_states/step_<k>.json`. `--resume`
+continues from the **latest** one, with the same config and `n_steps` > k:
+
+```bash
+# a crashed / killed run, to its original length (the config it saved):
+uv run python experiments/run_experiment.py --config data/runs/<run>/config.json --resume
+# a finished run, for more steps:
+uv run python experiments/run_experiment.py --config data/runs/<run>/config.json --set n_steps=180 --resume
+```
+
+It first truncates the logs back to what they were at that snapshot (dropping anything the crashed
+run logged after it), then appends exactly as one uninterrupted run would have (same optimizer state,
+prompt stream — replayed and hash-checked —, log-sampling RNG, early-stop streak, per-step sampling
+seeds, wandb run). Every other config field must equal the snapshot's (the launcher lists any
+difference), and `--resume` on a name with no snapshot fails. **Make sure the original process is dead
+first** — a still-running one would keep writing into the same logs. Not resumable: a run that stopped
+early, a `penalty_schedule` run (λ ramps over `n_steps`), the transformers backend (no optimizer
+state); a crashed run only from its last `save_every` step (so the steps after it are re-run), and
+not at all if it crashed before its first one or its checkpoints have expired. To go back further,
+delete the later `resume_states/step_*.json` by hand. Differences from an uninterrupted run: after a
+*finished* run, its final eval at its last step stays in `eval_metrics.jsonl` even if that step is not
+a multiple of `eval_every`; wandb keeps rows a crashed run logged past the snapshot. Writing a
+snapshot waits for an in-flight background eval, which stalls training only if `save_every` is not a
+multiple of `eval_every` (every repo config has it as one).
+
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
@@ -409,7 +441,8 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 - `eval_rollouts_slim.jsonl` — the **committed** subset of the above (`step, task_id, behavior_present, loose_rh, hardcoding, unparsed, invalid_reason, monitors`; no text, ~3 MB/run; an invalid — truncated/unparsed/no_submission — rollout has `monitors: {}`: it is never monitored). Regenerate from a full dump with `python3 scripts/slim_eval_rollouts.py <run dirs>` (stdlib-only; skips corrupt lines).
 - `rollouts.jsonl` — sampled training rollouts with metadata (env oracle, per-monitor score/label, reward).
 - `train/` + `eval/` — each has `ground_truth.png` + `monitors.png` (labels derive from `behavior_name`), auto-plotted on finish.
-- `final_checkpoint.txt` — tinker path of the saved final weights (7-day TTL); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.
+- `eval_checkpoints.jsonl` — one row per eval step: `{step, path, sampler}` — the persistent (never-expiring) tinker **sampler** checkpoint of the exact weights that eval (and that step's train batch) sampled; `sampler` matches the `eval_metrics.jsonl` row. For inference: `tinker.ServiceClient().create_sampling_client(model_path=path)`.
+- `final_checkpoint.txt` — tinker path of the final training state (weights + optimizer, no expiry); `checkpoint_<step>.txt` — full state (weights + optimizer) every `save_every` steps (4-week TTL); `resume_states/step_<k>.json` — one per saved state, what `--resume` continues from (the latest; see "Resuming"); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.
 
 > Note: don't nest `&`/`nohup` when backgrounding a run by hand — it orphans the process. Use
 > `queue_runs.sh -D` (handles detachment cleanly) or launch as a single foreground command.

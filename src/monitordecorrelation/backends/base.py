@@ -38,3 +38,7 @@ class RLBackend(Protocol):
         ``ttl_seconds`` keyword; the training loop passes one only to those, so no backend is ever
         handed a lifetime it would quietly ignore."""
         ...
+
+    # Optional, used by the RL loop at every eval step (see rl/train.py):
+    #   checkpoint_sampler(label) -> (sampler, path): persist the current weights (never expiring,
+    #   inference-only) and return a sampler on exactly that checkpoint plus its handle/path.
