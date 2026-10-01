@@ -27,6 +27,7 @@
   "eval_size": 64,
   "eval_samples_per_prompt": 4,
   "save_every": 999,
+  "stop_after_zero_behavior_steps": 16,
   "max_tokens": 3072,
   "think_budget": null,
   "thinking_effort": 0.5,
