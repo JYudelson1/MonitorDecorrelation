@@ -74,6 +74,29 @@ def _is_multimodal_config(config) -> bool:
     return any(isinstance(a, str) and a.endswith("ForConditionalGeneration") for a in arches)
 
 
+def _patch_inkling_moe_intermediate(config, model_name: str):
+    """Inkling-Small checkpoints store MoE expert width as ``text_config.intermediate_size`` and dense
+    MLP width as ``dense_intermediate_size``. Transformers remaps the latter onto ``intermediate_size``
+    but leaves ``moe_intermediate_size`` at the *full* Inkling default (3072), so expert ``gate_up_proj``
+    is built as ``[256, 6144, 4096]`` while the ckpt is ``[256, 4096, 4096]`` (2×2048). Patch before
+    ``from_pretrained`` so weights match. No-op when the raw config already sets ``moe_intermediate_size``.
+    """
+    mt = (getattr(config, "model_type", None) or "").lower()
+    if "inkling" not in mt and not _is_tml_model_name(model_name):
+        return config
+    from transformers.configuration_utils import PreTrainedConfig
+
+    raw, _ = PreTrainedConfig.get_config_dict(model_name)
+    text_raw = raw.get("text_config", raw)
+    if "moe_intermediate_size" in text_raw:
+        return config
+    if "intermediate_size" not in text_raw or "dense_intermediate_size" not in text_raw:
+        return config
+    tc = config.get_text_config() if hasattr(config, "get_text_config") else config
+    tc.moe_intermediate_size = int(text_raw["intermediate_size"])
+    return config
+
+
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
     _multimodal: bool = False  # class default for __new__ stubs (CausalLM / Qwen path)
@@ -127,6 +150,8 @@ class WhiteBoxModel:
         if self._multimodal:
             from transformers import AutoModelForMultimodalLM, AutoProcessor
 
+            config = _patch_inkling_moe_intermediate(config, model_name)
+
             # Multimodal MoEs (Inkling) are huge — accelerate places shards; do not .to(device).
             # AutoProcessor also loads the vision/audio sub-processors; InklingImageProcessor needs
             # torchvision. Text-only probing can fall back to AutoTokenizer (same chat template).
@@ -147,12 +172,21 @@ class WhiteBoxModel:
                 self.tokenizer, "eos_token", None
             ) is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.model = AutoModelForMultimodalLM.from_pretrained(
-                model_name,
-                dtype=self.dtype,
-                device_map="auto",
-                output_hidden_states=True,
-            )
+            try:
+                self.model = AutoModelForMultimodalLM.from_pretrained(
+                    model_name,
+                    config=config,
+                    dtype=self.dtype,
+                    device_map="auto",
+                    output_hidden_states=True,
+                )
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Failed to load multimodal model {model_name!r}. "
+                    f"Inkling-Small BF16 is ~266B params (12B active) and needs multi-GPU headroom; "
+                    f"try ``thinkingmachines/Inkling-Small-NVFP4``, free other GPU processes, or "
+                    f"set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``. Original error: {e}"
+                ) from e
             self.model.eval()
             self.device = str(next(self.model.parameters()).device)
         else:

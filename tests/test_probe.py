@@ -339,6 +339,68 @@ def test_inkling_build_messages_uses_reasoning_content():
     print("inkling build_messages OK")
 
 
+def test_patch_inkling_moe_intermediate_from_raw_config(monkeypatch):
+    """Inkling-Small raw config has intermediate_size=2048 (MoE) + dense_intermediate_size, but no
+    moe_intermediate_size — HF then defaults moe to 3072 and expert weights mismatch. Patch must set
+    moe_intermediate_size from the raw intermediate_size."""
+    import transformers.configuration_utils as cu
+
+    from monitordecorrelation.whitebox import model as wbm
+
+    text = type("Text", (), {"moe_intermediate_size": 3072, "intermediate_size": 16384})()
+
+    class _Cfg:
+        model_type = "inkling_mm_model"
+
+        def get_text_config(self):
+            return text
+
+    raw = {
+        "model_type": "inkling_mm_model",
+        "text_config": {
+            "hidden_size": 4096,
+            "intermediate_size": 2048,
+            "dense_intermediate_size": 16384,
+            # deliberately no moe_intermediate_size
+        },
+    }
+    monkeypatch.setattr(
+        cu.PreTrainedConfig,
+        "get_config_dict",
+        classmethod(lambda cls, *a, **k: (raw, {})),
+    )
+
+    cfg = _Cfg()
+    out = wbm._patch_inkling_moe_intermediate(cfg, "thinkingmachines/Inkling-Small")
+    assert out.get_text_config().moe_intermediate_size == 2048
+
+    # Already-explicit moe_intermediate_size in raw → leave HF value alone
+    text2 = type("Text", (), {"moe_intermediate_size": 3072, "intermediate_size": 16384})()
+
+    class _Cfg2:
+        model_type = "inkling_mm_model"
+
+        def get_text_config(self):
+            return text2
+
+    raw2 = {
+        "model_type": "inkling_mm_model",
+        "text_config": {
+            "intermediate_size": 2048,
+            "dense_intermediate_size": 16384,
+            "moe_intermediate_size": 999,
+        },
+    }
+    monkeypatch.setattr(
+        cu.PreTrainedConfig,
+        "get_config_dict",
+        classmethod(lambda cls, *a, **k: (raw2, {})),
+    )
+    wbm._patch_inkling_moe_intermediate(_Cfg2(), "thinkingmachines/Inkling-Small")
+    assert text2.moe_intermediate_size == 3072
+    print("inkling moe_intermediate patch OK")
+
+
 def test_whitebox_model_end_to_end():
     """End-to-end on a tiny model. Skips if the model can't be loaded (offline)."""
     try:
