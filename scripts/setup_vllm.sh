@@ -8,15 +8,39 @@
 #
 # Requires exactly 2 or 4 visible GPUs, each an H200 (or ≥80 GiB so either FP8 MoE
 # judge fits on one card with the concurrency settings below). Ctrl-C / exit kills every child.
+#
+# vLLM: uses `vllm` on PATH if present; otherwise installs into a dedicated
+# `.venv-vllm/` (kept out of the project env so it doesn't fight setup_box.sh's torch).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Floor for non-H200 cards: FP8 weights are ~30–35 GB, but max-num-seqs 256–512 +
 # speculative decoding needs H100-80-class headroom. nvidia-smi reports MiB.
 MIN_MEM_MIB=$((80 * 1024))
+VLLM_VENV=".venv-vllm"
 
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found; need a GPU box"; exit 1; }
-command -v vllm >/dev/null || { echo "vllm not on PATH; activate the env that has it"; exit 1; }
+command -v uv >/dev/null || { echo "uv not on PATH; need uv to install/run vllm"; exit 1; }
+
+ensure_vllm() {
+  if command -v vllm >/dev/null; then
+    VLLM=$(command -v vllm)
+    echo "using vllm on PATH: $VLLM"
+    return
+  fi
+  if [[ -x "$VLLM_VENV/bin/vllm" ]]; then
+    VLLM="$VLLM_VENV/bin/vllm"
+    echo "using vllm from $VLLM"
+    return
+  fi
+  echo "vllm not found; installing into $VLLM_VENV/ (python 3.12, --torch-backend=auto)"
+  uv venv --python 3.12 --seed "$VLLM_VENV"
+  uv pip install --python "$VLLM_VENV" vllm --torch-backend=auto
+  VLLM="$VLLM_VENV/bin/vllm"
+  [[ -x "$VLLM" ]] || { echo "vllm install finished but $VLLM is missing"; exit 1; }
+  echo "installed vllm → $VLLM"
+}
+ensure_vllm
 
 mapfile -t GPU_ROWS < <(nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits)
 NGPU=${#GPU_ROWS[@]}
@@ -52,7 +76,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Qwen3-30B always on GPU 0 → :8001 (clients hardcode this).
-CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-30B-A3B-FP8 \
+CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
   --port 8001 \
   --reasoning-parser qwen3 \
   --scheduling-policy priority \
@@ -66,7 +90,7 @@ echo "Qwen3-30B-A3B-FP8 on GPU 0 → :8001 (pid ${PIDS[-1]})"
 
 serve_q35() {
   local gpu=$1 port=$2
-  CUDA_VISIBLE_DEVICES=$gpu vllm serve Qwen/Qwen3.5-35B-A3B-FP8 \
+  CUDA_VISIBLE_DEVICES=$gpu "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
     --port "$port" \
     --reasoning-parser qwen3 \
     --scheduling-policy priority \
