@@ -6,10 +6,11 @@ the residual stream at the **final token** of that follow-up, per layer. The *sa
 applied at train and deploy time.
 
 Model-agnostic: default is a tiny ``Qwen/Qwen3-0.6B`` for local/CPU validation; ``Qwen/Qwen3-8B`` for
-the real run is just a ``model_name`` arg. Multimodal policies (Inkling: ``inkling_mm_model``) load via
-``AutoModelForMultimodalLM`` + ``AutoProcessor`` and put CoT in ``reasoning_content`` rather than
-Qwen ``<think>`` tags. Device auto-selects cuda -> mps -> cpu for CausalLM; multimodal uses
-``device_map="auto"``. Dtype is bf16 on accelerators, fp32 on CPU.
+the real run is just a ``model_name`` arg. Inkling checkpoints are multimodal, but we load
+**text-only** via ``InklingForCausalLM`` (language tower + ``lm_head``; vision/audio never
+allocated) and put CoT in ``reasoning_content`` rather than Qwen ``<think>`` tags. Device
+auto-selects cuda -> mps -> cpu for ordinary CausalLMs; Inkling uses ``device_map="auto"``.
+Dtype is bf16 on accelerators, fp32 on CPU.
 """
 
 from __future__ import annotations
@@ -148,45 +149,36 @@ class WhiteBoxModel:
 
         self._multimodal = _is_multimodal_config(config) or _is_tml_model_name(model_name)
         if self._multimodal:
-            from transformers import AutoModelForMultimodalLM, AutoProcessor
+            # Text-only load: Inkling checkpoints are multimodal (vision+audio towers), but probes only
+            # need the language residual stream. ``InklingForCausalLM`` allocates the text tower +
+            # lm_head only; ``key_mapping`` strips ``model.language_model.`` → ``model.`` so the MM
+            # safetensors load. Vision/audio (and MTP) keys are unexpected and skipped — never
+            # materialized. Chat template still uses reasoning_content (``_multimodal``).
+            from transformers import InklingForCausalLM
 
             config = _patch_inkling_moe_intermediate(config, model_name)
+            text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
 
-            # Multimodal MoEs (Inkling) are huge — accelerate places shards; do not .to(device).
-            # AutoProcessor also loads the vision/audio sub-processors; InklingImageProcessor needs
-            # torchvision. Text-only probing can fall back to AutoTokenizer (same chat template).
-            try:
-                self.processor = AutoProcessor.from_pretrained(model_name)
-            except (ValueError, ImportError) as e:
-                err = str(e)
-                if "torchvision" in err or "image processor" in err.lower():
-                    self.processor = AutoTokenizer.from_pretrained(model_name)
-                else:
-                    raise ValueError(
-                        f"Failed to load processor for multimodal model {model_name!r}. "
-                        f"Inkling's AutoProcessor needs torchvision "
-                        f"(``uv add torchvision`` / ``uv sync``). Original error: {e}"
-                    ) from e
-            self.tokenizer = getattr(self.processor, "tokenizer", self.processor)
-            if getattr(self.tokenizer, "pad_token", None) is None and getattr(
-                self.tokenizer, "eos_token", None
-            ) is not None:
+            self.processor = None
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             try:
-                # Request hidden states at forward time (``_extract_local``); Inkling's ctor rejects
-                # ``output_hidden_states`` as a from_pretrained / __init__ kwarg.
-                self.model = AutoModelForMultimodalLM.from_pretrained(
+                # Hidden states requested at forward time in ``_extract_local`` (ctor rejects the flag).
+                self.model = InklingForCausalLM.from_pretrained(
                     model_name,
-                    config=config,
+                    config=text_config,
                     dtype=self.dtype,
                     device_map="auto",
+                    key_mapping={r"model\.language_model\.": "model."},
                 )
             except RuntimeError as e:
                 raise RuntimeError(
-                    f"Failed to load multimodal model {model_name!r}. "
-                    f"Inkling-Small BF16 is ~266B params (12B active) and needs multi-GPU headroom; "
-                    f"try ``thinkingmachines/Inkling-Small-NVFP4``, free other GPU processes, or "
-                    f"set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``. Original error: {e}"
+                    f"Failed to load Inkling text tower from {model_name!r}. "
+                    f"Inkling-Small BF16 is ~266B params (12B active); prefer "
+                    f"``thinkingmachines/Inkling-Small-NVFP4`` on ≥2× H200, free other GPU "
+                    f"processes, or set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``. "
+                    f"Original error: {e}"
                 ) from e
             self.model.eval()
             self.device = str(next(self.model.parameters()).device)
