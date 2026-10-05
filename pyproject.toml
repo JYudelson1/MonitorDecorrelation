@@ -16,6 +16,11 @@ dependencies = [
     "peft>=0.19.1",
     "tml-renderers>=0.1.0",
     "reasoning-gym>=0.1.25",
+    # Inkling (`inkling_mm_model`) needs >=5.14; see [tool.uv].override-dependencies —
+    # tinker-cookbook still declares transformers<=5.5.4.
+    "transformers>=5.14.0",
+    # Inkling's AutoProcessor pulls InklingImageProcessor (torchvision backend) even for text-only.
+    "torchvision>=0.20",
 ]
 
 # GPU-only acceleration kernels for the white-box forward passes (Qwen3.5 is a hybrid
@@ -27,6 +32,13 @@ gpu = [
     "flash-attn>=2.5; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d; sys_platform == 'linux'",
+]
+
+# tinker-cookbook 0.5.7 pins transformers<=5.5.4, which predates Inkling day-0 support (5.14).
+# Override so the whitebox path can load `inkling_mm_model` without waiting on a cookbook bump.
+[tool.uv]
+override-dependencies = [
+    "transformers>=5.14.0",
 ]
 
 [build-system]
