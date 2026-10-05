@@ -1,6 +1,6 @@
 {
     "experiment": "mbpp_inkling_qmonitors",
-    "run_name": "mbpp_inkling_qmonitors_control_s0",
+    "run_name": "mbpp_inkling_qmonitors_out_q3_weak_s0",
     "description": "",
     "policy": "thinkingmachines/Inkling-Small",
     "backend": "tinker",
