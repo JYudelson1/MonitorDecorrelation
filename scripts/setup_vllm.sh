@@ -8,6 +8,7 @@
 #
 # Requires exactly 2 or 4 visible GPUs, each an H200 (or ≥80 GiB so either FP8 MoE
 # judge fits on one card with the concurrency settings below). Ctrl-C / exit kills every child.
+# Quiet: server output goes to logs/vllm/<name>.log; the terminal shows readiness + any server death.
 #
 # vLLM: uses `vllm` on PATH if present; otherwise installs into a dedicated
 # `.venv-vllm/` (kept out of the project env so it doesn't fight setup_box.sh's torch).
@@ -200,7 +201,25 @@ for row in "${GPU_ROWS[@]}"; do
 done
 echo "found $NGPU GPUs, all usable"
 
+command -v curl >/dev/null || { echo "curl not found; needed to health-check the servers"; exit 1; }
+
+# Servers are quiet: each one's full output (startup, per-10s throughput stats, errors) goes to
+# $LOG_DIR/<name>.log, overwritten per launch; the terminal only shows launches, readiness and deaths.
+# Per-request access logs are off (--disable-uvicorn-access-log) — one line per judge call otherwise.
+LOG_DIR="logs/vllm"
+mkdir -p "$LOG_DIR"
+
+# Refuse to start if a port is taken (e.g. an earlier setup_vllm.sh still running): the new server would
+# die on bind, and worse, the old one would answer the readiness check below.
+if [[ "$NGPU" -eq 2 ]]; then PORTS=(8001 8002); else PORTS=(8001 8002 8003 8004 8005); fi
+for port in "${PORTS[@]}"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    echo "port $port is already in use — another setup_vllm.sh still running? (ss -ltnp | grep :$port)" >&2
+    exit 1
+  fi
+done
 PIDS=()
+declare -A NAME_OF PORT_OF LOG_OF READY
 cleanup() {
   local pid
   for pid in "${PIDS[@]+"${PIDS[@]}"}"; do
@@ -210,8 +229,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# launch <name> <port> <cmd...>: run cmd in the background with all output → $LOG_DIR/<name>.log
+launch() {
+  local name=$1 port=$2 pid; shift 2
+  "$@" >"$LOG_DIR/$name.log" 2>&1 &
+  pid=$!
+  PIDS+=("$pid"); NAME_OF[$pid]=$name; PORT_OF[$pid]=$port; LOG_OF[$pid]=$LOG_DIR/$name.log
+  echo "$name → :$port (pid $pid, log $LOG_DIR/$name.log)"
+}
+
 # Qwen3-30B always on GPU 0 → :8001 (clients hardcode this).
-CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
+launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
   --port 8001 \
   --reasoning-parser qwen3 \
   --scheduling-policy priority \
@@ -219,13 +247,11 @@ CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
   --kv-cache-dtype fp8 \
   --gpu-memory-utilization 0.92 \
   --speculative-config '{"method": "eagle3", "model": "AngelSlim/Qwen3-a3B_eagle3", "num_speculative_tokens": 2}' \
-  &
-PIDS+=($!)
-echo "Qwen3-30B-A3B-FP8 on GPU 0 → :8001 (pid ${PIDS[-1]})"
+  --disable-uvicorn-access-log
 
 serve_q35() {
   local gpu=$1 port=$2
-  CUDA_VISIBLE_DEVICES=$gpu "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
+  launch "qwen3.5-35b-$port" "$port" env CUDA_VISIBLE_DEVICES="$gpu" "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
     --port "$port" \
     --reasoning-parser qwen3 \
     --scheduling-policy priority \
@@ -234,9 +260,7 @@ serve_q35() {
     --gpu-memory-utilization 0.9 \
     --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
     --compilation-config '{"max_cudagraph_capture_size": 1024}' \
-    &
-  PIDS+=($!)
-  echo "Qwen3.5-35B-A3B-FP8 on GPU $gpu → :$port (pid ${PIDS[-1]})"
+    --disable-uvicorn-access-log
 }
 
 if [[ "$NGPU" -eq 2 ]]; then
@@ -245,10 +269,26 @@ else
   serve_q35 1 8003
   serve_q35 2 8004
   serve_q35 3 8005
-  uv run python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 8005 &
-  PIDS+=($!)
-  echo "load balancer :8002 → :8003 :8004 :8005 (pid ${PIDS[-1]})"
+  # TCP passthrough, so :8002/health answers once a backend does
+  launch lb-8002 8002 uv run python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 8005
 fi
 
-echo "all servers launched; waiting (Ctrl-C to stop)"
-wait
+echo "starting (a first start JIT-compiles kernels: a few minutes); Ctrl-C stops everything"
+# Watch: announce each server once /health answers; if any process dies, show its log tail and stop
+# everything (a dead judge would break the run anyway).
+while :; do
+  for pid in "${PIDS[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rc=0; wait "$pid" || rc=$?
+      echo "!! ${NAME_OF[$pid]} exited (code $rc) — last lines of ${LOG_OF[$pid]}:" >&2
+      tail -n 40 "${LOG_OF[$pid]}" >&2
+      exit 1
+    fi
+    if [[ -z "${READY[$pid]:-}" ]] && curl -sf -o /dev/null --max-time 2 "http://localhost:${PORT_OF[$pid]}/health"; then
+      READY[$pid]=1
+      echo "✓ ${NAME_OF[$pid]} ready on :${PORT_OF[$pid]}"
+      (( ${#READY[@]} == ${#PIDS[@]} )) && echo "all servers ready (logs: $LOG_DIR/*.log)"
+    fi
+  done
+  sleep 5
+done
