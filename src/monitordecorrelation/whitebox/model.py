@@ -128,7 +128,20 @@ class WhiteBoxModel:
             from transformers import AutoModelForMultimodalLM, AutoProcessor
 
             # Multimodal MoEs (Inkling) are huge — accelerate places shards; do not .to(device).
-            self.processor = AutoProcessor.from_pretrained(model_name)
+            # AutoProcessor also loads the vision/audio sub-processors; InklingImageProcessor needs
+            # torchvision. Text-only probing can fall back to AutoTokenizer (same chat template).
+            try:
+                self.processor = AutoProcessor.from_pretrained(model_name)
+            except (ValueError, ImportError) as e:
+                err = str(e)
+                if "torchvision" in err or "image processor" in err.lower():
+                    self.processor = AutoTokenizer.from_pretrained(model_name)
+                else:
+                    raise ValueError(
+                        f"Failed to load processor for multimodal model {model_name!r}. "
+                        f"Inkling's AutoProcessor needs torchvision "
+                        f"(``uv add torchvision`` / ``uv sync``). Original error: {e}"
+                    ) from e
             self.tokenizer = getattr(self.processor, "tokenizer", self.processor)
             if getattr(self.tokenizer, "pad_token", None) is None and getattr(
                 self.tokenizer, "eos_token", None
