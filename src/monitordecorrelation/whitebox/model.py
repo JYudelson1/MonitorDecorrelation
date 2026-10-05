@@ -143,6 +143,61 @@ def _register_inkling_text_conversions() -> None:
     register_checkpoint_conversion_mapping("inkling_text", adapted, overwrite=True)
 
 
+def _install_inkling_finalize_guard(*, max_missing_gib: float = 2.0):
+    """Wrap ``PreTrainedModel._finalize_model_loading`` so we print missing/unexpected key stats
+    *before* HF materializes missing meta tensors (the silent hang after ``Loading weights: 100%``
+    when VRAM is already full). Raises if missing params would allocate more than ``max_missing_gib``.
+
+    Returns a restore callback.
+    """
+    from transformers.modeling_utils import PreTrainedModel
+
+    orig = PreTrainedModel._finalize_model_loading
+
+    @staticmethod
+    def _guarded(model, load_config, loading_info):
+        missing = sorted(loading_info.missing_and_mismatched())
+        unexpected = sorted(getattr(loading_info, "unexpected_keys", set()) or [])
+        mismatched = sorted(getattr(loading_info, "mismatched_keys", set()) or [])
+        # Estimate bytes for missing *parameters* still on meta (what finalize is about to allocate).
+        rows: list[tuple[int, str, tuple]] = []
+        for key in missing:
+            try:
+                p = model.get_parameter_or_buffer(key)
+            except Exception:
+                continue
+            rows.append((int(p.numel()) * max(int(p.element_size()), 1), key, tuple(p.shape)))
+        rows.sort(reverse=True)
+        missing_bytes = sum(b for b, _, _ in rows)
+        print(
+            f"[WhiteBoxModel] post-load: missing/mismatched={len(missing)} "
+            f"unexpected={len(unexpected)} mismatched={len(mismatched)} "
+            f"missing≈{missing_bytes / 1024**3:.2f} GiB"
+        )
+        for b, key, shape in rows[:15]:
+            print(f"  missing {b / 1024**3:7.2f} GiB  {key}  {shape}")
+        if len(rows) > 15:
+            print(f"  … +{len(rows) - 15} more missing keys")
+        if unexpected:
+            print(f"  unexpected (first 10): {unexpected[:10]}")
+        if missing_bytes > max_missing_gib * 1024**3:
+            raise RuntimeError(
+                f"Refusing to finalize load: {missing_bytes / 1024**3:.1f} GiB of weights are still "
+                f"missing and would be randomly re-initialized on GPU (this is the hang after "
+                f"'Loading weights: 100%' with VRAM already full). Fix the Inkling weight conversion "
+                f"/ NVFP4 load path instead of allocating them. Top missing keys printed above."
+            )
+        print("[WhiteBoxModel] finalize: materializing any remaining missing keys…")
+        return orig(model, load_config, loading_info)
+
+    PreTrainedModel._finalize_model_loading = _guarded
+
+    def _restore() -> None:
+        PreTrainedModel._finalize_model_loading = orig
+
+    return _restore
+
+
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
     _multimodal: bool = False  # class default for __new__ stubs (CausalLM / Qwen path)
@@ -213,10 +268,29 @@ class WhiteBoxModel:
                 # WeightConverter pipeline (MoE w13→gate_up, attn renames, …). Hidden states at forward.
                 # Do NOT force dtype=bfloat16 on *-NVFP4: let the checkpoint/quantizer decide; forcing
                 # BF16 can materialize dense weights (~3× VRAM) if a quant path is active.
-                load_kw: dict = {"config": text_config, "device_map": "auto"}
+                load_kw: dict = {
+                    "config": text_config,
+                    "device_map": "auto",
+                    "output_loading_info": True,
+                }
                 if "nvfp4" not in model_name.lower() and "fp4" not in model_name.lower():
                     load_kw["dtype"] = self.dtype
-                self.model = InklingForCausalLM.from_pretrained(model_name, **load_kw)
+                print(f"[WhiteBoxModel] from_pretrained({model_name!r}) text-only InklingForCausalLM…")
+                restore = _install_inkling_finalize_guard()
+                try:
+                    self.model, loading_info = InklingForCausalLM.from_pretrained(model_name, **load_kw)
+                finally:
+                    restore()
+                # loading_info is a LoadStateDictInfo (or dict, depending on transformers version)
+                if isinstance(loading_info, dict):
+                    mk = loading_info.get("missing_keys") or []
+                    uk = loading_info.get("unexpected_keys") or []
+                    print(f"[WhiteBoxModel] load done: missing={len(mk)} unexpected={len(uk)}")
+                else:
+                    print(
+                        f"[WhiteBoxModel] load done: missing={len(getattr(loading_info, 'missing_keys', []) or [])} "
+                        f"unexpected={len(getattr(loading_info, 'unexpected_keys', []) or [])}"
+                    )
             except RuntimeError as e:
                 raise RuntimeError(
                     f"Failed to load Inkling text tower from {model_name!r}. "
@@ -227,6 +301,7 @@ class WhiteBoxModel:
                 ) from e
             self.model.eval()
             self.device = str(next(self.model.parameters()).device)
+            print(f"[WhiteBoxModel] ready device={self.device} n_layers={self.n_layers} d_model={self.d_model}")
         else:
             self.processor = None
             self.device = device or _pick_device()
