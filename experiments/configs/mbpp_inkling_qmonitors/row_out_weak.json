@@ -74,13 +74,6 @@
             "thinking_budget": 12288,
             "use_cot": false,
             "use_output": true
-        },
-        {
-            "kind": "probe",
-            "name": "probe_ood",
-            "role": "held_out",
-            "probe_path": "data/probes/Inkling-Small/diverse_deception",
-            "probe_model": "thinkingmachines/Inkling-Small"
         }
     ]
 }
