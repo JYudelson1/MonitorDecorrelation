@@ -401,6 +401,34 @@ def test_patch_inkling_moe_intermediate_from_raw_config(monkeypatch):
     print("inkling moe_intermediate patch OK")
 
 
+def test_register_inkling_text_conversions_rewrites_language_model_prefix():
+    """CausalLM conversion targets must be ``model.*``, not ``model.language_model.*``."""
+    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+
+    from monitordecorrelation.whitebox.model import _register_inkling_text_conversions
+
+    mm = get_checkpoint_conversion_mapping("inkling_mm_model")
+    if not mm:
+        print("SKIP inkling text conversions (no mm map in this transformers)")
+        return
+    _register_inkling_text_conversions()
+    text = get_checkpoint_conversion_mapping("InklingForCausalLM")
+    assert text is not None and len(text) == len(mm)
+    # The llm→language_model rename must become llm→model for CausalLM
+    targets = []
+    for t in text:
+        tp = getattr(t, "target_patterns", None)
+        if isinstance(tp, str):
+            targets.append(tp)
+        elif isinstance(tp, list):
+            targets.extend(x for x in tp if isinstance(x, str))
+    assert any(t.startswith("model.layers") or "model.layers" in t for t in targets) or any(
+        "model." in t and "language_model" not in t for t in targets
+    )
+    assert not any("model.language_model." in t for t in targets)
+    print("inkling text conversions OK")
+
+
 def test_whitebox_model_end_to_end():
     """End-to-end on a tiny model. Skips if the model can't be loaded (offline)."""
     try:

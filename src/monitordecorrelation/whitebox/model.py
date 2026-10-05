@@ -98,6 +98,51 @@ def _patch_inkling_moe_intermediate(config, model_name: str):
     return config
 
 
+def _register_inkling_text_conversions() -> None:
+    """Hub Inkling checkpoints use ModelOpt names (``model.llm.*``, ``w13_weight``, …). The stock
+    conversion map is registered under ``inkling_mm_model`` for ``InklingForConditionalGeneration``.
+    Text-only ``InklingForCausalLM`` (``inkling_text``) does not see that map, so without this every
+    weight is ``missing`` → tqdm ``Loading weights: 0it`` then a hang reallocating the MoE. Mirror the
+    MM map with ``model.language_model.*`` targets rewritten to ``model.*``.
+    """
+    from transformers.conversion_mapping import (
+        WeightConverter,
+        WeightRenaming,
+        get_checkpoint_conversion_mapping,
+        register_checkpoint_conversion_mapping,
+    )
+
+    mm = get_checkpoint_conversion_mapping("inkling_mm_model")
+    if not mm:
+        return
+
+    def _rewrite(tp):
+        if isinstance(tp, str):
+            return tp.replace("model.language_model.", "model.")
+        if isinstance(tp, list):
+            return [_rewrite(t) for t in tp]
+        return tp
+
+    adapted = []
+    for transform in mm:
+        src = transform.source_patterns
+        tgt = _rewrite(transform.target_patterns)
+        if isinstance(transform, WeightConverter):
+            adapted.append(
+                WeightConverter(
+                    source_patterns=src,
+                    target_patterns=tgt,
+                    operations=list(transform.operations),
+                    force_cpu=transform.force_cpu,
+                )
+            )
+        else:
+            adapted.append(WeightRenaming(source_patterns=src, target_patterns=tgt))
+    # Class-name lookup wins in get_model_conversion_mapping; register both for safety.
+    register_checkpoint_conversion_mapping("InklingForCausalLM", adapted, overwrite=True)
+    register_checkpoint_conversion_mapping("inkling_text", adapted, overwrite=True)
+
+
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
     _multimodal: bool = False  # class default for __new__ stubs (CausalLM / Qwen path)
@@ -149,29 +194,29 @@ class WhiteBoxModel:
 
         self._multimodal = _is_multimodal_config(config) or _is_tml_model_name(model_name)
         if self._multimodal:
-            # Text-only load: Inkling checkpoints are multimodal (vision+audio towers), but probes only
-            # need the language residual stream. ``InklingForCausalLM`` allocates the text tower +
-            # lm_head only; ``key_mapping`` strips ``model.language_model.`` → ``model.`` so the MM
-            # safetensors load. Vision/audio (and MTP) keys are unexpected and skipped — never
-            # materialized. Chat template still uses reasoning_content (``_multimodal``).
+            # Text-only load: Inkling hubs are multimodal, but probes only need the language residual
+            # stream. ``InklingForCausalLM`` allocates text + lm_head only. Hub tensors are named
+            # ``model.llm.*`` (ModelOpt); register the MM→text conversion map first or every weight
+            # is missing and load hangs at ``Loading weights: 0it``.
             from transformers import InklingForCausalLM
 
             config = _patch_inkling_moe_intermediate(config, model_name)
             text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+            _register_inkling_text_conversions()
 
             self.processor = None
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             try:
-                # Hidden states requested at forward time in ``_extract_local`` (ctor rejects the flag).
-                self.model = InklingForCausalLM.from_pretrained(
-                    model_name,
-                    config=text_config,
-                    dtype=self.dtype,
-                    device_map="auto",
-                    key_mapping={r"model\.language_model\.": "model."},
-                )
+                # Do NOT pass key_mapping here — that would replace/stack badly with the registered
+                # WeightConverter pipeline (MoE w13→gate_up, attn renames, …). Hidden states at forward.
+                # Do NOT force dtype=bfloat16 on *-NVFP4: let the checkpoint/quantizer decide; forcing
+                # BF16 can materialize dense weights (~3× VRAM) if a quant path is active.
+                load_kw: dict = {"config": text_config, "device_map": "auto"}
+                if "nvfp4" not in model_name.lower() and "fp4" not in model_name.lower():
+                    load_kw["dtype"] = self.dtype
+                self.model = InklingForCausalLM.from_pretrained(model_name, **load_kw)
             except RuntimeError as e:
                 raise RuntimeError(
                     f"Failed to load Inkling text tower from {model_name!r}. "
