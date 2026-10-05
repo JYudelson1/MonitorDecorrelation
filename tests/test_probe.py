@@ -275,6 +275,8 @@ def test_extract_activations_logic_offline():
     m.tokenizer = _StubTokenizer()
     m.model = _StubModel()
     m.device = "cpu"
+    m._multimodal = False
+    m.processor = None
 
     triples = [("q", "", "bbb"), ("q", "", "ddddddd")]  # answer lens 3 vs 7 -> different padding
     acts = m.extract_activations(triples, batch_size=2)
@@ -287,6 +289,54 @@ def test_extract_activations_logic_offline():
     assert np.allclose(acts[1, 0, :], 7.0), acts[1, 0]
     assert np.allclose(acts[0, 2, :], 5.0), acts[0, 2]  # layer 2 adds 2
     print("extract_activations tensor logic OK")
+
+
+def test_inkling_build_messages_uses_reasoning_content():
+    """Inkling / multimodal probes put CoT in ``reasoning_content``, not Qwen ``<think>`` tags.
+    No weight download — just the message-shape contract used by the HF chat template."""
+    from monitordecorrelation.whitebox.model import WhiteBoxModel, _is_multimodal_config
+
+    class _Cfg:
+        model_type = "inkling_mm_model"
+        architectures = ["InklingForConditionalGeneration"]
+
+    assert _is_multimodal_config(_Cfg())
+
+    m = WhiteBoxModel.__new__(WhiteBoxModel)
+    m._multimodal = True
+    m.model_name = "thinkingmachines/Inkling-Small"
+    m.reasoning_effort = "high"
+    m.processor = None
+    m.tokenizer = None
+
+    msgs = m._build_messages("q?", "think hard", "42", follow_up=("Did you respond truthfully?", "Yes"))
+    assert msgs[0] == {"role": "user", "content": "q?"}
+    assert msgs[1] == {"role": "assistant", "content": "42", "reasoning_content": "think hard"}
+    assert msgs[2] == {"role": "user", "content": "Did you respond truthfully?"}
+    assert msgs[3] == {"role": "assistant", "content": "Yes"}
+    # empty CoT → no reasoning_content key (template skips thinking channel)
+    msgs2 = m._build_messages("q?", "", "42", follow_up=None)
+    assert msgs2[1] == {"role": "assistant", "content": "42"}
+    assert "reasoning_content" not in msgs2[1]
+
+    # Qwen path still folds CoT into content
+    m._multimodal = False
+    msgs_q = m._build_messages("q?", "think hard", "42", follow_up=None)
+    assert msgs_q[1]["content"] == "<think>think hard</think>\n42"
+    assert "reasoning_content" not in msgs_q[1]
+
+    # multimodal _render uses processor.apply_chat_template + reasoning_effort
+    class _Proc:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kw):
+            assert kw.get("reasoning_effort") == "high"
+            assert messages[1].get("reasoning_content") == "think hard"
+            return "RENDERED"
+
+    m._multimodal = True
+    m.processor = _Proc()
+    m.tokenizer = _Proc()  # unused when processor is set
+    assert m._render(("q?", "think hard", "42"), follow_up=None) == "RENDERED"
+    print("inkling build_messages OK")
 
 
 def test_whitebox_model_end_to_end():
@@ -328,6 +378,7 @@ if __name__ == "__main__":
     test_load_saved_rollouts_fixture()
     test_degradation_matrix()
     test_extract_activations_logic_offline()
+    test_inkling_build_messages_uses_reasoning_content()
     test_whitebox_model_end_to_end()
     print("ALL PASS")
 

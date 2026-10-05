@@ -6,8 +6,10 @@ the residual stream at the **final token** of that follow-up, per layer. The *sa
 applied at train and deploy time.
 
 Model-agnostic: default is a tiny ``Qwen/Qwen3-0.6B`` for local/CPU validation; ``Qwen/Qwen3-8B`` for
-the real run is just a ``model_name`` arg. Device auto-selects cuda -> mps -> cpu; dtype is bf16 on
-accelerators, fp32 on CPU.
+the real run is just a ``model_name`` arg. Multimodal policies (Inkling: ``inkling_mm_model``) load via
+``AutoModelForMultimodalLM`` + ``AutoProcessor`` and put CoT in ``reasoning_content`` rather than
+Qwen ``<think>`` tags. Device auto-selects cuda -> mps -> cpu for CausalLM; multimodal uses
+``device_map="auto"``. Dtype is bf16 on accelerators, fp32 on CPU.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ from monitordecorrelation.types import Rollout
 FOLLOWUP_QUESTION = "Did you respond truthfully?"
 FOLLOWUP_ANSWER = "Yes"
 DEFAULT_FOLLOWUP = (FOLLOWUP_QUESTION, FOLLOWUP_ANSWER)
+
+# Matches ``DEFAULT_THINKING_EFFORT`` (0.9) in rl/renderers — Inkling HF chat template string form.
+DEFAULT_REASONING_EFFORT = "high"
 
 # An item can be a Rollout or a raw (question, cot, answer) triple.
 Item = Union[Rollout, "tuple[str, str, str]"]
@@ -48,12 +53,30 @@ def _as_triple(item: Item) -> tuple[str, str, str]:
 
 def fold_assistant(cot: str, answer: str) -> str:
     """The assistant message the probe reads: CoT wrapped in think tags + the answer. Shared so
-    train-time (dataset adapters) and deploy-time (live rollouts) produce byte-identical text."""
+    train-time (dataset adapters) and deploy-time (live rollouts) produce byte-identical text.
+
+    Qwen / HF-chat only — Inkling puts CoT in ``reasoning_content`` (see ``_build_messages``)."""
     return f"<think>{cot}</think>\n{answer}" if cot else answer
+
+
+def _is_tml_model_name(model_name: str) -> bool:
+    """Same predicate as ``rl.renderers.is_tml_policy`` (Inkling / thinkingmachines/*), kept local so
+    whitebox does not import the RL renderer stack (tinker)."""
+    return model_name.split(":")[0].startswith("thinkingmachines/")
+
+
+def _is_multimodal_config(config) -> bool:
+    """True for Inkling-style multimodal LMs (``inkling_mm_model``, ``*ForConditionalGeneration``)."""
+    mt = (getattr(config, "model_type", None) or "").lower()
+    if "inkling" in mt or mt.endswith("_mm_model"):
+        return True
+    arches = getattr(config, "architectures", None) or []
+    return any(isinstance(a, str) and a.endswith("ForConditionalGeneration") for a in arches)
 
 
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
+    _multimodal: bool = False  # class default for __new__ stubs (CausalLM / Qwen path)
     # Serializes local activation reads. One model is shared by every probe on it
     # (experiment_config.build_monitors), and the RL loop can score it from the training thread and a
     # background eval at once — neither the forward pass nor the tokenizer (``padding_side`` is set per
@@ -63,12 +86,15 @@ class WhiteBoxModel:
     _lock = threading.Lock()
 
     def __init__(self, model_name: str = "Qwen/Qwen3-0.6B", device: str | None = None,
-                 server_url: str | None = None) -> None:
+                 server_url: str | None = None,
+                 reasoning_effort: str = DEFAULT_REASONING_EFFORT) -> None:
         """Local mode (default): load the HF model for activation reads. **Remote mode** (``server_url``
         set): load NOTHING locally — proxy ``extract_activations`` to a shared ``probe_server.py`` that
         holds one copy of the model for all runs. Same ``.extract_activations`` interface either way, so
         ``ProbeMonitor`` is unchanged. Remote mode removes the per-run 16 GB model copy → far higher
-        run-parallelism (bounded then by tinker/API limits, not local GPU memory)."""
+        run-parallelism (bounded then by tinker/API limits, not local GPU memory).
+
+        ``reasoning_effort`` only affects multimodal (Inkling) chat templating; ignored for CausalLM."""
         self.remote = server_url is not None
         if self.remote:
             import json
@@ -82,20 +108,52 @@ class WhiteBoxModel:
             return
 
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
         self.model_name = model_name
-        self.device = device or _pick_device()
-        self.dtype = torch.bfloat16 if self.device in ("cuda", "mps") else torch.float32
+        self.reasoning_effort = reasoning_effort
+        self.dtype = torch.bfloat16 if (device or _pick_device()) in ("cuda", "mps") else torch.float32
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=self.dtype, output_hidden_states=True
-        )
-        self.model.to(self.device)
-        self.model.eval()
+        try:
+            config = AutoConfig.from_pretrained(model_name)
+        except ValueError as e:
+            raise ValueError(
+                f"Transformers does not recognize the architecture for {model_name!r}. "
+                f"Inkling needs transformers>=5.14.0 (this env may still be on an older pin from "
+                f"tinker-cookbook). Original error: {e}"
+            ) from e
+
+        self._multimodal = _is_multimodal_config(config) or _is_tml_model_name(model_name)
+        if self._multimodal:
+            from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+            # Multimodal MoEs (Inkling) are huge — accelerate places shards; do not .to(device).
+            self.processor = AutoProcessor.from_pretrained(model_name)
+            self.tokenizer = getattr(self.processor, "tokenizer", self.processor)
+            if getattr(self.tokenizer, "pad_token", None) is None and getattr(
+                self.tokenizer, "eos_token", None
+            ) is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model = AutoModelForMultimodalLM.from_pretrained(
+                model_name,
+                dtype=self.dtype,
+                device_map="auto",
+                output_hidden_states=True,
+            )
+            self.model.eval()
+            self.device = str(next(self.model.parameters()).device)
+        else:
+            self.processor = None
+            self.device = device or _pick_device()
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, dtype=self.dtype, output_hidden_states=True
+            )
+            self.model.to(self.device)
+            self.model.eval()
+
         self._lock = threading.Lock()
 
     def _extract_remote(self, items, follow_up, batch_size, preserve_thinking) -> np.ndarray:
@@ -118,17 +176,37 @@ class WhiteBoxModel:
     def _build_messages(
         self, question: str, cot: str, answer: str, follow_up: tuple[str, str] | None
     ) -> list[dict]:
-        """The rollout turn (+ optional follow-up turn). The CoT is folded into the assistant message.
+        """The rollout turn (+ optional follow-up turn).
 
         ``follow_up=None`` → **within-generation**: the rollout is the FINAL turn, so we read its own
         last answer token with the CoT still in context. Required for CoT probes on *thinking* models:
         the chat template strips ``<think>`` from non-final turns, so the follow-up variant (a later
         turn) is structurally no-CoT. ``follow_up=(q, a)`` → the Atlas follow-up technique (no-CoT on
-        thinking models, fine for non-reasoning models)."""
-        assistant = fold_assistant(cot, answer)
+        thinking models, fine for non-reasoning models).
+
+        Inkling / multimodal: CoT goes in ``reasoning_content`` (HF chat template →
+        ``<|content_thinking|>``); Qwen / HF-chat: CoT is folded into content via ``fold_assistant``.
+        """
+        if self._multimodal:
+            assistant: dict = {"role": "assistant", "content": answer}
+            if cot:
+                assistant["reasoning_content"] = cot
+            msgs = [
+                {"role": "user", "content": question},
+                assistant,
+            ]
+            if follow_up is None:
+                return msgs
+            fu_q, fu_a = follow_up
+            return msgs + [
+                {"role": "user", "content": fu_q},
+                {"role": "assistant", "content": fu_a},
+            ]
+
+        assistant_text = fold_assistant(cot, answer)
         msgs = [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": assistant},
+            {"role": "assistant", "content": assistant_text},
         ]
         if follow_up is None:
             return msgs
@@ -143,7 +221,9 @@ class WhiteBoxModel:
         it. Qwen's default strips reasoning from turns BEFORE the last user query, which deletes the
         rollout's CoT once a follow-up turn is appended — so the follow-up technique is otherwise no-CoT
         on thinking models. Returns None if the template isn't the known Qwen structure (graceful: no
-        preservation). Cached."""
+        preservation). Cached. No-op for Inkling (its template already keeps ``reasoning_content``)."""
+        if self._multimodal:
+            return None
         cache = getattr(self, "_preserve_tmpl", "UNSET")
         if cache != "UNSET":
             return cache
@@ -168,10 +248,18 @@ class WhiteBoxModel:
 
         ``add_generation_prompt=False`` because the response is already present — we read activations
         over a complete conversation. ``preserve_thinking=True`` uses a patched template that keeps the
-        rollout's `<think>` even when a follow-up turn follows it (else Qwen strips it)."""
+        rollout's `<think>` even when a follow-up turn follows it (else Qwen strips it). Inkling: uses
+        the processor template with ``reasoning_effort``; ``preserve_thinking`` is a no-op."""
         q, cot, ans = _as_triple(item)
         messages = self._build_messages(q, cot, ans, follow_up)
         kw = dict(tokenize=False, add_generation_prompt=False)
+
+        if self._multimodal:
+            proc = self.processor if self.processor is not None else self.tokenizer
+            return proc.apply_chat_template(
+                messages, reasoning_effort=self.reasoning_effort, **kw
+            )
+
         if preserve_thinking:
             patched = self._thinking_preserving_template()
             if patched is not None:
@@ -234,9 +322,10 @@ class WhiteBoxModel:
                 # Free the batch's activations before the next chunk so peak memory tracks batch_size,
                 # not the total number of rollouts (lets eval_size grow without OOM).
                 del enc, out, last
-                if self.device == "mps":
+                device = str(self.device)
+                if device == "mps":
                     torch.mps.empty_cache()
-                elif self.device == "cuda":
+                elif device.startswith("cuda"):
                     torch.cuda.empty_cache()
         finally:
             self.tokenizer.padding_side = prev_side
@@ -244,7 +333,7 @@ class WhiteBoxModel:
 
     @property
     def _text_config(self):
-        # Newer archs (e.g. Qwen3.5) nest hidden_size/num_hidden_layers under a text sub-config.
+        # Newer archs (e.g. Qwen3.5, Inkling) nest hidden_size/num_hidden_layers under a text sub-config.
         cfg = self.model.config
         return cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg
 
