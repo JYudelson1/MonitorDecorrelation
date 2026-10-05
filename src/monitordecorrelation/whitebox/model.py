@@ -173,12 +173,13 @@ class WhiteBoxModel:
             ) is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             try:
+                # Request hidden states at forward time (``_extract_local``); Inkling's ctor rejects
+                # ``output_hidden_states`` as a from_pretrained / __init__ kwarg.
                 self.model = AutoModelForMultimodalLM.from_pretrained(
                     model_name,
                     config=config,
                     dtype=self.dtype,
                     device_map="auto",
-                    output_hidden_states=True,
                 )
             except RuntimeError as e:
                 raise RuntimeError(
