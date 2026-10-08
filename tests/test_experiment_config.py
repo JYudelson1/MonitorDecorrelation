@@ -533,6 +533,82 @@ def test_eval_terminal_monitors_baseline_propagates_verifier_mode_to_the_env(mon
     assert env.max_turns == 4 and env.output_view == "transcript" and env.command_timeout == 30.0
 
 
+@pytest.mark.parametrize("sets, want", [
+    ([], dict(policy="thinkingmachines/Inkling-Small", seed=0, effort=0.5, think_budget=None,
+              answer_tokens=None, max_tokens=3072)),
+    (["policy=Qwen/Qwen3-8B", "thinking_effort=null", "think_budget=2048", "answer_tokens=512",
+      "max_tokens=null", "seed=7"],
+     dict(policy="Qwen/Qwen3-8B", seed=7, effort=None, think_budget=2048, answer_tokens=512, max_tokens=None)),
+])
+def test_eval_terminal_monitors_baseline_samples_the_configs_policy_seed_and_effort(monkeypatch, tmp_path,
+                                                                                     sets, want):
+    """The policy / seed / thinking effort are config fields (overridable with --set), not flags: the
+    sampler, renderer, env and episode driver all get the config's values."""
+    import sys
+
+    import monitordecorrelation.monitors.vllm as vllm_mod
+
+    ev = _load_script("eval_terminal_monitors_baseline")
+    seen = {}
+
+    class _Sampling:
+        def create_sampling_client(self, base_model):
+            seen["sampled"] = base_model
+            return type("S", (), {"get_tokenizer": lambda self: None})()
+
+    def renderer(model, effort, tokenizer):
+        seen["rendered"], seen["effort"] = model, effort
+
+    class SpyEnv(ev.TerminalVerifierEnv):
+        @classmethod
+        def from_task(cls, **kw):
+            seen["env_seed"] = kw["seed"]
+            return super().from_task(**kw)
+
+    def episodes(*a, **kw):
+        seen["episodes"] = kw
+        raise _Stop
+
+    monkeypatch.setattr(vllm_mod, "check_server", lambda *a, **k: None)  # no live vLLM server in tests
+    monkeypatch.setattr(ev, "TerminalVerifierEnv", SpyEnv)
+    monkeypatch.setattr(ev.tinker, "ServiceClient", _Sampling)
+    monkeypatch.setattr(ev, "make_renderer", renderer)
+    monkeypatch.setattr(ev, "MonitorScorer", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "run_episodes", episodes)
+    monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(_REPO / _TV_CONFIG),
+                                      "--n-prompts", "4", "--out", str(tmp_path / "b.json"), "--set", *sets])
+    with pytest.raises(_Stop):
+        ev.main()
+    assert seen["sampled"] == seen["rendered"] == want["policy"]
+    assert seen["effort"] == want["effort"]
+    assert seen["env_seed"] == seen["episodes"]["seed"] == want["seed"]
+    for k in ("think_budget", "answer_tokens", "max_tokens"):
+        assert seen["episodes"][k] == want[k], k
+
+
+@pytest.mark.parametrize("argv, err", [
+    (["--model", "Qwen/Qwen3-8B"], "unrecognized arguments"),
+    (["--seed", "1"], "unrecognized arguments"),
+    (["--effort", "0.5"], "unrecognized arguments"),
+    # a policy switch must be validated as a whole: Inkling's effort can't ride along onto Qwen
+    (["--set", "policy=Qwen/Qwen3-8B"], "thinking_effort"),
+    # still refused: fields the script never reads
+    (["--set", "n_steps=5"], "never reads"),
+])
+def test_eval_terminal_monitors_baseline_refuses_the_old_flags_and_inconsistent_policy(monkeypatch, capsys,
+                                                                                        argv, err):
+    import sys
+
+    from pydantic import ValidationError
+
+    ev = _load_script("eval_terminal_monitors_baseline")
+    monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(_REPO / _TV_CONFIG),
+                                      *argv])
+    with pytest.raises((SystemExit, ValidationError)) as e:
+        ev.main()
+    assert err in str(e.value) + capsys.readouterr().err
+
+
 # ---- nothing a config sets may be silently ignored ----------------------------------------------
 # One test per relevance rule. The shape is always the same: the key is REQUIRED where it takes
 # effect and REJECTED where it does not, so a run can never quietly use something other than what the

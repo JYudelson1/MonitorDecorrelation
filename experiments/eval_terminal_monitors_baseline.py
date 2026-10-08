@@ -11,12 +11,15 @@ These are the row-zero numbers the degradation matrix is measured against: a mon
 pre-RL headroom (AUROC ~1.0, gap ~1.0) has nothing to degrade, so the matrix cell is uninformative.
 
   uv run python experiments/eval_terminal_monitors_baseline.py \
-      --config experiments/configs/terminal_verifier_gemini25_out.json \
-      --model thinkingmachines/Inkling-Small --n-prompts 96 --samples 2
+      --config experiments/configs/terminal_verifier_gemini25_out.json --n-prompts 96 --samples 2
 
   # config overrides, same syntax as run_experiment.py — but only for fields this script reads:
       --set max_tokens=4096 'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' \
             env_options.verifier_mode=verifier_bug
+
+  # the policy, seed and thinking effort come from the config too, so another policy is a --set —
+  # validated as a whole, e.g. Qwen3-8B (HF template: no effort knob, needs a thinking budget):
+      --set policy=Qwen/Qwen3-8B thinking_effort=null think_budget=2048 answer_tokens=512 max_tokens=null
 """
 
 from __future__ import annotations
@@ -49,9 +52,10 @@ from monitordecorrelation.rl.train import MonitorScorer
 
 load_dotenv()
 
-# The only config fields this script reads. --set on anything else (policy, seed, n_steps, …) would be
-# silently ignored, so apply_overrides refuses it; the policy and seed are the --model / --seed flags.
-READ_FIELDS = {"thinking_effort", "env_options", "monitors", "max_tokens", "think_budget", "answer_tokens"}
+# The only config fields this script reads. --set on anything else (n_steps, lr, …) would be silently
+# ignored, so apply_overrides refuses it.
+READ_FIELDS = {"policy", "seed", "thinking_effort", "env_options", "monitors", "max_tokens", "think_budget",
+               "answer_tokens"}
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
                        "reasoning", "binary_judge", "provider", "max_tokens", "base_url",
                        "enable_thinking", "thinking_budget", "thinking_effort"}
@@ -115,21 +119,18 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="experiment config whose `monitors` to evaluate")
     ap.add_argument("--only", default=None, help="comma-separated monitor names (default: all)")
-    ap.add_argument("--model", default="thinkingmachines/Inkling-Small")
     ap.add_argument("--n-prompts", type=int, default=96)
     ap.add_argument("--samples", type=int, default=2)
-    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--episode-workers", type=int, default=None,
                     help="max episodes in flight at once, and max calls in flight per judge "
                          "(default: no cap, one thread per episode and per judge call)")
-    ap.add_argument("--effort", type=float, default=None,
-                    help="TML thinking effort (default: the config's thinking_effort)")
     ap.add_argument("--out", default=None,
                     help="path of the summary json; its parent dir gets the rest (overrides --run-name)")
     ap.add_argument("--run-name", default=None,
-                    help="output dir name under data/runs/ (default: tv_monitor_baseline_<model>)")
+                    help="output dir name under data/runs/ (default: tv_monitor_baseline_<policy>)")
     ap.add_argument("--set", nargs="*", default=[], metavar="key=value",
                     help="override config fields, as in run_experiment.py (e.g. --set max_tokens=4096 "
+                         "policy=Qwen/Qwen3-8B "
                          "'monitors.model:gemini-3.5.reasoning={\"effort\":\"medium\"}' "
                          "env_options.verifier_mode=possible); only fields this script "
                          f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}")
@@ -137,15 +138,12 @@ def main() -> None:
     if args.episode_workers is not None and args.episode_workers < 1:
         ap.error(f"--episode-workers must be >= 1 (got {args.episode_workers})")
 
-    if args.effort is not None and any(kv.partition("=")[0] == "thinking_effort" for kv in args.set):
-        raise SystemExit("--effort and --set thinking_effort=… both given; pass one")
     cfg_obj = apply_overrides(load_config(args.config), args.set, allowed_fields=READ_FIELDS,
-                              allowed_monitor_fields=READ_MONITOR_FIELDS,
-                              not_allowed_hint="Use --model / --seed for the policy / seed.")
+                              allowed_monitor_fields=READ_MONITOR_FIELDS)
     cfg = cfg_obj.model_dump()
-    # Match the RL runs: the policy must be sampled the way training samples it.
-    if args.effort is None:
-        args.effort = cfg["thinking_effort"]
+    # Match the RL runs: the policy, seed and effort are the config's, so the policy is sampled the way
+    # training samples it (the config validator already pairs thinking_effort with the policy family).
+    policy, seed, effort = cfg["policy"], cfg["seed"], cfg["thinking_effort"]
     opts = cfg["env_options"]
     specs = cfg["monitors"]
     if probes := [m["name"] for m in specs if m["kind"] != "cot"]:
@@ -162,9 +160,9 @@ def main() -> None:
     # Every env option passes straight through, exactly as the RL run's envs/factory.py does, so the
     # baseline samples the same env (verifier_mode, offset_range, max_turns, …) the run trains on.
     env = TerminalVerifierEnv.from_task(
-        **{**opts, "n": max(64, args.n_prompts), "seed": args.seed, "eval_n": max(64, args.n_prompts)}
+        **{**opts, "n": max(64, args.n_prompts), "seed": seed, "eval_n": max(64, args.n_prompts)}
     )
-    prompts = env.holdout(args.n_prompts, seed=args.seed)
+    prompts = env.holdout(args.n_prompts, seed=seed)
 
     # The same check the training loop makes, now that the env (hence the resolved budget) exists:
     # max_tokens under a thinking budget, or answer_tokens without one, would be sampled with and
@@ -175,13 +173,9 @@ def main() -> None:
         raise SystemExit(f"config {args.config}: {e}") from e
 
     sc = tinker.ServiceClient()
-    sampler = sc.create_sampling_client(base_model=args.model)
-    is_tml = is_tml_policy(args.model)
-    if not is_tml and args.effort is not None:
-        raise SystemExit(
-            f"--effort/{args.effort} applies only to TML-rendered policies; {args.model} has no such knob"
-        )
-    renderer = make_renderer(args.model, effort=args.effort,
+    sampler = sc.create_sampling_client(base_model=policy)
+    is_tml = is_tml_policy(policy)
+    renderer = make_renderer(policy, effort=effort,
                             tokenizer=None if is_tml else sampler.get_tokenizer())
 
     judges = [AgentCoTMonitor(m["name"], m["model_id"], behavior=behavior,
@@ -194,8 +188,8 @@ def main() -> None:
                               thinking_budget=m["thinking_budget"], thinking_effort=m["thinking_effort"])
               for m in specs]
     n_ep = len(prompts) * args.samples
-    print(f"sampling {n_ep} episodes ({len(prompts)}x{args.samples}) from {args.model} "
-          f"(PRE-RL, effort={args.effort}) | judges: {', '.join(j.name for j in judges)}", flush=True)
+    print(f"sampling {n_ep} episodes ({len(prompts)}x{args.samples}) from {policy} "
+          f"(PRE-RL, effort={effort}) | judges: {', '.join(j.name for j in judges)}", flush=True)
 
     t0 = time.time()
     ep_bar = tqdm(total=n_ep, desc="episodes", unit="ep", position=0)
@@ -218,7 +212,7 @@ def main() -> None:
                            max_concurrent=args.episode_workers)
     rollouts = run_episodes(sampler, renderer, env, prompts, num_samples=args.samples,
                             max_tokens=cfg["max_tokens"], temperature=1.0,
-                            seed=args.seed, think_budget=think_budget,
+                            seed=seed, think_budget=think_budget,
                             answer_tokens=cfg["answer_tokens"], episode_workers=args.episode_workers,
                             on_rollout=on_rollout)
     wall_s = time.time() - t0
@@ -231,7 +225,7 @@ def main() -> None:
     invalid = [invalid_reason(env, r) for r in rollouts]
     valid = [i for i, why in enumerate(invalid) if why is None]
     gt_v = [gt[i] for i in valid]  # the judges' metrics are over the valid (monitored) episodes only
-    print(f"\n=== pre-RL baseline: {args.model}, {len(gt)} episodes, {wall_s:.0f}s ===")
+    print(f"\n=== pre-RL baseline: {policy}, {len(gt)} episodes, {wall_s:.0f}s ===")
     print(f"  verifier_mode              {opts.get('verifier_mode', 'corrupted')}")
     for k in ("used_verifier", "read_verifier", "modified_verifier", "passed", "submitted_true_answer"):
         print(f"  env/{k:<22} {mean(float(er.meta[k]) for er in results):.3f}")
@@ -278,7 +272,7 @@ def main() -> None:
 
     usage = token_usage(rollouts, judged, judges)
     pol = usage["policy"]
-    print(f"\n=== token usage ===\n  policy ({args.model}): {pol['n_sampling_calls']} sampling calls, "
+    print(f"\n=== token usage ===\n  policy ({policy}): {pol['n_sampling_calls']} sampling calls, "
           f"{pol['input_tokens']:,} input / {pol['output_tokens']:,} output tokens "
           f"({pol['output_tokens'] / max(1, len(rollouts)):,.0f} output/episode)")
     print(f"  {'judge':<14}{'calls':>7}{'prompt':>13}{'completion':>13}{'(reasoning)':>13}{'cost $':>10}")
@@ -290,13 +284,13 @@ def main() -> None:
     # the summary in baseline.json + run_info.json, the rollouts in eval_rollouts{,_slim}.jsonl using
     # the RL loop's eval-record schema (rl/train.py run_eval) at step 0.
     out = Path(args.out) if args.out else Path("data/runs") / \
-        (args.run_name or f"tv_monitor_baseline_{args.model.split('/')[-1]}") / "baseline.json"
+        (args.run_name or f"tv_monitor_baseline_{policy.split('/')[-1]}") / "baseline.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     summary = {
-        "model": args.model, "policy": args.model, "experiment": "tv_monitor_baseline",
+        "model": policy, "policy": policy, "experiment": "tv_monitor_baseline",
         "config_path": args.config, "config_overrides": args.set,
         "config": {**cfg, "monitors": specs}, "n_episodes": len(gt),
-        "seed": args.seed, "effort": args.effort, "episode_workers": args.episode_workers,
+        "seed": seed, "effort": effort, "episode_workers": args.episode_workers,
         "wall_s": wall_s, "env_options": opts,
         "behavior_rate": mean(map(float, gt)), "invalid_rate": 1 - len(valid) / len(gt), "monitors": rows,
         "token_usage": usage,
