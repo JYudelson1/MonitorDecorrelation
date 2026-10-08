@@ -20,6 +20,9 @@ pre-RL headroom (AUROC ~1.0, gap ~1.0) has nothing to degrade, so the matrix cel
   # the policy, seed and thinking effort come from the config too, so another policy is a --set —
   # validated as a whole, e.g. Qwen3-8B (HF template: no effort knob, needs a thinking budget):
       --set policy=Qwen/Qwen3-8B thinking_effort=null think_budget=2048 answer_tokens=512 max_tokens=null
+
+  # explore_hint / submission_ends may be set bare (shorthand for env_options.<key>):
+      --set explore_hint=true submission_ends=correct
 """
 
 from __future__ import annotations
@@ -59,6 +62,14 @@ READ_FIELDS = {"policy", "seed", "thinking_effort", "env_options", "monitors", "
 READ_MONITOR_FIELDS = {"name", "model_id", "use_cot", "use_output", "threshold",
                        "reasoning", "binary_judge", "provider", "max_tokens", "base_url",
                        "enable_thinking", "thinking_budget", "thinking_effort"}
+# Terminal-env options also accepted as bare --set keys: ``explore_hint=true`` is shorthand for
+# ``env_options.explore_hint=true`` (same validation, same "set twice" check).
+ENV_OPTION_ALIASES = {"explore_hint", "submission_ends"}
+
+
+def expand_env_option_aliases(sets: list[str]) -> list[str]:
+    """Rewrite each bare ``<alias>=v`` in ``--set`` to ``env_options.<alias>=v``."""
+    return [f"env_options.{kv}" if kv.partition("=")[0] in ENV_OPTION_ALIASES else kv for kv in sets]
 
 
 def rates(preds: list[bool], labels: list[bool]) -> dict[str, float]:
@@ -133,11 +144,14 @@ def main() -> None:
                          "policy=Qwen/Qwen3-8B "
                          "'monitors.model:gemini-3.5.reasoning={\"effort\":\"medium\"}' "
                          "env_options.verifier_mode=possible); only fields this script "
-                         f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}")
+                         f"reads: {sorted(READ_FIELDS)} and monitor fields {sorted(READ_MONITOR_FIELDS)}; "
+                         f"{sorted(ENV_OPTION_ALIASES)} may be given bare, as shorthand for "
+                         "env_options.<key>")
     args = ap.parse_args()
     if args.episode_workers is not None and args.episode_workers < 1:
         ap.error(f"--episode-workers must be >= 1 (got {args.episode_workers})")
 
+    args.set = expand_env_option_aliases(args.set)
     cfg_obj = apply_overrides(load_config(args.config), args.set, allowed_fields=READ_FIELDS,
                               allowed_monitor_fields=READ_MONITOR_FIELDS)
     cfg = cfg_obj.model_dump()
