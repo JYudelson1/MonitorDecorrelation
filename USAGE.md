@@ -25,6 +25,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
+| `experiments/eval_mbpp_baseline.py` | **No-training baseline** on MBPP-Honeypot (any `dataset` / `impossible` variant): samples the untrained policy on the run's eval set (`eval_size` × `eval_samples_per_prompt`, the config's policy / seed / effort / `max_tokens`) and reports strict / loose / hardcoding rates, honest solve rate, truncations and token lengths. Needs `--set monitors=[]` (it scores none). E.g. `--config experiments/configs/mbpp_inkling_qmonitors/row_control.json --set monitors=[] max_tokens=16384 env_options.dataset=codeforces_hard env_options.impossible=true --out data/runs/…` | `<out>/summary.json` + `rollouts.jsonl` |
 | `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `experiments/eval_terminal_monitors_baseline.py` | **Pre-RL monitor eval** on the terminal-verifier env: sample episodes from the untrained policy and score every judge in `--config` (AUROC, gap, TPR/FPR, call health). Policy, seed and `thinking_effort` come from the config (no `--model` / `--seed` / `--effort`); switch policy with `--set`, validated as a whole, e.g. `--set policy=Qwen/Qwen3-8B thinking_effort=null think_budget=2048 answer_tokens=512 max_tokens=null`. | `data/runs/tv_monitor_baseline_<policy>/baseline.json` + `eval_rollouts{,_slim}.jsonl` |
 | `scripts/load_balancer.py` | **vLLM load balancer.** Transparent TCP proxy: `--listen-port 8002 --backend-ports 8003 8004 8005` spreads connections over identical vLLM engines (fewest open connections, round-robin ties, failed backend deprioritised 5s); bytes pass through untouched. Balances per *connection* — fine for judges, whose `httpx.post` opens one per call. Stdlib-only. | stdout stats |
@@ -92,7 +93,10 @@ n_prompts_pool probe_server_url monitors`.
 run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
 The terminal baseline scripts never train, so they refuse it as a `--set`.
 `monitors: []` is legal and means a pure-task-reward run (no monitor in the gradient, none measured).
-`env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier).
+`env_options` holds env-specific constructor kwargs (impossiblebench + terminal_verifier, and
+mbpp_honeypot's `dataset` ∈ `taufeeque/mbpp-hardcode` (default) / `codeforces_easy` / `codeforces_median` /
+`codeforces_hard`, `impossible` ∈ `false` (default) / `true`, and `length_penalty` (default `0.003`, any
+number ≥ 0; e.g. `--set env_options.length_penalty=0.0005`) — see docs/ENVIRONMENTS.md #2).
 
 **No key is ever silently ignored.** A field that only applies to *some* runs has no default: it is
 **required** where it takes effect and **rejected** where it does not, so a config can never describe

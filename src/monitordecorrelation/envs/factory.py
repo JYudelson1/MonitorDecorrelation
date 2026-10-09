@@ -9,8 +9,8 @@ selects the slice where that means something — sycophancy (political/nlp/…),
 (impossible = oneoff + conflicting, or either alone) and terminal_verifier (the reasoning-gym task);
 MBPP has no slices, and ``ExperimentConfig`` rejects a ``subset`` for it rather than dropping it here
 (see ``ENVS_WITH_SUBSET``). Each env validates the VALUE and raises on one it does not know.
-``cfg.env_options`` passes env-specific knobs (impossiblebench / terminal_verifier) straight to the
-constructor, which validates them.
+``cfg.env_options`` passes env-specific knobs (mbpp_honeypot / impossiblebench / terminal_verifier)
+straight to the constructor, which validates them.
 
 NOTE (leakage / task #25 split): MBPP's ``holdout`` currently samples random items, NOT coordinated
 with which task_ids the iid MBPP probe trained on. The iid-probe-vs-eval split must be unified before a
@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 
 def make_env(cfg: "ExperimentConfig"):
     """Construct the environment named by ``cfg.env``. Raises ValueError on an unknown name."""
-    if cfg.env_options and cfg.env not in ("impossiblebench", "terminal_verifier"):
-        raise ValueError(f"env_options is only supported by the impossiblebench / terminal_verifier "
-                         f"envs, not {cfg.env!r}")
+    if cfg.env_options and cfg.env not in ("mbpp_honeypot", "impossiblebench", "terminal_verifier"):
+        raise ValueError(f"env_options is only supported by the mbpp_honeypot / impossiblebench / "
+                         f"terminal_verifier envs, not {cfg.env!r}")
     if cfg.env == "sycophancy":
         from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 
@@ -37,7 +37,13 @@ def make_env(cfg: "ExperimentConfig"):
     if cfg.env == "mbpp_honeypot":
         from monitordecorrelation.envs.mbpp_honeypot import MbppHoneypotEnv
 
-        return MbppHoneypotEnv.from_dataset(n=cfg.n_prompts_pool, seed=cfg.seed)
+        # env_options: dataset (MBPP or a Codeforces tier), impossible, length_penalty — see the env's
+        # docstring.
+        unknown = set(cfg.env_options or {}) - {"dataset", "impossible", "length_penalty"}
+        if unknown:
+            raise ValueError(f"mbpp_honeypot: unknown env_options {sorted(unknown)}; known: "
+                             "['dataset', 'impossible', 'length_penalty']")
+        return MbppHoneypotEnv.from_dataset(n=cfg.n_prompts_pool, seed=cfg.seed, **(cfg.env_options or {}))
     if cfg.env == "impossiblebench":
         from monitordecorrelation.envs.impossiblebench import ImpossibleBenchEnv
 

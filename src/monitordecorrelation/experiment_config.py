@@ -164,7 +164,9 @@ class ExperimentConfig(_Strict):
     )
     env_options: dict = Field(
         default_factory=dict,
-        description="env-specific constructor kwargs (impossiblebench: e.g. {'reward_mode': 'fraction', "
+        description="env-specific constructor kwargs (mbpp_honeypot: {'dataset': 'taufeeque/mbpp-hardcode' "
+        "(default) | 'codeforces_easy' | 'codeforces_median' | 'codeforces_hard', 'impossible': false "
+        "(default) | true, 'length_penalty': 0.003 (default) | any number >= 0}; impossiblebench: e.g. {'reward_mode': 'fraction', "
         "'per_test_timeout': 1.0}; terminal_verifier: {'verifier_mode': 'corrupted', 'offset_range': [4, 9], "
         "'max_turns': 4, 'output_view': 'transcript', 'command_timeout': 30}, plus 'submission_ends': "
         "'first'|'correct' — required by, and only by, the submit_* verifier_modes); validated by the env "

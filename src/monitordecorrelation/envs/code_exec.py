@@ -61,3 +61,63 @@ def run_tests(code: str, tests: list[str], setup: str = "", timeout: float = 6.0
     bits = out.split("RESULTS:")[-1]
     bits = "".join(ch for ch in bits if ch in "01")[: len(tests)].ljust(len(tests), "0")
     return [ch == "1" for ch in bits]
+
+
+# --- stdin/stdout programs (Codeforces-style tests) ----------------------------------------------
+
+# Runs the candidate as ``__main__`` (so ``if __name__ == "__main__":`` guards fire) under an
+# address-space cap. A launcher rather than ``preexec_fn``: the RL loop grades from many threads, and
+# ``preexec_fn`` is not safe there.
+_IO_LAUNCHER = (
+    "import resource, runpy, sys\n"
+    "_lim = int(sys.argv[2]) * 1024 * 1024\n"
+    "resource.setrlimit(resource.RLIMIT_AS, (_lim, _lim))\n"
+    "sys.argv = sys.argv[1:2]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
+
+
+def _token_eq(got: str, want: str) -> bool:
+    if got == want:
+        return True
+    if want.lower() in ("yes", "no"):  # Codeforces' yes/no checkers ignore case
+        return got.lower() == want.lower()
+    if "." in want:  # a real-valued answer: absolute/relative 1e-6, the usual Codeforces tolerance
+        try:
+            g, w = float(got), float(want)
+        except ValueError:
+            return False
+        return abs(g - w) <= 1e-6 * max(1.0, abs(w))
+    return False
+
+
+def outputs_match(got: str, want: str) -> bool:
+    """Codeforces-style comparison: whitespace-separated tokens equal (yes/no case-insensitively,
+    decimals to 1e-6). Only used on problems without a custom checker (the loader drops those)."""
+    g, w = got.split(), want.split()
+    return len(g) == len(w) and all(_token_eq(a, b) for a, b in zip(g, w))
+
+
+def run_io_test(code: str, stdin: str, expected: str, *, timeout: float,
+                mem_mb: int = 2048) -> tuple[str, str | None]:
+    """Run ``code`` as a program on ``stdin`` → ``(status, stdout)``. ``status`` is ``"ok"`` (exit 0
+    and the output matches ``expected``), ``"wrong_answer"``, ``"runtime_error"`` or ``"timeout"``
+    (stdout None). Same trust model as :func:`run_tests` — a timeout + memory cap, not a sandbox."""
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="io_test_") as d:
+        path = os.path.join(d, "solution.py")
+        with open(path, "w") as f:
+            f.write(code or "")
+        try:
+            with code_exec_slot():
+                proc = subprocess.run(
+                    [sys.executable, "-c", _IO_LAUNCHER, path, str(mem_mb)], input=stdin,
+                    capture_output=True, text=True, timeout=timeout, cwd=d, errors="replace",
+                )
+        except subprocess.TimeoutExpired:
+            return "timeout", None
+    if proc.returncode != 0:
+        return "runtime_error", proc.stdout
+    return ("ok" if outputs_match(proc.stdout, expected) else "wrong_answer"), proc.stdout

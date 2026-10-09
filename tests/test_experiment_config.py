@@ -70,6 +70,14 @@ def test_make_env_dispatch(monkeypatch):
     assert isinstance(env, _Fake)
     assert calls == {"n": 7, "seed": 3}  # subset is (correctly) not passed to MBPP
 
+    # env_options pass through (dataset / impossible / length_penalty); anything else is refused
+    calls.clear()
+    opts = {"dataset": "codeforces_hard", "impossible": True, "length_penalty": 0.0005}
+    factory.make_env(_cfg(env="mbpp_honeypot", n_prompts_pool=7, seed=3, env_options=opts))
+    assert calls == {"n": 7, "seed": 3, **opts}
+    with pytest.raises(ValueError, match="unknown env_options"):
+        factory.make_env(_cfg(env="mbpp_honeypot", env_options={"timeout": 1.0}))
+
 
 def test_cot_monitor_inherits_env_behavior():
     """A CoT spec with no explicit behavior takes the env's behavior_name (reward_hacking for MBPP)."""
