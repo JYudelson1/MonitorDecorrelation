@@ -289,9 +289,10 @@ class SelectedProbe:
         np.savez(os.path.join(path, "probe.npz"), coef=self.coef.astype(np.float64),
                  intercept=np.array([self.intercept]), layer=np.array([self.layer]),
                  thresholds=np.array([self.threshold_1, self.threshold_5]))
-        with open(os.path.join(path, "meta.json"), "w") as fh:
-            json.dump({"layer": self.layer, "threshold_1": self.threshold_1, "threshold_5": self.threshold_5,
-                       "score": "sigmoid(coef . x[layer] + intercept - threshold_1)", **self.meta}, fh, indent=1)
+        with open(os.path.join(path, "meta.json"), "w") as fh:  # the probe's own fields win over a loaded meta's
+            json.dump({**self.meta, "layer": self.layer, "threshold_1": self.threshold_1,
+                       "threshold_5": self.threshold_5, "score": "sigmoid(coef . x[layer] + intercept - threshold_1)"},
+                      fh, indent=1)
 
     @classmethod
     def load(cls, path: str) -> "SelectedProbe":

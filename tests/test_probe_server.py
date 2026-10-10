@@ -171,6 +171,47 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
     assert got["golden"] == len(items) == 10  # fewer than N_GOLDEN episodes: all of them
     meta = json.load(open(out / "meta.json"))
     assert meta["name"] == "probe_iid_x" and meta["golden_tolerance"] == dp.MEAN_TOLERANCE and meta["effort"] == 0.5
+    assert set(got["serving_check"]) == {"test_auroc", "test_tpr_at_t1", "test_fpr_at_t1"}  # no diagnostics given
     scorer = ProbeScorer(world["model"], [str(out)])
     report = scorer.golden_check([str(out)], tolerance=meta["golden_tolerance"])
     assert report[probe_sha(str(out))]["n"] == got["golden"]
+    # serving on another reader: thresholds from that reader's honest dev episodes, its reader_info in the meta
+    items = {i: {**it, "split": "train"} for i, it in world["items"].items()}
+    p = dp.SelectedProbe.load(world["probe_dir"])
+    dp.serve_on(p, {"reader": "other", "reader_info": {"loader": "x"}}, items, str(root), VIEW, "followup")
+    src = dp.LayerSource(str(root / "terminal_prerl"), VIEW, "followup")
+    neg = [r for r, i in enumerate(src.ids) if not (items[i].get("diagnostics") or {}).get("used_verifier")]
+    want = np.percentile(p.logit(src.layer(p.layer))[neg], [99, 95])
+    np.testing.assert_allclose([p.threshold_1, p.threshold_5], want)
+    p.threshold_1 = 123.0  # the toy probe's logits are constant, so mark the threshold instead
+    p.save(str(tmp_path / "moved"))  # meta.json shows the probe's thresholds, not those of the meta it loaded
+    assert json.load(open(tmp_path / "moved" / "meta.json"))["threshold_1"] == 123.0 != p.meta["threshold_1"]
+    assert p.meta["reader_info"] == {"loader": "x"} and p.meta["trained_reader_info"] == world["probe"].meta["reader_info"]
+
+
+def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
+    """experiments/check_probe_server.py end to end on the tiny model: golden checks at both batchings, throughput,
+    and the HTTP server + monitor agreeing with the scorer."""
+    import importlib.util
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(os.path.dirname(__file__), "..", "experiments", f"{name}.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    dp, check = load("deploy_probes"), load("check_probe_server")
+    root = tmp_path / "features"
+    root.mkdir()
+    os.symlink(world["features"], root / "terminal_prerl")
+    items = {i: {**it, "split": "test"} for i, it in world["items"].items()}
+    deployed = tmp_path / "deployed"
+    dp.deploy(dp.SelectedProbe.load(world["probe_dir"]), world["probe_dir"],
+              str(deployed / "terminal_prerl" / VIEW / "followup"), "probe_iid_x", VIEW, "followup", items, str(root),
+              0.5, None, log=lambda m: None)
+    out = tmp_path / "check.json"
+    assert check.main(["--model", world["nvfp4_dir"], "--probes-root", str(deployed), "--out", str(out),
+                       "--device", "cpu"]) == 0
+    report = json.loads(out.read_text())
+    assert report["ok"] and set(report["throughput"]) == {"1", "65536"} and len(report["end_to_end"]) == 1
