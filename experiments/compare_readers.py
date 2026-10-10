@@ -44,8 +44,51 @@ import numpy as np
 
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, load_items
 
-PROBES = [("terminal_prerl", "with_reasoning", "followup"), ("terminal_prerl", "without_reasoning", "followup"),
-          ("diverse_deception", "without_reasoning", "followup")]
+def probes_for(readouts: list[str]) -> list[tuple[str, str, str]]:
+    """The probes compared for each readout: IID in both views, and OOD."""
+    return [(dataset, view, r) for r in readouts for dataset, view in
+            (("terminal_prerl", "with_reasoning"), ("terminal_prerl", "without_reasoning"),
+             ("diverse_deception", "without_reasoning"))]
+
+
+def router_topk(features_dir: str, view: str) -> dict:
+    """{id: top-6 experts at "Yes" per MoE layer [M, k]} from a reader's shards, or {} if they don't have them."""
+    import glob
+
+    from safetensors import safe_open
+
+    out = {}
+    for marker in sorted(glob.glob(os.path.join(features_dir, view, "shard_*.jsonl"))):
+        data = marker[: -len(".jsonl")] + ".safetensors"
+        if not os.path.exists(data):
+            continue
+        with safe_open(data, framework="pt") as f:
+            if "router_topk" not in f.keys():
+                return {}
+            topk = f.get_tensor("router_topk").numpy()
+        ids = [json.loads(line)["id"] for line in open(marker)]
+        out.update(zip(ids, topk))
+    return out
+
+
+def routing_agreement_at_yes(args) -> dict:
+    """The share of matching top-6 experts at "Yes" between the readers, per MoE layer, over every item both readers
+    extracted (the stored features; the diagnostics' version covers every token of a small sample)."""
+    out = {}
+    for dataset, view in (("terminal_prerl", "with_reasoning"), ("terminal_prerl", "without_reasoning"),
+                          ("diverse_deception", "without_reasoning")):
+        a = router_topk(os.path.join(args.features, "nvfp4", dataset), view)
+        b = router_topk(os.path.join(args.features, "bf16", dataset), view)
+        ids = [i for i in a if i in b]
+        if not ids:
+            continue
+        x, y = np.stack([a[i] for i in ids]).astype(np.int64), np.stack([b[i] for i in ids]).astype(np.int64)
+        same = (x[..., :, None] == y[..., None, :]).any(-1).mean(-1)  # [items, M]: share of a's experts in b's
+        per_layer = same.mean(0)
+        out[f"{dataset}/{view}"] = {"n": len(ids), "mean": float(per_layer.mean()),
+                                    "min_layer": int(per_layer.argmin()), "min": float(per_layer.min()),
+                                    "per_moe_layer": [round(float(v), 4) for v in per_layer]}
+    return out
 
 
 def jaccard(a, b) -> float:
@@ -235,15 +278,20 @@ def main() -> int:
     ap.add_argument("--diagnostics", required=True)
     ap.add_argument("--datasets", default="data/probe_datasets")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--readouts", default="followup",
+                    help="comma-list: the probes compared (followup, mean, router, router_all); the jitter, batching "
+                         "and sink checks are about the follow-up readout and run only with it")
     args = ap.parse_args()
+    readouts = [r for r in args.readouts.split(",") if r]
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
     ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
-    report = {"probes": {}, "jitter": {}, "batching": {}, "sink": {}, "routing_agreement": routing_agreement(args)}
-    for dataset, view, readout in PROBES:
+    report = {"readouts": readouts, "probes": {}, "jitter": {}, "batching": {}, "sink": {},
+              "routing_agreement": routing_agreement(args), "routing_agreement_at_yes": routing_agreement_at_yes(args)}
+    for dataset, view, readout in probes_for(readouts):
         name = f"{dataset}/{view}/{readout}"
         if all(os.path.isdir(os.path.join(args.probes, r, dataset, view, readout)) for r in ("nvfp4", "bf16")):
             report["probes"][name] = compare_probe(args, dataset, view, readout, items, ood_items)
-    for reader in ("nvfp4", "bf16"):
+    for reader in ("nvfp4", "bf16") if "followup" in readouts else ():
         deployed = os.path.join(args.probes, reader, "terminal_prerl", "with_reasoning", "followup")
         if os.path.isdir(deployed):
             probe = SelectedProbe.load(deployed)
@@ -268,8 +316,9 @@ def main() -> int:
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "decision.json"), "w") as fh:
         json.dump(report, fh, indent=1, default=float)
-    lines = ["# Reader comparison", "", f"**Decision:** reader = `{decision['reader']}`; fix batching = "
-             f"{decision['fix_batching']}; 'Yes' sink-like = {decision['sink_like_yes']}", "",
+    lines = [f"# Reader comparison ({', '.join(readouts)})", "",
+             f"**Decision:** reader = `{decision['reader']}`; fix batching = {decision['fix_batching']}; "
+             f"'Yes' sink-like = {decision['sink_like_yes']}", "",
              "| probe | Jaccard@t1 (with / without reasoning) | Spearman | refit floor: Jaccard / Spearman (medians) "
              "| ΔAUROC (4-bit − full) [CI] | passes |",
              "|---|---|---|---|---|---|"]
@@ -286,6 +335,9 @@ def main() -> int:
     if report["routing_agreement"]:
         lines += ["", f"Routing agreement (share of matching top-6 experts, all tokens of the diagnostics sample): "
                       f"{report['routing_agreement']['mean']:.4f}"]
+    for name, r in report["routing_agreement_at_yes"].items():
+        lines.append(f"Routing agreement at \"Yes\" between the readers, {name} ({r['n']} items): mean "
+                     f"{r['mean']:.4f}, lowest {r['min']:.4f} at MoE layer {r['min_layer']}")
     lines += ["", f"Jitter: {json.dumps(report['jitter'])}", f"Batching: {json.dumps(report['batching'])}",
               f"Sink check: {json.dumps(report['sink'])}"]
     open(os.path.join(args.out, "report.md"), "w").write("\n".join(lines) + "\n")

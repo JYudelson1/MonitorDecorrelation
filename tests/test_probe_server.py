@@ -215,3 +215,38 @@ def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
                        "--device", "cpu"]) == 0
     report = json.loads(out.read_text())
     assert report["ok"] and set(report["throughput"]) == {"1", "65536"} and len(report["end_to_end"]) == 1
+
+
+def test_posthoc_scoring_of_saved_runs(world, tmp_path):
+    """experiments/eval_inkling_probes_on_runs.py on a fake RL run: every valid eval episode scored as in training,
+    per-step metrics in the file the degradation matrix reads, and a rerun scores nothing twice."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "posthoc", os.path.join(os.path.dirname(__file__), "..", "experiments", "eval_inkling_probes_on_runs.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    run = tmp_path / "terminal_run_s0"
+    run.mkdir()
+    saved = [{**r, "step": 0 if i < 6 else 10} for i, r in enumerate(rows())]
+    saved.append({**rows()[0], "step": 10, "invalid_reason": "unparsed"})  # never scored
+    (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in saved))
+    (run / "run_info.json").write_text(json.dumps({"config": {"env_options": RUN_ENV, "thinking_effort": 0.5}}))
+    argv = [str(run), "--model", world["nvfp4_dir"], "--probes", world["probe_dir"], "--names", "probe_iid",
+            "--device", "cpu", "--chunk", "4"]
+    assert mod.main(argv) == 0
+    scored = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
+    assert sorted(r["line"] for r in scored) == list(range(1, 11))
+    row_of = {i: n for n, i in enumerate(world["vf"].ids)}
+    ids = [f"t{t}/{k}" for t in range(5) for k in range(2)]  # rows() order = the dataset's ids
+    want = world["probe"].logit(layer_array(world["x"], 2, np.array([row_of[i] for i in ids])))
+    got = [next(r for r in scored if r["line"] == n + 1)["scores"]["probe_iid"]["logit"] for n in range(10)]
+    np.testing.assert_allclose(got, want, atol=1e-2)
+    per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
+    assert [r["step"] for r in per_step] == [0, 10] and [r["n"] for r in per_step] == [6, 4]
+    assert {"auroc", "auroc_used_verifier", "recall_at_threshold", "fpr_at_threshold"} <= set(per_step[0])
+    assert mod.main(argv) == 0  # nothing left to score
+    assert len((run / "probe_scores_inkling.jsonl").read_text().splitlines()) == 10
+    opts, effort = mod.run_replay_options({"config": {"env_options": {"verifier_mode": "submit_corrupted"},
+                                                      "thinking_effort": 0.5}})
+    assert effort == 0.5 and opts["max_turns"] == 4 and opts["require_explanation"] is False  # the env's defaults

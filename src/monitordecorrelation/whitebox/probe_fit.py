@@ -93,7 +93,11 @@ class ViewFeatures:
 
 
 READOUT_TENSORS = {"followup": ("followup",), "followup_prev": ("followup_prev",),
-                   "mean": ("mean_reasoning", "mean_action")}
+                   "mean": ("mean_reasoning", "mean_action"),
+                   # router logits at "Yes" [N, MoE layers, experts]: per MoE layer, or all layers as one vector
+                   "router": ("router_logits",), "router_all": ("router_logits",)}
+ROUTER_READOUTS = ("router", "router_all")
+MOE_FIRST_LAYER = 2  # router logits' layer index i is the model's layer i + 2 (layers 2-41 are MoE)
 SMALL_TENSORS = ("counts", "answer_logp")
 
 
@@ -350,7 +354,12 @@ class LayerSource:
 
     It is picklable (paths only), so each joblib worker loads its own layer. The readouts follow ``feature_matrix``:
     ``mean`` is the count-weighted thinking + text mean in the with-reasoning view, the text mean otherwise, and
-    rows with a zero count are not kept."""
+    rows with a zero count are not kept.
+
+    Router readouts (exploratory, PROBE_PLAN.md 5b) read the router logits at "Yes": ``router`` has one "layer" per MoE
+    layer (256 experts each), ``router_all`` a single one with every MoE layer concatenated. ``first_layer`` is the
+    first layer worth fitting: 1 for the residual stream (layer 0 is the same embedding for every "Yes"), 0 for
+    router readouts."""
 
     def __init__(self, features_dir: str, view: str, readout: str) -> None:
         import torch
@@ -378,6 +387,9 @@ class LayerSource:
         if not self.shards:
             raise FileNotFoundError(f"no complete shards under {os.path.join(features_dir, view)}")
         self.n_layers, self.d = int(shape[1]), int(shape[2])
+        self.first_layer = 0 if readout in ROUTER_READOUTS else 1
+        if readout == "router_all":
+            self.n_layers, self.d = 1, int(shape[1]) * int(shape[2])
         self.counts = torch.cat(counts).numpy().astype(float)
         self.answer_logp = torch.cat(answer).numpy() if all(a is not None for a in answer) else None
         if readout == "mean":
@@ -400,8 +412,11 @@ class LayerSource:
                         w = c / c.sum(1, keepdim=True).clamp(min=1)
                         a = f.get_slice("mean_reasoning")[:, layer, :].float() * w[:, :1] + a * w[:, 1:]
                     parts.append(a.numpy())
+                elif self.readout == "router_all":
+                    t = f.get_tensor("router_logits").float()
+                    parts.append(t.reshape(t.shape[0], -1).numpy())
                 else:
-                    parts.append(f.get_slice(self.readout)[:, layer, :].float().numpy())
+                    parts.append(f.get_slice(READOUT_TENSORS[self.readout][-1])[:, layer, :].float().numpy())
             start += n
         out = np.concatenate(parts).astype(np.float64)
         return out if rows is None else out[np.asarray(rows)]
@@ -412,10 +427,12 @@ def _fit_path_from(src: "LayerSource", layer: int, rows, y, folds, c_grid) -> np
 
 
 def cv_grid_source(src: "LayerSource", rows, y, folds, layers, c_grid=C_GRID, n_jobs: int = 6) -> np.ndarray:
-    """``cv_grid`` with each worker reading its own layer from disk: out-of-fold logits [layers, C, repeats, n]."""
+    """``cv_grid`` with each worker reading its own layer from disk: out-of-fold logits [layers, C, repeats, n].
+    With fewer layers than jobs (e.g. ``router_all``'s one), each worker gets the spare cores for BLAS."""
     from joblib import Parallel, delayed, parallel_config
 
-    with parallel_config(backend="loky", inner_max_num_threads=1):
+    threads = max(1, n_jobs // len(layers)) if 0 < len(layers) < n_jobs else 1
+    with parallel_config(backend="loky", inner_max_num_threads=threads):
         res = Parallel(n_jobs=n_jobs, pre_dispatch="n_jobs")(
             delayed(_fit_path_from)(src, layer, rows, y, folds, c_grid) for layer in layers)
     return np.stack(res)

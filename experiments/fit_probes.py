@@ -36,8 +36,8 @@ import time
 import numpy as np
 
 from monitordecorrelation.whitebox.probe_fit import (
-    C_GRID, LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, cv_grid_source, load_items, make_folds, select,
-    thresholds, within_group_auroc)
+    C_GRID, MOE_FIRST_LAYER, LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, cv_grid_source, load_items,
+    make_folds, select, thresholds, within_group_auroc)
 
 PLAN = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "md_files",
                     "PROBE_PLAN.md")
@@ -206,6 +206,15 @@ def keys_for(readout: str) -> tuple:
     return (*READOUT_TENSORS[readout], *SMALL_TENSORS)
 
 
+def router_layer(readout: str, layer: int) -> dict:
+    """For router probes, which model layer(s) the selected router logits come from."""
+    if readout == "router":
+        return {"model_layer": layer + MOE_FIRST_LAYER}
+    if readout == "router_all":
+        return {"model_layer": "all MoE layers"}
+    return {}
+
+
 def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
     src = LayerSource(os.path.join(args.features, "terminal_prerl"), view, readout)
     keep = src.keep
@@ -219,7 +228,7 @@ def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
     test = np.flatnonzero((split == "test") & keep)
     everything = np.flatnonzero(keep)
     n_layers = src.n_layers
-    layers = list(range(1, n_layers))
+    layers = list(range(src.first_layer, n_layers))
     folds = make_folds(len(dev), y_all[dev], groups_all[dev], repeats=args.repeats, seed=args.seed)
     log(f"IID {view}/{readout}: {len(dev)} dev ({int(y_all[dev].sum())} hacks), {len(test)} test; "
         f"grid {len(layers)} layers × {len(C_GRID)} C × {args.repeats * 5} folds")
@@ -292,7 +301,7 @@ def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
             log("  sensitivity rows")
             metrics["sensitivity"] = sensitivity_rows(src, dev, test, y_all[dev], yt, sel, list(range(n_layers)))
     meta = {**provenance, "dataset": "terminal_prerl", "view": view, "readout": readout, "label": "used_verifier",
-            "C": sel.C, "selection": metrics["selection"], "n_layers": n_layers}
+            "C": sel.C, "selection": metrics["selection"], "n_layers": n_layers, **router_layer(readout, sel.layer)}
     rows = [{"id": src.ids[i], "split": split[i], "used_verifier": int(y_all[i]), "behavior_present": int(bp_all[i]),
              "task_id": groups_all[i], "crossfit_logit": float(c)} for i, c in zip(everything, cf)]
     test_logit = dict(zip(test.tolist(), t_logit.tolist()))
@@ -319,7 +328,7 @@ def fit_ood(args, ood_items, items, concealed_items, readout, provenance) -> dic
     split = np.array([it["split"] for it in its])
     dev = np.flatnonzero((split == "train") & keep)
     test = np.flatnonzero((split == "test") & keep)
-    layers = list(range(1, src.n_layers))
+    layers = list(range(src.first_layer, src.n_layers))
     strat = np.array([f"{s}|{y}" for s, y in zip(source[dev], y_all[dev])])
     folds = make_folds(len(dev), strat, pair[dev], repeats=args.repeats, seed=args.seed)
     log(f"OOD {readout}: {len(dev)} dev, {len(test)} test")
@@ -382,7 +391,7 @@ def fit_ood(args, ood_items, items, concealed_items, readout, provenance) -> dic
     metrics["transfer"] = transfer
     probe.threshold_1, probe.threshold_5 = per_view_t["without_reasoning"]
     meta = {**provenance, "dataset": "diverse_deception", "view": view, "readout": readout, "label": "deceptive",
-            "C": sel.C, "selection": metrics["selection"], "n_layers": src.n_layers,
+            "C": sel.C, "selection": metrics["selection"], "n_layers": src.n_layers, **router_layer(readout, sel.layer),
             "thresholds_by_terminal_view": per_view_t}
     rows = [{"id": src.ids[i], "split": split[i], "label": int(y_all[i]), "source": source[i],
              "test_logit": float(z)} for i, z in zip(test, t_logit)]
@@ -398,7 +407,9 @@ def main() -> int:
     ap.add_argument("--features", required=True, help="the reader's features: <dataset>/<view>/shard_*")
     ap.add_argument("--datasets", default="data/probe_datasets", help="folder with the dataset folders")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--readouts", default="followup,mean", help="comma-list of followup, followup_prev, mean")
+    ap.add_argument("--readouts", default="followup,mean",
+                    help="comma-list of followup, followup_prev, mean, and the exploratory router readouts: router "
+                         "(per MoE layer; its layer index i is model layer i + 2), router_all (every MoE layer)")
     ap.add_argument("--probes", default="iid,ood")
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--jobs", type=int, default=-1)
@@ -426,7 +437,10 @@ def main() -> int:
         for readout in readouts:
             summary[f"ood/{readout}"] = fit_ood(args, ood_items, items, concealed, readout, provenance)
     os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "summary.json"), "w") as fh:
+    path = os.path.join(args.out, "summary.json")  # accumulates: a later run with other readouts adds its probes
+    if os.path.exists(path):
+        summary = {**json.load(open(path)), **summary}
+    with open(path, "w") as fh:
         json.dump(summary, fh, indent=1, default=float)
     lines = [f"# Probes for reader `{args.reader}`", "", "| probe | layer | C | test AUROC (95% CI) | notes |",
              "|---|---|---|---|---|"]
@@ -435,7 +449,9 @@ def main() -> int:
         note = (f"within-task {m['crossfit']['within_task']:.3f}; vs read-not-used "
                 f"{m['crossfit']['hacks_vs_read_not_used']:.3f}") if "crossfit" in m else \
             f"transfer {m['transfer']['with_reasoning']['auroc_all']:.3f} / {m['transfer']['without_reasoning']['auroc_all']:.3f}"
-        lines.append(f"| {name} | {s['layer']} | {s['C']:g} | {m['test_auroc']:.4f} "
+        layer = (f"MoE {s['layer']} (model {s['layer'] + MOE_FIRST_LAYER})" if name.endswith("/router") else
+                 "all MoE" if name.endswith("/router_all") else s["layer"])
+        lines.append(f"| {name} | {layer} | {s['C']:g} | {m['test_auroc']:.4f} "
                      f"[{m['test_auroc_ci'][0]:.3f}, {m['test_auroc_ci'][1]:.3f}] | {note} |")
     open(os.path.join(args.out, "summary.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
