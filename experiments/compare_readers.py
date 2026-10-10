@@ -273,15 +273,22 @@ def sink_check(args, reader) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--probes", required=True)
-    ap.add_argument("--features", required=True)
-    ap.add_argument("--diagnostics", required=True)
+    ap.add_argument("--probes")
+    ap.add_argument("--features")
+    ap.add_argument("--diagnostics")
     ap.add_argument("--datasets", default="data/probe_datasets")
     ap.add_argument("--out", required=True)
     ap.add_argument("--readouts", default="followup",
                     help="comma-list: the probes compared (followup, mean, router, router_all); the jitter, batching "
                          "and sink checks are about the follow-up readout and run only with it")
+    ap.add_argument("--from-json", help="re-apply the rules to an earlier decision.json and rewrite the report, "
+                                        "without recomputing anything")
     args = ap.parse_args()
+    if args.from_json:
+        finish(json.load(open(args.from_json)), args.out)
+        return 0
+    if not (args.probes and args.features and args.diagnostics):
+        ap.error("--probes, --features and --diagnostics are required (unless --from-json)")
     readouts = [r for r in args.readouts.split(",") if r]
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
     ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
@@ -300,7 +307,14 @@ def main() -> int:
                 report["batching"][reader] = batching_rule(args, reader, probe, items,
                                                            report["jitter"][reader]["dlogit_p99"])
         report["sink"][reader] = sink_check(args, reader)
-    ok = []
+    finish(report, args.out)
+    return 0
+
+
+def finish(report: dict, out: str) -> None:
+    """Apply the rules to the compared probes (one decision per readout: a readout keeps 4-bit only if every probe on
+    it passes), then write decision.json and report.md."""
+    ok_by_readout: dict[str, list[bool]] = {}
     for name, r in report["probes"].items():
         agree_ok = all(a["jaccard_at_t1"] >= 0.8 and a["spearman"] >= 0.95 for a in r["agreement"].values())
         fl = r["refit_floor"]
@@ -308,16 +322,20 @@ def main() -> int:
                            for v, a in r["agreement"].items())
         delta_ok = all(d["delta"] >= -0.01 and d["ci"][0] >= -0.02 for d in r["delta_auroc"].values())
         r["passes"] = {"agreement": agree_ok, "agreement_within_refit_noise": within_noise, "delta_auroc": delta_ok}
-        ok.append((agree_ok or within_noise) and delta_ok)
-    decision = {"reader": "nvfp4" if ok and all(ok) else ("bf16" if ok else "undecided: both readers not fitted"),
+        ok_by_readout.setdefault(name.rsplit("/", 1)[1], []).append((agree_ok or within_noise) and delta_ok)
+    by_readout = {r: "nvfp4" if all(ok) else "bf16" for r, ok in ok_by_readout.items()}
+    decision = {"reader": "nvfp4" if by_readout and all(v == "nvfp4" for v in by_readout.values())
+                else ("bf16" if by_readout else "undecided: both readers not fitted"),
+                "by_readout": by_readout,
                 "fix_batching": any(b.get("fix_batching") for b in report["batching"].values()),
                 "sink_like_yes": any(s.get("sink_like") for s in report["sink"].values())}
     report["decision"] = decision
-    os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "decision.json"), "w") as fh:
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "decision.json"), "w") as fh:
         json.dump(report, fh, indent=1, default=float)
-    lines = [f"# Reader comparison ({', '.join(readouts)})", "",
-             f"**Decision:** reader = `{decision['reader']}`; fix batching = {decision['fix_batching']}; "
+    per = "; ".join(f"{r} → `{v}`" for r, v in by_readout.items())
+    lines = [f"# Reader comparison ({', '.join(report.get('readouts', by_readout))})", "",
+             f"**Decision per readout:** {per or 'none compared'}. Fix batching = {decision['fix_batching']}; "
              f"'Yes' sink-like = {decision['sink_like_yes']}", "",
              "| probe | Jaccard@t1 (with / without reasoning) | Spearman | refit floor: Jaccard / Spearman (medians) "
              "| ΔAUROC (4-bit − full) [CI] | passes |",
@@ -332,17 +350,16 @@ def main() -> int:
                      f"{min(a['spearman'] for a in ag.values()):.4f} | "
                      f"{fl['with_reasoning']['jaccard_median']:.3f} / {fl['without_reasoning']['jaccard_median']:.3f}; "
                      f"{min(fl[v]['spearman_median'] for v in ag):.4f} | {dl} | {r['passes']} |")
-    if report["routing_agreement"]:
+    if report.get("routing_agreement"):
         lines += ["", f"Routing agreement (share of matching top-6 experts, all tokens of the diagnostics sample): "
                       f"{report['routing_agreement']['mean']:.4f}"]
-    for name, r in report["routing_agreement_at_yes"].items():
+    for name, r in report.get("routing_agreement_at_yes", {}).items():  # absent in reports before 2026-10-10 14:00
         lines.append(f"Routing agreement at \"Yes\" between the readers, {name} ({r['n']} items): mean "
                      f"{r['mean']:.4f}, lowest {r['min']:.4f} at MoE layer {r['min_layer']}")
     lines += ["", f"Jitter: {json.dumps(report['jitter'])}", f"Batching: {json.dumps(report['batching'])}",
               f"Sink check: {json.dumps(report['sink'])}"]
-    open(os.path.join(args.out, "report.md"), "w").write("\n".join(lines) + "\n")
+    open(os.path.join(out, "report.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
-    return 0
 
 
 if __name__ == "__main__":

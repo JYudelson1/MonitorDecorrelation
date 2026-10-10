@@ -221,6 +221,12 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
     assert set(mean_report["probes"]) == {"terminal_prerl/with_reasoning/mean", "terminal_prerl/without_reasoning/mean",
                                           "diverse_deception/without_reasoning/mean"}
     assert not mean_report["jitter"] and not mean_report["batching"]  # follow-up checks only
+    assert set(mean_report["decision"]["by_readout"]) == {"mean"}
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"), "--from-json",
+                         str(tmp_path / "compare_mean" / "decision.json"), "--out", str(tmp_path / "rerendered")],
+                        capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert cp.returncode == 0, cp.stderr[-3000:]
+    assert json.loads((tmp_path / "rerendered" / "decision.json").read_text())["decision"] == mean_report["decision"]
 
 
 def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
