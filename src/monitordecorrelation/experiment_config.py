@@ -136,9 +136,24 @@ class ProbeMonitorSpec(_Strict):
     batch_size: int = 8
 
 
+class InklingProbeMonitorSpec(_Strict):
+    """A frozen-reader probe on Inkling-Small's activations (deployed by experiments/deploy_probes.py), scored
+    by an Inkling probe server (experiments/inkling_probe_server.py) that replays each TerminalEnv episode.
+    Needs env ``terminal_verifier`` and a TML policy; the run's ``thinking_effort`` must equal the effort the
+    probe's episodes were rendered at (checked when the monitor is built)."""
+
+    kind: Literal["inkling_probe"] = "inkling_probe"
+    name: str
+    role: Literal["train_against", "held_out"]
+    probe_path: str  # e.g. data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup
+    server_url: str  # it must serve this probe (checked when the monitor is built)
+    threshold: float = 0.5  # on sigmoid(logit - t1%): 0.5 = the probe's 1% FPR on pre-RL honest episodes
+
+
 MonitorSpec = Annotated[
-    Union[CoTMonitorSpec, ProbeMonitorSpec], Field(discriminator="kind")
+    Union[CoTMonitorSpec, ProbeMonitorSpec, InklingProbeMonitorSpec], Field(discriminator="kind")
 ]
+MONITOR_SPECS = {"cot": CoTMonitorSpec, "probe": ProbeMonitorSpec, "inkling_probe": InklingProbeMonitorSpec}
 
 # The envs that slice their dataset, i.e. the ones ``subset`` means something to. Anywhere else a
 # subset would be dropped on the floor by ``factory.make_env``, so the config rejects it.
@@ -351,6 +366,18 @@ class ExperimentConfig(_Strict):
             errs.append(
                 f"kl_coef is 0 (no KL penalty), so kl_discount_factor={self.kl_discount_factor} would be "
                 "ignored — drop the key"
+            )
+
+        inkling = [m.name for m in self.monitors if m.kind == "inkling_probe"]
+        if inkling and self.env != "terminal_verifier":
+            errs.append(
+                f"inkling_probe monitors ({', '.join(inkling)}) replay TerminalEnv episodes, so they need env "
+                f"'terminal_verifier', not {self.env!r}"
+            )
+        if inkling and not tml:
+            errs.append(
+                f"inkling_probe monitors ({', '.join(inkling)}) read Inkling-Small over the episode's TML "
+                f"rendering at the run's thinking_effort; policy {self.policy!r} is not TML-rendered"
             )
 
         if self.probe_server_url is not None and not any(m.kind == "probe" for m in self.monitors):
@@ -589,7 +616,7 @@ def apply_overrides(
                 f"--set: monitor selector {selector!r} matched no monitor. Configured: {names}"
             )
         for mon in matched:
-            spec = ProbeMonitorSpec if mon.get("kind") == "probe" else CoTMonitorSpec
+            spec = MONITOR_SPECS[mon.get("kind", "cot")]
             if field not in spec.model_fields:
                 raise SystemExit(
                     f"--set: monitor {mon['name']!r} ({mon.get('kind', 'cot')}) has no field "
@@ -631,6 +658,8 @@ def build_monitors(
     probe_server_url: str | None = None,
     *,
     multi_turn: bool = False,
+    env_options: dict | None = None,
+    run_effort: float | None = None,
 ) -> tuple[list, list]:
     """Construct (train_against, held_out) monitor objects. WhiteBoxModels are shared across probes
     that use the same ``probe_model`` so we never load the same model twice. ``probe_server_url`` (set)
@@ -643,7 +672,10 @@ def build_monitors(
     ``AgentCoTMonitor`` (chat-transcript judge over the per-turn episode record) instead of a
     ``CoTMonitor`` (the single-turn two-section judge). Same spec fields either way; a CoT-only
     (``use_output: false``) spec renders the reasoning-only transcript (the task, then each turn's
-    thinking; commands, explanations and tool output withheld — and the prompt says so)."""
+    thinking; commands, explanations and tool output withheld — and the prompt says so).
+
+    ``kind: inkling_probe`` specs need ``env_options`` (the replay keys, as the env runs them: see
+    ``replay_env_options``) and ``run_effort`` (the run's ``thinking_effort``)."""
     from monitordecorrelation.monitors.agent_cot_monitor import AgentCoTMonitor
     from monitordecorrelation.monitors.cot_monitor import CoTMonitor
     from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
@@ -671,6 +703,13 @@ def build_monitors(
                 thinking_budget=s.thinking_budget,
                 thinking_effort=s.thinking_effort,
             )
+        elif s.kind == "inkling_probe":
+            from monitordecorrelation.monitors.inkling_probe_monitor import InklingProbeMonitor
+
+            if env_options is None or run_effort is None:
+                raise ValueError(f"inkling_probe monitor {s.name!r} needs the run's env_options and run_effort")
+            mon = InklingProbeMonitor(s.name, s.probe_path, s.server_url, env_options=env_options,
+                                      run_effort=run_effort, threshold=s.threshold)
         else:  # probe
             probe = LinearProbe.load(s.probe_path)
             model_name = s.probe_model or probe.meta.get(
@@ -689,3 +728,19 @@ def build_monitors(
             )
         by_role[s.role].append(mon)
     return by_role["train_against"], by_role["held_out"]
+
+
+def replay_env_options(env, env_options: dict) -> dict:
+    """The env options an Inkling probe server needs to replay an episode (``REPLAY_ENV_KEYS``), as the env runs
+    them: its own attributes (its defaults included), else the config's ``env_options``."""
+    from monitordecorrelation.whitebox.probe_datasets import REPLAY_ENV_KEYS
+
+    out = {k: getattr(env, k) for k in REPLAY_ENV_KEYS if hasattr(env, k)}
+    for k in REPLAY_ENV_KEYS:
+        if k not in out and k in env_options:
+            out[k] = env_options[k]
+    if "verifier_mode" not in out:
+        modes = {getattr(it, "verifier_mode", None) for it in getattr(env, "items", [])} - {None}
+        if len(modes) == 1:
+            out["verifier_mode"] = modes.pop()
+    return out

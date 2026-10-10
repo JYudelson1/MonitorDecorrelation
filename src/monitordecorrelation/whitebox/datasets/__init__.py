@@ -106,6 +106,16 @@ def resolve_datasets(datasets: list[str] | None, preset: str | None) -> list[str
     return [d for d in out if not (d in seen or seen.add(d))]
 
 
+def held_out_pairs(n_pairs: int, test_frac: float, seed: int) -> set[int]:
+    """Held-out pairs of the pair-respecting split. An honest/deceptive twin never straddles train/test,
+    because that would leak. Shared by experiments/train_probe.py and experiments/build_probe_datasets.py,
+    so the same seed picks the same test pairs in both."""
+    import numpy as np
+
+    perm = np.random.default_rng(seed).permutation(n_pairs)
+    return set(perm[: max(1, int(round(test_frac * n_pairs)))].tolist())
+
+
 def flatten_pairs(
     pairs: list[ContrastivePair],
 ) -> tuple[list[str], list[str], list[str], list[int]]:

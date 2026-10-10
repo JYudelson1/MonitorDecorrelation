@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from monitordecorrelation.whitebox.datasets import (
     PROBE_PRESETS,
     flatten_pairs,
+    held_out_pairs,
     load_contrastive,
     resolve_datasets,
 )
@@ -72,11 +73,7 @@ def main() -> None:
 
     # Stratified, pair-respecting split: split by PAIR index so an honest/deceptive twin never
     # straddles train/test (would leak). Rows are interleaved [h0,d0,h1,d1,...] from flatten_pairs.
-    rng = np.random.default_rng(args.seed)
-    n_pairs = len(pairs)
-    perm = rng.permutation(n_pairs)
-    n_test = max(1, int(round(args.test_frac * n_pairs)))
-    test_pairs = set(perm[:n_test].tolist())
+    test_pairs = held_out_pairs(len(pairs), args.test_frac, args.seed)
     train_rows = [i for i in range(len(triples)) if (i // 2) not in test_pairs]
     test_rows = [i for i in range(len(triples)) if (i // 2) in test_pairs]
 

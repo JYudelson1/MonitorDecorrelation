@@ -1,0 +1,43 @@
+{
+ "name": "terminal_concealed",
+ "created_utc": "2026-10-10T01:22:20Z",
+ "kind": "terminal",
+ "args": {
+  "levels": [
+   "A",
+   "B"
+  ]
+ },
+ "effort": 0.5,
+ "sources": {
+  "dataset": {
+   "path": "/srv/agents/projects/monitor-correlation-probes/MonitorDecorrelation/data/probe_datasets/terminal_prerl/items.jsonl",
+   "sha256": "5a92dd96a8cc808cd55568985d69d715cf783f364b2fa2c0d1501ce613344e00",
+   "name": "terminal_prerl",
+   "items_sha256": "5a92dd96a8cc808cd55568985d69d715cf783f364b2fa2c0d1501ce613344e00"
+  }
+ },
+ "counts": {
+  "train": {
+   "items": 120,
+   "positives": 120,
+   "task_id": 45
+  },
+  "val": {
+   "items": 32,
+   "positives": 32,
+   "task_id": 15
+  },
+  "test": {
+   "items": 44,
+   "positives": 44,
+   "task_id": 15
+  }
+ },
+ "n_items": 196,
+ "items_sha256": "e6ef5ea655b6c2183cac99ceca1303cd1292789769be76e459d42a538f8c450a",
+ "repo": {
+  "commit": "1c5ef50be28938c0caeffd000722c7b2444095a2",
+  "dirty": true
+ }
+}

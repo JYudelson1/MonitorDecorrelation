@@ -9,8 +9,9 @@ Model-agnostic: default is a tiny ``Qwen/Qwen3-0.6B`` for local/CPU validation; 
 the real run is just a ``model_name`` arg. Inkling checkpoints are multimodal, but we load
 **text-only** via ``InklingForCausalLM`` (language tower + ``lm_head``; vision/audio never
 allocated) and put CoT in ``reasoning_content`` rather than Qwen ``<think>`` tags. Device
-auto-selects cuda -> mps -> cpu for ordinary CausalLMs; Inkling uses ``device_map="auto"``.
-Dtype is bf16 on accelerators, fp32 on CPU.
+auto-selects cuda -> mps -> cpu for ordinary CausalLMs; Inkling uses ``device_map="auto"``, except
+NVFP4 checkpoints, which go to one GPU through ``whitebox/inkling_nvfp4.py``. Dtype is bf16 on
+accelerators, fp32 on CPU.
 """
 
 from __future__ import annotations
@@ -236,7 +237,8 @@ class WhiteBoxModel:
 
         self.model_name = model_name
         self.reasoning_effort = reasoning_effort
-        self.dtype = torch.bfloat16 if (device or _pick_device()) in ("cuda", "mps") else torch.float32
+        # "cuda:1" is a CUDA device too: compare the device type, not the string
+        self.dtype = torch.bfloat16 if torch.device(device or _pick_device()).type in ("cuda", "mps") else torch.float32
 
         try:
             config = AutoConfig.from_pretrained(model_name)
@@ -263,42 +265,15 @@ class WhiteBoxModel:
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-            try:
-                # Do NOT pass key_mapping here — that would replace/stack badly with the registered
-                # WeightConverter pipeline (MoE w13→gate_up, attn renames, …). Hidden states at forward.
-                # Do NOT force dtype=bfloat16 on *-NVFP4: let the checkpoint/quantizer decide; forcing
-                # BF16 can materialize dense weights (~3× VRAM) if a quant path is active.
-                load_kw: dict = {
-                    "config": text_config,
-                    "device_map": "auto",
-                    "output_loading_info": True,
-                }
-                if "nvfp4" not in model_name.lower() and "fp4" not in model_name.lower():
-                    load_kw["dtype"] = self.dtype
-                print(f"[WhiteBoxModel] from_pretrained({model_name!r}) text-only InklingForCausalLM…")
-                restore = _install_inkling_finalize_guard()
-                try:
-                    self.model, loading_info = InklingForCausalLM.from_pretrained(model_name, **load_kw)
-                finally:
-                    restore()
-                # loading_info is a LoadStateDictInfo (or dict, depending on transformers version)
-                if isinstance(loading_info, dict):
-                    mk = loading_info.get("missing_keys") or []
-                    uk = loading_info.get("unexpected_keys") or []
-                    print(f"[WhiteBoxModel] load done: missing={len(mk)} unexpected={len(uk)}")
-                else:
-                    print(
-                        f"[WhiteBoxModel] load done: missing={len(getattr(loading_info, 'missing_keys', []) or [])} "
-                        f"unexpected={len(getattr(loading_info, 'unexpected_keys', []) or [])}"
-                    )
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"Failed to load Inkling text tower from {model_name!r}. "
-                    f"Inkling-Small BF16 is ~266B params (12B active); prefer "
-                    f"``thinkingmachines/Inkling-Small-NVFP4`` on ≥2× H200, free other GPU "
-                    f"processes, or set ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``. "
-                    f"Original error: {e}"
-                ) from e
+            from monitordecorrelation.whitebox.inkling_nvfp4 import is_nvfp4_checkpoint, load_inkling_nvfp4
+
+            if is_nvfp4_checkpoint(model_name):
+                # transformers cannot load the NVFP4 release itself (packed experts; see inkling_nvfp4.py).
+                # One device: the packed model takes ~167 GiB of GPU memory, i.e. one B300.
+                print(f"[WhiteBoxModel] {model_name!r} is NVFP4: packed-expert loader on {device or 'cuda:0'}…")
+                self.model = load_inkling_nvfp4(model_name, device=device or "cuda:0")
+            else:
+                self.model = self._load_inkling_text(InklingForCausalLM, model_name, text_config)
             self.model.eval()
             self.device = str(next(self.model.parameters()).device)
             print(f"[WhiteBoxModel] ready device={self.device} n_layers={self.n_layers} d_model={self.d_model}")
@@ -315,6 +290,11 @@ class WhiteBoxModel:
             self.model.eval()
 
         self._lock = threading.Lock()
+
+    def _load_inkling_text(self, model_cls, model_name: str, text_config):
+        """BF16 Inkling text tower across the visible GPUs (``device_map="auto"``)."""
+        return _load_inkling_text_tower(model_cls, model_name, text_config, self.dtype)
+
 
     def _extract_remote(self, items, follow_up, batch_size, preserve_thinking) -> np.ndarray:
         """POST the (question, cot, answer) triples to the shared server; it renders + reads activations
@@ -508,3 +488,57 @@ class WhiteBoxModel:
         if self.remote:
             return self._d_model
         return int(self._text_config.hidden_size)
+
+
+def load_inkling_text(model_name: str, dtype=None):
+    """The Inkling text tower (BF16 on GPUs, across the visible ones; float32 on CPU), with no tokenizer.
+
+    Probe features need no tokenizer: whitebox/inkling_replay.py renders with the TML renderer. It uses the same
+    conversions and guards as ``WhiteBoxModel``. The NVFP4 release has its own loader (whitebox/inkling_nvfp4.py)."""
+    import torch
+    from transformers import AutoConfig, InklingForCausalLM
+
+    config = _patch_inkling_moe_intermediate(AutoConfig.from_pretrained(model_name), model_name)
+    text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+    _register_inkling_text_conversions()
+    dtype = dtype or (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+    return _load_inkling_text_tower(InklingForCausalLM, model_name, text_config, dtype).eval()
+
+
+def _load_inkling_text_tower(model_cls, model_name: str, text_config, dtype):
+    """``model_cls.from_pretrained`` for the Inkling text tower with ``device_map="auto"``, guarded as in
+    ``WhiteBoxModel``."""
+    try:
+        # Do NOT pass key_mapping here — that would replace/stack badly with the registered
+        # WeightConverter pipeline (MoE w13→gate_up, attn renames, …). Hidden states at forward.
+        load_kw: dict = {
+            "config": text_config,
+            "device_map": "auto",
+            "output_loading_info": True,
+            "dtype": dtype,
+        }
+        print(f"[WhiteBoxModel] from_pretrained({model_name!r}) text-only InklingForCausalLM…")
+        restore = _install_inkling_finalize_guard()
+        try:
+            model, loading_info = model_cls.from_pretrained(model_name, **load_kw)
+        finally:
+            restore()
+        # loading_info is a LoadStateDictInfo (or dict, depending on transformers version)
+        if isinstance(loading_info, dict):
+            mk = loading_info.get("missing_keys") or []
+            uk = loading_info.get("unexpected_keys") or []
+            print(f"[WhiteBoxModel] load done: missing={len(mk)} unexpected={len(uk)}")
+        else:
+            print(
+                f"[WhiteBoxModel] load done: missing={len(getattr(loading_info, 'missing_keys', []) or [])} "
+                f"unexpected={len(getattr(loading_info, 'unexpected_keys', []) or [])}"
+            )
+        return model
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Failed to load Inkling text tower from {model_name!r}. "
+            f"Inkling-Small BF16 is ~266B params (12B active, ~530 GB of weights): it needs ~4 "
+            f"B200/B300-class GPUs. ``thinkingmachines/Inkling-Small-NVFP4`` fits on one B300 "
+            f"(whitebox/inkling_nvfp4.py). Otherwise free other GPU processes, or set "
+            f"``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``. Original error: {e}"
+        ) from e

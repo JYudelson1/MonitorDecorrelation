@@ -59,6 +59,7 @@ from monitordecorrelation.experiment_config import (
     apply_overrides,
     build_monitors,
     load_config,
+    replay_env_options,
     validate_token_budgets,
 )
 from monitordecorrelation.hyperparams import get_lr
@@ -193,7 +194,9 @@ def main() -> None:
     # place of the single-turn CoTMonitor; every other env is unchanged.
     train_against, held_out = build_monitors(cfg.monitors, default_behavior=env.behavior_name,
                                              probe_server_url=probe_server_url,
-                                             multi_turn=bool(getattr(env, "multi_turn", False)))
+                                             multi_turn=bool(getattr(env, "multi_turn", False)),
+                                             env_options=replay_env_options(env, cfg.env_options),
+                                             run_effort=cfg.thinking_effort)
     if probe_server_url:
         print(f"  probes → shared server {probe_server_url}")
 

@@ -1,0 +1,45 @@
+{
+ "name": "diverse_deception",
+ "created_utc": "2026-10-09T19:40:43Z",
+ "kind": "contrastive",
+ "args": {
+  "preset": "diverse_deception",
+  "datasets": [
+   "marks_tegmark",
+   "doluschat",
+   "mask_statements",
+   "truthfulqa",
+   "liarsbench",
+   "sandbagging"
+  ],
+  "n_per": 1000,
+  "seed": 0,
+  "test_frac": 0.2
+ },
+ "counts": {
+  "train": {
+   "items": 7758,
+   "positives": 3879,
+   "pair": 3879
+  },
+  "test": {
+   "items": 1940,
+   "positives": 970,
+   "pair": 970
+  }
+ },
+ "counts_by_source": {
+  "marks_tegmark": 1496,
+  "doluschat": 2000,
+  "mask_statements": 1568,
+  "truthfulqa": 1634,
+  "liarsbench": 1000,
+  "sandbagging": 2000
+ },
+ "n_items": 9698,
+ "items_sha256": "c4e712f35c87d92139e38fdab7068752de867808634821f45561b89639acc942",
+ "repo": {
+  "commit": "8d6d0c1797ee12b6c7c0d6f6cf01b6d3fb618f80",
+  "dirty": true
+ }
+}

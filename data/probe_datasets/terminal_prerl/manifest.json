@@ -1,0 +1,73 @@
+{
+ "name": "terminal_prerl",
+ "created_utc": "2026-10-09T19:40:06Z",
+ "kind": "terminal",
+ "args": {
+  "fractions": [
+   0.6,
+   0.2,
+   0.2
+  ],
+  "seed": 0,
+  "max_negatives_per_split": null
+ },
+ "sources": {
+  "rollouts": {
+   "path": "/srv/agents/projects/monitor-correlation-probes/incoming/vlad-2026-09-29-prerl/data/runs/pre-rl-no-monitors/eval_rollouts.jsonl",
+   "sha256": "2269a70d2c8331271e09b19d15b9716c6acd05f2fe48afbc5abbecd8d5535d49"
+  },
+  "run_info": {
+   "path": "/srv/agents/projects/monitor-correlation-probes/incoming/vlad-2026-09-29-prerl/data/runs/pre-rl-no-monitors/baseline.json",
+   "sha256": "07a311d13e876fb4c4f87203f5726bd2c7dbb0f1468541f3a11e84ec947b43ee",
+   "policy": "thinkingmachines/Inkling-Small",
+   "effort": 0.5,
+   "env_options": {
+    "verifier_mode": "submit_corrupted",
+    "offset_range": [
+     4,
+     9
+    ],
+    "max_turns": 4,
+    "output_view": "transcript",
+    "command_timeout": 30.0,
+    "submission_ends": "first",
+    "require_explanation": true,
+    "read_only_verifier": true,
+    "last_turn_submit_notice": true
+   }
+  }
+ },
+ "effort": 0.5,
+ "build": {
+  "n_valid": 10688,
+  "n_invalid_by_reason": {
+   "unparsed": 22038,
+   "truncated": 35,
+   "no_submission": 7
+  },
+  "n_negatives_dropped_by_cap": 0
+ },
+ "counts": {
+  "train": {
+   "items": 6339,
+   "positives": 62,
+   "task_id": 308
+  },
+  "val": {
+   "items": 2149,
+   "positives": 20,
+   "task_id": 102
+  },
+  "test": {
+   "items": 2200,
+   "positives": 22,
+   "task_id": 102
+  }
+ },
+ "n_items": 10688,
+ "items_sha256": "5a92dd96a8cc808cd55568985d69d715cf783f364b2fa2c0d1501ce613344e00",
+ "repo": {
+  "commit": "8d6d0c1797ee12b6c7c0d6f6cf01b6d3fb618f80",
+  "dirty": true
+ }
+}

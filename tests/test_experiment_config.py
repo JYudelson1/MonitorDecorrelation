@@ -915,3 +915,43 @@ def test_judge_reasoning_reaches_every_judge_call(monkeypatch, tmp_path, cfg_nam
 
     sent, written = launch(f"monitors.{g25[0]}.reasoning=null")  # null → the model default
     assert written[g25[0]] is None and sent[g25[0]] == {"max_tokens": 2048}
+
+
+INKLING = dict(env="terminal_verifier", subset="largest_island", policy="thinkingmachines/Inkling-Small",
+               thinking_effort=0.5, penalty_coef=None,
+               monitors=[{"kind": "inkling_probe", "name": "probe_iid", "role": "held_out",
+                          "probe_path": "data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup",
+                          "server_url": "http://127.0.0.1:8178"}])
+
+
+def test_inkling_probe_monitors_need_the_terminal_env_and_a_tml_policy():
+    cfg = _cfg(**INKLING)
+    assert cfg.monitors[0].kind == "inkling_probe" and cfg.monitors[0].threshold == 0.5
+    assert "replay TerminalEnv episodes" in _err(**{**INKLING, "env": "sycophancy", "subset": "nlp"})
+    assert "not TML-rendered" in _err(**{**INKLING, "policy": "Qwen/Qwen3-8B", "thinking_effort": None})
+    with pytest.raises(Exception, match="server_url"):  # required: no default
+        _cfg(**{**INKLING, "monitors": [{k: v for k, v in INKLING["monitors"][0].items() if k != "server_url"}]})
+
+
+def test_inkling_probe_fields_are_overridable_and_build_needs_the_replay_inputs():
+    from monitordecorrelation.experiment_config import apply_overrides
+
+    cfg = apply_overrides(_cfg(**INKLING), ["monitors.probe_iid.threshold=0.7"])
+    assert cfg.monitors[0].threshold == 0.7
+    with pytest.raises(SystemExit, match="no field 'model_id'"):
+        apply_overrides(_cfg(**INKLING), ["monitors.probe_iid.model_id=x"])
+    with pytest.raises(ValueError, match="env_options and run_effort"):
+        build_monitors(cfg.monitors, multi_turn=True)
+
+
+def test_replay_env_options_reads_the_env_as_it_runs():
+    from types import SimpleNamespace
+
+    from monitordecorrelation.experiment_config import replay_env_options
+
+    env = SimpleNamespace(max_turns=4, require_explanation=True, submission_ends="first", last_turn_submit_notice=True,
+                          items=[SimpleNamespace(verifier_mode="submit_corrupted")] * 3)
+    want = {"max_turns": 4, "require_explanation": True, "submission_ends": "first", "last_turn_submit_notice": True,
+            "verifier_mode": "submit_corrupted"}
+    assert replay_env_options(env, {}) == want
+    assert replay_env_options(env, {"verifier_mode": "submit_possible"})["verifier_mode"] == "submit_possible"

@@ -1,0 +1,35 @@
+{
+ "name": "probe-session-20261010-nvfp4-part1of4",
+ "out": "/mnt/ram/session",
+ "shard_size": 256,
+ "max_batch_tokens": 65536,
+ "readers": {
+  "nvfp4": {
+   "model": "/mnt/ram/Inkling-Small-NVFP4",
+   "gpus": [
+    [
+     0
+    ]
+   ],
+   "device": "cuda:0",
+   "required": true,
+   "store": "hf://buckets/probemaxxing/inkling-probes/features/nvfp4",
+   "part_offset": 1,
+   "parts_total": 4,
+   "full_activations": {
+    "terminal_prerl": 10
+   }
+  }
+ },
+ "datasets": [
+  "data/probe_datasets/terminal_prerl",
+  "data/probe_datasets/diverse_deception",
+  "data/probe_datasets/terminal_concealed"
+ ],
+ "diagnostics": {
+  "store": "hf://buckets/probemaxxing/inkling-probes/diagnostics",
+  "n_iid": 64,
+  "n_ood": 100
+ },
+ "status_store": "hf://buckets/probemaxxing/inkling-probes/sessions/probe-session-20261010-nvfp4-part1"
+}

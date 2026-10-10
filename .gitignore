@@ -33,6 +33,8 @@ data/runs/archived/
 !data/runs/**/eval_metrics.jsonl
 !data/runs/**/eval_rollouts_slim.jsonl
 !data/runs/**/metrics.jsonl
+# the deployed Inkling probes' golden sets: the probe server checks them at startup (experiments/deploy_probes.py)
+!data/probes/**/golden.jsonl
 
 # Rollout-index cache of visualize_transcripts.py
 .cache/
