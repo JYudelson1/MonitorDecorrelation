@@ -257,3 +257,34 @@ def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
     assert summary["refits"] == 6 and m["cosine_to_original"]["median"] > 0.5
     assert len((tmp_path / "refits" / "by_layer.csv").read_text().splitlines()) == L  # header + layers 1..L-1
     assert summary["by_layer_transfer_with_reasoning"][str(SIGNAL_LAYER)] > 0.8
+
+
+def test_learning_curves_run_on_synthetic_probes(tmp_path):
+    """experiments/learning_curves.py: refits at the fitted layer and C over fractions of the training data, for IID
+    (with the concealed test hacks) and OOD (with per-source fits), and the full-data fit reproduces the probe."""
+    import importlib.util
+
+    data, feats = make_world(tmp_path)
+    out = tmp_path / "probes"
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1",
+                         "--jobs", "2", "--readouts", "followup", "--skip-baselines"],
+                        capture_output=True, text=True, cwd=REPO, timeout=1800)
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    spec = importlib.util.spec_from_file_location("curves", os.path.join(REPO, "experiments", "learning_curves.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["--probes", str(out), "--features", str(feats), "--datasets", str(data),
+                     "--out", str(tmp_path / "curves"), "--fractions", "0.25,1", "--repeats", "3", "--threads", "2",
+                     "--source-refits", "2"]) == 0
+    summary = json.loads((tmp_path / "curves" / "summary.json").read_text())
+    full = {r["view"]: r for r in summary["iid"] if r["fraction"] == 1}
+    fitted = json.loads((out / "terminal_prerl" / "with_reasoning" / "followup" / "metrics.json").read_text())
+    assert abs(full["with_reasoning"]["test_auroc"]["median"] - fitted["test_auroc"]) < 1e-9
+    assert [r["fits"] for r in summary["iid"]] == [3, 1, 3, 1]
+    assert all(r["concealed_test_hacks_recall"]["median"] > 0.5 for r in summary["iid"] if r["fraction"] == 1)
+    ood_full = next(r for r in summary["ood"] if r["fraction"] == 1)
+    assert ood_full["transfer_auroc_with_reasoning"]["median"] > 0.8
+    assert {(r["source"], r["trained_on"]) for r in summary["ood_sources"]} == {
+        ("all", "all"), *((s, h) for s in ("a", "b") for h in ("only", "all_but"))}
+    assert all(r["fits"] == 2 for r in summary["ood_sources"])
