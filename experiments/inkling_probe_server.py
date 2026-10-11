@@ -1,6 +1,6 @@
 """Serve Inkling probes to RL runs from one GPU (whitebox/probe_server.py).
 
-    uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 --max-batch-tokens 1 \
+    uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
         --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup \
         --port 8178
 
@@ -26,10 +26,10 @@ def main() -> int:
     ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8178)
-    ap.add_argument("--max-batch-tokens", type=int, default=65536,
-                    help="padded tokens per forward: 1 scores one episode per forward, the pre-registered batching "
-                         "rule's fix (it fired on 2026-10-10, see md_files/PROBE_RESULTS.md); 65536 batches like the "
-                         "extraction")
+    ap.add_argument("--max-batch-tokens", type=int, default=1,
+                    help="padded tokens per forward. The default 1 scores one episode per forward: the pre-registered "
+                         "batching rule's fix, since the rule fired on 2026-10-10 (md_files/PROBE_RESULTS.md). 65536 "
+                         "batches like the extraction: ~2x faster, but a score then depends on its batch")
     ap.add_argument("--golden-tolerance", type=float, default=None,
                     help="max |Δlogit| on the golden episodes (default: each probe's own, else 1.0)")
     args = ap.parse_args()
