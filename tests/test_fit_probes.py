@@ -170,9 +170,36 @@ def test_selection_prefers_smaller_c_within_one_se():
     assert auroc(base, y) > 0.7
 
 
+def _write_diagnostics(folder, data, rng, per_class=4, ood_pairs=3):
+    """One reader's diagnostics files (whitebox/diagnostics.py), sampled as pick_sample does: TerminalEnv train hacks
+    and non-hacks in both views, then OOD train pairs. One-at-a-time readouts are the batched ones plus a little
+    noise."""
+    terminal = [json.loads(line) for line in open(data / "terminal_prerl" / "items.jsonl")]
+    ood = [json.loads(line) for line in open(data / "diverse_deception" / "items.jsonl")]
+    train = [it for it in terminal if it["split"] == "train"]
+    iid = [it for it in train if it["label"]][:per_class] + [it for it in train if not it["label"]][:per_class]
+    sample = ([(it, "with_reasoning") for it in iid] + [(it, "without_reasoning") for it in iid]
+              + [(it, "without_reasoning") for it in ood if it["split"] == "train" and it["pair"] < ood_pairs])
+    batched = torch.tensor(rng.standard_normal((len(sample), L, D)), dtype=torch.float32)
+    alone = batched + 0.01 * torch.tensor(rng.standard_normal(batched.shape), dtype=torch.float32)
+    os.makedirs(folder)
+    save_file({"followup_batched": batched.to(torch.bfloat16), "followup_alone": alone.to(torch.bfloat16)},
+              str(folder / "diag.safetensors"))
+    with open(folder / "done.json", "w") as fh:
+        json.dump({"items": [{"id": it["id"], "view": v, "label": it["label"], "split": it["split"]}
+                             for it, v in sample],
+                   "topk_agree_jitter_mean": 0.96, "yes_norm_ratio_median_by_layer": [1.0] * 43}, fh)
+    return per_class * 2
+
+
 def test_compare_readers_applies_the_reader_rule(tmp_path):
-    """Two "readers": the second is the first plus small noise, so they should agree and 4-bit is kept."""
+    """Two "readers": the second is the first plus small noise, so they should agree and 4-bit is kept.
+
+    The report-only fields come along: weights nearly parallel, small score shifts, each reader's probe scoring
+    as well on the other's features, and a small batching floor on the (4-bit) diagnostics."""
     import shutil
+
+    from scipy.stats import spearmanr
 
     data, feats = make_world(tmp_path)
     rng = np.random.default_rng(5)
@@ -194,20 +221,59 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
                              "--readouts", "followup,mean", "--skip-baselines"],
                             capture_output=True, text=True, cwd=REPO, timeout=1800)
         assert cp.returncode == 0, cp.stderr[-3000:]
+    n_diag_rows = _write_diagnostics(tmp_path / "diagnostics" / "nvfp4", data, rng)
     cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"),
                          "--probes", str(tmp_path / "probes"), "--features", str(readers),
-                         "--diagnostics", str(tmp_path / "no-diagnostics"), "--datasets", str(data),
+                         "--diagnostics", str(tmp_path / "diagnostics"), "--datasets", str(data),
                          "--out", str(tmp_path / "compare")], capture_output=True, text=True, cwd=REPO, timeout=1800)
     assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
     report = json.loads((tmp_path / "compare" / "decision.json").read_text())
     assert len(report["probes"]) == 3
-    for r in report["probes"].values():
+    diag = load_file(str(tmp_path / "diagnostics" / "nvfp4" / "diag.safetensors"))
+    diag_items = json.loads((tmp_path / "diagnostics" / "nvfp4" / "done.json").read_text())["items"]
+    views = ("with_reasoning", "without_reasoning")
+    for name, r in report["probes"].items():
         assert r["passes"]["agreement"], r["agreement"]
-        for view in ("with_reasoning", "without_reasoning"):  # rule (c)'s refit floor, for every probe and view
+        for view in views:  # rule (c)'s refit floor, for every probe and view
             fl = r["refit_floor"][view]
             assert 0 <= fl["jaccard_p05"] <= fl["jaccard_median"] <= 1 and fl["spearman_median"] > 0.5, fl
+        # report only: the readers differ by a little noise, so the weights are nearly parallel and scores barely move
+        assert r["weight_cosine"] > 0.99, (name, r["weight_cosine"])
+        for view in views:
+            s, ag = r["score_shift"][view], r["agreement"][view]
+            assert s["n"] == ag["n"] and abs(s["mean"]) <= ag["max_abs_dlogit"] and s["p99_abs"] <= ag["max_abs_dlogit"]
+            assert s["pearson"] > 0.999 and s["sd"] > 0, s
+        cross = r["cross_reader"]
+        assert set(cross) == {"nvfp4", "bf16"} and all(set(by_f) == {"nvfp4", "bf16"} for by_f in cross.values())
+        for p_reader, by_f in cross.items():
+            own = by_f[p_reader]  # a probe on its own reader's features gives rule (b)'s numbers
+            if name.startswith("terminal_prerl/"):
+                assert abs(own["test_auroc"] - r["delta_auroc"]["iid_test"][f"auroc_{p_reader}"]) < 1e-12
+                for m in by_f.values():
+                    for t in ("own", "recalibrated"):
+                        assert m["test_auroc"] > 0.9 and m[f"tpr_at_t1_{t}"] >= 0.5 and m[f"fpr_at_t1_{t}"] < 0.1, m
+            else:
+                assert abs(own["ood_test_auroc"] - r["delta_auroc"]["ood_test"][f"auroc_{p_reader}"]) < 1e-12
+                for view in views:
+                    assert abs(own["transfer_auroc"][view]
+                               - r["delta_auroc"][f"iid_transfer_{view}"][f"auroc_{p_reader}"]) < 1e-12
+                for m in by_f.values():
+                    assert m["ood_test_auroc"] > 0.9 and min(m["transfer_auroc"].values()) > 0.8, m
+        floor = r["batching_floor"]  # only the 4-bit diagnostics exist, as on 2026-10-10
+        assert set(floor) == {"nvfp4"} and set(floor["nvfp4"]) == {"nvfp4", "bf16"}, floor
+        for p_reader, by_view in floor["nvfp4"].items():  # recomputed here from the diagnostics' TerminalEnv rows
+            assert set(by_view) == (set(views) if name.startswith("diverse_deception/") else {name.split("/")[1]})
+            probe = SelectedProbe.load(str(tmp_path / "probes" / p_reader / name))
+            for view, s in by_view.items():
+                rows = [k for k, it in enumerate(diag_items) if it["view"] == view and it["id"].startswith("t")]
+                a, b = (probe.logit(diag[k][rows, probe.layer].double().numpy())
+                        for k in ("followup_batched", "followup_alone"))
+                assert s["n"] == len(rows) == n_diag_rows and abs(s["mean"] - np.mean(b - a)) < 1e-12, s
+                assert abs(s["sd"] - np.std(b - a)) < 1e-12 and s["spearman"] > 0.9, s
+                assert abs(s["spearman"] - spearmanr(a, b).statistic) < 1e-12, s
     assert report["decision"]["reader"] in ("nvfp4", "bf16")
-    assert (tmp_path / "compare" / "report.md").read_text().startswith("# Reader comparison")
+    text = (tmp_path / "compare" / "report.md").read_text()
+    assert text.startswith("# Reader comparison") and "## Report only" in text and "Batching floor" in text
     agree = report["routing_agreement_at_yes"]  # the readers share their router logits here
     assert set(agree) == {"terminal_prerl/with_reasoning", "terminal_prerl/without_reasoning",
                           "diverse_deception/without_reasoning"} and all(a["mean"] == 1.0 for a in agree.values())
@@ -222,11 +288,26 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
                                           "diverse_deception/without_reasoning/mean"}
     assert not mean_report["jitter"] and not mean_report["batching"]  # follow-up checks only
     assert set(mean_report["decision"]["by_readout"]) == {"mean"}
+    for r in mean_report["probes"].values():  # the readers' mean features are identical here: so are the probes
+        assert "batching_floor" not in r and abs(r["weight_cosine"] - 1) < 1e-9
+        assert all(abs(s["mean"]) < 1e-9 and s["p99_abs"] < 1e-9 for s in r["score_shift"].values()), r["score_shift"]
     cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"), "--from-json",
                          str(tmp_path / "compare_mean" / "decision.json"), "--out", str(tmp_path / "rerendered")],
                         capture_output=True, text=True, cwd=REPO, timeout=600)
     assert cp.returncode == 0, cp.stderr[-3000:]
     assert json.loads((tmp_path / "rerendered" / "decision.json").read_text())["decision"] == mean_report["decision"]
+    assert "## Report only" in (tmp_path / "rerendered" / "report.md").read_text()
+    old = json.loads((tmp_path / "compare" / "decision.json").read_text())  # as written before the report-only fields
+    for r in old["probes"].values():
+        for k in ("weight_cosine", "score_shift", "cross_reader", "batching_floor"):
+            r.pop(k)
+    (tmp_path / "old.json").write_text(json.dumps(old))
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"), "--from-json",
+                         str(tmp_path / "old.json"), "--out", str(tmp_path / "rerendered_old")],
+                        capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert cp.returncode == 0, cp.stderr[-3000:]
+    assert json.loads((tmp_path / "rerendered_old" / "decision.json").read_text())["decision"] == report["decision"]
+    assert "## Report only" not in (tmp_path / "rerendered_old" / "report.md").read_text()
 
 
 def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
