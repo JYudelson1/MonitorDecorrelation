@@ -61,5 +61,11 @@
  "effort": 0.5,
  "golden_tolerance": 3.0,
  "fitted_dir": "data/probe_results/fitted/bf16/diverse_deception/without_reasoning/mean",
- "deployed_utc": "2026-10-12T03:55:32Z"
+ "deployed_utc": "2026-10-12T06:14:15Z",
+ "deployed_code": {
+  "commit": "c508145273113940241188273769b229b78167c1",
+  "dirty": false,
+  "diff_sha256": null,
+  "source": "git"
+ }
 }
