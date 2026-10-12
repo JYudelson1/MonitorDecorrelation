@@ -27,12 +27,12 @@
   "golden": 32,
   "golden_tolerance": 3.0,
   "reader": "nvfp4",
-  "trained_reader": "nvfp4",
-  "threshold_1": -0.9759394365294369,
+  "trained_reader": "bf16",
+  "threshold_1": -0.3419564611365299,
   "serving_check": {
-   "test_auroc": 0.175452875866099,
-   "test_tpr_at_t1": 0.09090909090909091,
-   "test_fpr_at_t1": 0.007805325987144169
+   "test_auroc": 0.16387010601886634,
+   "test_tpr_at_t1": 0.045454545454545456,
+   "test_fpr_at_t1": 0.010101010101010102
   }
  },
  {
@@ -63,12 +63,12 @@
   "golden": 32,
   "golden_tolerance": 3.0,
   "reader": "nvfp4",
-  "trained_reader": "nvfp4",
-  "threshold_1": 0.4307098730160573,
+  "trained_reader": "bf16",
+  "threshold_1": 1.1426948450342602,
   "serving_check": {
-   "test_auroc": 0.601844895233325,
+   "test_auroc": 0.5156523916854495,
    "test_tpr_at_t1": 0.0,
-   "test_fpr_at_t1": 0.010560146923783287
+   "test_fpr_at_t1": 0.011019283746556474
   }
  },
  {
@@ -99,12 +99,12 @@
   "golden": 32,
   "golden_tolerance": 3.0,
   "reader": "nvfp4",
-  "trained_reader": "nvfp4",
-  "threshold_1": -5.4573985958099405,
+  "trained_reader": "bf16",
+  "threshold_1": -5.596041257116656,
   "serving_check": {
    "test_auroc": 1.0,
    "test_tpr_at_t1": 1.0,
-   "test_fpr_at_t1": 0.0036730945821854912
+   "test_fpr_at_t1": 0.005050505050505051
   }
  },
  {
@@ -135,12 +135,12 @@
   "golden": 32,
   "golden_tolerance": 3.0,
   "reader": "nvfp4",
-  "trained_reader": "nvfp4",
-  "threshold_1": -3.41989418029786,
+  "trained_reader": "bf16",
+  "threshold_1": -3.463882452034876,
   "serving_check": {
    "test_auroc": 1.0,
    "test_tpr_at_t1": 1.0,
-   "test_fpr_at_t1": 0.0036730945821854912
+   "test_fpr_at_t1": 0.005509641873278237
   }
  }
 ]

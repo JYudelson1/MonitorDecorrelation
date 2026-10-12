@@ -131,6 +131,12 @@ def serving_check(probe: SelectedProbe, items: dict, features: str, view: str, r
     return out
 
 
+def fitted_ref(fitted: str) -> str:
+    """Where the fitted probe lives in the repo: experiments/probe_report.py collects ``<reader>/<dataset>/<view>/
+    <readout>`` of fit_probes.py's output (the --probes folder is named after its reader) into data/probe_results."""
+    return "data/probe_results/fitted/" + "/".join(os.path.normpath(fitted).split(os.sep)[-4:])
+
+
 def deploy(probe: SelectedProbe, fitted: str, out: str, name: str, view: str, readout: str, items: dict,
            features: str, effort: float, tolerance: float | None, log, diagnostics: str | None = None) -> dict:
     src = LayerSource(os.path.join(features, "terminal_prerl"), view, readout)
@@ -138,7 +144,7 @@ def deploy(probe: SelectedProbe, fitted: str, out: str, name: str, view: str, re
     if tolerance is None:
         tolerance = MEAN_TOLERANCE
     probe.meta = {**probe.meta, "name": name, "view": view, "effort": effort, "golden_tolerance": tolerance,
-                  "fitted_dir": os.path.relpath(fitted), "deployed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                  "fitted_dir": fitted_ref(fitted), "deployed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                                                        time.gmtime())}
     if os.path.isdir(out):
         shutil.rmtree(out)
