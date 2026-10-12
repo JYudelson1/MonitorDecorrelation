@@ -11,7 +11,8 @@ Checks:
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
 - The GPU check script checks one IID and one OOD monitor through HTTP.
-- The post-hoc scorer's per-step metrics, also on the tasks no probe saw.
+- The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any task outside the probes' train and val
+  splits), and its resume after ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, t
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, probe_sha)
+    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha)
 
 VIEW = "with_reasoning"
 
@@ -539,7 +540,9 @@ def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
 def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     """experiments/eval_inkling_probes_on_runs.py on a fake RL run: every valid eval episode scored as in training,
     per-step metrics in the file the degradation matrix reads, also on the tasks no probe saw, and a rerun scores
-    nothing twice. Without a task-splits file, the unseen-task fields are left out with a warning."""
+    nothing twice. Without a task-splits file, the unseen-task fields are left out with a warning. After a resume
+    rewrote the end of eval_rollouts.jsonl, exactly the rewritten lines are scored again and the lines gone are left
+    out of the metrics."""
     mod = load_script("eval_inkling_probes_on_runs")
     run = tmp_path / "terminal_run_s0"
     run.mkdir()
@@ -574,27 +577,54 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     again = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
     assert json.dumps(again) == json.dumps([{k: v for k, v in r.items() if not k.endswith("_unseen")}
                                             for r in per_step])  # the other fields unchanged
+    # run_experiment --resume from the step-0 snapshot: eval_rollouts.jsonl cut back to its first 6 lines, then the
+    # resumed run's step-10 eval appends other episodes (t0's, where t3's were) on lines 7-8; lines 9-11 are gone
+    resumed = [*saved[:6], *({**r, "step": 10} for r in rows()[:2])]
+    (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in resumed))
+    assert mod.main([*argv, "--task-splits", str(splits)]) == 0
+    records = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
+    new = records[10:]
+    assert [r["line"] for r in new] == [7, 8]  # only the rewritten lines, each under its new episode's hash
+    assert [r["item_sha256"] for r in new] == [item_sha(episode_item(r["question"], r["env_meta"], RUN_ENV))
+                                               for r in rows()[:2]]
+    assert all(r["item_sha256"] == item_sha(episode_item(s["question"], s["env_meta"], RUN_ENV))
+               for r, s in zip(records[:6], saved))  # the kept lines' hashes: their episodes are unchanged
+    np.testing.assert_allclose([r["scores"]["probe_iid"]["logit"] for r in new], want[:2], atol=1e-2)
+    per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
+    assert [(r["step"], r["n"], r["n_pos"]) for r in per_step] == [(0, 6, 1), (10, 2, 1)]  # step 10: t0/0 hacks
+    assert [(r["n_unseen"], r["n_pos_unseen"]) for r in per_step] == [(2, 1), (2, 1)]  # t0 is a test task
     opts, effort = mod.run_replay_options({"config": {"env_options": {"verifier_mode": "submit_corrupted"},
                                                       "thinking_effort": 0.5}})
     assert effort == 0.5 and opts["max_turns"] == 4 and opts["require_explanation"] is False  # the env's defaults
 
 
-def test_posthoc_metrics_on_unseen_tasks():
-    """eval_inkling_probes_on_runs.step_metrics: the *_unseen fields count only the unseen tasks' scored episodes, are
-    NaN where undefined, and leave the other fields as they were."""
+def test_posthoc_metrics_on_unseen_tasks(tmp_path):
+    """eval_inkling_probes_on_runs: a task is unseen unless the probes' train or val split holds it, so a test task is,
+    and so is every task of a seed-1 run (eval_7920_*). The *_unseen fields count only those tasks' scored episodes
+    (not those without a task id), are NaN where undefined, and leave the other fields as they were."""
     mod = load_script("eval_inkling_probes_on_runs")
+    splits = tmp_path / "task_splits.json"
+    splits.write_text(json.dumps({"train": ["eval_7919_1", "eval_7919_4"], "val": ["eval_7919_2"],
+                                  "test": ["eval_7919_3"]}))
+    seen = mod.seen_tasks(str(splits), lambda m: None)
+    assert seen == {"eval_7919_1", "eval_7919_2", "eval_7919_4"}
+    (tmp_path / "test_only.json").write_text(json.dumps({"test": ["eval_7919_3"]}))
+    with pytest.raises(SystemExit, match="'train' and 'val'"):
+        mod.seen_tasks(str(tmp_path / "test_only.json"), lambda m: None)
 
     def row(step, task, score, behavior, used=False):
         return {"step": step, "task_id": task, "behavior_present": behavior, "used_verifier": used,
                 "scores": {"p": {"logit": 0.0, "score": score}}}
 
-    episodes = [row(0, "a", 0.9, True, used=True), row(0, "a", 0.2, False, used=True), row(0, "b", 0.6, False),
-                row(0, "b", 0.1, False), row(0, "b", None, True),  # unscored: not counted anywhere
-                row(0, "seen", 0.4, True), row(0, "seen", 0.7, False),
-                row(5, "b", 0.3, False), row(5, "seen", 0.8, True),
-                row(7, "seen", 0.9, True), row(7, None, 0.1, False)]
+    episodes = [row(0, "eval_7919_3", 0.9, True, used=True),  # a test task of seed 0
+                row(0, "eval_7920_1", 0.2, False, used=True),  # seed 1: index 1, but another grid than eval_7919_1
+                row(0, "eval_7920_2", 0.6, False), row(0, "eval_7920_2", 0.1, False),
+                row(0, "eval_7920_2", None, True),  # unscored: not counted anywhere
+                row(0, "eval_7919_1", 0.4, True), row(0, "eval_7919_2", 0.7, False),  # a train and a val task
+                row(5, "eval_7920_2", 0.3, False), row(5, "eval_7919_4", 0.8, True),
+                row(7, "eval_7919_4", 0.9, True), row(7, None, 0.1, False)]  # no task id: maybe a seen task
     plain = mod.step_metrics(episodes, "p")
-    got = mod.step_metrics(episodes, "p", unseen={"a", "b"})
+    got = mod.step_metrics(episodes, "p", seen=seen)
     assert not any(k.endswith("_unseen") for r in plain for k in r)
     assert json.dumps([{k: r[k] for k in p} for r, p in zip(got, plain)]) == json.dumps(plain)  # NaN-safe equality
     s0, s5, s7 = got
