@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Inkling probe pipeline on hub, after the GPU session, as one resumable entry point:
+# The Inkling probe pipeline on a CPU machine, after the GPU session, as one resumable entry point:
 #   fetch -> fit -> verify -> compare -> analyses -> deploy -> report
 #
 #   scripts/run_probe_pipeline.sh [--dry-run] [--stages fetch,fit,...] [--run DIR] [options]  2>&1 | tee -a pipeline.log
@@ -7,6 +7,8 @@
 # Every command is printed ("+ ...") before it runs. Outputs go to a new <scratch>/pipeline/<UTC timestamp>/ (--run
 # picks the folder). Each finished step leaves a marker in <run>/.done/, so rerunning with the same --run resumes
 # after the last finished step; a failed step stops the pipeline. The report steps always run (they are quick).
+# A step that runs again after a failure replaces what it had written: fit, compare and the analyses get --overwrite
+# (they refuse an existing output otherwise); a finished step is never rerun.
 # --dry-run prints the commands and runs nothing. It works from the repo root, wherever it is called from.
 #
 # Before it, the GPU session extracts the features (not run here). From the repo root, on a fresh spot VM, through
@@ -38,13 +40,13 @@
 #   report    experiments/probe_report.py collect (into data/probe_results) and render --docs
 #
 # Readout sets (--set NAME=READOUTS, repeatable; default followup=followup and mean_router=mean,router,router_all):
-# one fetch per set and reader, so hub's disk holds only the tensors a set needs (the 2026-10-10 run had followup in
-# ../scratch/features and the rest in ../scratch/features_mr; reuse such folders with --features-of SET=DIR).
+# one fetch per set and reader, so the disk holds only the tensors a set needs (the 2026-10-10 run kept followup and
+# the rest in two separate folders; reuse such folders with --features-of SET=DIR).
 # Fitting baselines needs the follow-up and mean readouts in one folder: one set with both, and --fit-args '--jobs 6'.
 #
 # Options (defaults in brackets):
 #   --run DIR             the run folder [<scratch>/pipeline/<UTC timestamp>]
-#   --scratch DIR         [../scratch]
+#   --scratch DIR         [../scratch, a folder next to the repo]
 #   --features DIR        features root, <features>/<set>/<reader> [<scratch>/features]
 #   --features-of SET=DIR a set's features folder, holding <reader>/ (repeatable)
 #   --diagnostics DIR     [<scratch>/diagnostics]
@@ -214,7 +216,7 @@ if wants fit; then
     for r in "${READER_LIST[@]}"; do
       step "fit-${SET_NAMES[$i]}-$r" "${PY[@]}" experiments/fit_probes.py --reader "$r" \
         --features "$(feat "${SET_NAMES[$i]}" "$r")" --out "$RUN/probes/$r" --readouts "${SET_READOUTS[$i]}" \
-        "${FIT_EXTRA[@]}"
+        "${FIT_EXTRA[@]}" --overwrite
     done
   done
 fi
@@ -234,7 +236,7 @@ if wants compare; then
     for i in "${!SET_NAMES[@]}"; do
       step "compare-${SET_NAMES[$i]}" "${PY[@]}" experiments/compare_readers.py --probes "$RUN/probes" \
         --features "${FEAT_OF[${SET_NAMES[$i]}]:-$FEATURES/${SET_NAMES[$i]}}" --diagnostics "$DIAGNOSTICS" \
-        --out "$RUN/compare/${SET_NAMES[$i]}" --readouts "${SET_READOUTS[$i]}"
+        --out "$RUN/compare/${SET_NAMES[$i]}" --readouts "${SET_READOUTS[$i]}" --overwrite
     done
   fi
 fi
@@ -246,21 +248,21 @@ if wants analyses; then
       S=$(set_of "$ro")
       step "refits-$r-$ro" "${PY[@]}" experiments/ood_refits.py \
         --probe "$RUN/probes/$r/diverse_deception/without_reasoning/$ro" --features "$(feat "$S" "$r")" \
-        --out "$RUN/ood_refits/$r/$ro" --refits "$REFITS"
+        --out "$RUN/ood_refits/$r/$ro" --refits "$REFITS" --overwrite
     done
   done
   S=$(set_of followup)
   IFS=, read -r -a CURVE_LIST <<<"$CURVES_READERS"
   for r in "${CURVE_LIST[@]}"; do
     step "curves-$r" "${PY[@]}" experiments/learning_curves.py --probes "$RUN/probes/$r" \
-      --features "$(feat "$S" "$r")" --out "$RUN/learning_curves/$r"
+      --features "$(feat "$S" "$r")" --out "$RUN/learning_curves/$r" --overwrite
   done
-  step analyses-dataset-stats "${PY[@]}" experiments/probe_analyses.py dataset-stats --out "$RUN/analyses"
+  step analyses-dataset-stats "${PY[@]}" experiments/probe_analyses.py dataset-stats --out "$RUN/analyses" --overwrite
   P=$RUN/probes/$DEPLOY_READER
   NEAR=$P/terminal_prerl/with_reasoning/followup,$P/terminal_prerl/without_reasoning/followup
   NEAR+=,$P/diverse_deception/without_reasoning/followup
   step analyses-near-threshold "${PY[@]}" experiments/probe_analyses.py near-threshold --probes "$NEAR" \
-    --features "$(feat "$S" "$DEPLOY_READER")" --out "$RUN/analyses"
+    --features "$(feat "$S" "$DEPLOY_READER")" --out "$RUN/analyses" --overwrite
 fi
 
 if wants deploy; then

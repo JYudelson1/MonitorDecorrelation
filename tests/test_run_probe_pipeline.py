@@ -1,5 +1,6 @@
 """scripts/run_probe_pipeline.sh: valid bash; a dry run prints every stage's commands in order and creates nothing;
-finished steps are skipped when a run is resumed; stages are selectable and bad arguments are refused."""
+finished steps are skipped when a run is resumed, and a step rerun after a failure may replace its own outputs; stages
+are selectable and bad arguments are refused."""
 
 from __future__ import annotations
 
@@ -11,6 +12,9 @@ SCRIPT = os.path.join(REPO, "scripts", "run_probe_pipeline.sh")
 ORDER = ["scripts/fetch_features.py", "-c", "experiments/fit_probes.py", "experiments/verify_fits.py",
          "experiments/compare_readers.py", "experiments/ood_refits.py", "experiments/learning_curves.py",
          "experiments/probe_analyses.py", "experiments/deploy_probes.py", "experiments/probe_report.py"]
+# the scripts that refuse an existing output unless --overwrite (deploy and collect manage their folders themselves)
+OVERWRITING = {"experiments/fit_probes.py", "experiments/compare_readers.py", "experiments/ood_refits.py",
+               "experiments/learning_curves.py", "experiments/probe_analyses.py"}
 
 
 def dry(tmp_path, *args: str) -> subprocess.CompletedProcess:
@@ -45,18 +49,18 @@ def test_dry_run_prints_every_stage_in_order_and_creates_nothing(tmp_path):
         "nvfp4 --keep mean_action,mean_reasoning,counts,answer_logp,router_logits,router_topk,router_margin "
         "--workers 4",
         f"experiments/fit_probes.py --reader bf16 --features {s}/features/mean_router/bf16 --out {run}/probes/bf16 "
-        "--readouts mean,router,router_all --skip-baselines --jobs 6",
+        "--readouts mean,router,router_all --skip-baselines --jobs 6 --overwrite",
         f"experiments/verify_fits.py --probes {run}/probes --out {run}/verify_fits "
         f"--check nvfp4/followup={s}/features/followup/nvfp4 --check bf16/followup={s}/features/followup/bf16 "
         f"--check nvfp4/mean,router,router_all={s}/features/mean_router/nvfp4 "
         f"--check bf16/mean,router,router_all={s}/features/mean_router/bf16",
         f"experiments/compare_readers.py --probes {run}/probes --features {s}/features/followup "
-        f"--diagnostics {s}/diagnostics --out {run}/compare/followup --readouts followup",
+        f"--diagnostics {s}/diagnostics --out {run}/compare/followup --readouts followup --overwrite",
         f"experiments/ood_refits.py --probe {run}/probes/nvfp4/diverse_deception/without_reasoning/mean "
-        f"--features {s}/features/mean_router/nvfp4 --out {run}/ood_refits/nvfp4/mean --refits 50",
+        f"--features {s}/features/mean_router/nvfp4 --out {run}/ood_refits/nvfp4/mean --refits 50 --overwrite",
         f"experiments/learning_curves.py --probes {run}/probes/bf16 --features {s}/features/followup/bf16 "
-        f"--out {run}/learning_curves/bf16",
-        f"experiments/probe_analyses.py dataset-stats --out {run}/analyses",
+        f"--out {run}/learning_curves/bf16 --overwrite",
+        f"experiments/probe_analyses.py dataset-stats --out {run}/analyses --overwrite",
         f"experiments/deploy_probes.py --probes {run}/probes/bf16 --features {s}/features/mean_router/nvfp4 "
         f"--diagnostics {s}/diagnostics/nvfp4 --serving-reader nvfp4 --readouts mean --out data/probes/Inkling-Small",
         f"experiments/probe_report.py collect --scratch {run} --compare followup={run}/compare/followup "
@@ -65,6 +69,7 @@ def test_dry_run_prints_every_stage_in_order_and_creates_nothing(tmp_path):
     ]
     for line in expected:
         assert line in lines, line
+    assert all((c[-1] == "--overwrite") == (c[0] in OVERWRITING) for c in cmds), lines
     assert f"# no {tmp_path}/doc.md: nothing to render" in cp.stdout
     assert not list(tmp_path.iterdir())
 
