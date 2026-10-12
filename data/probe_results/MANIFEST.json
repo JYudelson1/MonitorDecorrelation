@@ -1,0 +1,623 @@
+{
+ "files": {
+  "analyses/dataset_stats.json": {
+   "sha256": "569c8d8b6321e1efe6f410d43f826c7746f868fb2d441fa718736760f6e766e9",
+   "source": "scratch/analyses/20261012T041431Z/dataset_stats.json",
+   "source_sha256": "3ad9881a631c2116a10b20d9cbf18be9a1a1d1467d53b3a2f8521d6d3fed3b25"
+  },
+  "compare/followup/decision.json": {
+   "sha256": "eaf510ab9899ce8ee953cbf4323daa90a8653c9f7727ee6f0334745f30c6888e",
+   "source": "scratch/compare/decision.json"
+  },
+  "compare/followup/report.md": {
+   "sha256": "2aa9272df710788960f789a8c9a9f7af57c18291d60f316bcf773c0d84665ad0",
+   "source": "scratch/compare/report.md"
+  },
+  "compare/mean_router/decision.json": {
+   "sha256": "10a5c3dc02f1672788a0eef3b2dd92ff7062916583c8b50e3e33529a960490f6",
+   "source": "scratch/compare_mean_router/decision.json"
+  },
+  "compare/mean_router/report.md": {
+   "sha256": "10d931612edf33a7cd37fc0e3a51dcf7fad5416c248a2c5a13a8185cfccca4e4",
+   "source": "scratch/compare_mean_router/report.md"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup/cv_grid.csv": {
+   "sha256": "d0da1296302d2a2b70f8a59a77689d38124b8213218364c4806145f0257dd552",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup/meta.json": {
+   "sha256": "0492ac878d446f10f1f259c7af74bec3dcf03f7790f93f8326ec6820907a5c15",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup/meta.json",
+   "source_sha256": "5ed5b525edfbb2878eb6fa2948c74b73c908abf4349b4bded51ad66fb08fb54b"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup/metrics.json": {
+   "sha256": "1cdc0d462b1c12fb155fc7a49c0ce11ebaa8a0fae93e1b74b05d305dd6020f1b",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup/metrics.json"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup/probe.npz": {
+   "sha256": "c46acd24990f4200d2eda19b71852bcc91557b524a5d1a958dac213b36eff5d9",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/mean/cv_grid.csv": {
+   "sha256": "e138d4760da89609420c02ed16d77bba43cdb4a9a05adeb5f64162e2f01fcbd8",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/mean/meta.json": {
+   "sha256": "d70bf9d83430da66c843e9b374abb57407bee3dfc607c447c0b460b3cb3910c0",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/mean/meta.json",
+   "source_sha256": "6e91542ebc48e1fbbb9f3a7f4cd0dfe6ab71ce7c0a10a5d63ff00b5edda852e8"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/mean/metrics.json": {
+   "sha256": "c2bc0bc35283d3b4cb76cff694445461b1c58e8a591009efe3a98a77db54d921",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/mean/metrics.json"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/mean/probe.npz": {
+   "sha256": "8ef8de01279203f5b25c2c8b1c1e225d1b2573ad8e3d4c78e2929139f7cfc0b6",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/mean/probe.npz"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router/cv_grid.csv": {
+   "sha256": "09945bba0d21fc488139e55ec705185def3887cbc1ba65cceab66d410908c3cc",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router/cv_grid.csv"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router/meta.json": {
+   "sha256": "b44bbcb759c3941ada86cbad34d60aea7945898f9943ed39c7315f890f500dcb",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router/meta.json",
+   "source_sha256": "0c8f6966cc4df29fe6280585301904d8515f669a9b545df25d999711e6fdd4d2"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router/metrics.json": {
+   "sha256": "f19281e121105fb3d6bf972920d307f0f9b2a097b0cf102e33f1511703f763aa",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router/metrics.json"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router/probe.npz": {
+   "sha256": "1e06d203a3fbf5aee3c774ad40fe59ca8ed92c16c775f9abc0d1d7a2349b0ccb",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router/probe.npz"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router_all/cv_grid.csv": {
+   "sha256": "4ab77efa84a385f794d3318511bd82393c01d0b915162684f21d21d48bb00492",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router_all/meta.json": {
+   "sha256": "8f4d0f691a56037dbc8344020c45851376f5effacf96e06c0cf9ab6c8b91ee7c",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router_all/meta.json",
+   "source_sha256": "8acffa9996fc31344e121565e406ac66dd668c9dad8d551ada9c6eaa4ef78729"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router_all/metrics.json": {
+   "sha256": "5c5028fc9004c699a1c0a7a301fda629f821b105631ee5106400fae4bf0c010b",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router_all/metrics.json"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/router_all/probe.npz": {
+   "sha256": "6b88feea303e974302fbec0cf79c30fbae2867769304124142124c3d8d31a1af",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router_all/probe.npz"
+  },
+  "fitted/bf16/summary.json": {
+   "sha256": "024826941243baf67eb9dedb92fc33d1259b48f09969db45512d832fb3a18074",
+   "source": "scratch/probes/bf16/summary.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup/cv_grid.csv": {
+   "sha256": "ef65118010a89e1f5b9963d873ec2ce2d313007732bc472cf176a778e2bf9037",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/meta.json"
+   ],
+   "sha256": "4acb8bbbf343037d5a47b7d52e10b7a834d41283fda3f49c057bb7d6d48cf3c1"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup/meta.json": {
+   "sha256": "a05cd621a270a45f7ea3d7b32907d5db3b9e81bc0c07c1beaa25b795d6e94bb0",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/meta.json",
+   "source_sha256": "9ca9f0eafd098267290efbd6e68729d3a9fcb3fbb106329a19e20129e96cfb97"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup/metrics.json": {
+   "sha256": "41e7589c82e0dca0f2f90447eca35f03e7e416623219324ed2a62b8071c0188e",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup/probe.npz": {
+   "sha256": "315266fd1126249256c4a8fba59c758bda753a458fee5834b840be78c5944a09",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/mean/cv_grid.csv": {
+   "sha256": "e3772bb34c381cf1d912636fc9f49ec432e3ac003509cf1ae941e1f4a770599b",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/mean/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/meta.json"
+   ],
+   "sha256": "648f4b383aaa9a19f63a95110e014a35fd3afd00af14d21d10ad02f150f92073"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/mean/meta.json": {
+   "sha256": "466826e7c641696fa7516467f4b3072551f80645a610d44b2c174b57ddbfe112",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/meta.json",
+   "source_sha256": "04bd4673791aefc5af76b5031c902446bf37529a3a961a558c004bf1321d1983"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/mean/metrics.json": {
+   "sha256": "7cb2d8d21da99322254b17509bee0e3a723e0a7118479670c2fb2db1adde0f0f",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/mean/probe.npz": {
+   "sha256": "06530be4cc84ac66719f6e42a3bcae68947974d215a2bb1dd98a0df0dd9bcc9b",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/mean/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router/cv_grid.csv": {
+   "sha256": "347b13eb7791862cde5fc4512c33e51e4ce756b7e06d83af21ba90767312050b",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/router/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/router/meta.json"
+   ],
+   "sha256": "e09970d5406ade3508c95eba89d91cf0a41308b21c4a5f30c0fd0a33131bbea6"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router/meta.json": {
+   "sha256": "b6a1858fb3d9c62db2ef1413d06cc84536d11968d6bd5a7a66e5624594ab32bd",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router/meta.json",
+   "source_sha256": "b6ffffa9eff91349fe3d8b9b4a5f57f9b35e4c7dd113c3b4f685ce22eea8733c"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router/metrics.json": {
+   "sha256": "0cc0faef3f16dcc6827a3442ba37fb8704f7d71873ceb1c2980dcfbd7aa2e501",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router/probe.npz": {
+   "sha256": "81e5601abdd717f068d143d3252fd1abb78059b8983646d642410779def80b5d",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router_all/cv_grid.csv": {
+   "sha256": "7f4ea2098ab89d4f059c59bae59445da83122ae478c6886663999f5157e03aaa",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router_all/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/meta.json"
+   ],
+   "sha256": "0e4acea40af032475cf614dd6f3d6cce92ca0995f08e231c5f37aceb0c994d67"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router_all/meta.json": {
+   "sha256": "6233525ff6cbc524c61be3104de872761cc6824c1864f823216ed2cd35bee33f",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/meta.json",
+   "source_sha256": "9228d4606bc7dae67ffdee6e6ccfc30f89b425e5fe3cea7d8c36f3f94f008c12"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router_all/metrics.json": {
+   "sha256": "076cb321546fc9da3f78c9a9d08b16042d1665327ca8cbb9c89e12858fc11a74",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/router_all/probe.npz": {
+   "sha256": "9d6ff3c23d2736ddef7000b06e11760a64775eeb9ce30b18e50b90f157c17e9f",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/router_all/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup/cv_grid.csv": {
+   "sha256": "9c1d254f03c51354f445fc0bf2525875c23b97eb1dfeafc68196872a01920145",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/meta.json"
+   ],
+   "sha256": "bcfa88f23fa0fa8540eed9244be2bcbccc58e1ce9010b9181f91228ba72d4e47"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup/meta.json": {
+   "sha256": "c3cfc968469b7a35f9c545835dc37749902b396a970e90a46682f7804949c2d8",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/meta.json",
+   "source_sha256": "5a1b67824b6e127a18fc591e18faeb425a54fb4222e339e7364281f3609938dd"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup/metrics.json": {
+   "sha256": "217969d7cdf0a54f2c109dcdb2655488e9231a949f9a83aec670b712413a29ea",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup/probe.npz": {
+   "sha256": "69aa558934e802ce4552a2721dd579862e0d872e114ffc73d807e4c6f68b1de3",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/mean/cv_grid.csv": {
+   "sha256": "e042b1a953cbb68bd6471819de70ac7b1877ed9425cc5ce3bcb2400459d8d42c",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/mean/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/meta.json"
+   ],
+   "sha256": "498af3f264a754796aadd8a227786cb1a47bf555294ea064f8a5a0a001b043b0"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/mean/meta.json": {
+   "sha256": "9675f8c3e0110b126cf08803010e90413f4545f25a6dc69d16d88dfef8897094",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/meta.json",
+   "source_sha256": "3be221af4c62c93024c2da0c819034a95084fef20ff76b8c78ad11f9b1e5ccd5"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/mean/metrics.json": {
+   "sha256": "89d981878d565d51d6d9d90aaac09aa5a38b3c1224cf33f5c342c03d0020897d",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/mean/probe.npz": {
+   "sha256": "719e542be998bd9910b82d50343a2641332b8ab76e27a8d1b22bc67a6c26c827",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/mean/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router/cv_grid.csv": {
+   "sha256": "8024b8093102408a363a1114c8ed8b5d53f8cff470fe7a69dc1eece508b0f38e",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/router/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/router/meta.json"
+   ],
+   "sha256": "2055f6bc4d3895447528384dc0991ba886ef6890616bb7481c1d6c64832b3ba9"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router/meta.json": {
+   "sha256": "684b26ff0c395c03044007ec3403a701408996cb047d24e08b2a88510f4c5538",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router/meta.json",
+   "source_sha256": "8adb1a7ef1251dd9f04f35e314f8936b932d69e52244949a0e14d7c4dacb3136"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router/metrics.json": {
+   "sha256": "e2cd4d54e25bfc209356d92cdd3cad9b0bed5c99f1b0291d8ff7668c7fef42d7",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router/probe.npz": {
+   "sha256": "bb47a74d66a446fb545da68bdc8037f60fa563ed96d3b83dea3da9a514882b58",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router_all/cv_grid.csv": {
+   "sha256": "eb1d8e550ead824b0b14aaef9a0040f171905cd93d0f932399abd5c720aa2bc3",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router_all/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/meta.json"
+   ],
+   "sha256": "f1553bfdead042d951dec1e173375af455ff6f1ea7325096470bf4c4f0fd44a9"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router_all/meta.json": {
+   "sha256": "84ce01ff5fe033f9093112f4889e6100f0668d54631f49e4d447b7537ddc7f85",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/meta.json",
+   "source_sha256": "a6cec15e87fc8b652d9263ca281bac564aa4ce776eeb0e2de2b4aa92033690a8"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router_all/metrics.json": {
+   "sha256": "b51cb7cef0a733aa9912f4ea97ce84228a8951fffb2636944b181225310a2f74",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/router_all/probe.npz": {
+   "sha256": "269d2abb4c30164a68cab8c987c0fb8d4fa21caf62f4154f44a17af28d4cf833",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/router_all/probe.npz"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/followup/cv_grid.csv": {
+   "sha256": "1daf01feefa41cceea212b79be4303005caf1a8925aa764412e47560621e93db",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/followup/meta.json": {
+   "sha256": "acde727905b3172c51c05bccaedff244868ffd13257cad313ef1588fb5fd6072",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/followup/meta.json",
+   "source_sha256": "1ef190e1deb04dad8e391b072eac206de99ad8da4ead5e4fbaf5a8510e1e7f9e"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/followup/metrics.json": {
+   "sha256": "5ddf828120257d40bc1f381ca183cb93a17a2e4a7294ee6fe2200ac514a15f21",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/followup/metrics.json"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/followup/probe.npz": {
+   "sha256": "336fce61ecea5f32b7027d21e78fd59a8f3bb8a3577e9e727bbcff1d20f1e1c3",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/followup/probe.npz"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/mean/cv_grid.csv": {
+   "sha256": "a9ad0e1a8c81fcc177aa5d90f9c39529cebbf9a8bfd89ddf32392143cc4d23a0",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/mean/meta.json": {
+   "sha256": "131755216e6a33cffeb864de0ed86c6f0a31d034e643e811615bda4b469acd27",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/mean/meta.json",
+   "source_sha256": "76354ab1b3c5bb30947982952a32eaa57c41d43df20aaff80a6874023d3cbc9b"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/mean/metrics.json": {
+   "sha256": "79e23dfe806c8d1468debcbdf384f950d6df9bbceffb516dd9beeb6eb4702cfa",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/mean/metrics.json"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/mean/probe.npz": {
+   "sha256": "70ecfea42630c7282f8598932cc9a4b6225f096fcc4b2fc0c50066d5b25d0cf4",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/mean/probe.npz"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router/cv_grid.csv": {
+   "sha256": "b63fb6987824a5f0884c8135c5c235e3ed7fd4630f33e9cf2856d6f98139a68c",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router/cv_grid.csv"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router/meta.json": {
+   "sha256": "56cb66487fcc3004bb75dae8b3961d58567a9f21a9006d90bf9c9f4ab664bb19",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router/meta.json",
+   "source_sha256": "c9452f34e7842643014679fb5dd1c7ea748944a3834d2a4ef0bd1f391b5deb4f"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router/metrics.json": {
+   "sha256": "60fb2e40fe6876744b328b7e4defd7e1b797943b225614dfaaa957c6548c57dd",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router/metrics.json"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router/probe.npz": {
+   "sha256": "266697b202be516868d72b0c6b9c209cfd621c1e194c4f6f6334bdea68605c23",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router/probe.npz"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router_all/cv_grid.csv": {
+   "sha256": "0ef2445c458ad0f85c4c8dfc38dc5a91a2122e972d0cf9ad3426dd0f4a972bfd",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router_all/meta.json": {
+   "sha256": "d2b6a7235f64d54a02a68beed8e35b10c688e7aa0fb534ebe353dc049972207d",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router_all/meta.json",
+   "source_sha256": "1440f1fa69e86a6c4ab6ca7eed8f608b9754f5bf6640ba8e9e7cabb4b8592953"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router_all/metrics.json": {
+   "sha256": "36544023d7768ab3e6f86518942d5ae7f446be039e74adaf14e7535c7a0b940c",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router_all/metrics.json"
+  },
+  "fitted/nvfp4/diverse_deception/without_reasoning/router_all/probe.npz": {
+   "sha256": "67ea3bc8f0581bbd0f84e9bab9dff8a69c10b81af14473380cce6cccfebd94ae",
+   "source": "scratch/probes/nvfp4/diverse_deception/without_reasoning/router_all/probe.npz"
+  },
+  "fitted/nvfp4/summary.json": {
+   "sha256": "9acaa20ac0eb5aba2d4548ff90fed3dd3c72b548f85595d7aeec00492dbf236b",
+   "source": "scratch/probes/nvfp4/summary.json"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/followup/cv_grid.csv": {
+   "sha256": "c3e5a1cc455bbef08c6ba5dfa4d8691fb9f8cb04debe14d3487f0cb20a64e433",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/followup/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/meta.json"
+   ],
+   "sha256": "1080fe45ad941e185f5a7aeaec39eccc57e429e7694d284deab0907071fe3300"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/followup/meta.json": {
+   "sha256": "d7b294fec462cd121609bab58728fc45c21836d83a1c9ad4f5b9a68ed53a7e96",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/meta.json",
+   "source_sha256": "1fcaca811c3b9149ef68964533deb474ae764bbf1b19a21d5f2c0882843bd8bc"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/followup/metrics.json": {
+   "sha256": "84d79fb99eb0d81daafaa9c9f31e94c69483160d8c31d025467ce4daedb544dc",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/followup/probe.npz": {
+   "sha256": "cdb63f829110467157a3f982fdf994e32a79737c4e1475aca58cfc5cda7d024f",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/mean/cv_grid.csv": {
+   "sha256": "6bab9c91949909cb349bb8e0bf93e70a4f9e2a299395871bfec2ba4ac327e003",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/mean/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/meta.json"
+   ],
+   "sha256": "9cf368b7f6cba46bf9fe4af56f90255786c482834a4ebd56ecfe78dc6a8d4ab2"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/mean/meta.json": {
+   "sha256": "ce873e0c243a8ab04c76d63830f72099e1fde483719ce4917aac822db7d39d99",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/meta.json",
+   "source_sha256": "d056fc7b3bb562d57fc368e44160e8a793354b702c29c32b4187c83ab0e50cb7"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/mean/metrics.json": {
+   "sha256": "8313237fb108408f04c6dfdca70b3be9eb213747ebc66ff8688f07ddd5e82af8",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/mean/probe.npz": {
+   "sha256": "4d616ec501a97c4153912377d359c01c118b422a2560286bae0f849a4c56ba8f",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/mean/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router/cv_grid.csv": {
+   "sha256": "b4ef52fa52f7ace68fb4243bd95e6f6588b28d554318490723a3f878d0473f14",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/meta.json"
+   ],
+   "sha256": "937e5eb116603ae64225bd59cf460b2b376d426cac60e05841c11865c6ab6c4b"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router/meta.json": {
+   "sha256": "6475be9debff08a5a14a22fb02c90d03c6c98f32d1e2b82eb3d24c467144f608",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/meta.json",
+   "source_sha256": "dbcc48b15f1ca8a3838757b83949fe1669ebde20d1e2c72cd0849d1c6f89241b"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router/metrics.json": {
+   "sha256": "338ad8642a4f77a7553e97d719c51d9983edc4cb40717a0abaa95cb6c65a3b9d",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router/probe.npz": {
+   "sha256": "6cec5105a1d5d4ebb93d7151bc94d6238e9c07d8dde35bd6d0822ea5ef04cf3a",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router_all/cv_grid.csv": {
+   "sha256": "f412348c0a08c6196d5ec1f4a85986562be4fc7b2fbe8a3ca335bbfe9b3b86b5",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router_all/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/meta.json"
+   ],
+   "sha256": "113990d694f421a41a8494bccdd109214b3dfe4551de46eecb5a458cd4e111c7"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router_all/meta.json": {
+   "sha256": "09513721429bc971b75d93dfbce1ad5d01e50ecc8ad7f48d8658b62d92e8cbbd",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/meta.json",
+   "source_sha256": "d166c6ac3f757809303bfe4b320397a13547d5b5e08e2a79c4abf2a42b2c0e6a"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router_all/metrics.json": {
+   "sha256": "ade1869a0c19a9813307ebcacb5f7fba2516c690c41178ddce1e089d88a2188b",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/with_reasoning/router_all/probe.npz": {
+   "sha256": "e69acc7a5d20929f04f112291d7e0d25bc09e348c832b550f90486cf31689fd1",
+   "source": "scratch/probes/nvfp4/terminal_prerl/with_reasoning/router_all/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/followup/cv_grid.csv": {
+   "sha256": "917bd121fe2260ec924376ed0a9c35091efd15f0015bda2ddfc54ccca4fc300a",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/followup/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/meta.json"
+   ],
+   "sha256": "61f58c02025e6a6fd4497f692f20a3c30c85fdbad83e8c6c8b549e9c5c36265d"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/followup/meta.json": {
+   "sha256": "a35f91c91c7dd0b48d4e236bf95837fa5563337df8b578f54e97b1e754e5fcd5",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/meta.json",
+   "source_sha256": "d741072bb5d725a293f8c3eb93d9d198a58a71dd41318a711dc7a9fc0c96dc60"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/followup/metrics.json": {
+   "sha256": "36fab1cacc711aa62cae3f47d8c32497a7ebcf4f811d637cf828b37004706789",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/followup/probe.npz": {
+   "sha256": "7b69e48f3f947ddd1d6edaa741a3d6afb048194518d30f72770c9cf1b6994ad3",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/followup/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/mean/cv_grid.csv": {
+   "sha256": "293ec70206bdceec55148ce1f1c12332a0e12babd3efc3ec6cd746f4619e95ec",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/mean/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/meta.json"
+   ],
+   "sha256": "8726e96e11bc94b73e5a5b1e756dd59e0bcedae91a7a97cab8ee33d27eee707e"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/mean/meta.json": {
+   "sha256": "65ee4dd86429c482fcf295cc97264ff55baab5c3f59e0feb298bbdc4a91c1e16",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/meta.json",
+   "source_sha256": "0ab3d0a4d5abb0f36442ff58efc27a177dff5d77109c23c9f01fcb87605ef930"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/mean/metrics.json": {
+   "sha256": "507add7efaf08bc98e87ea2b87589008e3b032887a922e7bca52d0780499188a",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/mean/probe.npz": {
+   "sha256": "b38dc13c0de20b73054a203e1f73f25ad896f1b1906fc599dfa7ee187808b1ac",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/mean/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router/cv_grid.csv": {
+   "sha256": "ae1904eede93bb8379d7d328d545afef499cdd69a3dbb606a1f46863834b8b3c",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/meta.json"
+   ],
+   "sha256": "cc514379c10eb1a002f0f42d54c8cf89e124a8a5134591420c15648a20063fab"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router/meta.json": {
+   "sha256": "ce768e7534ac4cee07c087441105553b2888abcccd947f896d766ac12e060dfe",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/meta.json",
+   "source_sha256": "da3466f35f84b8dd718d952b82af245ec93ab5800c07293ee575322032de00ae"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router/metrics.json": {
+   "sha256": "c40e4a97ad3b197a4cec27a2b09c8268591dc463cf31b57e1b102a6ee5846011",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router/probe.npz": {
+   "sha256": "9054fafee3b724892c34cbacd33b0d338f238213e2e093f4a1d6491aaf8c95cb",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router/probe.npz"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router_all/cv_grid.csv": {
+   "sha256": "6e5b3c12778a1269dc6bb996d58c009b90805c62ee50152912277d8589c96555",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/cv_grid.csv"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router_all/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/scores.jsonl",
+    "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/meta.json"
+   ],
+   "sha256": "8de5297736222659b222b6963274ee92d84d3b24b0efdfe3b4a76cb6a2e9ec38"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router_all/meta.json": {
+   "sha256": "34f4efd32bc4a4673c3b101bab67dfd6f7ae8082ee1325666035254ca67dbc31",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/meta.json",
+   "source_sha256": "a3e8a218d8c38b1fcb210e0b846b0d10d70f4ad2cf56724d98c3be1746fb48db"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router_all/metrics.json": {
+   "sha256": "b175593a0c8963143ea7498cdb5d04eb25125011a96cd479dcb402127f79a884",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/metrics.json"
+  },
+  "fitted/nvfp4/terminal_prerl/without_reasoning/router_all/probe.npz": {
+   "sha256": "93ec7476caeb6ab52a7056cf60860dc057ea63b40885ee772cc4417da7a302cc",
+   "source": "scratch/probes/nvfp4/terminal_prerl/without_reasoning/router_all/probe.npz"
+  },
+  "learning_curves/bf16/iid.csv": {
+   "sha256": "6ae33709ec185663b099b67dbca04cdf38c1604d8b43c7b74d01c0c34907e3af",
+   "source": "scratch/learning_curves/bf16/iid.csv"
+  },
+  "learning_curves/bf16/ood.csv": {
+   "sha256": "1867b848b20197acc28fdc2b8dfb8c8a6339d6dd4feab8a584ac0a8e6fc2b605",
+   "source": "scratch/learning_curves/bf16/ood.csv"
+  },
+  "learning_curves/bf16/ood_sources.csv": {
+   "sha256": "91708ce2a9a2506c507691038df7296eac714be1700233aaa794415bd5af708d",
+   "source": "scratch/learning_curves/bf16/ood_sources.csv"
+  },
+  "learning_curves/bf16/summary.json": {
+   "sha256": "3586202e759caf2ceb123eeca7fee0cccba12ce6a62df0cead2c0ca4ab02d560",
+   "source": "scratch/learning_curves/bf16/summary.json",
+   "source_sha256": "e657c012045a67731fecba7ade0909ae46988a9a28fa0fc0fcbb2e7625e9ac1a"
+  },
+  "ood_refits/bf16/followup/by_layer.csv": {
+   "sha256": "967bb0053fe5d24d58aa3366d3f66f0adbe87e29d148f38c7b7317966be9a839",
+   "source": "scratch/ood_refits/bf16/followup/by_layer.csv"
+  },
+  "ood_refits/bf16/followup/refits.csv": {
+   "sha256": "86a550d0828820c64f82261d20420a8c6bd025fe78f88214d5b372b19c0ea90f",
+   "source": "scratch/ood_refits/bf16/followup/refits.csv"
+  },
+  "ood_refits/bf16/followup/summary.json": {
+   "sha256": "0165557e2507797548cd20628eb396bd51265b2e55942dd453be693374f4df16",
+   "source": "scratch/ood_refits/bf16/followup/summary.json",
+   "source_sha256": "15f5a70bf5661dc4ada4f6968b26dddde08a091ed4cfeecd08c5d118ffd19a9b"
+  },
+  "ood_refits/bf16/mean/by_layer.csv": {
+   "sha256": "8e91617334da17c4ce63b10baf1afa0a1eeafa0ca2e8298346be8b8baaed8033",
+   "source": "scratch/ood_refits/bf16/mean/by_layer.csv"
+  },
+  "ood_refits/bf16/mean/refits.csv": {
+   "sha256": "77886282aa73020fa474b5baec1f3ca4c5fffd3c26152e24ee181b295b9ab044",
+   "source": "scratch/ood_refits/bf16/mean/refits.csv"
+  },
+  "ood_refits/bf16/mean/summary.json": {
+   "sha256": "30536149ea9fbf919ddc60b2de2a9aab79b9fcc51d1db4f07f2ef256d1d8d9b7",
+   "source": "scratch/ood_refits/bf16/mean/summary.json",
+   "source_sha256": "f6b719dcaa395740840274f6f1f243b410f8ead871aaabe25f0bd00640b02224"
+  },
+  "ood_refits/nvfp4/followup/by_layer.csv": {
+   "sha256": "86c4145ad8b3c92c3779758ae917f8925ae745b48b254906a2ab0b45db72f218",
+   "source": "scratch/ood_refits/nvfp4/followup/by_layer.csv"
+  },
+  "ood_refits/nvfp4/followup/refits.csv": {
+   "sha256": "2b92690b7c395e9102677bd2a4b2ac855bc683f27836d1c8277d516b610d3331",
+   "source": "scratch/ood_refits/nvfp4/followup/refits.csv"
+  },
+  "ood_refits/nvfp4/followup/summary.json": {
+   "sha256": "c82334bbe394c242e03a6de77680ab4fff4b6d1724c1055fd36124ef08868618",
+   "source": "scratch/ood_refits/nvfp4/followup/summary.json",
+   "source_sha256": "a6136278f81796f758616bef8a2f475a5c797919a6c708bf7b5a8e7b2db92181"
+  },
+  "ood_refits/nvfp4/mean/by_layer.csv": {
+   "sha256": "bcb08c73195224e2d761ed61bcf4db33e26e13024999d1b08dec1ffa3d8b1bcb",
+   "source": "scratch/ood_refits/nvfp4/mean/by_layer.csv"
+  },
+  "ood_refits/nvfp4/mean/refits.csv": {
+   "sha256": "dc66171819e5e5b4320628fd8b8e6696a3acc21858fd3701ce75b1dfda5dd6ea",
+   "source": "scratch/ood_refits/nvfp4/mean/refits.csv"
+  },
+  "ood_refits/nvfp4/mean/summary.json": {
+   "sha256": "656d85c6ec895f30062cd4de40525ecada56335172abf9ea9c5a43ed0917adc5",
+   "source": "scratch/ood_refits/nvfp4/mean/summary.json",
+   "source_sha256": "b19903f469d5a48846354f9bbabed3e773c887965568ce4b2c5dc06bc7c470b9"
+  }
+ },
+ "written_by": "experiments/probe_report.py collect"
+}

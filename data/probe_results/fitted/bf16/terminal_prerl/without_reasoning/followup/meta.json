@@ -1,0 +1,42 @@
+{
+ "layer": 22,
+ "threshold_1": -3.7813597202301494,
+ "threshold_5": -5.618883848190308,
+ "score": "sigmoid(coef . x[layer] + intercept - threshold_1)",
+ "reader": "bf16",
+ "reader_info": {
+  "path": "Inkling-Small",
+  "loader": "transformers",
+  "dtype": "torch.bfloat16",
+  "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"
+ },
+ "feature_format": "inkling-probe-features/v2",
+ "versions": {
+  "torch": "2.14.1+cu130",
+  "transformers": "5.19.0"
+ },
+ "prereg_sha256": "58eb57820b6cc88b193519ca83ab3ff2268a3f0805778ba8e273e87f2b0aaff6",
+ "fitted_utc": "2026-10-10T06:28:30Z",
+ "c_grid": [
+  1e-05,
+  0.0001,
+  0.001,
+  0.01,
+  0.1,
+  1.0
+ ],
+ "repeats": 3,
+ "dataset": "terminal_prerl",
+ "view": "without_reasoning",
+ "readout": "followup",
+ "label": "used_verifier",
+ "C": 0.001,
+ "selection": {
+  "layer": 22,
+  "C": 0.001,
+  "cv_auroc": 1.0,
+  "cv_se": NaN,
+  "flat": true
+ },
+ "n_layers": 43
+}

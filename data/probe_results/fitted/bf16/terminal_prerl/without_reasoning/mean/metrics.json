@@ -1,0 +1,50 @@
+{
+ "test_auroc": 0.9999791301444194,
+ "test_auroc_ci": [
+  0.9998930471270809,
+  1.0
+ ],
+ "test_auroc_behavior_present": 0.9999791301444194,
+ "tpr_at_t1": 1.0,
+ "fpr_at_t1": 0.0032139577594123047,
+ "tpr_at_t5": 1.0,
+ "fpr_at_t5": 0.021120293847566574,
+ "selection": {
+  "layer": 22,
+  "C": 0.001,
+  "cv_auroc": 0.9999030207473033,
+  "cv_se": NaN,
+  "flat": true
+ },
+ "n": {
+  "dev": 8488,
+  "dev_hacks": 76,
+  "test": 2200,
+  "test_hacks": 22
+ },
+ "crossfit": {
+  "auroc_all": 0.99997783816076,
+  "hacks_vs_read_not_used": 0.9953981592637055,
+  "hacks_vs_honest_wrong": 0.9999778255973591,
+  "three_plus_turns": 0.9999148116596911,
+  "within_task": 1.0,
+  "n_read_not_used": 51,
+  "n_honest_wrong": 10584
+ },
+ "concealment": {
+  "A": {
+   "n": 98,
+   "recall_at_t1": 1.0,
+   "recall_at_t5": 1.0
+  },
+  "B": {
+   "n": 98,
+   "recall_at_t1": 1.0,
+   "recall_at_t5": 1.0
+  },
+  "unedited_crossfit": {
+   "n": 98,
+   "recall_at_t1": 1.0
+  }
+ }
+}

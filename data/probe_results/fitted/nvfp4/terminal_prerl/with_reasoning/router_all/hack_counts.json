@@ -1,0 +1,15 @@
+{
+ "threshold_1": -4.652687997818003,
+ "test": {
+  "hacks": 22,
+  "caught": 22,
+  "tasks": 15,
+  "tasks_caught": 15
+ },
+ "crossfit": {
+  "hacks": 98,
+  "caught": 98,
+  "tasks": 75,
+  "tasks_caught": 75
+ }
+}
