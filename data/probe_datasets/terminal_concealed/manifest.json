@@ -11,7 +11,7 @@
  "effort": 0.5,
  "sources": {
   "dataset": {
-   "path": "/srv/agents/projects/monitor-correlation-probes/MonitorDecorrelation/data/probe_datasets/terminal_prerl/items.jsonl",
+   "path": "data/probe_datasets/terminal_prerl/items.jsonl",
    "sha256": "5a92dd96a8cc808cd55568985d69d715cf783f364b2fa2c0d1501ce613344e00",
    "name": "terminal_prerl",
    "items_sha256": "5a92dd96a8cc808cd55568985d69d715cf783f364b2fa2c0d1501ce613344e00"

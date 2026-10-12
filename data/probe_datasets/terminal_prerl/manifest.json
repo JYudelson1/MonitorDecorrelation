@@ -13,11 +13,11 @@
  },
  "sources": {
   "rollouts": {
-   "path": "/srv/agents/projects/monitor-correlation-probes/incoming/vlad-2026-09-29-prerl/data/runs/pre-rl-no-monitors/eval_rollouts.jsonl",
+   "path": "hf://buckets/probemaxxing/inkling-probes/inputs/vlad-2026-09-29-prerl/pre-rl-no-monitors/eval_rollouts.jsonl",
    "sha256": "2269a70d2c8331271e09b19d15b9716c6acd05f2fe48afbc5abbecd8d5535d49"
   },
   "run_info": {
-   "path": "/srv/agents/projects/monitor-correlation-probes/incoming/vlad-2026-09-29-prerl/data/runs/pre-rl-no-monitors/baseline.json",
+   "path": "hf://buckets/probemaxxing/inkling-probes/inputs/vlad-2026-09-29-prerl/pre-rl-no-monitors/baseline.json",
    "sha256": "07a311d13e876fb4c4f87203f5726bd2c7dbb0f1468541f3a11e84ec947b43ee",
    "policy": "thinkingmachines/Inkling-Small",
    "effort": 0.5,
