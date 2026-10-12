@@ -275,3 +275,30 @@ def write_dataset(out_dir: str, items: list[dict], manifest: dict) -> dict:
 
 def file_source(path: str) -> dict:
     return {"path": os.path.abspath(path), "sha256": _sha256(path)}
+
+
+def read_items(dataset_dir: str, recorded: dict[str, str | None] | None = None) -> list[dict]:
+    """The items of ``<dataset_dir>/items.jsonl``, refused unless the file is the one its records describe.
+
+    - Its sha256 must equal its ``manifest.json``'s ``items_sha256`` and every hash in ``recorded`` (where it was
+      recorded -> sha256; e.g. the features' index.json, which copied the manifest's hash at extraction).
+    - A missing manifest, or a missing hash, is not checked.
+    - The bytes hashed are the bytes parsed: one read, one hash.
+    Raises SystemExit naming both hashes on a mismatch: features and labels from different items must never meet."""
+    path = os.path.join(dataset_dir, "items.jsonl")
+    with open(path, "rb") as fh:
+        data = fh.read()
+    actual = hashlib.sha256(data).hexdigest()
+    expected = dict(recorded or {})
+    manifest = os.path.join(dataset_dir, "manifest.json")
+    if os.path.exists(manifest):
+        with open(manifest) as fh:
+            expected = {manifest: json.load(fh).get("items_sha256"), **expected}
+    wrong = [f"{where} records {sha}" for where, sha in expected.items() if sha and sha != actual]
+    if wrong:
+        raise SystemExit(f"{path} is not the file its records describe: its sha256 is {actual}, but "
+                         f"{'; '.join(wrong)}. Refusing to pair items with features or labels made from other items: "
+                         "use the items.jsonl those records were made from (rebuild it with "
+                         "experiments/build_probe_datasets.py, or fetch the matching copy), or extract the features "
+                         "again from this one.")
+    return [json.loads(line) for line in data.split(b"\n") if line.strip()]

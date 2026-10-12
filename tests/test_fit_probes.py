@@ -161,6 +161,31 @@ def test_router_probes_find_the_planted_moe_layer(tmp_path):
     assert ood["selection"]["layer"] == ROUTER_SIGNAL_LAYER and ood["transfer"]["with_reasoning"]["auroc_all"] > 0.8
 
 
+def test_fitting_refuses_items_the_features_were_not_made_from(tmp_path):
+    """The features' index.json records the items_sha256 of the items they were extracted from, and a dataset's
+    manifest that of its items.jsonl. Either differing from items.jsonl: refused, before any fitting."""
+    import hashlib
+
+    from monitordecorrelation.whitebox.probe_fit import load_items
+
+    data, feats = make_world(tmp_path)
+    ood = data / "diverse_deception"
+    good = hashlib.sha256((ood / "items.jsonl").read_bytes()).hexdigest()
+    (ood / "manifest.json").write_text(json.dumps({"name": "diverse_deception", "items_sha256": good}))
+    assert len(load_items(str(ood), {"features/index.json": good})) == 240
+    (ood / "manifest.json").write_text(json.dumps({"name": "diverse_deception", "items_sha256": "f" * 64}))
+    with pytest.raises(SystemExit, match=f"manifest.json records {'f' * 64}"):
+        load_items(str(ood))
+    (feats / "terminal_prerl" / "index.json").write_text(json.dumps(
+        {"dataset": {"name": "terminal_prerl", "items_sha256": "0" * 64}}))
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(tmp_path / "probes"),
+                         "--readouts", "followup", "--probes", "iid"],
+                        capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert cp.returncode == 1 and "not the file its records describe" in cp.stderr, cp.stderr[-3000:]
+    assert f"index.json records {'0' * 64}" in cp.stderr and not (tmp_path / "probes").exists()
+
+
 def test_selection_prefers_smaller_c_within_one_se():
     rng = np.random.default_rng(1)
     y = np.array([0, 1] * 50)
@@ -185,9 +210,11 @@ def _write_diagnostics(folder, data, rng, per_class=4, ood_pairs=3):
     sample = ([(it, "with_reasoning") for it in iid] + [(it, "without_reasoning") for it in iid]
               + [(it, "without_reasoning") for it in ood if it["split"] == "train" and it["pair"] < ood_pairs])
     batched = torch.tensor(rng.standard_normal((len(sample), L, D)), dtype=torch.float32)
-    alone = batched + 0.01 * torch.tensor(rng.standard_normal(batched.shape), dtype=torch.float32)
+    alone = (batched + 0.01 * torch.tensor(rng.standard_normal(batched.shape), dtype=torch.float32)).to(torch.bfloat16)
+    top = alone.float().abs().topk(8, dim=-1).indices  # the 8 largest-magnitude dimensions, as diagnostics.py keeps
     os.makedirs(folder)
-    save_file({"followup_batched": batched.to(torch.bfloat16), "followup_alone": alone.to(torch.bfloat16)},
+    save_file({"followup_batched": batched.to(torch.bfloat16), "followup_alone": alone,
+               "massive_idx": top.to(torch.int16), "massive_val": alone.float().gather(-1, top)},
               str(folder / "diag.safetensors"))
     with open(folder / "done.json", "w") as fh:
         json.dump({"items": [{"id": it["id"], "view": v, "label": it["label"], "split": it["split"]}
@@ -276,8 +303,17 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
                 assert abs(s["sd"] - np.std(b - a)) < 1e-12 and s["spearman"] > 0.9, s
                 assert abs(s["spearman"] - spearmanr(a, b).statistic) < 1e-12, s
     assert report["decision"]["reader"] in ("nvfp4", "bf16") and set(report["code"]) == CODE_KEYS
+    decision = report["decision"]  # both rules ran (the 4-bit diagnostics): decided, not "not evaluated"
+    assert decision["fix_batching"] in (True, False) and decision["sink_like_yes"] is False
+    assert decision["not_evaluated"] == {}
+    massive = report["massive_dims"]  # report only: the diagnostics' "Yes" readouts, per layer
+    assert set(massive) == {"nvfp4", "bf16"} and massive["bf16"] == {}  # no full-precision diagnostics
+    assert massive["nvfp4"]["n"] == len(diag_items) and massive["nvfp4"]["k"] == 8
+    assert len(massive["nvfp4"]["top_share_by_layer"]) == L
+    assert massive["nvfp4"]["median_layers_10_35"]["top_share"] is None  # these synthetic readers have 6 layers
     text = (tmp_path / "compare" / "report.md").read_text()
     assert text.startswith("# Reader comparison") and "## Report only" in text and "Batching floor" in text
+    assert "Massive dimensions of \"Yes\"" in text and "not evaluated" not in text
     agree = report["routing_agreement_at_yes"]  # the readers share their router logits here
     assert set(agree) == {"terminal_prerl/with_reasoning", "terminal_prerl/without_reasoning",
                           "diverse_deception/without_reasoning"} and all(a["mean"] == 1.0 for a in agree.values())
@@ -292,6 +328,12 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
                                           "diverse_deception/without_reasoning/mean"}
     assert not mean_report["jitter"] and not mean_report["batching"]  # follow-up checks only
     assert set(mean_report["decision"]["by_readout"]) == {"mean"}
+    # the batching and readout rules did not run: recorded as such, not as "no"
+    assert mean_report["decision"]["fix_batching"] is None and mean_report["decision"]["sink_like_yes"] is None
+    assert set(mean_report["decision"]["not_evaluated"]) == {"fix_batching", "sink_like_yes"}
+    assert all("follow-up readout" in why for why in mean_report["decision"]["not_evaluated"].values())
+    assert "Fix batching = not evaluated (the batching rule is about the follow-up readout" in \
+        (tmp_path / "compare_mean" / "report.md").read_text()
     for r in mean_report["probes"].values():  # the readers' mean features are identical here: so are the probes
         assert "batching_floor" not in r and abs(r["weight_cosine"] - 1) < 1e-9
         assert all(abs(s["mean"]) < 1e-9 and s["p99_abs"] < 1e-9 for s in r["score_shift"].values()), r["score_shift"]
@@ -305,6 +347,7 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
     for r in old["probes"].values():
         for k in ("weight_cosine", "score_shift", "cross_reader", "batching_floor"):
             r.pop(k)
+    old.pop("massive_dims")
     (tmp_path / "old.json").write_text(json.dumps(old))
     cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"), "--from-json",
                          str(tmp_path / "old.json"), "--out", str(tmp_path / "rerendered_old")],
@@ -332,6 +375,89 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
     assert again["decision"] == mean_report["decision"]
     cp = compare("--from-json", str(tmp_path / "old.json"), "--out", str(tmp_path / "compare"), "--overwrite")
     assert cp.returncode == 0, cp.stderr[-3000:]
+    # a mean comparison written before 2026-10-12 recorded the rules that never ran as False: decided again, None
+    old_mean = json.loads((tmp_path / "compare_mean" / "decision.json").read_text())
+    old_mean["decision"].update(fix_batching=False, sink_like_yes=False)
+    del old_mean["decision"]["not_evaluated"], old_mean["readouts"], old_mean["massive_dims"]
+    (tmp_path / "old_mean.json").write_text(json.dumps(old_mean))
+    cp = compare("--from-json", str(tmp_path / "old_mean.json"), "--out", str(tmp_path / "rerendered_old_mean"))
+    assert cp.returncode == 0, cp.stderr[-3000:]
+    redone = json.loads((tmp_path / "rerendered_old_mean" / "decision.json").read_text())["decision"]
+    assert redone["fix_batching"] is None and redone["sink_like_yes"] is None
+    assert redone["not_evaluated"]["sink_like_yes"] == "no reader had diagnostics (done.json)"
+    assert "'Yes' sink-like = not evaluated (no reader had diagnostics" in \
+        (tmp_path / "rerendered_old_mean" / "report.md").read_text()
+
+
+def _compare_readers():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("compare_readers", os.path.join(REPO, "experiments",
+                                                                                   "compare_readers.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_massive_dimensions_of_yes_are_reported_per_layer(tmp_path):
+    """Synthetic diagnostics with 43 layers. In layers 10–35, 8 planted dimensions of "Yes" hold v² / (v² + 1) of its
+    squared norm (v grows with the layer; the other 8 dimensions are 1). Five inputs plant dimensions 0–7, the sixth
+    0–6 and 8, so 47 of the 48 top-8 dimensions are the layer's 8 most frequent ones. Elsewhere all 16 are equal."""
+    import types
+
+    cr = _compare_readers()
+    n, layers, d = 6, 43, 16
+    yes = torch.ones(n, layers, d)
+    idx = torch.arange(8).repeat(n, layers, 1)  # outside 10–35: all equal, any 8 hold half the norm
+    v = {layer: 1 + (layer - 10) / 8 for layer in range(10, 36)}  # exact in bfloat16
+    for layer, value in v.items():
+        for i in range(n):
+            planted = [0, 1, 2, 3, 4, 5, 6, 8] if i == n - 1 else list(range(8))
+            yes[i, layer, planted] = value
+            idx[i, layer] = torch.tensor(planted)
+    folder = tmp_path / "diagnostics" / "nvfp4"
+    folder.mkdir(parents=True)
+    yes = yes.to(torch.bfloat16)
+    save_file({"followup_alone": yes, "followup_batched": yes.clone(), "massive_idx": idx.to(torch.int16),
+               "massive_val": yes.float().gather(-1, idx)}, str(folder / "diag.safetensors"))
+    m = cr.massive_dims(types.SimpleNamespace(diagnostics=str(tmp_path / "diagnostics")), "nvfp4")
+    assert (m["n"], m["k"]) == (n, 8)
+    share = {layer: value ** 2 / (value ** 2 + 1) for layer, value in v.items()}
+    for layer in range(layers):
+        want = share.get(layer, 0.5)
+        assert abs(m["top_share_by_layer"][layer] - want) < 1e-4, layer
+        assert abs(m["common_share_by_layer"][layer] - want) < 1e-4, layer  # the median input: one of the five
+        assert m["consistency_by_layer"][layer] == (round(47 / 48, 4) if layer in share else 1.0), layer
+        assert m["common_dims_by_layer"][layer] == list(range(8))
+    med = m["median_layers_10_35"]  # layers 10–35 exactly: adding 9 or 36 (share 0.5) would lower it
+    assert abs(med["top_share"] - float(np.median(list(share.values())))) < 1e-12
+    assert abs(med["consistency"] - 47 / 48) < 1e-12
+    lines = cr.massive_lines({"nvfp4": m, "bf16": {}})
+    assert sum(line.startswith("| ") and line[2:].split(" |")[0].isdigit() for line in lines) == layers
+    assert any("medians over layers 10–35: top-8 share" in line for line in lines)
+    assert cr.massive_dims(types.SimpleNamespace(diagnostics=str(tmp_path / "none")), "nvfp4") == {}
+
+
+def test_rules_that_did_not_run_are_not_evaluated_rather_than_false(tmp_path):
+    cr = _compare_readers()
+
+    def decide(**report):
+        cr.finish({"probes": {}, "jitter": {}, **report}, str(tmp_path / "out"))
+        return json.loads((tmp_path / "out" / "decision.json").read_text())["decision"]
+
+    d = decide(readouts=["mean"], batching={}, sink={})
+    assert (d["fix_batching"], d["sink_like_yes"]) == (None, None)
+    assert "follow-up readout" in d["not_evaluated"]["fix_batching"]
+    d = decide(batching={"nvfp4": {}}, sink={"nvfp4": {}, "bf16": {}})  # no readouts: an older file
+    assert (d["fix_batching"], d["sink_like_yes"]) == (None, None)
+    assert d["not_evaluated"]["sink_like_yes"] == "no reader had diagnostics (done.json)"
+    report_md = (tmp_path / "out" / "report.md").read_text()
+    assert "Fix batching = not evaluated (no reader had both diagnostics" in report_md
+    d = decide(readouts=["followup"], batching={"nvfp4": {"fix_batching": False}, "bf16": {}},
+               sink={"nvfp4": {"sink_like": False}, "bf16": {}})  # ran for the 4-bit reader only: decided by it
+    assert (d["fix_batching"], d["sink_like_yes"], d["not_evaluated"]) == (False, False, {})
+    d = decide(readouts=["followup"], batching={"nvfp4": {"fix_batching": True}}, sink={"bf16": {"sink_like": True}})
+    assert (d["fix_batching"], d["sink_like_yes"]) == (True, True)
 
 
 def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):

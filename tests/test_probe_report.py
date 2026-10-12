@@ -124,7 +124,8 @@ def build(tmp_path):
     dump(s / "compare_mean_router" / "decision.json", {
         "probes": {"terminal_prerl/with_reasoning/mean": plain}, "routing_agreement_at_yes": {
             "terminal_prerl/with_reasoning": {"n": 10688, "mean": 0.952, "min_layer": 29, "min": 0.862}},
-        "decision": {"reader": "bf16", "by_readout": {"mean": "nvfp4"}, "fix_batching": False, "sink_like_yes": False}})
+        "decision": {"reader": "bf16", "by_readout": {"mean": "nvfp4"}, "fix_batching": None, "sink_like_yes": None,
+                     "not_evaluated": {"fix_batching": "about the follow-up readout", "sink_like_yes": "ditto"}}})
     dump(s / "compare_mean_router" / "report.md", "# Reader comparison (mean)\n")
     refit = {"original": 0.909, "median": 0.909, "p05": 0.836, "p95": 0.956}
     dump(s / "ood_refits" / "nvfp4" / "followup" / "summary.json", {
@@ -313,7 +314,8 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "OOD test -0.002 [-0.004, +0.001]; transfer with +0.197 [+0.163, +0.232] | (a) ✓ (c) ✓ (b) ✗ |",
         "Decision per readout: followup → bf16. Fix batching: yes. \"Yes\" sink-like: no.",
         "- Jitter (nvfp4, 228 diagnostics inputs)",
-        "Decision per readout: mean → nvfp4. Fix batching: no.",
+        "Decision per readout: mean → nvfp4. Fix batching: not evaluated (about the follow-up readout). \"Yes\" "
+        "sink-like: not evaluated (ditto).",
         "terminal_prerl/with_reasoning 95% over 10,688 items (lowest 86%, MoE layer 29)",
         "| terminal_prerl/with_reasoning/followup | 0.800 | +0.10 (0.20); 0.70; 0.950 | +0.10 (0.20); 0.70; 0.950 |",
         "| terminal_prerl/with_reasoning/followup | bf16 | 1.000 / 1.000 | 100% / 0.40%; 100% / 0.40% | "

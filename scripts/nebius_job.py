@@ -52,6 +52,10 @@ Step 8 runs in a ``finally``, so errors, preemption and Ctrl-C all still delete;
 opts out. ``job.json`` in ``--out`` records the VM, flags, UTC timestamps, exit code and whether
 the VM was preempted. Each step's log is mirrored into ``--out`` while it streams, so it survives
 a preemption.
+- SIGTERM and SIGHUP (the launcher's machine shutting down, its terminal closing) are handled like Ctrl-C. Under
+  ``nohup`` SIGHUP stays ignored, so the launcher outlives its terminal.
+- None of them interrupts step 8: one that arrives then is held until the VM is deleted, and the launcher stops
+  there (no further attempt). SIGTERM or SIGHUP during step 7's fetches skips the rest of them, to delete sooner.
 
 Relaunching (``run --attempts N``, default 3): after a spot preemption, or a job that exits 75 (it stopped early,
 e.g. at its deadline, and can resume), a fresh VM runs the job again, in whichever region is cheapest then. That
@@ -64,6 +68,10 @@ continues up to N VMs in all.
 
 Leftovers: run/up first ``reap`` the ledger. Reap finds reservations whose launcher died mid-run, deletes their VM
 once it has stopped, and settles them from that launcher's sampled prices. ``reap`` does only that.
+- A VM whose job.json reap can't find (the ledger records ``--out`` as an absolute path; older entries may be
+  relative) is treated as still running its job: only its ``--hours`` cap makes it overdue.
+- A kept VM (``up``, ``run --keep``) stays reserved until ``down`` deletes it (with the ledger, ``--budget-file`` or
+  NEBIUS_BUDGET_FILE) or reap finds it gone; either settles it from the prices its launcher sampled.
 
 Code version: the pushed repo has no .git, so each push also writes ``CODE_VERSION.json`` into it: the launching
 machine's ``code_version`` of what it pushed (commit, dirty, diff_sha256; src/monitordecorrelation/provenance.py).
@@ -95,7 +103,7 @@ Lessons from the manual session, built in here:
 
 Exit status: 0 on success; the job's own exit code if it failed; 2 for an infrastructure failure;
 3 if the VM stopped mid-run (spot preemption or the --hours cap); 75 if the job stopped early to resume
-later and no attempt was left; 130 on Ctrl-C.
+later and no attempt was left; 130 on Ctrl-C, SIGTERM or SIGHUP (also when it arrived while the VM was deleted).
 Stdlib only, so plain ``python3`` (3.11+) runs it.
 """
 
@@ -163,8 +171,57 @@ class LauncherSignal(KeyboardInterrupt):
     deleted."""
 
 
-def _raise_launcher_signal(signum, frame):
+class HeldSignals:
+    """Signals that arrived while a VM was being deleted (``signals_held``): the first one (None: none), and whether
+    SIGTERM/SIGHUP may currently cut the best-effort collection short."""
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+        self.cut_collection = False
+
+    def hold(self, signum: int) -> None:
+        if self.signum is None:
+            self.signum = signum
+        if self.cut_collection and signum != signal.SIGINT:  # the machine or terminal is going away: delete first
+            self.cut_collection = False
+            raise LauncherSignal(f"signal {signum}")
+        log(f"{signal.Signals(signum).name} held off while the VM is deleted; the launcher stops once it is gone")
+
+
+_held: HeldSignals | None = None  # set while a VM is being deleted: signals are held instead of raised
+
+
+def _launcher_signal(signum, frame):
+    """The launcher's handler for Ctrl-C, SIGTERM and SIGHUP: raise KeyboardInterrupt (``LauncherSignal`` for SIGTERM
+    and SIGHUP), so the VM is still deleted; while it is being deleted (``_held``, set by ``signals_held``), hold the
+    signal instead. Holding starts with one assignment, not a handler swap, so no signal slips in between; blocking
+    signals in the main thread could not ensure that while the price sampler's thread runs."""
+    held = _held
+    if held is not None:
+        held.hold(signum)
+        return
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
     raise LauncherSignal(f"signal {signum}")
+
+
+def install_launcher_signals() -> dict:
+    """``_launcher_signal`` for Ctrl-C, SIGTERM and SIGHUP. A Ctrl-C or SIGHUP this process inherited as ignored stays
+    ignored: a launcher started with ``nohup`` must outlive its terminal. Returns the previous handlers, for
+    ``restore_signals``."""
+    old = {}
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        if sig != signal.SIGTERM and signal.getsignal(sig) == signal.SIG_IGN:
+            if sig == signal.SIGHUP:
+                log("SIGHUP is ignored (nohup): the launcher keeps going if its terminal closes")
+            continue
+        old[sig] = signal.signal(sig, _launcher_signal)
+    return old
+
+
+def restore_signals(old: dict) -> None:
+    for sig, handler in old.items():
+        signal.signal(sig, handler)
 
 
 def utc() -> str:
@@ -172,7 +229,10 @@ def utc() -> str:
 
 
 def log(msg: str) -> None:
-    print(f"[nebius_job {datetime.now(UTC):%H:%M:%S}] {msg}", flush=True)
+    try:
+        print(f"[nebius_job {datetime.now(UTC):%H:%M:%S}] {msg}", flush=True)
+    except (OSError, RuntimeError):  # a hung-up terminal (EIO), or a line logged by a signal handler mid-print
+        pass  # (reentrant call): a log line must never stop a teardown
 
 
 # ---------------------------------------------------------------------------------------- pure parts
@@ -747,7 +807,8 @@ class Budget:
     - **Before a VM is created,** its worst case is checked and reserved. With a bid, that is bid × GPUs × --hours;
       without one, it is the on-demand price, which spot never exceeds.
     - **Afterwards,** the reservation is settled at the estimated cost from the sampled prices.
-    - **A kept VM** (``up``) stays reserved at its worst case.
+    - **A kept VM** (``up``, ``run --keep``) stays reserved at its worst case until ``down`` deletes it (with the
+      ledger) or ``reap`` finds it gone.
     - **Reservations** also record the launcher's pid and host, and the VM's region, so ``reap`` can settle them if
       the launcher dies.
     - The file is re-read before every change, so launchers running side by side don't overwrite each other."""
@@ -894,10 +955,25 @@ def wait_running(nb: Nebius, inst: Instance, timeout: float = 900) -> Instance:
 
 def teardown(nb: Nebius, name: str, instance_id: str | None = None, timeout: float = 300) -> None:
     """Delete the VM (by id, and by name in case creation died before we learned the id) and its
-    managed boot disk, then verify that neither is left. Raises InfraError if anything remains."""
+    managed boot disk, then verify that neither is left. Raises InfraError if anything remains.
+
+    Every cloud call is retried until ``timeout``: one failed listing must not leave a VM running. If the listing
+    never works, the known ``instance_id`` is still deleted (and the verification then raises)."""
     boot = f"{name}-boot"
-    ids = ({instance_id} if instance_id else set()) | {i.id for i in nb.instances() if i.name == name}
     deadline = time.time() + timeout
+    ids = {instance_id} if instance_id else set()
+    while True:
+        try:
+            ids |= {i.id for i in nb.instances() if i.name == name}
+            break
+        except InfraError as e:
+            if time.time() > deadline:
+                if not ids:
+                    raise
+                log(f"  listing failed ({e}); deleting {sorted(ids)} by id")
+                break
+            log(f"  listing failed, retrying: {e}")
+            time.sleep(15)
     for iid in sorted(ids):
         log(f"deleting instance {iid}")
         while True:  # e.g. a preempted VM still STOPPING refuses deletion for a while
@@ -1276,15 +1352,22 @@ def collect(remote: Remote, job: JobSpec, rec: Record) -> None:
 
 
 @contextlib.contextmanager
-def ctrl_c_deferred():
-    """A second Ctrl-C must not abort the delete."""
-    def _handler(signum, frame):
-        log("Ctrl-C ignored while deleting the VM; wait a moment")
-    old = signal.signal(signal.SIGINT, _handler)
+def signals_held():
+    """Ctrl-C, SIGTERM and SIGHUP must not abort deleting the VM. Inside the block each is held off and recorded in
+    the ``HeldSignals`` it yields, so the caller can stop once the VM is gone. ``cmd_vm`` has installed
+    ``_launcher_signal`` already (a caller that hasn't gets it here). A signal this process ignores (SIGHUP under
+    nohup) stays ignored."""
+    global _held
+    held, old = HeldSignals(), {}
+    _held = held
     try:
-        yield
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(sig) not in (signal.SIG_IGN, _launcher_signal):
+                old[sig] = signal.signal(sig, _launcher_signal)
+        yield held
     finally:
-        signal.signal(signal.SIGINT, old)
+        _held = None
+        restore_signals(old)
 
 
 # --------------------------------------------------------------------------------------- commands
@@ -1415,26 +1498,103 @@ def launcher_alive(entry: dict) -> bool:
     return any(os.path.basename(a) == "nebius_job.py" for a in args)
 
 
+def find_record(entry: dict, ledger: Path) -> dict | None:
+    """The job.json of a reservation's VM, or None if it can't be found from here.
+
+    - ``out`` is absolute in reservations made since 2026-10-12. An older, relative one is tried against the current
+      directory, the repo (where the launcher usually runs) and the ledger's folder.
+    - A record counts only if it names this VM: an ``--out`` reused by a later run holds that run's record."""
+    out = entry.get("out")
+    if not out:
+        return None
+    path = Path(out).expanduser()
+    for folder in dict.fromkeys([path] if path.is_absolute() else [Path.cwd() / path, REPO / path,
+                                                                   ledger.parent / path]):
+        try:
+            rec = json.loads((folder / "job.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("name") == entry.get("job"):
+            return rec
+    return None
+
+
+def reaped_cost(entry: dict, rec: dict, why: str) -> tuple[float, str]:
+    """(USD, note) to settle a reservation at when its launcher can't: the prices that launcher sampled (``rec``, its
+    job.json), conservatively (each interval at its higher bound, the unsampled rest at the reservation's hourly worst
+    case), up to now or the VM's ``--hours`` shutdown, whichever is first. With no samples, the reserved worst case."""
+    hours = rec.get("hours") or entry.get("hours") or 0
+    start = (rec.get("times") or {}).get("create_start") or entry.get("created")
+    if not (rec.get("price_samples") and start and hours):
+        return entry["usd"], f"{why}: no price samples, so at the worst case"
+    end = min(time.time(), _seconds(start) + hours * 3600)
+    usd = estimated_cost(rec["price_samples"], datetime.fromtimestamp(end, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         conservative=True, cap_hourly=entry["usd"] / hours)  # reserved: the worst rate × hours
+    return usd, f"{why}: from its sampled prices (conservative), up to its --hours shutdown"
+
+
+def entry_regions(entry: dict, regions: list[Region]) -> list[Region]:
+    """Where a reservation's VM can be: its project's region once it was created, else any region."""
+    return [r for r in regions if r.project == entry["project"]] if entry.get("project") else list(regions)
+
+
+def vm_left(nb: Nebius, name: str) -> bool:
+    """Is there an instance named ``name``, or its boot disk, in ``nb``'s project? InfraError if it can't be told."""
+    return any(i.name == name for i in nb.instances()) or any(d.name == f"{name}-boot" for d in nb.disks())
+
+
+def settle_kept(budget: Budget, name: str, why: str) -> None:
+    """Settle the reservation of the kept VM ``name`` (``up``, ``run --keep``), which is gone now (``reaped_cost``)."""
+    for e in [e for e in budget.data["entries"]
+              if e.get("job") == name and e.get("kind") == "reserved" and e.get("kept")]:
+        usd, note = reaped_cost(e, find_record(e, budget.path) or {}, why)
+        budget.settle(name, usd, note)
+        log(f"budget: kept VM {name} settled at ${usd:.2f} ({note})")
+
+
 def reap(args, budget: Budget, regions: list[Region]) -> None:
-    """Clean up after launchers that died mid-run (e.g. their machine restarted).
+    """Clean up after launchers that died mid-run (e.g. their machine restarted), and settle kept VMs that are gone.
 
     For each reservation whose launcher is gone:
-    - delete its VM once the VM has stopped (it powers itself off after its job, or at ``--hours``);
-    - leave a VM that is still running alone, for a later reap;
+    - delete its VM once the VM has stopped (it powers itself off after its job, or at ``--hours``), or once it is
+      overdue: 30 min past its ``--hours`` cap (wedged), or, per its job.json, an hour old with no job started;
+    - leave a VM that is still running alone, for a later reap. If its job.json can't be found from here, whether its
+      job still runs is unknown, so only the ``--hours`` cap makes it overdue;
     - settle the reservation at the estimate from the prices that launcher sampled, up to the VM's ``--hours``
-      deadline; with no samples, at the reserved worst case."""
-    for e in [e for e in budget.data["entries"] if e.get("kind") == "reserved" and not e.get("kept")]:
-        if launcher_alive(e):
+      deadline; with no samples, at the reserved worst case.
+
+    A kept VM (``up``, ``run --keep``) is never deleted here. Its reservation is settled the same way once the VM is
+    gone from its region (deleted by hand; ``down`` with the ledger settles it at once)."""
+    for e in [e for e in budget.data["entries"] if e.get("kind") == "reserved"]:
+        name = e["job"]
+        if not e.get("kept") and launcher_alive(e):
             continue
-        name, running = e["job"], False
-        rec_path = Path(e["out"]) / "job.json" if e.get("out") else None
-        rec = json.loads(rec_path.read_text()) if rec_path and rec_path.exists() else {}
+        places = entry_regions(e, regions)
+        if not places:
+            log(f"reap: {name} is in project {e['project']}, which is not among the regions here; left as it is")
+            continue
+        if e.get("kept"):
+            try:
+                gone = not any(vm_left(Nebius(args.nebius, r.project), name) for r in places)
+            except InfraError as err:
+                log(f"reap: could not check kept VM {name} ({err}); it stays reserved")
+                continue
+            if gone:
+                settle_kept(budget, name, "kept VM gone; settled by reap")
+            continue
+        running = False
+        rec = find_record(e, budget.path)
+        if rec is None and e.get("out"):
+            log(f"reap: no job.json of {name} under {e['out']} as seen from here ({os.getcwd()}): whether its job "
+                "still runs is unknown, so only its --hours cap can make it overdue")
+        known, rec = rec is not None, rec or {}
         times, hours = rec.get("times") or {}, rec.get("hours") or e.get("hours") or 0
         start = times.get("create_start") or e.get("created")
+        now = time.time()
         overdue = start is not None and (
-            time.time() > _seconds(start) + hours * 3600 + 1800  # 30 min past its cap: wedged
-            or ("job_start" not in times and time.time() > _seconds(start) + 3600))  # an hour and no job: orphan
-        for region in [r for r in regions if not e.get("project") or r.project == e["project"]]:
+            (bool(hours) and now > _seconds(start) + hours * 3600 + 1800)  # 30 min past its cap: wedged
+            or (known and "job_start" not in times and now > _seconds(start) + 3600))  # an hour and no job: orphan
+        for region in places:
             nb = Nebius(args.nebius, region.project)
             here = [i for i in nb.instances() if i.name == name]
             alive = any(i.state in ALIVE_STATES for i in here)
@@ -1453,13 +1613,7 @@ def reap(args, budget: Budget, regions: list[Region]) -> None:
                     break
         if running:
             continue
-        usd, note = e["usd"], "launcher died; no price samples, so settled at the worst case"
-        if rec.get("price_samples") and start:
-            end = min(time.time(), _seconds(start) + hours * 3600)
-            cap = e["usd"] / hours if hours else None  # the reservation was the bid rate × hours
-            usd = estimated_cost(rec["price_samples"], datetime.fromtimestamp(end, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                 conservative=True, cap_hourly=cap)
-            note = "launcher died; settled by reap from its sampled prices (conservative), up to its --hours deadline"
+        usd, note = reaped_cost(e, rec, "launcher died; settled by reap")
         budget.settle(name, usd, note)
         log(f"reap: {name} settled at ${usd:.2f} ({note})")
 
@@ -1473,7 +1627,19 @@ def cmd_vm(args, cmd: list[str]) -> int:
     - Each new VM goes to the region that is cheapest then.
     - Each is checked against the budget like the first.
     - The job must resume from what it saved; ``extract_probe_features.py --store`` does.
-    - Attempt k > 1 writes to ``--out``/retry-k/."""
+    - Attempt k > 1 writes to ``--out``/retry-k/.
+
+    SIGTERM and SIGHUP are handled like Ctrl-C (SIGHUP not under nohup), and none of them interrupts a delete: one
+    that arrives while a VM is being deleted is acted on once it is gone, with no further attempt (exit 130)."""
+    handlers = {} if args.dry_run else install_launcher_signals()
+    try:
+        return vm_attempts(args, cmd)
+    finally:
+        restore_signals(handlers)
+
+
+def vm_attempts(args, cmd: list[str]) -> int:
+    """``cmd_vm`` inside its signal handlers."""
     base = vm_spec(args)
     first_job = job_spec(args, cmd, base.name)
     check_code(first_job.allow_dirty)  # before anything is priced, reaped or created
@@ -1488,9 +1654,6 @@ def cmd_vm(args, cmd: list[str]) -> int:
         raise SystemExit(f"budget ledger {args.budget_file} not found: refusing to spend without it "
                          "(create it with {\"limit_usd\": N, \"entries\": []})")
     budget = Budget(args.budget_file) if args.budget_file else None
-    if not args.dry_run:
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            signal.signal(sig, _raise_launcher_signal)
     if budget is not None and not args.dry_run:
         reap(args, budget, all_regions(args, regions))
     attempts = max(1, args.attempts) if args.cmd == "run" else 1
@@ -1611,8 +1774,9 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
             raise VmStopped(state)
 
     if budget is not None:
-        budget.reserve(spec.name, worst, what, pid=os.getpid(), host=socket.gethostname(), out=str(job.out),
-                       hours=spec.hours)
+        # absolute: `reap` may run from another directory, and must find this VM's job.json there
+        budget.reserve(spec.name, worst, what, pid=os.getpid(), host=socket.gethostname(),
+                       out=os.path.abspath(job.out), hours=spec.hours)
     try:
         cloud_init = render_cloud_init(spec.user, pub.read_text(), spec.hours)
         for offer in order:
@@ -1674,10 +1838,18 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         except Exception:  # noqa: BLE001
             pass
     finally:
-        with ctrl_c_deferred():
+        with signals_held() as held:  # Ctrl-C, SIGTERM and SIGHUP wait until the VM is deleted
             if remote is not None and rec.stopped_state is None:
-                collect(remote, job, rec)
-            keep = keep_always or (args.cmd == "up" and code == 0)
+                try:
+                    held.cut_collection = True  # SIGTERM/SIGHUP skip the rest of this best-effort step
+                    try:
+                        collect(remote, job, rec)
+                    finally:
+                        held.cut_collection = False
+                except LauncherSignal as e:
+                    log(f"collection cut short ({e}): deleting the VM first")
+                    rec.errors.append(f"collection cut short by {e}")
+            keep = (keep_always or (args.cmd == "up" and code == 0)) and inst is not None  # no VM: nothing to keep
             if keep:
                 rec.kept = True
                 if budget is not None:
@@ -1685,7 +1857,8 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                 log(f"VM kept. ssh -i {key} -o UserKnownHostsFile={job.out / 'known_hosts'} {rec.host}")
                 log(f"auto-shutdown {spec.hours:g} h after boot stops it but does NOT delete it "
                     f"(extend: ssh … 'sudo shutdown -h +MINUTES'); "
-                    f"delete: python3 scripts/nebius_job.py down --name {spec.name}")
+                    f"delete: python3 scripts/nebius_job.py down --name {spec.name}"
+                    + (f" --budget-file {budget.path}" if budget is not None else ""))
             else:
                 if sampler is not None:
                     sampler.stop()
@@ -1720,6 +1893,13 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                     f"({'so far; the VM is still running' if rec.kept else 'from the sampled spot prices'})")
             rec.save(job.out)
             log(f"record: {job.out / 'job.json'}")
+        if held.signum is not None:  # acted on now that the VM is deleted: no further attempt
+            what = signal.Signals(held.signum).name
+            log(f"{what} received while cleaning up: stopping here")
+            rec.errors.append(f"{what} while the VM was being cleaned up; the launcher stopped after it")
+            rec.save(job.out)
+            if rec.teardown_verified is not False:  # a failed delete keeps its own exit code (2): never relaunched
+                code = EXIT_INTERRUPTED
     return code, rec
 
 
@@ -1775,7 +1955,8 @@ def _clients(args) -> list[tuple[Region, Nebius]]:
 
 
 def cmd_down(args, cmd: list[str]) -> int:
-    """Delete a VM (by name or id) and its boot disk in whichever region it is, then verify."""
+    """Delete a VM (by name or id) and its boot disk in whichever region it is, then verify. With the ledger, a kept
+    VM's reservation (``up``, ``run --keep``) is then settled from the prices its launcher sampled (``reaped_cost``)."""
     if not (args.name or args.id):
         raise SystemExit("down needs --name or --id")
     found = []
@@ -1791,9 +1972,13 @@ def cmd_down(args, cmd: list[str]) -> int:
         if here:
             log(f"{region.name}: deleting {name}")
             teardown(nb, name, args.id)
-            found.append(region.name)
+            found.append(name)
     if not found:
         log(f"nothing named {args.name or args.id!r} in any region; nothing to delete")
+    elif args.budget_file and Path(args.budget_file).expanduser().exists():
+        budget = Budget(args.budget_file)
+        for name in dict.fromkeys(found):
+            settle_kept(budget, name, "kept VM deleted; settled by down")
     return 0
 
 
@@ -1929,6 +2114,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("down", parents=[nebius], help="delete a VM and its boot disk, then verify")
     p.add_argument("--name")
     p.add_argument("--id")
+    p.add_argument("--budget-file", default=os.environ.get("NEBIUS_BUDGET_FILE"),
+                   help="the spending ledger: settle the deleted VM's reservation if it was kept (up, run --keep)")
     p.set_defaults(func=cmd_down)
     p = sub.add_parser("list", parents=[nebius], help="instances and disks in every region")
     p.set_defaults(func=cmd_list)

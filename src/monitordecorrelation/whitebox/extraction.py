@@ -11,6 +11,8 @@ loads a reader once and runs several datasets and parts with it.
   the last one stopped.
   - ``index.json`` fixes the settings that decide what each shard holds: dataset, reader, views, shard size and so
     on. A run with other settings refuses to start rather than mix shards.
+  - The dataset is pinned by its manifest's ``items_sha256``; ``items.jsonl`` must match it
+    (probe_datasets.read_items).
   - Never change the shard size between runs.
   - The code version (``code``: provenance.code_version) is recorded, not checked: a run may resume another
     commit's shards. ``index.json`` has the code of the run that wrote it last; each run record has its own, with
@@ -22,7 +24,8 @@ loads a reader once and runs several datasets and parts with it.
   - It starts a shard only if the shard and the upload backlog fit before ``deadline`` (epoch seconds; the
     launcher's ``NEBIUS_JOB_DEADLINE``).
   - After SIGTERM (Nebius's 60 s notice before stopping a spot VM) it starts nothing new.
-  - Either way the run reports ``stopped_early``; the caller exits 75 (``EXIT_UNFINISHED``).
+  - Either way the run reports ``stopped_early``; the caller exits 75 (``EXIT_UNFINISHED``), also when uploads were
+    still running or failed then (``stop_verdict``): the shards they carried are extracted again on resume.
 """
 
 from __future__ import annotations
@@ -155,14 +158,16 @@ def prepare(job: Job) -> Prepared:
     settings mismatch fails in seconds, not after a 5-minute load."""
     from monitordecorrelation.whitebox.features import FEATURE_FORMAT
     from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, PROBE_EFFORT, VIEWS
+    from monitordecorrelation.whitebox.probe_datasets import read_items
     from monitordecorrelation.whitebox.store import open_store
 
     if not 0 <= job.part < job.parts:
         raise SystemExit(f"part {job.part} of {job.parts}: want 0 <= part < parts")
     manifest = json.load(open(os.path.join(job.dataset, "manifest.json")))
     splits = set(job.splits.split(","))
-    with open(os.path.join(job.dataset, "items.jsonl")) as fh:
-        items = [it for it in map(json.loads, fh) if it["split"] in splits]
+    # refused unless items.jsonl is the file the manifest describes: the manifest's items_sha256 goes into index.json,
+    # which resumed runs and fit_probes.py hold the items to
+    items = [it for it in read_items(job.dataset) if it["split"] in splits]
     items = items[: job.limit] if job.limit else items
     views = list(job.views) if job.views else (list(VIEWS) if manifest["kind"] == "terminal" else ["without_reasoning"])
     effort = float(PROBE_EFFORT if manifest.get("effort") is None else manifest["effort"])
@@ -305,7 +310,7 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
 
     run.update(seconds=round(time.time() - t0, 1), finished_utc=now(), stopped_early=stopped)
     write_json(run_path, run)
-    unsaved = []
+    unsaved, out_of_time = [], False
     if uploader:
         uploader.submit("run record", [(run_path, run_rel)])
         timeout = None if deadline == float("inf") else max(5.0, deadline - time.time() - 15)
@@ -313,6 +318,7 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
             timeout = max(1.0, min(timeout or float("inf"), stop.at + 55 - time.time()))
         if not uploader.close(timeout):
             unsaved.append("uploads still running when time ran out")
+            out_of_time = True
         unsaved += [f"{name} failed" for name in uploader.failed]
         if unsaved:
             log(f"NOT all saved to {p.store.url}: {'; '.join(unsaved)}. The files are still in {job.out}.")
@@ -321,7 +327,23 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
     return {"dataset": os.path.basename(job.dataset), "part": job.part, "parts": job.parts, "n_items": len(p.items),
             "views": p.views, "shards": index["shards"], "shards_extracted": run["shards_extracted"],
             "tokens_this_run": run["tokens"], "seconds_this_run": run["seconds"],
-            "complete": stopped is None and not unsaved and complete(p), "stopped_early": stopped, "unsaved": unsaved}
+            "complete": stopped is None and not unsaved and complete(p), "stopped_early": stopped, "unsaved": unsaved,
+            "out_of_time": out_of_time, "store_broken": uploader.broken if uploader else None}
+
+
+def stop_verdict(summary: dict, sigterm: bool) -> str | None:
+    """How an ``extract`` run ended, for the caller's exit code:
+    - ``"failed"``: the store refuses uploads (quota, permission), so a relaunch could save nothing either; or uploads
+      failed although nothing stopped the run;
+    - ``"stopped"``: the deadline or SIGTERM stopped it (``sigterm``: the StopFlag was set), even with uploads still in
+      flight or failed then. Resumable: a shard whose marker and data are not both in the store is not ``done``, so a
+      resumed run extracts it again;
+    - None: it finished and everything is saved."""
+    if summary.get("store_broken"):
+        return "failed"
+    if summary["stopped_early"] or (summary["unsaved"] and (sigterm or summary.get("out_of_time"))):
+        return "stopped"
+    return "failed" if summary["unsaved"] else None
 
 
 def answer_ids(replay) -> tuple[int, int] | None:

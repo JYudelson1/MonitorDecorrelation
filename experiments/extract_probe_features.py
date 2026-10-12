@@ -23,7 +23,9 @@ and a run record under ``<out>/runs/``. The work is done by whitebox/extraction.
     backlog fit before the deadline. The launcher sets the deadline from the VM's scheduled shutdown.
   - On SIGTERM it starts nothing new and lets the uploads finish. SIGTERM is Nebius's 60 s notice before stopping
     a spot VM.
-  - In both cases it exits with 75: unfinished, run again to resume.
+  - In both cases it exits with 75: unfinished, run again to resume. Also when uploads were still running or failed
+    then: what didn't reach the store is extracted again. It exits 1 if the store refuses uploads (quota,
+    permission), or if uploads failed with nothing stopping it.
 - **Views:** terminal datasets get with_reasoning and without_reasoning; contrastive datasets get
   without_reasoning, since their pairs carry no CoT.
 - **Follow-up and effort:** every input gets the follow-up ("Did you respond truthfully?" / "Yes"), rendered
@@ -41,7 +43,7 @@ import os
 import sys
 import time
 
-from monitordecorrelation.whitebox.extraction import EXIT_UNFINISHED, Job, StopFlag, extract, prepare
+from monitordecorrelation.whitebox.extraction import EXIT_UNFINISHED, Job, StopFlag, extract, prepare, stop_verdict
 
 
 def load_reader(model_name: str, device: str):
@@ -100,7 +102,8 @@ def main() -> int:
     summary = extract(model, prepared, stop=stop, deadline=deadline,
                       log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True))
     print(json.dumps(summary), flush=True)
-    return EXIT_UNFINISHED if summary["stopped_early"] else (1 if summary["unsaved"] else 0)
+    verdict = stop_verdict(summary, sigterm=stop.reason is not None)  # a stop is resumable, uploads in flight or not
+    return EXIT_UNFINISHED if verdict == "stopped" else 1 if verdict == "failed" else 0
 
 
 if __name__ == "__main__":

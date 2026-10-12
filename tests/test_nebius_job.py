@@ -12,10 +12,12 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1034,8 +1036,9 @@ def test_reap_cleans_up_after_a_launcher_that_died(tmp_path, monkeypatch, capsys
     dead_out = tmp_path / "dead-run"
     dead_out.mkdir()
     an_hour_later = "2026-10-09T21:00:00Z"
-    (dead_out / "job.json").write_text(json.dumps({"times": {"create_start": start, "job_start": start}, "hours": 1.5,
-                                                   "price_samples": [[start, 7.92], [an_hour_later, 9.0]]}))
+    (dead_out / "job.json").write_text(json.dumps({  # a real job.json names its VM
+        "name": "md-dead", "times": {"create_start": start, "job_start": start}, "hours": 1.5,
+        "price_samples": [[start, 7.92], [an_hour_later, 9.0]]}))
 
     def reserved(job, usd, **info):
         return {"when": start, "job": job, "kind": "reserved", "usd": usd, "what": job, **info}
@@ -1044,13 +1047,15 @@ def test_reap_cleans_up_after_a_launcher_that_died(tmp_path, monkeypatch, capsys
     ledger.write_text(json.dumps({"limit_usd": 50, "entries": [
         reserved("md-dead", 30.0, pid=999999, host="hub", out=str(dead_out), hours=1.5, project="project-u02"),
         reserved("md-alive", 30.0, pid=os.getpid(), host=socket.gethostname()),
-        reserved("md-kept", 20.0, kept=True),
+        reserved("md-kept", 20.0, kept=True, project="project-e03"),
         reserved("md-running", 10.0, pid=999998, host="hub", project="project-e04"),
         reserved("md-never-made", 5.0, pid=999997, host="hub"),
     ]}))
     nb_u, nb_e = FakeNebius("nebius", "project-u02"), FakeNebius("nebius", "project-e04")
     nb_u.alive["computeinstance-9"] = nj.Instance("computeinstance-9", "md-dead", "STOPPED", None)
     nb_e.alive["computeinstance-8"] = nj.Instance("computeinstance-8", "md-running", "RUNNING", "1.2.3.4")
+    nb_k = FakeNebius("nebius", "project-e03")  # a kept VM, stopped at its --hours: never reaped
+    nb_k.alive["computeinstance-7"] = nj.Instance("computeinstance-7", "md-kept", "STOPPED", None)
     monkeypatch.setattr(nj, "launcher_alive", lambda e: e["job"] == "md-alive")
     assert nj.main(["reap", "--regions-file", str(regions_file), "--budget-file", str(ledger)]) == 0
     entries = {e["job"]: e for e in json.loads(ledger.read_text())["entries"]}
@@ -1059,6 +1064,7 @@ def test_reap_cleans_up_after_a_launcher_that_died(tmp_path, monkeypatch, capsys
     assert nb_u.deleted == ["computeinstance-9"] and not nb_u.alive
     assert entries["md-alive"]["kind"] == entries["md-kept"]["kind"] == entries["md-running"]["kind"] == "reserved"
     assert nb_e.alive and not nb_e.deleted  # still running: left for a later reap
+    assert nb_k.alive and not nb_k.deleted
     assert (entries["md-never-made"]["kind"], entries["md-never-made"]["usd"]) == ("spent", 5.0)  # no samples
     assert "md-running in eu-west2 is RUNNING" in capsys.readouterr().out
 
@@ -1309,3 +1315,219 @@ def test_what_never_travels_is_never_recorded():
     for path in (".env", ".env.local", "a/.envrc", ".venv/lib/x.py", "src/__pycache__/m.cpython-311.pyc", "m.pyc",
                  ".git/config", ".gitignore", "src/env.py", "data/x.json"):
         assert nj.shippable(path) is not nj.provenance.never_recorded(path), path
+
+
+# ------------------------------------------------------------------------------------- teardown, signals, ledger
+
+
+def _stamp(t: float) -> str:
+    return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_teardown_retries_a_failed_listing(monkeypatch):
+    """One failed `instance list` (an API hiccup) must not skip the delete: it is retried like the delete itself."""
+    monkeypatch.setattr(nj.time, "sleep", lambda s: None)
+    monkeypatch.setattr(FakeNebius, "clouds", {})
+
+    class Flaky(FakeNebius):
+        failures = 0
+
+        def instances(self):
+            if self.failures:
+                self.failures -= 1
+                raise nj.InfraError("nebius compute instance failed (1): 503 Service Unavailable")
+            return super().instances()
+
+    nb = Flaky("nebius", "p")
+    nb.alive["i-1"] = nj.Instance("i-1", "md-job-z", "RUNNING", None)
+    nb.failures = 2
+    nj.teardown(nb, "md-job-z")  # no id, as after a failed create: only the listing finds the VM
+    assert nb.deleted == ["i-1"] and not nb.alive
+
+    class Down(FakeNebius):  # the listing never works: the VM it knows is deleted all the same, then it raises
+        def instances(self):
+            raise nj.InfraError("nebius compute instance failed (1): unavailable")
+
+    clock = iter(range(0, 100_000, 100))
+    monkeypatch.setattr(nj.time, "time", lambda: next(clock))
+    nb = Down("nebius", "p2")
+    nb.alive["i-2"] = nj.Instance("i-2", "md-job-w", "RUNNING", None)
+    with pytest.raises(nj.InfraError):
+        nj.teardown(nb, "md-job-w", "i-2")
+    assert nb.deleted == ["i-2"]
+
+
+def test_the_ledger_records_out_as_an_absolute_path(tmp_path, monkeypatch, regions_file):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    ledger = _ledger(tmp_path, 0.0)
+    args = _region_args(tmp_path, regions_file, "--max-gpu-price", "2.5", "--budget-file", str(ledger))
+    args[args.index("--out") + 1] = "runs/rel"  # relative, as in the docs' examples
+    assert nj.main(["run", *args, "--", "true"]) == 0
+    out = json.loads(ledger.read_text())["entries"][-1]["out"]
+    assert os.path.isabs(out) and Path(out).resolve() == (tmp_path / "runs" / "rel").resolve()
+
+
+def test_reap_never_takes_a_record_it_cannot_find_for_no_job(tmp_path, monkeypatch, capsys, regions_file):
+    """VMs two hours old (past "an hour and no job") whose launcher died. Reap deletes one only if its own job.json
+    says no job started, or if it is 30 min past its --hours cap. An old ledger entry's relative --out is found from
+    another directory (here via the repo). A record that can't be found, or that belongs to another VM (a reused
+    --out), means "unknown", never "no job"."""
+    now = time.time()
+    start, long_ago = _stamp(now - 2 * 3600), _stamp(now - 5 * 3600)
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(nj, "REPO", repo)
+    for name, times in (("a", {"create_start": start, "job_start": start}), ("idle", {"create_start": start})):
+        (repo / "runs" / name).mkdir(parents=True)
+        (repo / "runs" / name / "job.json").write_text(json.dumps({"name": f"md-{name}", "hours": 4, "times": times}))
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+
+    def reserved(job, out, created):
+        return {"when": created, "job": job, "kind": "reserved", "usd": 10.0, "what": job, "pid": 999999,
+                "host": "a-pod-long-gone", "out": out, "hours": 4, "project": "project-u02", "created": created}
+
+    ledger = tmp_path / "budget.json"
+    ledger.write_text(json.dumps({"limit_usd": 50, "entries": [
+        reserved("md-a", "runs/a", start),  # relative (before 2026-10-12): found via the repo; its job runs
+        reserved("md-lost", "runs/lost", start),  # no record anywhere: unknown, so left running
+        reserved("md-other", "runs/a", start),  # that folder's record is md-a's, not its own: unknown
+        reserved("md-idle", "runs/idle", start),  # its record: no job an hour after creation, an orphan
+        reserved("md-wedged", "runs/lost", long_ago),  # unknown, but 5 h old with --hours 4: past its cap
+    ]}))
+    nb = FakeNebius("nebius", "project-u02")
+    for k, name in enumerate(("md-a", "md-lost", "md-other", "md-idle", "md-wedged")):
+        nb.alive[f"computeinstance-{k}"] = nj.Instance(f"computeinstance-{k}", name, "RUNNING", "1.2.3.4")
+    assert nj.main(["reap", "--regions-file", str(regions_file), "--budget-file", str(ledger)]) == 0
+    assert {i.name for i in nb.alive.values()} == {"md-a", "md-lost", "md-other"}
+    entries = {e["job"]: e for e in json.loads(ledger.read_text())["entries"]}
+    assert {job for job, e in entries.items() if e["kind"] == "reserved"} == {"md-a", "md-lost", "md-other"}
+    assert entries["md-idle"]["usd"] == entries["md-wedged"]["usd"] == 10.0  # no price samples: the worst case
+    assert "no job.json of md-lost" in capsys.readouterr().out
+
+
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class SignalEscaped(Exception):
+    """A signal reached the test's own handler: the launcher's were not in place."""
+
+
+@pytest.fixture
+def guarded_signals():
+    """For tests that send themselves signals: handlers that fail the test instead of killing pytest, and the
+    originals put back afterwards."""
+    saved = {s: signal.getsignal(s) for s in SIGNALS}
+
+    def escaped(signum, frame):
+        raise SignalEscaped(signal.Signals(signum).name)
+
+    for s in SIGNALS:
+        signal.signal(s, escaped)
+    yield escaped
+    for s, handler in saved.items():
+        signal.signal(s, handler)
+
+
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_a_signal_during_the_delete_waits_for_it_then_ends_the_run(tmp_path, monkeypatch, fake_cloud,
+                                                                   guarded_signals, sig):
+    """Ctrl-C, SIGTERM (the launcher's machine shutting down) or SIGHUP (its terminal closing) while the VM is being
+    deleted: the delete completes, and then the launcher stops (130) instead of relaunching the resumable job."""
+    real_teardown = nj.teardown
+
+    def teardown(nb, name, instance_id=None, timeout=300):
+        signal.raise_signal(sig)
+        real_teardown(nb, name, instance_id, timeout)
+
+    monkeypatch.setattr(nj, "teardown", teardown)
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: nj.EXIT_UNFINISHED)
+    assert nj.main(["run", *_run_args(tmp_path), "--", "true"]) == nj.EXIT_INTERRUPTED
+    cloud = FakeNebius.clouds["project-x"]
+    assert cloud.created == 1 and cloud.deleted == ["computeinstance-1"] and not cloud.alive  # deleted, no relaunch
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert rec["teardown_verified"] is True and any(signal.Signals(sig).name in e for e in rec["errors"])
+    assert all(signal.getsignal(s) is guarded_signals for s in SIGNALS)  # the launcher's handlers are gone again
+
+
+@pytest.mark.parametrize("sig, rest_fetched", [(signal.SIGTERM, False), (signal.SIGHUP, False),
+                                               (signal.SIGINT, True)])
+def test_sigterm_or_sighup_while_fetching_deletes_the_vm_first(tmp_path, monkeypatch, fake_cloud, guarded_signals,
+                                                               sig, rest_fetched):
+    """The machine or terminal is going away: the best-effort fetches stop so the VM is deleted at once. A second
+    Ctrl-C lets them finish, as before; either way the launcher stops after the delete."""
+    fetched = []
+
+    def collect(remote, job, rec):
+        signal.raise_signal(sig)
+        fetched.append("the rest")
+
+    monkeypatch.setattr(nj, "collect", collect)
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    assert nj.main(["run", *_run_args(tmp_path), "--", "true"]) == nj.EXIT_INTERRUPTED
+    assert bool(fetched) is rest_fetched and FakeNebius.clouds["project-x"].deleted == ["computeinstance-1"]
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert rec["teardown_verified"] is True
+    assert any("collection cut short" in e for e in rec["errors"]) is not rest_fetched
+
+
+def test_under_nohup_a_hangup_does_not_stop_the_run(tmp_path, monkeypatch, fake_cloud, guarded_signals):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)  # as nohup leaves it
+
+    def remote_steps(remote, job, rec, check_vm=None):
+        signal.raise_signal(signal.SIGHUP)  # the terminal closes mid-job
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    assert nj.main(["run", *_run_args(tmp_path), "--", "true"]) == 0
+    assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN and FakeNebius.clouds["project-x"].deleted
+    assert signal.getsignal(signal.SIGTERM) is guarded_signals
+
+
+def test_a_kept_vms_reservation_is_settled_once_it_is_deleted(tmp_path, regions_file):
+    """`up` and `run --keep` leave the VM reserved at its worst case. `down` with the ledger settles it from the prices
+    its launcher sampled, the unsampled rest at the worst rate, up to its --hours shutdown. `reap` settles a kept VM
+    that is gone (deleted by hand), and never deletes one that is still there."""
+    t0 = time.time() - 3 * 3600  # created 3 h ago with --hours 2: it stopped at its cap an hour ago
+    start, half = _stamp(t0), _stamp(t0 + 1800)
+    kept_out = tmp_path / "kept"
+    kept_out.mkdir()
+    (kept_out / "job.json").write_text(json.dumps({"name": "md-kept", "hours": 2, "kept": True,
+                                                   "times": {"create_start": start},
+                                                   "price_samples": [[start, 1.0], [half, 1.5]]}))
+
+    def kept(job, **info):
+        return {"when": start, "job": job, "kind": "reserved", "usd": 5.0, "what": job, "pid": os.getpid(),
+                "host": socket.gethostname(), "hours": 2, "created": start, "kept": True, **info}
+
+    ledger = tmp_path / "budget.json"
+    ledger.write_text(json.dumps({"limit_usd": 50, "entries": [
+        kept("md-kept", out=str(kept_out), project="project-u02"),
+        kept("md-by-hand", project="project-e04"),  # deleted in the console: gone
+        kept("md-still-here", project="project-e03"),
+    ]}))
+    nb_u, nb_e3 = FakeNebius("nebius", "project-u02"), FakeNebius("nebius", "project-e03")
+    nb_u.alive["computeinstance-7"] = nj.Instance("computeinstance-7", "md-kept", "STOPPED", None)
+    nb_e3.alive["computeinstance-8"] = nj.Instance("computeinstance-8", "md-still-here", "STOPPED", None)
+    assert nj.main(["down", "--regions-file", str(regions_file), "--name", "md-kept",
+                    "--budget-file", str(ledger)]) == 0
+    assert not nb_u.alive
+    entries = {e["job"]: e for e in json.loads(ledger.read_text())["entries"]}
+    # 0.5 h at max($1.00, $1.50), then 1.5 h unsampled at the worst rate ($5 reserved for 2 h)
+    assert (entries["md-kept"]["kind"], entries["md-kept"]["usd"]) == ("spent", 0.75 + 3.75)
+    assert entries["md-by-hand"]["kind"] == entries["md-still-here"]["kind"] == "reserved"  # down settles its own
+    assert nj.main(["reap", "--regions-file", str(regions_file), "--budget-file", str(ledger)]) == 0
+    entries = {e["job"]: e for e in json.loads(ledger.read_text())["entries"]}
+    assert (entries["md-by-hand"]["kind"], entries["md-by-hand"]["usd"]) == ("spent", 5.0)  # no record: worst case
+    assert entries["md-still-here"]["kind"] == "reserved" and nb_e3.alive and not nb_e3.deleted
+
+
+def test_run_keep_without_a_vm_leaves_nothing_reserved(tmp_path, monkeypatch, regions_file):
+    monkeypatch.setattr(FakeNebius, "FAIL_CREATE", {"project-u02", "project-e04"})  # both regions under the bid
+    ledger = _ledger(tmp_path, 0.0)
+    code = nj.main(["run", "--keep", *_region_args(tmp_path, regions_file, "--max-gpu-price", "2.5",
+                                                    "--budget-file", str(ledger)), "--", "true"])
+    assert code == nj.EXIT_INFRA
+    entry = json.loads(ledger.read_text())["entries"][-1]
+    assert (entry["kind"], entry["usd"]) == ("spent", 0.0) and not entry.get("kept")
+    assert json.loads((tmp_path / "out" / "job.json").read_text())["kept"] is False

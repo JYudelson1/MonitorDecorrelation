@@ -28,7 +28,9 @@
 **Logs and exit code.** Worker output is merged into this process's log, each line prefixed with the worker. Exit
 code:
 - 1 if a worker of a required reader failed (a relaunch wouldn't fix it);
-- else 75 if any worker stopped early with progress or on SIGTERM, so the launcher relaunches and everything resumes;
+- else 75 if any worker stopped early with progress or on SIGTERM, so the launcher relaunches and everything resumes.
+  A stop stays resumable when uploads were still running or failed then: shards missing from the store are extracted
+  again on resume. A worker fails (1) if its store refuses uploads, or if uploads failed with nothing stopping it;
 - else 76 if a worker stopped at its deadline before finishing a single shard: ``--hours`` leaves too little time
   after the setup, so a relaunch would only repeat that;
 - else 0.
@@ -59,7 +61,7 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 
 from monitordecorrelation.provenance import code_version  # noqa: E402
 from monitordecorrelation.whitebox.extraction import (  # noqa: E402
-    EXIT_NO_PROGRESS, EXIT_UNFINISHED, Job, StopFlag, extract, now, prepare)
+    EXIT_NO_PROGRESS, EXIT_UNFINISHED, Job, StopFlag, extract, now, prepare, stop_verdict)
 
 STAGGER_TIMEOUT = 1200.0
 
@@ -107,7 +109,7 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
     from monitordecorrelation.whitebox import diagnostics
     from monitordecorrelation.whitebox.features import special_ids
     from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, PROBE_EFFORT, InklingReplay
-    from monitordecorrelation.whitebox.probe_datasets import item_messages
+    from monitordecorrelation.whitebox.probe_datasets import item_messages, read_items
     from monitordecorrelation.whitebox.store import open_store
 
     cfg = plan["diagnostics"]
@@ -121,8 +123,7 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
         for ds in candidates:
             path = os.path.join(REPO, ds) if not os.path.isabs(ds) else ds
             if json.load(open(os.path.join(path, "manifest.json")))["kind"] == kind:
-                with open(os.path.join(path, "items.jsonl")) as fh:
-                    by_kind[kind] = [json.loads(line) for line in fh]
+                by_kind[kind] = read_items(path)  # refused unless it is the file its manifest describes
                 break
     sample = diagnostics.pick_sample(by_kind.get("terminal", []), by_kind.get("contrastive", []),
                                      cfg.get("n_iid", 64), cfg.get("n_ood", 100))
@@ -169,9 +170,10 @@ def worker(plan: dict, reader: str, copy: int) -> int:
         summary = extract(model, p, stop=stop, deadline=deadline, log=wlog)
         wlog(json.dumps(summary))
         extracted += summary["shards_extracted"]
-        if summary["unsaved"]:
+        verdict = stop_verdict(summary, sigterm=stop.reason is not None)
+        if verdict == "failed":  # the store refuses uploads, or they failed with nothing stopping the run
             return 1
-        if summary["stopped_early"]:
+        if verdict == "stopped":  # resumable, even with uploads in flight: unsaved shards are redone on resume
             return EXIT_UNFINISHED if stop.reason or extracted else EXIT_NO_PROGRESS
     if want_diag:
         if stop.reason or time.time() > deadline - 600:

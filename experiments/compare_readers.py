@@ -29,6 +29,12 @@ Inputs:
 99th-percentile jitter |Δlogit| of t₁%.
 
 **Readout rule.** "Yes" counts as sink-like if its median norm ratio to the preceding context is > 5 in layers 10–35.
+The pre-registration's other criterion, "or the same ≤ 8 massive dimensions dominate its norm", has no number to apply,
+so it is not decided here; its numbers are reported (massive dimensions, below).
+
+The batching and readout rules are decided over the readers whose check ran. If none ran (the follow-up readout was not
+compared, or there are no diagnostics), ``fix_batching`` / ``sink_like_yes`` are None, with the reason in
+``decision.not_evaluated``.
 
 **Report only** (no rule reads these), for every compared probe:
 - **Weight cosine** between the two readers' probes; none when they sit at different layers.
@@ -40,6 +46,9 @@ Inputs:
   - OOD: OOD test AUROC, and transfer AUROC over every TerminalEnv episode of each view.
 - **Batching floor** (follow-up probes; the diagnostics keep only that readout): on the diagnostics' TerminalEnv rows
   of the view(s) the probe scores, the mean and sd of its one-at-a-time − batched logits, and Spearman between them.
+- **Massive dimensions** of "Yes" (``massive_dims``, per reader with diagnostics; follow-up comparisons): per layer,
+  the share of its squared norm in each input's top-8 dimensions, how consistent those dimensions are across inputs,
+  and the share in the layer's 8 most frequent ones; and their medians over layers 10–35.
 
 **Writes** ``decision.json`` and ``report.md``; decision.json records the code version (provenance.code_version) as
 ``code``. An ``--out`` that already holds either is refused, unless ``--overwrite``.
@@ -384,13 +393,59 @@ def routing_agreement(args) -> dict:
     return {"mean": float(np.mean(per_layer)), "per_moe_layer": [round(x, 4) for x in per_layer]}
 
 
+SINK_LAYERS = slice(10, 36)  # layers 10–35, where the readout rule looks
+
+
 def sink_check(args, reader) -> dict:
     path = os.path.join(args.diagnostics, reader, "done.json")
     if not os.path.exists(path):
         return {}
     ratios = json.load(open(path))["yes_norm_ratio_median_by_layer"]
-    mid = ratios[10:36]
+    mid = ratios[SINK_LAYERS]
     return {"median_ratio_layers_10_35": float(np.median(mid)), "sink_like": float(np.median(mid)) > 5}
+
+
+def massive_dims(args, reader) -> dict:
+    """Report only: the numbers behind the readout rule's second half ("Yes" is also sink-like if "the same ≤ 8 massive
+    dimensions dominate its norm"), for which the pre-registration sets no threshold and none is set here. From the
+    diagnostics' 8 largest-magnitude dimensions of "Yes" per layer (``massive_idx``) and its readouts from the same
+    one-item forwards (``followup_alone``), per layer:
+    - ``top_share``: the median over inputs of the share of "Yes"'s squared norm in its own top-8 dimensions;
+    - ``consistency``: how much the inputs agree on those dimensions: the mean share of an input's top 8 that are among
+      the layer's 8 most frequent (1: every input has the same 8);
+    - ``common_share``: the median share of the squared norm in those 8 most frequent dimensions, the same 8 for every
+      input; and the median of each over layers 10–35."""
+    from safetensors import safe_open
+
+    path = os.path.join(args.diagnostics, reader, "diag.safetensors")
+    if not os.path.exists(path):
+        return {}
+    with safe_open(path, framework="pt") as f:
+        if not {"massive_idx", "followup_alone"} <= set(f.keys()):
+            return {}
+        idx = f.get_tensor("massive_idx").long().numpy()  # [inputs, layers, k]
+        yes = f.get_tensor("followup_alone")  # [inputs, layers, d], bf16
+    n, n_layers, k = idx.shape
+    top, consistency, common_share, common_dims = [], [], [], []
+    for layer in range(n_layers):
+        y = yes[:, layer].double().numpy()
+        sq = y ** 2
+        total = sq.sum(1)
+        top.append(float(np.median(np.take_along_axis(sq, idx[:, layer], 1).sum(1) / total)))
+        dims, counts = np.unique(idx[:, layer], return_counts=True)
+        common = dims[np.argsort(-counts, kind="stable")[:k]]  # ties: the lower dimension
+        consistency.append(float(np.isin(idx[:, layer], common).sum(1).mean() / k))
+        common_share.append(float(np.median(sq[:, common].sum(1) / total)))
+        common_dims.append(sorted(int(d) for d in common))
+
+    def mid(values: list[float]) -> float | None:
+        return float(np.median(values[SINK_LAYERS])) if values[SINK_LAYERS] else None
+
+    return {"n": n, "k": k, "top_share_by_layer": [round(v, 4) for v in top],
+            "consistency_by_layer": [round(v, 4) for v in consistency],
+            "common_share_by_layer": [round(v, 4) for v in common_share], "common_dims_by_layer": common_dims,
+            "median_layers_10_35": {"top_share": mid(top), "consistency": mid(consistency),
+                                    "common_share": mid(common_share)}}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -423,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
     ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
     report = {"readouts": readouts, "code": code_version(), "probes": {}, "jitter": {}, "batching": {}, "sink": {},
-              "routing_agreement": routing_agreement(args), "routing_agreement_at_yes": routing_agreement_at_yes(args)}
+              "massive_dims": {}, "routing_agreement": routing_agreement(args),
+              "routing_agreement_at_yes": routing_agreement_at_yes(args)}
     for dataset, view, readout in probes_for(readouts):
         name = f"{dataset}/{view}/{readout}"
         if all(os.path.isdir(os.path.join(args.probes, r, dataset, view, readout)) for r in ("nvfp4", "bf16")):
@@ -437,13 +493,40 @@ def main(argv: list[str] | None = None) -> int:
                 report["batching"][reader] = batching_rule(args, reader, probe, items,
                                                            report["jitter"][reader]["dlogit_p99"])
         report["sink"][reader] = sink_check(args, reader)
+        report["massive_dims"][reader] = massive_dims(args, reader)  # report only
     finish(report, args.out)
     return 0
 
 
+def any_reader(results: dict, key: str) -> bool | None:
+    """``key`` is true for any reader whose check ran (a non-empty result); None if it ran for none."""
+    ran = [r[key] for r in results.values() if r]
+    return any(ran) if ran else None
+
+
+def why_not_evaluated(report: dict, rule: str, needs: str) -> str:
+    readouts = report.get("readouts")
+    if readouts is not None and "followup" not in readouts:
+        return (f"the {rule} is about the follow-up readout, which this comparison left out (readouts: "
+                f"{', '.join(readouts)})")
+    return f"no reader had {needs}"
+
+
+def decided(decision: dict, key: str) -> str:
+    """A rule's outcome for report.md: True / False, or why it was not evaluated."""
+    value = decision.get(key)
+    if value is None:
+        return f"not evaluated ({(decision.get('not_evaluated') or {}).get(key, 'no reader was checked')})"
+    return str(value)
+
+
 def finish(report: dict, out: str) -> None:
     """Apply the rules to the compared probes (one decision per readout: a readout keeps 4-bit only if every probe on
-    it passes), then write decision.json and report.md."""
+    it passes), then write decision.json and report.md.
+
+    The batching and readout rules are decided over the readers they ran for. A rule that ran for none (follow-up not
+    compared, or no diagnostics) is recorded as None, with the reason in ``decision.not_evaluated``: never as False.
+    Decision files written before 2026-10-12 recorded False there; ``--from-json`` decides them again."""
     ok_by_readout: dict[str, list[bool]] = {}
     for name, r in report["probes"].items():
         agree_ok = all(a["jaccard_at_t1"] >= 0.8 and a["spearman"] >= 0.95 for a in r["agreement"].values())
@@ -454,19 +537,26 @@ def finish(report: dict, out: str) -> None:
         r["passes"] = {"agreement": agree_ok, "agreement_within_refit_noise": within_noise, "delta_auroc": delta_ok}
         ok_by_readout.setdefault(name.rsplit("/", 1)[1], []).append((agree_ok or within_noise) and delta_ok)
     by_readout = {r: "nvfp4" if all(ok) else "bf16" for r, ok in ok_by_readout.items()}
+    not_evaluated = {}
+    fix_batching = any_reader(report.get("batching") or {}, "fix_batching")
+    if fix_batching is None:
+        not_evaluated["fix_batching"] = why_not_evaluated(
+            report, "batching rule", "both diagnostics and a fitted follow-up probe (terminal_prerl/with_reasoning)")
+    sink_like = any_reader(report.get("sink") or {}, "sink_like")
+    if sink_like is None:
+        not_evaluated["sink_like_yes"] = why_not_evaluated(report, "readout rule", "diagnostics (done.json)")
     decision = {"reader": "nvfp4" if by_readout and all(v == "nvfp4" for v in by_readout.values())
                 else ("bf16" if by_readout else "undecided: both readers not fitted"),
-                "by_readout": by_readout,
-                "fix_batching": any(b.get("fix_batching") for b in report["batching"].values()),
-                "sink_like_yes": any(s.get("sink_like") for s in report["sink"].values())}
+                "by_readout": by_readout, "fix_batching": fix_batching, "sink_like_yes": sink_like,
+                "not_evaluated": not_evaluated}
     report["decision"] = decision
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "decision.json"), "w") as fh:
         json.dump(report, fh, indent=1, default=float)
     per = "; ".join(f"{r} → `{v}`" for r, v in by_readout.items())
     lines = [f"# Reader comparison ({', '.join(report.get('readouts', by_readout))})", "",
-             f"**Decision per readout:** {per or 'none compared'}. Fix batching = {decision['fix_batching']}; "
-             f"'Yes' sink-like = {decision['sink_like_yes']}", "",
+             f"**Decision per readout:** {per or 'none compared'}. Fix batching = {decided(decision, 'fix_batching')}; "
+             f"'Yes' sink-like = {decided(decision, 'sink_like_yes')}", "",
              "| probe | Jaccard@t1 (with / without reasoning) | Spearman | refit floor: Jaccard / Spearman (medians) "
              "| ΔAUROC (4-bit − full) [CI] | passes |",
              "|---|---|---|---|---|---|"]
@@ -496,9 +586,50 @@ def finish(report: dict, out: str) -> None:
 def report_only_lines(report: dict) -> list[str]:
     """report.md's lines for the report-only fields (absent from decision.json files written before 2026-10-12)."""
     probes = {name: r for name, r in report["probes"].items() if "cross_reader" in r}
-    if not probes:
+    massive = massive_lines(report.get("massive_dims") or {})
+    if not (probes or massive):
         return []
-    lines = ["", "## Report only (no rule reads these)", "",
+    lines = ["", "## Report only (no rule reads these)"]
+    if probes:
+        lines += probe_lines(probes)
+    return lines + massive
+
+
+def massive_lines(by_reader: dict) -> list[str]:
+    """report.md's table for ``massive_dims``: per layer and reader, the top-8 share, consistency and common-8
+    share."""
+    readers = [r for r in READERS if by_reader.get(r)]
+    if not readers:
+        return []
+    lines = ["", "Massive dimensions of \"Yes\" (the readout rule's second half, \"the same ≤ 8 massive dimensions "
+                 "dominate its norm\", has no pre-registered threshold; the rule above uses the norm ratio only). Per "
+                 "layer: the median share of the squared norm in each input's own top 8 dimensions; how consistent "
+                 "those dimensions are across inputs (share of an input's top 8 among the layer's 8 most frequent); "
+                 "the median share in those 8 most frequent dimensions.", ""]
+    for r in readers:
+        med = by_reader[r]["median_layers_10_35"]
+        lines.append(f"- {r} ({by_reader[r]['n']} diagnostics inputs), medians over layers 10–35: top-8 share "
+                     f"{pct_or_dash(med['top_share'])}, consistency {pct_or_dash(med['consistency'])}, common-8 "
+                     f"share {pct_or_dash(med['common_share'])}")
+    lines += ["", "| layer | " + " | ".join(f"{r}: top-8 share / consistency / common-8 share" for r in readers)
+              + " |", "|---|" + "---|" * len(readers)]
+    for layer in range(max(len(by_reader[r]["top_share_by_layer"]) for r in readers)):
+        cells = []
+        for r in readers:
+            d = by_reader[r]
+            cells.append(" / ".join(pct_or_dash(d[key][layer] if layer < len(d[key]) else None) for key in
+                                    ("top_share_by_layer", "consistency_by_layer", "common_share_by_layer")))
+        lines.append(f"| {layer} | " + " | ".join(cells) + " |")
+    return lines
+
+
+def pct_or_dash(x: float | None) -> str:
+    return "—" if x is None else f"{x:.1%}"
+
+
+def probe_lines(probes: dict) -> list[str]:
+    """report.md's report-only tables for the compared probes."""
+    lines = ["",
              "Score shift: the full-precision probe's logits on 4-bit minus on full-precision features, TerminalEnv "
              "val+test.", "",
              "| probe | weight cosine (4-bit vs full) | shift, with reasoning: mean (sd), p99 abs, Pearson r "

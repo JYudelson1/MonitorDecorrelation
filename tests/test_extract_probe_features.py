@@ -13,6 +13,7 @@ dataset builder. Checks:
     another commit;
   - a deadline or SIGTERM stops it cleanly with exit 75;
   - it refuses to mix shards made with other settings;
+  - it refuses an ``items.jsonl`` that is not the file its manifest describes (``items_sha256``);
   - two processes (``--part 0/2``, ``1/2``) share a dataset through one store.
 """
 
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import time
 
+import pytest
 import torch
 from inkling_tiny import write_tiny_checkpoints
 
@@ -61,6 +63,11 @@ def summary(cp: subprocess.CompletedProcess) -> dict:
 def tiny_setup(tmp_path):
     """A tiny NVFP4 reader and a 10-episode terminal dataset (6 shards of <= 4 items over two views)."""
     _, nvfp4_dir, _, _ = write_tiny_checkpoints(tmp_path, vocab_size=201024)
+    return (nvfp4_dir, *tiny_dataset(tmp_path))
+
+
+def tiny_dataset(tmp_path):
+    """The 10-episode terminal dataset alone: (folder, items)."""
     rollouts = tmp_path / "eval_rollouts.jsonl"
     rows = [{"task_id": f"t{t}", "question": f"Solve {t}.", "behavior_present": t == 0 and k == 0,
              "invalid_reason": None,
@@ -71,7 +78,7 @@ def tiny_setup(tmp_path):
     items, _ = terminal_items(str(rollouts), RUN_ENV, seed=0)
     dataset = tmp_path / "terminal_tiny"
     write_dataset(str(dataset), items, {"kind": "terminal", "effort": 0.5, "counts": counts(items, "task_id")})
-    return nvfp4_dir, dataset, items
+    return dataset, items
 
 
 def common_args(nvfp4_dir, dataset, out) -> list[str]:
@@ -190,6 +197,7 @@ def test_sigterm_starts_nothing_new_and_keeps_what_is_saved(tmp_path):
     assert proc.returncode == 75, err[-3000:]
     result = json.loads(out.strip().splitlines()[-1])
     assert "SIGTERM" in result["stopped_early"] and result["shards_extracted"] < 6
+    assert result["store_broken"] is None and result["out_of_time"] in (True, False)
     names = {str(p.relative_to(store)) for p in store.rglob("*.jsonl")}
     assert {n[:-6] for n in names} == stored_shards(store)  # every marker has its data
     assert result["complete"] is False and "SIGTERM" in run_records(store)[0]["stopped_early"]
@@ -221,3 +229,19 @@ def test_two_parts_share_a_dataset_through_one_store(tmp_path):
     assert stored_shards(store) == everything and len(run_records(store)) == 2
     again = run([*common_args(nvfp4_dir, dataset, tmp_path / "gpu9"), "--store", str(store)])
     assert again.returncode == 0 and summary(again)["shards_extracted"] == 0 and summary(again)["complete"] is True
+
+
+def test_items_that_are_not_the_manifests_are_refused(tmp_path):
+    """An items.jsonl edited after the dataset was built (here one label flipped) no longer has the manifest's
+    items_sha256, which index.json would record for its shards: refused before any model loads."""
+    from monitordecorrelation.whitebox.extraction import Job, prepare
+
+    dataset, items = tiny_dataset(tmp_path)
+    assert len(prepare(Job(dataset=str(dataset), out=str(tmp_path / "ok"), model="unused")).items) == len(items)
+    lines = (dataset / "items.jsonl").read_text().splitlines()
+    first = json.loads(lines[0])
+    first["label"] = 1 - first["label"]
+    (dataset / "items.jsonl").write_text("\n".join([json.dumps(first), *lines[1:]]) + "\n")
+    with pytest.raises(SystemExit, match="not the file its records describe") as refused:
+        prepare(Job(dataset=str(dataset), out=str(tmp_path / "edited"), model="unused"))
+    assert "manifest.json records" in str(refused.value) and not (tmp_path / "edited").exists()

@@ -5,12 +5,15 @@ Checks:
 - Both readers extract both datasets (the 4-bit one split over two workers) and run their diagnostics.
 - A deadline that leaves no time for a single shard ends with 76, not a relaunch; a second run finishes.
 - A broken optional reader doesn't fail the session and isn't retried; the required reader still finishes.
+- A worker stopped by the deadline or SIGTERM with uploads still in flight exits 75 (resumable), not 1 (failed).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -131,3 +134,53 @@ def test_a_broken_optional_reader_does_not_fail_the_session(setup):
     assert status["readers"]["bf16"]["state"] == "failed" and status["readers"]["nvfp4"]["state"] == "done"
     second = run(tmp_path, plan)
     assert second.returncode == 0 and "failed in an earlier attempt" in second.stdout and "not retried" in second.stdout
+
+
+class _Prepared:
+    """One shard to do, as ``prepare`` would report it."""
+
+    def mine(self):
+        return [("without_reasoning", 0)]
+
+    def done(self, view, k):
+        return False
+
+
+@pytest.mark.parametrize("summary, sigterm, expected", [
+    # the deadline stopped it while an upload was still running: resumable (this was 1, a "failed" reader)
+    ({"stopped_early": "deadline: 200s left", "unsaved": ["uploads still running when time ran out"],
+      "out_of_time": True, "shards_extracted": 2}, False, 75),
+    # SIGTERM during the last shard: the loop ended, but the 60 s notice cut its upload off
+    ({"stopped_early": None, "unsaved": ["uploads still running when time ran out"], "out_of_time": True,
+      "shards_extracted": 3}, True, 75),
+    # an upload that failed during a stop is redone on resume as well
+    ({"stopped_early": "SIGTERM: the VM is being stopped", "unsaved": ["without_reasoning/shard_00001 failed"],
+      "shards_extracted": 1}, True, 75),
+    # stopped at its deadline before finishing a single shard: no time for anything, not relaunched
+    ({"stopped_early": "deadline: 60s left", "unsaved": [], "shards_extracted": 0}, False, 76),
+    # the store refuses uploads (quota, permission): a relaunch could save nothing either
+    ({"stopped_early": "SIGTERM: the VM is being stopped", "unsaved": ["the store refuses uploads: 403"],
+      "store_broken": "HTTPError: 403 Forbidden", "shards_extracted": 1}, True, 1),
+    # uploads failed with nothing stopping the run
+    ({"stopped_early": None, "unsaved": ["without_reasoning/shard_00000 failed"], "shards_extracted": 1}, False, 1),
+])
+def test_a_stop_stays_resumable_with_uploads_in_flight(tmp_path, monkeypatch, summary, sigterm, expected):
+    """The worker's exit code after its extraction, with the model and the extraction faked."""
+    spec = importlib.util.spec_from_file_location("run_probe_session", SCRIPT)
+    session = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(session)
+
+    def extract(model, p, *, stop, deadline, log):
+        if sigterm:
+            signal.raise_signal(signal.SIGTERM)  # Nebius's notice, caught by the worker's StopFlag
+        return {"out_of_time": False, "store_broken": None, **summary}
+
+    monkeypatch.setattr(session, "prepare", lambda job: _Prepared())
+    monkeypatch.setattr(session, "load_reader", lambda spec: object())
+    monkeypatch.setattr(session, "extract", extract)
+    plan = {"out": str(tmp_path), "readers": {"nvfp4": {"model": "m", "gpus": [[0]]}}, "datasets": ["data/x"]}
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        assert session.worker(plan, "nvfp4", 0) == expected
+    finally:
+        signal.signal(signal.SIGTERM, before)

@@ -28,6 +28,9 @@
 
 **Code version** (provenance.code_version): each probe's meta.json and summary.json entry record the code that fitted
 it as ``code``; meta.json also records the features' (their index.json's ``code``) as ``features_code``.
+
+**Same items:** each dataset's ``items.jsonl`` must match the ``items_sha256`` of its manifest and of the features'
+index.json (what they were extracted from); otherwise the run refuses to start, before any fitting.
 """
 
 from __future__ import annotations
@@ -62,6 +65,20 @@ def prereg_sha() -> str | None:
 
 def log(msg: str) -> None:
     print(f"[fit {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def features_index(args, dataset: str) -> dict:
+    """The features' index.json for ``dataset`` ({} if there is none, e.g. synthetic features)."""
+    path = os.path.join(args.features, dataset, "index.json")
+    return json.load(open(path)) if os.path.exists(path) else {}
+
+
+def dataset_items(args, dataset: str) -> dict[str, dict]:
+    """The dataset's items by id, refused unless items.jsonl is the file its manifest describes and the one the
+    features were extracted from (the ``items_sha256`` their index.json recorded)."""
+    recorded = (features_index(args, dataset).get("dataset") or {}).get("items_sha256")
+    return load_items(os.path.join(args.datasets, dataset),
+                      {os.path.join(args.features, dataset, "index.json"): recorded})
 
 
 def policy_text(item: dict, view: str) -> str:
@@ -437,11 +454,10 @@ def main() -> int:
                  "--overwrite rewrites them")
     code = code_version()
 
-    items = load_items(os.path.join(args.datasets, "terminal_prerl"))
-    concealed = load_items(os.path.join(args.datasets, "terminal_concealed")) \
+    items = dataset_items(args, "terminal_prerl")
+    concealed = dataset_items(args, "terminal_concealed") \
         if os.path.isdir(os.path.join(args.datasets, "terminal_concealed")) else None
-    index = json.load(open(os.path.join(args.features, "terminal_prerl", "index.json"))) \
-        if os.path.exists(os.path.join(args.features, "terminal_prerl", "index.json")) else {}
+    index = features_index(args, "terminal_prerl")
     provenance = {"reader": args.reader, "reader_info": index.get("reader"), "feature_format": index.get("feature_format"),
                   "versions": index.get("versions"), "prereg_sha256": prereg_sha(), "fitted_utc": time.strftime(
                       "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats,
@@ -453,7 +469,7 @@ def main() -> int:
                 summary[f"iid/{view}/{readout}"] = {**fit_iid(args, items, concealed, view, readout, provenance),
                                                     "code": code}
     if "ood" in args.probes:
-        ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
+        ood_items = dataset_items(args, "diverse_deception")
         for readout in readouts:
             summary[f"ood/{readout}"] = {**fit_ood(args, ood_items, items, concealed, readout, provenance),
                                          "code": code}
