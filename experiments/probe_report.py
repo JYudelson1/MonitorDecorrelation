@@ -359,6 +359,15 @@ def yes(x) -> str:
     return "yes" if x else "no"
 
 
+def outcome(decision: dict, key: str) -> str:
+    """A rule's outcome in a comparison's decision: yes / no, or "not evaluated" when it is None (compare_readers.py
+    from 2026-10-12 on, when the rule ran for no reader), with the recorded reason."""
+    if decision.get(key) is None:
+        why = (decision.get("not_evaluated") or {}).get(key)
+        return "not evaluated" + (f" ({why})" if why else "")
+    return yes(decision[key])
+
+
 def short(view: str) -> str:
     return view.replace("_reasoning", "")
 
@@ -598,7 +607,7 @@ def reader_comparison(name: str) -> Callable[[Results], list[str]]:
                          "Spearman (with / without)", "refit floor, medians: Jaccard; Spearman",
                          "ΔAUROC, 4-bit − full [95% CI]", "rules"], rows) + [
             "", "Decision per readout: " + ", ".join(f"{k} → {v}" for k, v in dec["by_readout"].items())
-            + f". Fix batching: {yes(dec['fix_batching'])}. \"Yes\" sink-like: {yes(dec['sink_like_yes'])}."
+            + f". Fix batching: {outcome(dec, 'fix_batching')}. \"Yes\" sink-like: {outcome(dec, 'sink_like_yes')}."
         ] + comparison_notes(d) + legend(
             f"From `{rel}` (experiments/compare_readers.py).",
             "Agreement: the full-precision probe's logits on both readers' TerminalEnv val+test features, per view:",
