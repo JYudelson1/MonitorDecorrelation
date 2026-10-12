@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Every spot event of our Nebius GPU runs, from the launcher's records (``job.json`` of each attempt).
 
-    python3 scripts/spot_events.py output/gpu_jobs            # prints the table and the summary
-    python3 scripts/spot_events.py output/gpu_jobs --md out.md
+    python3 scripts/spot_events.py JOBS            # prints the table and the summary
+    python3 scripts/spot_events.py JOBS --md out.md
+
+JOBS is the folder holding the launcher's ``--out`` folders (each with its ``job.json``), e.g. ``runs/``.
 
 **Per VM attempt, one row:**
 - when it was launched, which VM, which region and at what price;

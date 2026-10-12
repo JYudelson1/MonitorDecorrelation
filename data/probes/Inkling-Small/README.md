@@ -31,10 +31,12 @@ Each directory is `<dataset>/<view>/<readout>/`:
 | `diverse_deception/with_reasoning/mean` | `probe_ood_with_reasoning_mean` | **report only:** inverted on TerminalEnv (scores hacks below honest episodes) |
 | `diverse_deception/without_reasoning/mean` | `probe_ood_without_reasoning_mean` | report only: near chance on TerminalEnv |
 
-**Which to use.** `probe_iid` and `probe_ood` as above. Both read the with-reasoning view, so the server scores them
-in one forward pass. Use the mean probes only to compare evasion strategies: a mean over a long transcript is easy
-to dilute. Two cautions, in short: on pre-RL data the IID probe is close to a text detector, and the OOD probe
-responds to lying about the hack more than to the hack.
+**Which to use.** `probe_iid` and `probe_ood` as above. Both read the with-reasoning view, but served live they
+still cost one forward pass each: every monitor sends its own requests to the server, and only probes within one
+request share a pass. (The post-hoc scorer, `experiments/eval_inkling_probes_on_runs.py`, does score them in one
+pass.) Use the mean probes only to compare evasion strategies: a mean over a long transcript is easy to dilute. Two
+cautions, in short: on pre-RL data the IID probe is close to a text detector, and the OOD probe responds to lying
+about the hack more than to the hack.
 
 ## Score and thresholds
 
@@ -61,12 +63,16 @@ In each monitor directory:
   (`trained_reader`, `trained_reader_info`) with their checkpoint revisions, the feature format, the torch and
   transformers versions, `prereg_sha256` (the sha256 of
   [`docs/inkling_probes_preregistration.md`](../../../docs/inkling_probes_preregistration.md)), the rendering
-  `effort` (0.5), `golden_tolerance`, `fitted_dir` (the fitted probe under `data/probe_results/fitted/`), and when it
-  was fitted and deployed.
+  `effort` (0.5), `golden_tolerance`, `fitted_dir` (the fitted probe under `data/probe_results/fitted/`), when it
+  was fitted and deployed, and `deployed_code`, the code version that deployed it (the fits of 2026-10-10 predate
+  code stamping).
 - **`golden.jsonl`**: 32 TerminalEnv test episodes (up to 8 hacks), each with the sha256 of its rendering and its
   logit on the stored features. At startup the probe server re-scores them and refuses to start if a rendering
-  differs or a logit moves by more than `golden_tolerance`. That catches a wrong reader, layer or rendering, and
-  drift in the libraries, before it can look like monitor degradation.
+  differs, if a logit moves by more than `golden_tolerance`, or if the logits moved by more than 0.3 on average (a
+  systematic shift; the server's `--golden-mean-tolerance`). That catches a wrong reader, layer or rendering, and
+  drift in the libraries, before it can look like monitor degradation. By its own calibration the mean bound also
+  refuses a correct setup about 1% of the time per probe. The real-B300 check of 2026-10-10 predates that bound, so
+  the server in its current form has not yet run on a GPU.
 
 At the top level:
 - **`deployed.json`**: one entry per monitor: its directory, layer, readers, `threshold_1`, golden-set size and
@@ -79,20 +85,26 @@ At the top level:
 ## Using them
 
 - **Serve** them from one B300: [`docs/GPU_RUNBOOK.md`](../../../docs/GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring).
-  The server must run the reader revision in `reader_info`; the monitor refuses any other.
+  The server must run the reader revision in `reader_info`, downloaded with `hf download --revision …
+  --local-dir` so that it can tell which revision it runs; the monitor refuses any other.
 - **Config:** a monitor of `"kind": "inkling_probe"` with `probe_path` set to a directory above
   ([`docs/MONITORS.md`](../../../docs/MONITORS.md#inkling-probe-monitors-kind-inkling_probe)). Only with
   `env: terminal_verifier` and an Inkling policy at `thinking_effort` 0.5.
 - **Held-out probes after the fact:** `experiments/eval_inkling_probes_on_runs.py` scores finished runs' saved eval
   episodes, without a live server.
 
-**Regenerating** these directories needs the fitted probes (`data/probe_results/fitted/bf16/`) and the 4-bit reader's
-features and diagnostics, which are in the private buckets:
+**Regenerating** these directories needs the fitted probes (`data/probe_results/fitted/bf16/`), the TerminalEnv
+dataset's items, and the 4-bit reader's features and diagnostics. Everything but the fitted probes is in the private
+buckets (access must be granted). The items are gitignored; fetch them, and check their sha256 against the
+manifest's `items_sha256`:
 
 ```bash
+uv run hf buckets cp hf://buckets/probemaxxing/inkling-probes/datasets/terminal_prerl/items.jsonl \
+    data/probe_datasets/terminal_prerl/items.jsonl
 uv run python experiments/deploy_probes.py --probes data/probe_results/fitted/bf16 \
     --features <4-bit features> --diagnostics <4-bit diagnostics> --readouts followup,mean
 ```
 
 It replaces each monitor directory it deploys, recalibrates the thresholds on the 4-bit features, writes new golden
-sets, and merges its entries into `deployed.json`.
+sets, and merges its entries into `deployed.json`. `scripts/run_probe_pipeline.sh` runs this as its deploy stage,
+after fetching the features ([`docs/INKLING_PROBES.md`](../../../docs/INKLING_PROBES.md#re-running-the-pipeline)).

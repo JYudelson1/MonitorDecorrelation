@@ -63,12 +63,15 @@ it. So **the follow-up technique is structurally no-CoT on thinking (Qwen3) mode
 | **`diverse_deception`** (`probe_ood`) | 7-source mix (5849 pairs) | Qwen3-8B | **0.977** | trained + committed; the OOD matrix detector |
 | **`mbpp_honeypot`** (`probe_iid`) | honest code vs hardcode | Qwen3-8B | trained | split-safe; the iid matrix detector |
 | **`terminal_prerl`** (`probe_iid`, Inkling) | pre-RL TerminalEnv episodes, hack = `used_verifier` | Inkling-Small | 1.000 (test) | close to a text detector on pre-RL data; [`INKLING_PROBES.md`](INKLING_PROBES.md) |
-| **`diverse_deception`** (`probe_ood`, Inkling) | 6-source mix (4,849 pairs) | Inkling-Small | 0.98; 0.71 on TerminalEnv hacks | responds to lying about the hack more than to the hack; [`INKLING_PROBES.md`](INKLING_PROBES.md) |
+| **`diverse_deception`** (`probe_ood`, Inkling) | 6-source mix (4,849 pairs) | Inkling-Small | 0.98; on TerminalEnv hacks 0.71 (fit reader) / 0.76 (as served) | responds to lying about the hack more than to the hack; [`INKLING_PROBES.md`](INKLING_PROBES.md) |
 
 The Inkling rows are the full-precision-trained follow-up probes, which are served on the 4-bit reader. The OOD
-probe's 0.71 is its transfer to TerminalEnv hacks in the with-reasoning view.
-[`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md) lists all eight deployed monitors. <!-- src
-for the two Inkling rows: data/probe_results/fitted/bf16/{terminal_prerl/with_reasoning,diverse_deception/without_reasoning}/followup/metrics.json -->
+probe's transfer to TerminalEnv hacks (with-reasoning view) depends on where it is measured: 0.71 on the
+full-precision features it was fitted on, over all episodes; 0.76 as served, on the 4-bit reader's features over the
+test split. [`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md) lists all eight deployed
+monitors. <!-- src for the two Inkling rows:
+data/probe_results/fitted/bf16/{terminal_prerl/with_reasoning,diverse_deception/without_reasoning}/followup/metrics.json;
+the served 0.76: data/probes/Inkling-Small/deployed.json (serving_check.test_auroc) -->
 
 ## How to train / deploy
 

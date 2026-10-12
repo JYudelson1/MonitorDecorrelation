@@ -288,10 +288,13 @@ Only replay fields leave the run, never the oracle's labels.
 **Checks when the monitor is built:**
 - the run's effort equals the probe's, and the run supplies every env option the replay needs;
 - the server serves this exact probe, identified by the sha256 of its `probe.npz` and `meta.json`;
-- the server's reader (loader and checkpoint revision) is the one in the probe's `reader_info`.
+- the server's reader (loader and checkpoint revision) is the one in the probe's `reader_info`. The server reads the
+  revision from the metadata `hf download --local-dir` leaves next to the weights; when it can't tell, the server and
+  the monitor warn, and only the golden check guards against a different checkpoint.
 
 **Failures and retries.** Connection errors, timeouts, 5xx and "still running" (202) answers are retried forever, with
-backoff from 1 s up to `max_backoff` and a warning every few minutes. So a run pauses while the server is down: a
+backoff from 1 s up to a cap and a warning every few minutes. The cap is the `InklingProbeMonitor` constructor's
+`max_backoff` (60 s), not a config field. So a run pauses while the server is down: a
 train-against run never computes a reward without the probe. A protocol or probe mismatch (409) or an episode the
 server can't replay (422) is fatal; the run then aborts through its usual unscored-monitor check. Each
 `MonitorResult.meta` holds the probe's name and sha256, the logit, the episode's token count and the experts the
@@ -300,31 +303,41 @@ reader chose at "Yes".
 **The probe server** (`whitebox/probe_server.py`; command line `experiments/inkling_probe_server.py`):
 - **Scoring is the training extraction:** the same replay, view, follow-up, feature code and batching budget, then the
   probe's readout and layer.
-- **One GPU,** any number of probes. Probes on the same view share one forward pass. `--max-batch-tokens 1` (the
-  default) scores one episode per forward pass, so a score doesn't depend on what else was in the batch: the
-  pre-registered batching rule fired.
+- **One GPU,** any number of probes. A request's probes on the same view share one forward pass, but each monitor
+  sends its own requests, so two live monitors cost two passes per episode. `--max-batch-tokens 1` (the default)
+  scores one episode per forward pass, so a score doesn't depend on what else was in the batch: the pre-registered
+  batching rule fired.
 - **Protocol:** JSON over HTTP on localhost only; runs on other machines reach it through an SSH tunnel.
   `GET /v1/meta` lists the reader, the effort and the probes; `POST /v1/score` scores episodes. A request is
   identified by the hash of its body, so a repeated request joins the running job instead of starting another.
 - **Golden check:** each probe directory holds `golden.jsonl`, 32 test episodes with the sha256 of their rendering and
   their logit on the stored features. At startup the server re-scores them. It refuses to start if a rendering
-  differs, or if a logit moves by more than the probe's `golden_tolerance`. GPU extraction isn't bit-reproducible,
-  so the tolerance is twice the largest batched-vs-one-at-a-time difference measured for that probe (at least 1
-  logit); for the mean probes, where that wasn't measured, it is 3. The check catches a wrong reader, layer or
-  rendering, and drift in transformers or the kernels, before it can look like monitor degradation.
+  differs, if a logit moves by more than the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on
+  average (a systematic shift; `--golden-mean-tolerance` overrides it).
+  - GPU extraction isn't bit-reproducible, so the per-episode tolerance is twice the largest batched-vs-one-at-a-time
+    difference measured for that probe (at least 1 logit); for the mean probes, where that wasn't measured, it is 3.
+  - The mean bound is for what the per-episode one can't see: every logit shifted a little, e.g. by another library
+    version. A +0.3 shift already raises the false-alarm rate at t₁% from 1% to 1.2–1.7%. The bound catches a shift
+    of 0.55 or more with ≥ 95% probability per probe, smaller ones less reliably. By its own calibration it also
+    refuses a correct setup about 1% of the time per probe (`GOLDEN_MEAN_TOLERANCE` in `whitebox/probe_server.py`).
+  - The check catches a wrong reader, layer or rendering, and drift in transformers or the kernels, before it can
+    look like monitor degradation.
 - **GPU check:** `experiments/check_probe_server.py` runs the golden check of every deployed probe at both batchings,
-  then the HTTP server → `InklingProbeMonitor` path, whose scores must equal the scorer's, then a throughput test. On
-  a real B300 it passed for the follow-up monitors (2026-10-10). The mean monitors, redeployed full-precision-trained
-  on 2026-10-12, have so far been checked on CPU only.
+  then the HTTP server → `InklingProbeMonitor` path for one IID and one OOD monitor, whose scores must equal the
+  scorer's, then a throughput test. It loads its own reader, so run it before starting the server on the same GPU.
+  On a real B300 (2026-10-10) the golden checks of the monitors then deployed passed at both batchings, and the end
+  to end path passed for two OOD follow-up monitors. That run predates the mean bound and the redeployed mean
+  monitors, so the current server has been checked on CPU only.
 
 **Post-hoc scoring, without a server.** Nothing in training reads a held-out probe's score, and runs save every eval
 episode in full (`eval_rollouts.jsonl`). So held-out Inkling probes can be scored after the runs:
 `experiments/eval_inkling_probes_on_runs.py` loads the reader once on a GPU, replays every valid eval episode of
 every run exactly as in training (with the run's own env options, after checking its effort against the probes'),
-and writes `probe_eval_<name>.jsonl` per run and probe: per eval step, AUROC against `behavior_present` and
-`used_verifier`, recall and false-alarm rate at 0.5, class means and counts. `eval/degradation.py` already reads that
-file for post-hoc probes. Per-episode scores go to `probe_scores_inkling.jsonl` in each run folder, so a rerun scores
-only what's missing. Only train-against runs need the live server. Commands:
+and writes `probe_eval_<name>.jsonl` per run and probe (tracked by git): per eval step, AUROC against
+`behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts, and the same on
+the tasks no probe saw (`*_unseen`). `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids;
+the suspiciousness-gap grid reads only `eval_metrics.jsonl`. Per-episode scores go to `probe_scores_inkling.jsonl` in
+each run folder, so a rerun scores only what's missing. Only train-against runs need the live server. Commands:
 [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring).
 
 ## Training *against* a probe — the two mechanisms (which model feeds the probe?)

@@ -19,48 +19,73 @@ reader: the 4-bit Inkling-Small checkpoint (`thinkingmachines/Inkling-Small-NVFP
 - **Post-hoc scoring**, enough for held-out probes: their scores are only measured, so finished runs can be scored
   later from their saved eval episodes, all in one GPU session.
 
-Pin the reader to the revision the probes record (`reader_info.revision` in each `meta.json`,
-`b6a99534467840620d411e4cd4ad5819b2610d9c`): the monitor refuses a server that runs another one.
+**Pin the reader** to the revision the probes record (`reader_info.revision` in each `meta.json`,
+`b6a99534467840620d411e4cd4ad5819b2610d9c`). The server reads the revision of its checkpoint from the metadata that
+`hf download --local-dir` writes next to the weights, and the monitor refuses a server that runs another revision.
+A checkpoint fetched any other way has no such metadata: the server and the monitor then only warn, and nothing but
+the golden check guards against a different checkpoint.
+
+**Commit first.** The launcher pushes the repo to the VM and refuses uncommitted changes, unless `--allow-dirty`
+(which saves the patch in `--out`). Files under `data/runs/`, such as a run folder pushed for scoring, don't count
+as code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
 
 ### Serving
 
-1. **A B300 VM with the reader.** With the Nebius launcher ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)):
+1. **A B300 VM with the reader.** With the Nebius launcher:
 
    ```bash
-   python3 scripts/nebius_job.py up --hours 12 --max-gpu-price 4.5 --preset 1gpu-24vcpu-346gb \
+   python3 scripts/nebius_job.py up --hours 12 --max-gpu-price 4.5 --preset 1gpu-24vcpu-346gb --out runs/{stamp}-{name} \
        --hf thinkingmachines/Inkling-Small-NVFP4@b6a99534467840620d411e4cd4ad5819b2610d9c   # prints the ssh line
    ```
 
-   `up` picks the cheapest region, creates a spot VM, sets up a RAM disk, uv and the repo, downloads the weights to
-   `/mnt/ram/Inkling-Small-NVFP4` and keeps the VM; it shuts itself down after `--hours`. Elsewhere: clone the repo,
-   `uv sync --locked`, and download the checkpoint at that revision to a fast local disk.
+   `up` picks the cheapest region and creates a spot VM. It sets up a RAM disk, uv and the repo (at `~/md` on the VM),
+   downloads the weights to `/mnt/ram/Inkling-Small-NVFP4` with `hf download --revision … --local-dir`, and keeps the
+   VM. The VM shuts itself down after `--hours`, but delete it as soon as you are done:
+   `python3 scripts/nebius_job.py down --name <vm>` (the name is in the output and in `--out`'s `job.json`).
 
-2. **Start the server on the VM**, in the repo, detached (e.g. in `tmux`):
+   On any other box with a B300: clone the repo, `uv sync --locked`, and download the reader the same way, to a fast
+   local disk:
+
+   ```bash
+   uv run hf download thinkingmachines/Inkling-Small-NVFP4 --revision b6a99534467840620d411e4cd4ad5819b2610d9c \
+       --local-dir /mnt/ram/Inkling-Small-NVFP4
+   ```
+
+2. **Optional: check the serving path first** (exits 1 on failure). It loads its own copy of the reader, and one B300
+   can't hold two (~179 GiB each), so run it before starting the server, or stop the server first. It runs every
+   deployed probe's golden check at both batchings, the HTTP server → `InklingProbeMonitor` path for one IID and one
+   OOD monitor (their scores must equal the scorer's), and a throughput test.
+
+   ```bash
+   cd ~/md && uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
+       --out results/check_probe_server.json
+   ```
+
+3. **Start the server on the VM**, in `~/md`, detached (e.g. in `tmux`):
 
    ```bash
    uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 --max-batch-tokens 1 \
        --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup
    ```
 
-   It loads the reader, runs every probe's golden check (and refuses to start if one fails), prints what it serves,
-   and listens on `127.0.0.1:8178`. List every probe any run will ask for: probes on the same view share one forward
-   pass. `--max-batch-tokens 1`, the default, scores one episode per forward pass (the batching rule fired).
+   It loads the reader, runs every probe's golden check, prints what it serves, and listens on `127.0.0.1:8178`.
+   List every probe any run will ask for. `--max-batch-tokens 1`, the default, scores one episode per forward pass
+   (the batching rule fired). The golden check refuses to start if a rendering differs, if a logit moves by more than
+   the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on average (`--golden-mean-tolerance`).
+   That mean bound refuses a correct setup about 1% of the time per probe, by its own calibration: if only the mean
+   check fails, read the reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
+   this bound, so the server in its current form has not yet run on a GPU.
 
-3. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
+4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
 
    ```bash
    ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
    ```
 
-4. **Optional end-to-end check** before the runs (exits 1 on failure): golden checks at both batchings, the HTTP
-   server → `InklingProbeMonitor` path against the scorer, and throughput.
-
-   ```bash
-   uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 --out results/check_probe_server.json
-   ```
-
-**Capacity.** About 3.9k tokens/s one episode at a time on a B300. With the TerminalEnv configs' batch sizes, a
-training step waits about a minute for its scores, and one B300 can serve two or three concurrent train-against runs.
+**Capacity.** About 3.9k tokens/s one episode at a time on a B300. Every live monitor sends its own requests, so each
+costs its own forward pass per episode, even when two probes read the same view. With the TerminalEnv configs' batch
+sizes, a training step waits about a minute per live probe on the with-reasoning view, and one B300 can serve two or
+three train-against runs with one live probe each. Score held-out probes after the runs instead (below).
 
 **Preemption.** A spot VM can be stopped at 60 s notice; ours were, about 1.4 times per VM-hour, mostly in their first
 minutes. Nothing restarts a preempted server yet. Runs don't fail: their monitors retry until the server is back, so
@@ -69,21 +94,24 @@ port. An on-demand VM costs several times more but isn't preempted.
 
 ### Post-hoc scoring of finished runs
 
-`experiments/eval_inkling_probes_on_runs.py` loads the reader once, replays every valid eval episode of each run
-exactly as in training, and writes per run and probe `probe_eval_<name>.jsonl` (per eval step: AUROC against
-`behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts), the file
-`eval/degradation.py` reads for post-hoc probes. Per-episode scores are appended to `probe_scores_inkling.jsonl`, so
-an interrupted session resumes where it stopped.
+`experiments/eval_inkling_probes_on_runs.py` loads the reader once and replays every valid eval episode of each run
+exactly as in training, scoring all the probes in one pass per view. It writes per run and probe
+`probe_eval_<name>.jsonl`, tracked by git: per eval step, AUROC against `behavior_present` and `used_verifier`,
+recall and false-alarm rate at 0.5, class means and counts, and the same on the tasks no probe saw (`*_unseen`, from
+`--task-splits`, by default the deployed probes' `task_splits.json`). `eval/degradation.py` reads these files into
+the AUROC-drop and end-AUROC grids (not the suspiciousness-gap grid, which reads `eval_metrics.jsonl` only).
+Per-episode scores are appended to `probe_scores_inkling.jsonl`, so an interrupted session resumes where it stopped.
 
 ```bash
 # on a 1× B300 with the reader in /mnt/ram and the runs' folders (eval_rollouts.jsonl + run_info.json)
 uv run python experiments/eval_inkling_probes_on_runs.py --model /mnt/ram/Inkling-Small-NVFP4 \
     --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup \
-    --names probe_iid,probe_ood  data/runs/terminal_*
+    --names probe_iid,probe_ood  data/runs/tv_*_s*      # the TerminalEnv runs: tv_<row>_s<seed>
 ```
 
 As one launcher job: `eval_rollouts.jsonl` is gitignored, so push it explicitly, and write the results to a folder
-that is fetched back (`--out-dir results` writes `results/<run name>/`):
+that is fetched back (`--out-dir results` writes `results/<run name>/`). The pushed run folder doesn't count as
+uncommitted code.
 
 ```bash
 python3 scripts/nebius_job.py run --hours 3 --out runs/{stamp}-{name} \
@@ -95,9 +123,9 @@ python3 scripts/nebius_job.py run --hours 3 --out runs/{stamp}-{name} \
 ```
 
 The launcher brings them back to `<--out>/results/<run>/`; copy `probe_eval_*.jsonl` from there into the run's
-folder. **Cost:** a 90-step TerminalEnv run saves about
-7,900 eval episodes. The two with-reasoning probes share one pass over them: about one GPU-hour per run. Adding the
-without-reasoning probes adds about half of that again.
+folder and commit them. **Cost:** a 90-step TerminalEnv run saves about 7,900 eval episodes. The two with-reasoning
+probes share one pass over them here: about one GPU-hour per run. Adding the without-reasoning probes adds about half
+of that again.
 
 ## Legacy: the Qwen3.5-4B runbook (superseded)
 

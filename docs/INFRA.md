@@ -124,14 +124,24 @@ created.
 2. Bootstrap over SSH: a tmpfs RAM disk at `/mnt/ram`, lingering for the user, uv.
 3. Download the `--hf` weights into `/mnt/ram` (public repos, no token), detached.
 4. Push the repo (tracked files plus untracked files that aren't ignored, so `.env`, `.venv` and `.git` never travel)
-   and any `--push` inputs; `uv sync --locked`.
+   and any `--push` inputs; `uv sync --locked`. The repo lands in `~/md` on the VM, with a `CODE_VERSION.json` (next
+   paragraph).
 5. Run the job, detached and polled. It gets `NEBIUS_JOB_DEADLINE` (the VM's scheduled shutdown, epoch seconds).
 6. `--upload` paths go straight from the VM to an HF bucket; `--fetch` paths and all logs come back into `--out`.
 7. Delete the VM and verify that neither it nor its boot disk is left. This runs in a `finally`, so errors,
    preemption and Ctrl-C delete too; only `--keep` (and `up`) opt out.
 
-`job.json` in `--out` records the VM, the flags, timestamps, the exit code, whether the VM was preempted, every
-region's quote, the price every 15 minutes while the VM existed, and an estimated cost. Exit status: 0 on success;
+**Only committed code is pushed.** `run`, `up` and `exec` refuse a working tree with uncommitted changes (tracked
+changes, or untracked files that would travel) before anything is priced or created, and check again at each push.
+`--allow-dirty` pushes them anyway and saves them in that attempt's `--out`: `code.diff`, the patch from the commit
+to what was pushed, and `code_untracked.txt`. Files under `data/runs/` don't count: they are what experiments write,
+not code, so a run folder pushed for post-hoc scoring doesn't block a launch. The VM's copy of the repo has no
+`.git`, so each push writes `CODE_VERSION.json` into it (commit, dirty flag, patch hash), and code on the VM stamps
+its outputs from that file (`src/monitordecorrelation/provenance.py`).
+
+`job.json` in `--out` records the VM, the flags, the code version pushed, timestamps, the exit code, whether the VM
+was preempted, every region's quote, the price every 15 minutes while the VM existed, and an estimated cost. Exit
+status: 0 on success;
 the job's own code if it failed; 2 for an infrastructure failure; 3 if the VM stopped mid-run; 75 if the job stopped
 early and no attempt was left; 130 on Ctrl-C.
 
@@ -148,9 +158,9 @@ Since 2026-10-08 Nebius prices preemptible VMs on a per-region spot market:
 
 **What we saw** (one night of probe-feature extraction, 2026-10-10, summarized by `scripts/spot_events.py` from the
 launcher's `job.json` records): 12 VMs from 17 attempts, about 8 GPU-hours, about $30.
-- **4 preemptions,** about 1.4 per VM-hour. Three came within 2–5 minutes of the VM starting; both 8-GPU VMs created
-  that night were stopped before they finished booting. Every VM that survived its first ~5 minutes ran to its end,
-  except one stopped after 32 minutes.
+- **4 preemptions,** about 1.4 per VM-hour. Three came within 2–5 minutes of the VM starting. Three 8-GPU VMs were
+  created that night: two were stopped before they finished booting, and the third was stopped after 32 minutes.
+  Every other VM that survived its first ~5 minutes ran to its end.
 - **10 creations failed for lack of capacity,** each after a ~6-minute schedule timeout, at no cost, even when the
   capacity advice said HIGH. Capacity advice is not a reservation.
 - **2 creations hit the public-IPv4 quota** (3 per region for our tenant), so at most 3 VMs fit in one region.
@@ -206,12 +216,12 @@ The Inkling probe data lives in two **private** Hugging Face storage buckets. Ac
 | `probemaxxing/inkling-probes` | `datasets/` (the probe datasets' items), `inputs/` (the raw pre-RL rollouts), `features/nvfp4/` (4-bit features, plus whole hidden states of a few episodes under `*/full/`), `diagnostics/` (reader diagnostics), `probes/` (fitted probes, comparisons, deployed copies), `runs/` and `sessions/` (GPU job reports and status) |
 | `probemaximizer/inkling-probes-bulk` | `features/bf16/` (full-precision features) |
 
-Each free organization gets 100 GB of private storage, hence two buckets.
+There is one bucket per reader's features.
 
-**Why HF buckets.** They are free under that quota and reachable from every region, so a relaunched job can move to
-the cheapest region and still find its work; the data ends up there anyway. From a 1× B300 VM uploads ran at ~170 MB/s
-with one uploader and ~530 MB/s with four, several times what extraction produces. Nebius disks and shared
-filesystems are tied to one region; Nebius Object Storage would need access keys on the VM.
+**Why HF buckets.** They are free within the organizations' storage quota and reachable from every region, so a
+relaunched job can move to the cheapest region and still find its work; the data ends up there anyway. From a 1× B300
+VM uploads ran at ~170 MB/s with one uploader and ~530 MB/s with four, several times what extraction produces. Nebius
+disks and shared filesystems are tied to one region; Nebius Object Storage would need access keys on the VM.
 
 **The token.** With `--upload`, the launcher sends an HF token with write access over SSH into an owner-only file on
 the VM before the job starts, so the job can save its own progress. It is deleted when the upload step ends, and with
