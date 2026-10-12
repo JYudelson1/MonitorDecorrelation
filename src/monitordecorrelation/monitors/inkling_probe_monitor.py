@@ -59,6 +59,9 @@ class InklingProbeMonitor:
             if want.get(k) is not None and have.get(k) is not None and want[k] != have[k]:
                 raise FatalProbeError(f"{name}: the probe was fitted on reader {k}={want[k]!r}, the server runs "
                                       f"{have[k]!r}")
+            if want.get(k) is not None and have.get(k) is None:  # e.g. a checkpoint not fetched with hf download
+                self.log(f"[{name}] WARNING: the server can't tell its reader's {k}; the probe expects "
+                         f"{want[k]!r}. Only the server's golden check guards against a different checkpoint.")
 
     # --------------------------------------------------------------------------------------------- calls
 

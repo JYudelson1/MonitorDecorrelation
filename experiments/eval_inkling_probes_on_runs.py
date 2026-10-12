@@ -9,7 +9,7 @@ for post-hoc probes (eval/degradation.py). Train-against runs still need the liv
 
     uv run python experiments/eval_inkling_probes_on_runs.py --model /mnt/ram/Inkling-Small-NVFP4 \
         --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup \
-        --names probe_iid,probe_ood  data/runs/terminal_*      # run dirs: eval_rollouts.jsonl + run_info.json
+        --names probe_iid,probe_ood  data/runs/tv_*      # run dirs: eval_rollouts.jsonl + run_info.json
 
 **Episodes:**
 - Every valid one (no ``invalid_reason``) is replayed exactly as in training: ``episode_item`` with the run's env

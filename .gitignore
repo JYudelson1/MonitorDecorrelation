@@ -32,6 +32,7 @@ data/runs/archived/
 # rollouts.jsonl / eval_rollouts.jsonl stay excluded above, and archived/ is fully excluded).
 !data/runs/**/eval_metrics.jsonl
 !data/runs/**/eval_rollouts_slim.jsonl
+!data/runs/**/probe_eval_*.jsonl
 !data/runs/**/metrics.jsonl
 # the deployed Inkling probes' golden sets: the probe server checks them at startup (experiments/deploy_probes.py)
 !data/probes/**/golden.jsonl

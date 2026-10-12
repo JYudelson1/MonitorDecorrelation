@@ -159,3 +159,23 @@ def test_the_default_root_is_this_checkout():
     assert provenance.never_recorded(".env") and provenance.never_recorded("a/.envrc")
     assert provenance.never_recorded("x/__pycache__/y.py") and provenance.never_recorded("m.pyc")
     assert not provenance.never_recorded(".gitignore") and not provenance.never_recorded("src/env.py")
+
+
+def test_run_outputs_are_not_code(tmp_path):
+    """A fresh run folder under data/runs/ (untracked, or a tracked file changed) leaves the stamp clean."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)  # noqa: E731
+    git("init", "-q")
+    (repo / "data" / "runs" / "old").mkdir(parents=True)
+    (repo / "data" / "runs" / "old" / "eval_metrics.jsonl").write_text("{}\n")
+    (repo / "code.py").write_text("x = 1\n")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+    (repo / "data" / "runs" / "tv_control_s0").mkdir()
+    (repo / "data" / "runs" / "tv_control_s0" / "run_info.json").write_text("{}")
+    (repo / "data" / "runs" / "old" / "eval_metrics.jsonl").write_text("{\"step\": 1}\n")
+    assert code_version(repo)["dirty"] is False
+    (repo / "code.py").write_text("x = 2\n")
+    assert code_version(repo)["dirty"] is True
+    assert provenance.not_code("data/runs/a/b.json") and not provenance.not_code("data/probes/x/meta.json")

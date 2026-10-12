@@ -49,7 +49,7 @@ def test_dry_run_prints_every_stage_in_order_and_creates_nothing(tmp_path):
         "nvfp4 --keep mean_action,mean_reasoning,counts,answer_logp,router_logits,router_topk,router_margin "
         "--workers 4",
         f"experiments/fit_probes.py --reader bf16 --features {s}/features/mean_router/bf16 --out {run}/probes/bf16 "
-        "--readouts mean,router,router_all --skip-baselines --jobs 6 --overwrite",
+        "--readouts mean,router,router_all --jobs 6 --overwrite",  # baselines by default, as pre-registered
         f"experiments/verify_fits.py --probes {run}/probes --out {run}/verify_fits "
         f"--check nvfp4/followup={s}/features/followup/nvfp4 --check bf16/followup={s}/features/followup/bf16 "
         f"--check nvfp4/mean,router,router_all={s}/features/mean_router/nvfp4 "

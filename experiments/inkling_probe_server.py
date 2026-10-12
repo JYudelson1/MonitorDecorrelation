@@ -50,7 +50,11 @@ def main() -> int:
     model = (load_inkling_nvfp4(args.model, device=args.device) if is_nvfp4_checkpoint(args.model)
              else load_inkling_text(args.model)).eval()
     print(f"[probe-server] loaded {args.model} in {time.time() - t:.0f}s", flush=True)
-    scorer = ProbeScorer(model, dirs, max_batch_tokens=args.max_batch_tokens, reader_info=reader_info(model, args.model))
+    info = reader_info(model, args.model)
+    if not info.get("revision"):  # reader_info reads it from the metadata `hf download --local-dir` leaves
+        print(f"[probe-server] WARNING: can't tell which revision {args.model} is; monitors can't check it. Download "
+              "it with `hf download REPO --revision REV --local-dir DIR`.", flush=True)
+    scorer = ProbeScorer(model, dirs, max_batch_tokens=args.max_batch_tokens, reader_info=info)
     report = {}
     for d in dirs:  # each probe at its own max tolerance; the mean tolerance is the server's
         tol = args.golden_tolerance

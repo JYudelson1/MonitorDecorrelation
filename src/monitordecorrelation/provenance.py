@@ -16,7 +16,9 @@ from it, and a hash of the difference.
 
 **Never recorded:** paths that never travel to a VM and may hold secrets (any part ``.git``, ``.venv``,
 ``__pycache__`` or ``.env*``, and ``*.pyc``: scripts/nebius_job.py's ``shippable``) are left out of the dirty check and
-the patch, so a stray ``.env.local`` neither makes the tree dirty nor lands in a saved patch.
+the patch, so a stray ``.env.local`` neither makes the tree dirty nor lands in a saved patch. Nor do the runs' outputs
+under data/runs/: they are what experiments write, not code, so a fresh run folder (e.g. pushed to a VM for post-hoc
+scoring) doesn't block a launch, and the patch rebuilds the code without them.
 
 ``code_version`` is cheap (a few local git calls, no network) and never raises. Stdlib only: scripts/nebius_job.py
 loads this file by its path, under a plain python3.
@@ -58,6 +60,15 @@ def never_recorded(path: str) -> bool:
     """Paths left out of the stamp: what scripts/nebius_job.py never pushes (secrets, environments, VCS, bytecode)."""
     parts = path.replace(os.sep, "/").split("/")
     return any(p in (".git", ".venv", "__pycache__") or p.startswith(".env") for p in parts) or path.endswith(".pyc")
+
+
+RUN_OUTPUTS = "data/runs/"  # what experiments write, not code: a fresh run's folder must not make the code "dirty"
+
+
+def not_code(path: str) -> bool:
+    """Paths the stamp ignores: ``never_recorded`` ones, and the runs' outputs under data/runs/ (e.g. pushed to a VM
+    for post-hoc probe scoring)."""
+    return never_recorded(path) or path.replace(os.sep, "/").startswith(RUN_OUTPUTS)
 
 
 class GitError(RuntimeError):
@@ -104,9 +115,9 @@ def _changes(root: Path) -> tuple[str, list[str], bool, list[str]]:
         raise GitError(f"{root} is not the top of the git work tree {top}")
     commit = _git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").decode().strip()
     changed = _paths(_git(root, "diff", "HEAD", "--name-only", "-z", "--no-renames", "--no-ext-diff"))
-    tracked = [p for p in changed if not never_recorded(p)]
+    tracked = [p for p in changed if not not_code(p)]
     others = _paths(_git(root, "ls-files", "--others", "--exclude-standard", "-z"))
-    untracked = sorted((p for p in others if not never_recorded(p) and os.path.isfile(root / p)), key=os.fsencode)
+    untracked = sorted((p for p in others if not not_code(p) and os.path.isfile(root / p)), key=os.fsencode)
     return commit, tracked, len(tracked) < len(changed), untracked
 
 

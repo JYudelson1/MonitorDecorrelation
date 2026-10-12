@@ -54,7 +54,7 @@
 #   --store READER=URL    a reader's feature store (repeatable) [the 2026-10-10 buckets]
 #   --diagnostics-store URL  [hf://buckets/probemaxxing/inkling-probes/diagnostics]
 #   --set NAME=READOUTS   a readout set (repeatable)
-#   --fit-args ARGS       [--skip-baselines --jobs 6]
+#   --fit-args ARGS       [--jobs 6] (baselines included, as pre-registered; add --skip-baselines to save time)
 #   --refit-readouts LIST [followup,mean]      --refits N [50]
 #   --curves-readers LIST [the readers]
 #   --deploy-reader R [bf16]   --serve-reader R [nvfp4]   --deploy-readouts LIST [followup,mean]
@@ -72,7 +72,7 @@ cd "$HERE/.."
 STAGES_ALL=(fetch fit verify compare analyses deploy report)
 DRY=0 RUN="" SCRATCH=../scratch FEATURES="" DIAGNOSTICS="" READERS=nvfp4,bf16 STAGES=$(IFS=,; echo "${STAGES_ALL[*]}")
 DIAG_STORE=hf://buckets/probemaxxing/inkling-probes/diagnostics
-FIT_ARGS="--skip-baselines --jobs 6" REFIT_READOUTS=followup,mean REFITS=50 CURVES_READERS=""
+FIT_ARGS="--jobs 6" REFIT_READOUTS=followup,mean REFITS=50 CURVES_READERS=""
 DEPLOY_READER=bf16 SERVE_READER=nvfp4 DEPLOY_READOUTS=followup,mean DEPLOYED=data/probes/Inkling-Small
 RESULTS=data/probe_results DOCS=docs/INKLING_PROBES.md PYTHON=""
 declare -A STORE=([nvfp4]=hf://buckets/probemaxxing/inkling-probes/features/nvfp4
