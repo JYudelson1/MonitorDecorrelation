@@ -39,6 +39,9 @@ data/runs/archived/
 # Rollout-index cache of visualize_transcripts.py
 .cache/
 
+# The code version scripts/nebius_job.py writes into the copy of the repo it pushes to a VM (provenance.py)
+/CODE_VERSION.json
+
 # Old docs
 docs/Original Project Proposal.md
 docs/Joey Research Ideas.md
