@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Download a reader's features from their store to hub, optionally keeping only some tensors of each shard.
+"""Download a reader's features from their store to a local folder, optionally keeping only some tensors of each shard.
 
     uv run python scripts/fetch_features.py hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16 \
-        ../scratch/features/bf16 --keep followup,counts,answer_logp
+        FEATURES/bf16 --keep followup,counts,answer_logp
 
-**Why slim:** hub's disk has room for one reader's full features, not two. Comparing the readers needs only the
+**Why slim:** a disk with room for one reader's full features may not hold two. Comparing the readers needs only the
 follow-up readout (``compare_readers.py``), which is about a third of each shard.
 
 **How:**

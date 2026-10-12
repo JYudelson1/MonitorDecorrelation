@@ -1,6 +1,7 @@
-"""Fitting and evaluating Inkling probes on extracted features, as pre-registered in PROBE_PLAN.md section 5b.
+"""Fitting and evaluating Inkling probes on extracted features, as pre-registered in
+docs/inkling_probes_preregistration.md.
 
-This runs on hub's CPUs; ``experiments/fit_probes.py`` is the command line.
+This runs on CPUs; ``experiments/fit_probes.py`` is the command line.
 
 - **Loading:** a reader's features for a dataset view come from shards (whitebox/features.py), joined to the dataset's
   items by id for labels, tasks and diagnostics.
@@ -317,7 +318,8 @@ def write_golden(probe_dir: str, probe: SelectedProbe, vf, items: dict, readout:
     """``golden.jsonl`` for the probe server's startup check (whitebox/probe_server.py).
 
     For each of ``ids`` it stores the episode's replay fields, the sha256 of its rendering, and its logit on the stored
-    features. The rendering is redone here with the same replay, so hub and server must agree on it too."""
+    features. The rendering is redone here with the same replay, so the fitting machine and the server must agree on
+    it too."""
     from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, InklingReplay
     from monitordecorrelation.whitebox.probe_datasets import item_messages
     from monitordecorrelation.whitebox.probe_server import conversation_sha
@@ -349,17 +351,18 @@ def write_golden(probe_dir: str, probe: SelectedProbe, vf, items: dict, readout:
 class LayerSource:
     """One reader's features for one dataset view and readout, read from the shard files one layer at a time.
 
-    Hub's pod has only ~6 GB of memory to spare, and one view's every tensor is ~23 GB. So nothing is held in full:
-    ``layer(l, rows)`` reads layer ``l`` of every shard (``safe_open`` slices) and returns float64 [rows, d].
+    One view's every tensor is ~23 GB, and fitting runs on machines with a few GB of memory to spare. So nothing is
+    held in full: ``layer(l, rows)`` reads layer ``l`` of every shard (``safe_open`` slices) and returns float64
+    [rows, d].
 
     It is picklable (paths only), so each joblib worker loads its own layer. The readouts follow ``feature_matrix``:
     ``mean`` is the count-weighted thinking + text mean in the with-reasoning view, the text mean otherwise, and
     rows with a zero count are not kept.
 
-    Router readouts (exploratory, PROBE_PLAN.md 5b) read the router logits at "Yes": ``router`` has one "layer" per MoE
-    layer (256 experts each), ``router_all`` a single one with every MoE layer concatenated. ``first_layer`` is the
-    first layer worth fitting: 1 for the residual stream (layer 0 is the same embedding for every "Yes"), 0 for
-    router readouts."""
+    Router readouts (exploratory in docs/inkling_probes_preregistration.md) read the router logits at "Yes":
+    ``router`` has one "layer" per MoE layer (256 experts each), ``router_all`` a single one with every MoE layer
+    concatenated. ``first_layer`` is the first layer worth fitting: 1 for the residual stream (layer 0 is the same
+    embedding for every "Yes"), 0 for router readouts."""
 
     def __init__(self, features_dir: str, view: str, readout: str) -> None:
         import torch

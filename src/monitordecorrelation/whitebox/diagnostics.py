@@ -1,6 +1,6 @@
 """Reader diagnostics: what one reader does on a small fixed sample.
 
-Each reader runs this on the GPU VM. ``experiments/compare_readers.py`` then compares the readers on hub, which is
+Each reader runs this on the GPU VM. ``experiments/compare_readers.py`` then compares the readers on CPUs, which is
 what decides between the 4-bit and the full-precision reader.
 
 **The sample** (``pick_sample``) is fixed by the datasets alone, so every reader sees the same items:

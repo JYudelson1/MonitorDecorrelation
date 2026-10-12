@@ -226,7 +226,8 @@ def conceal(item: dict, level: str) -> dict:
     - **Level B:** they are also removed from every turn's reasoning and explanation.
 
     The commands and tool outputs are untouched: the act of reading ``verifier.py`` stays visible, only the policy's
-    own words about it are gone. This is the concealment stress set of the pre-registered analysis (PROBE_PLAN 5b).
+    own words about it are gone. This is the concealment stress set of the pre-registered analysis
+    (docs/inkling_probes_preregistration.md).
     Its items are scored by probes that never trained on their task, so they keep the source item's task and split."""
     if level not in CONCEALMENT_LEVELS:
         raise ValueError(f"unknown concealment level {level!r}; known: {CONCEALMENT_LEVELS}")

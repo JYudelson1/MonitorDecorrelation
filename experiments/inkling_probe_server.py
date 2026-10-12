@@ -31,8 +31,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8178)
     ap.add_argument("--max-batch-tokens", type=int, default=1,
                     help="padded tokens per forward. The default 1 scores one episode per forward: the pre-registered "
-                         "batching rule's fix, since the rule fired on 2026-10-10 (md_files/PROBE_RESULTS.md). 65536 "
-                         "batches like the extraction: ~2x faster, but a score then depends on its batch")
+                         "batching rule's fix, since the rule fired on 2026-10-10 (docs/INKLING_PROBES.md, section 7). "
+                         "65536 batches like the extraction: ~2x faster, but a score then depends on its batch")
     ap.add_argument("--golden-tolerance", type=float, default=None,
                     help="max |Δlogit| on the golden episodes (default: each probe's own, else 1.0)")
     ap.add_argument("--golden-mean-tolerance", type=float, default=GOLDEN_MEAN_TOLERANCE,

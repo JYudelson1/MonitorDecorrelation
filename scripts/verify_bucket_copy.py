@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Check that a local folder is in a Hugging Face bucket prefix byte for byte, before the local copy is deleted.
 
-    uv run python scripts/verify_bucket_copy.py ../scratch/features/nvfp4 \
+    uv run python scripts/verify_bucket_copy.py FEATURES/nvfp4 \
         hf://buckets/probemaxxing/inkling-probes/features/nvfp4
 
 **How:** ``HfApi.list_bucket_tree`` lists every file under the prefix with its size and Xet content hash;
 ``hf_xet.hash_files`` computes the same hash for the local files (``--batch`` at a time) without uploading them.
-Nothing is downloaded: 53 GB of 4-bit features took 32 s on hub.
+Nothing is downloaded: 53 GB of 4-bit features took 32 s on the team's CPU machine.
 
 **Exit code:**
 - 0 if every local file is in the bucket with the same size and hash;
