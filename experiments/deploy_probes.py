@@ -92,9 +92,15 @@ def recalibrate(probe: SelectedProbe, items: dict, features: str, view: str, rea
     return thresholds(probe.logit(src.layer(probe.layer, rows))[neg])
 
 
+def same_reader(a: dict | None, b: dict | None) -> bool:
+    """Whether two ``reader_info`` records name the same reader: the same loader and checkpoint revision. The
+    checkpoint's path is where it sat on the machine that ran it, and data/probe_results keeps only its name."""
+    return bool(a) and bool(b) and all(a.get(k) == b.get(k) for k in ("loader", "revision"))
+
+
 def serve_on(probe: SelectedProbe, serving: dict, items: dict, features: str, view: str, readout: str) -> None:
     """Re-point ``probe`` at the serving reader ``serving`` (its features' index.json ``reader``)."""
-    if probe.meta.get("reader_info") == serving["reader_info"]:
+    if same_reader(probe.meta.get("reader_info"), serving["reader_info"]):
         return
     probe.threshold_1, probe.threshold_5 = recalibrate(probe, items, features, view, readout)
     probe.meta = {**probe.meta, "trained_reader": probe.meta.get("reader"),

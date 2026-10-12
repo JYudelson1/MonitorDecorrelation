@@ -222,6 +222,10 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
     # serving on another reader: thresholds from that reader's honest dev episodes, its reader_info in the meta
     items = {i: {**it, "split": "train"} for i, it in world["items"].items()}
     p = dp.SelectedProbe.load(world["probe_dir"])
+    before = (p.threshold_1, p.threshold_5)
+    same = {**world["probe"].meta["reader_info"], "path": "Inkling-Small-NVFP4"}  # the same reader, elsewhere
+    dp.serve_on(p, {"reader": "same", "reader_info": same}, items, str(root), VIEW, "followup")
+    assert (p.threshold_1, p.threshold_5) == before and "trained_reader" not in p.meta
     dp.serve_on(p, {"reader": "other", "reader_info": {"loader": "x"}}, items, str(root), VIEW, "followup")
     src = dp.LayerSource(str(root / "terminal_prerl"), VIEW, "followup")
     neg = [r for r, i in enumerate(src.ids) if not (items[i].get("diagnostics") or {}).get("used_verifier")]
