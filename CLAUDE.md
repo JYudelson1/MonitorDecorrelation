@@ -22,6 +22,9 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
 | RL backends / GRPO / logging | [`docs/INFRA.md`](docs/INFRA.md) |
 | What's actually built/tested | [`STATUS.md`](STATUS.md) |
 | How to run the scripts | [`USAGE.md`](USAGE.md) |
+| Inkling-Small probes: design, results, caveats, pipeline | [`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md) |
+| The deployed Inkling probe monitors (which to use, thresholds, files) | [`data/probes/Inkling-Small/README.md`](data/probes/Inkling-Small/README.md) |
+| GPU VMs (Nebius) and the Hugging Face buckets | [`docs/INFRA.md`](docs/INFRA.md) (GPU VMs, Storage), [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md) |
 | Original source docs | `docs/Original Project Proposal.md`, `docs/Joey Research Ideas.md` |
 
 ## Conventions
@@ -111,3 +114,13 @@ Multi-turn plumbing: `rl/episodes.py` (episode driver, prefix-chained tokens →
 acts). Baseline: `experiments/eval_terminal_baseline.py`; RL: `run_experiment.py --config
 experiments/configs/terminal_verifier_*.json`.
 See docs/ENVIRONMENTS.md #5.
+
+**Inkling-Small probe monitors for the terminal runs** — 8 logistic-regression probes in
+`data/probes/Inkling-Small/`: {IID `terminal_prerl`, OOD `diverse_deception`} × {with, without reasoning} ×
+{`followup`, `mean`}, trained on the full-precision reader and served on the 4-bit one
+(`experiments/inkling_probe_server.py`). `probe_iid` = `terminal_prerl/with_reasoning/followup`, `probe_ood` =
+`diverse_deception/with_reasoning/followup`; the rest are for comparison (see the README there). Held-out probes can be
+scored after a run (`experiments/eval_inkling_probes_on_runs.py`); a run that trains against a probe needs the live
+server. The pre-registration, `docs/inkling_probes_preregistration.md`, is pinned by its sha256
+(`tests/test_preregistration.py`, and every probe's `meta.json`): never edit it. Results and caveats:
+`docs/INKLING_PROBES.md`.
