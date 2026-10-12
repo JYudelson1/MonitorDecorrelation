@@ -60,6 +60,12 @@
  "name": "probe_ood_without_reasoning_followup",
  "effort": 0.5,
  "golden_tolerance": 3.22,
- "fitted_dir": "../scratch/probes/bf16/diverse_deception/without_reasoning/followup",
- "deployed_utc": "2026-10-10T08:14:18Z"
+ "fitted_dir": "data/probe_results/fitted/bf16/diverse_deception/without_reasoning/followup",
+ "deployed_utc": "2026-10-12T05:58:31Z",
+ "deployed_code": {
+  "commit": "f3728245f581cfeecdca13a6946d17a0b7da8761",
+  "dirty": false,
+  "diff_sha256": null,
+  "source": "git"
+ }
 }
