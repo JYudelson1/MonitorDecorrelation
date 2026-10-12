@@ -161,6 +161,31 @@ def test_router_probes_find_the_planted_moe_layer(tmp_path):
     assert ood["selection"]["layer"] == ROUTER_SIGNAL_LAYER and ood["transfer"]["with_reasoning"]["auroc_all"] > 0.8
 
 
+def test_fitting_refuses_items_the_features_were_not_made_from(tmp_path):
+    """The features' index.json records the items_sha256 of the items they were extracted from, and a dataset's
+    manifest that of its items.jsonl. Either differing from items.jsonl: refused, before any fitting."""
+    import hashlib
+
+    from monitordecorrelation.whitebox.probe_fit import load_items
+
+    data, feats = make_world(tmp_path)
+    ood = data / "diverse_deception"
+    good = hashlib.sha256((ood / "items.jsonl").read_bytes()).hexdigest()
+    (ood / "manifest.json").write_text(json.dumps({"name": "diverse_deception", "items_sha256": good}))
+    assert len(load_items(str(ood), {"features/index.json": good})) == 240
+    (ood / "manifest.json").write_text(json.dumps({"name": "diverse_deception", "items_sha256": "f" * 64}))
+    with pytest.raises(SystemExit, match=f"manifest.json records {'f' * 64}"):
+        load_items(str(ood))
+    (feats / "terminal_prerl" / "index.json").write_text(json.dumps(
+        {"dataset": {"name": "terminal_prerl", "items_sha256": "0" * 64}}))
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(tmp_path / "probes"),
+                         "--readouts", "followup", "--probes", "iid"],
+                        capture_output=True, text=True, cwd=REPO, timeout=600)
+    assert cp.returncode == 1 and "not the file its records describe" in cp.stderr, cp.stderr[-3000:]
+    assert f"index.json records {'0' * 64}" in cp.stderr and not (tmp_path / "probes").exists()
+
+
 def test_selection_prefers_smaller_c_within_one_se():
     rng = np.random.default_rng(1)
     y = np.array([0, 1] * 50)

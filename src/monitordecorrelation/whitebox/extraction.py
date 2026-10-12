@@ -11,6 +11,8 @@ loads a reader once and runs several datasets and parts with it.
   the last one stopped.
   - ``index.json`` fixes the settings that decide what each shard holds: dataset, reader, views, shard size and so
     on. A run with other settings refuses to start rather than mix shards.
+  - The dataset is pinned by its manifest's ``items_sha256``; ``items.jsonl`` must match it
+    (probe_datasets.read_items).
   - Never change the shard size between runs.
   - The code version (``code``: provenance.code_version) is recorded, not checked: a run may resume another
     commit's shards. ``index.json`` has the code of the run that wrote it last; each run record has its own, with
@@ -156,14 +158,16 @@ def prepare(job: Job) -> Prepared:
     settings mismatch fails in seconds, not after a 5-minute load."""
     from monitordecorrelation.whitebox.features import FEATURE_FORMAT
     from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, PROBE_EFFORT, VIEWS
+    from monitordecorrelation.whitebox.probe_datasets import read_items
     from monitordecorrelation.whitebox.store import open_store
 
     if not 0 <= job.part < job.parts:
         raise SystemExit(f"part {job.part} of {job.parts}: want 0 <= part < parts")
     manifest = json.load(open(os.path.join(job.dataset, "manifest.json")))
     splits = set(job.splits.split(","))
-    with open(os.path.join(job.dataset, "items.jsonl")) as fh:
-        items = [it for it in map(json.loads, fh) if it["split"] in splits]
+    # refused unless items.jsonl is the file the manifest describes: the manifest's items_sha256 goes into index.json,
+    # which resumed runs and fit_probes.py hold the items to
+    items = [it for it in read_items(job.dataset) if it["split"] in splits]
     items = items[: job.limit] if job.limit else items
     views = list(job.views) if job.views else (list(VIEWS) if manifest["kind"] == "terminal" else ["without_reasoning"])
     effort = float(PROBE_EFFORT if manifest.get("effort") is None else manifest["effort"])

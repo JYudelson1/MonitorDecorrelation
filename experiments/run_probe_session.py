@@ -109,7 +109,7 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
     from monitordecorrelation.whitebox import diagnostics
     from monitordecorrelation.whitebox.features import special_ids
     from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, PROBE_EFFORT, InklingReplay
-    from monitordecorrelation.whitebox.probe_datasets import item_messages
+    from monitordecorrelation.whitebox.probe_datasets import item_messages, read_items
     from monitordecorrelation.whitebox.store import open_store
 
     cfg = plan["diagnostics"]
@@ -123,8 +123,7 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
         for ds in candidates:
             path = os.path.join(REPO, ds) if not os.path.isabs(ds) else ds
             if json.load(open(os.path.join(path, "manifest.json")))["kind"] == kind:
-                with open(os.path.join(path, "items.jsonl")) as fh:
-                    by_kind[kind] = [json.loads(line) for line in fh]
+                by_kind[kind] = read_items(path)  # refused unless it is the file its manifest describes
                 break
     sample = diagnostics.pick_sample(by_kind.get("terminal", []), by_kind.get("contrastive", []),
                                      cfg.get("n_iid", 64), cfg.get("n_ood", 100))

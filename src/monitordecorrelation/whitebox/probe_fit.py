@@ -80,9 +80,12 @@ def within_group_auroc(scores, labels, groups) -> float:
 # ------------------------------------------------------------------------------------------------ loading
 
 
-def load_items(dataset_dir: str) -> dict[str, dict]:
-    with open(os.path.join(dataset_dir, "items.jsonl")) as fh:
-        return {it["id"]: it for it in map(json.loads, fh)}
+def load_items(dataset_dir: str, recorded: dict[str, str | None] | None = None) -> dict[str, dict]:
+    """The dataset's items by id, refused (SystemExit) unless ``items.jsonl`` matches its manifest's ``items_sha256``
+    and every hash in ``recorded`` (where -> sha256, e.g. the features' index.json): probe_datasets.read_items."""
+    from monitordecorrelation.whitebox.probe_datasets import read_items
+
+    return {it["id"]: it for it in read_items(dataset_dir, recorded)}
 
 
 @dataclass
