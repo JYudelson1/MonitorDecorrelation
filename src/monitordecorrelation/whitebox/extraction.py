@@ -22,7 +22,8 @@ loads a reader once and runs several datasets and parts with it.
   - It starts a shard only if the shard and the upload backlog fit before ``deadline`` (epoch seconds; the
     launcher's ``NEBIUS_JOB_DEADLINE``).
   - After SIGTERM (Nebius's 60 s notice before stopping a spot VM) it starts nothing new.
-  - Either way the run reports ``stopped_early``; the caller exits 75 (``EXIT_UNFINISHED``).
+  - Either way the run reports ``stopped_early``; the caller exits 75 (``EXIT_UNFINISHED``), also when uploads were
+    still running or failed then (``stop_verdict``): the shards they carried are extracted again on resume.
 """
 
 from __future__ import annotations
@@ -305,7 +306,7 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
 
     run.update(seconds=round(time.time() - t0, 1), finished_utc=now(), stopped_early=stopped)
     write_json(run_path, run)
-    unsaved = []
+    unsaved, out_of_time = [], False
     if uploader:
         uploader.submit("run record", [(run_path, run_rel)])
         timeout = None if deadline == float("inf") else max(5.0, deadline - time.time() - 15)
@@ -313,6 +314,7 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
             timeout = max(1.0, min(timeout or float("inf"), stop.at + 55 - time.time()))
         if not uploader.close(timeout):
             unsaved.append("uploads still running when time ran out")
+            out_of_time = True
         unsaved += [f"{name} failed" for name in uploader.failed]
         if unsaved:
             log(f"NOT all saved to {p.store.url}: {'; '.join(unsaved)}. The files are still in {job.out}.")
@@ -321,7 +323,23 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
     return {"dataset": os.path.basename(job.dataset), "part": job.part, "parts": job.parts, "n_items": len(p.items),
             "views": p.views, "shards": index["shards"], "shards_extracted": run["shards_extracted"],
             "tokens_this_run": run["tokens"], "seconds_this_run": run["seconds"],
-            "complete": stopped is None and not unsaved and complete(p), "stopped_early": stopped, "unsaved": unsaved}
+            "complete": stopped is None and not unsaved and complete(p), "stopped_early": stopped, "unsaved": unsaved,
+            "out_of_time": out_of_time, "store_broken": uploader.broken if uploader else None}
+
+
+def stop_verdict(summary: dict, sigterm: bool) -> str | None:
+    """How an ``extract`` run ended, for the caller's exit code:
+    - ``"failed"``: the store refuses uploads (quota, permission), so a relaunch could save nothing either; or uploads
+      failed although nothing stopped the run;
+    - ``"stopped"``: the deadline or SIGTERM stopped it (``sigterm``: the StopFlag was set), even with uploads still in
+      flight or failed then. Resumable: a shard whose marker and data are not both in the store is not ``done``, so a
+      resumed run extracts it again;
+    - None: it finished and everything is saved."""
+    if summary.get("store_broken"):
+        return "failed"
+    if summary["stopped_early"] or (summary["unsaved"] and (sigterm or summary.get("out_of_time"))):
+        return "stopped"
+    return "failed" if summary["unsaved"] else None
 
 
 def answer_ids(replay) -> tuple[int, int] | None:

@@ -190,6 +190,7 @@ def test_sigterm_starts_nothing_new_and_keeps_what_is_saved(tmp_path):
     assert proc.returncode == 75, err[-3000:]
     result = json.loads(out.strip().splitlines()[-1])
     assert "SIGTERM" in result["stopped_early"] and result["shards_extracted"] < 6
+    assert result["store_broken"] is None and result["out_of_time"] in (True, False)
     names = {str(p.relative_to(store)) for p in store.rglob("*.jsonl")}
     assert {n[:-6] for n in names} == stored_shards(store)  # every marker has its data
     assert result["complete"] is False and "SIGTERM" in run_records(store)[0]["stopped_early"]
