@@ -7,6 +7,10 @@ Checks:
 - A wrong effort, or a probe the server doesn't serve, fails at construction.
 - A client that starts before the server waits for it.
 - Identical concurrent requests share one forward pass.
+- Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
+  error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
+  dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
+- The GPU check script checks one IID and one OOD monitor through HTTP.
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw.
 """
 
@@ -16,22 +20,27 @@ import importlib.util
 import json
 import math
 import os
+import socket
+import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 import pytest
+import torch
 from inkling_tiny import write_tiny_checkpoints
 from test_extract_probe_features import RUN_ENV, TURNS
 
 from monitordecorrelation.monitors.inkling_probe_monitor import FatalProbeError, InklingProbeMonitor
 from monitordecorrelation.types import Prompt, Rollout
 from monitordecorrelation.whitebox.extraction import Job, extract, prepare, reader_info
-from monitordecorrelation.whitebox.probe_datasets import counts, terminal_items, write_dataset
+from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, terminal_items, write_dataset
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, GoldenCheckError, ProbeScorer, Server, probe_sha)
+    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, probe_sha)
 
 VIEW = "with_reasoning"
 
@@ -193,6 +202,252 @@ def test_a_client_waits_for_a_late_server_and_requests_are_shared(world):
     srv.stop()
     assert len(out) == 3 and len({o[0].score for o in out}) == 1
     assert calls == [1]  # three identical requests, one forward pass
+
+
+# --------------------------------------------------------------------------------- failures, retries, the job table
+
+
+class FakeScorer:
+    """Stands in for ``ProbeScorer`` behind a ``Server``: serves one probe and scores every episode 0.75, but first
+    raises the exceptions in ``fail``, one per call. ``keys`` records each call's episode keys; with ``gate`` set, a
+    call waits for it."""
+
+    def __init__(self, sha: str, fail=()):
+        self.probes, self.fail, self.keys, self.gate = {sha: None}, list(fail), [], None
+
+    def meta(self) -> dict:
+        return {"protocol": PROTOCOL, "reader": {}, "probes": {s: {} for s in self.probes}}
+
+    def score(self, episodes, shas):
+        self.keys.append([ep.get("key") for ep in episodes])
+        if self.gate is not None:
+            self.gate.wait(30)
+        if self.fail:
+            raise self.fail.pop(0)
+        return [{"key": ep.get("key"), "n_tokens": {VIEW: 3},
+                 "scores": {s: {"logit": 1.0, "score": 0.75} for s in shas}} for ep in episodes]
+
+
+class Clock:
+    """The server's clock in a test: it moves only when the test moves it."""
+
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def time(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def toy_probe(tmp_path) -> str:
+    """A probe directory the monitor can load; its scores come from a fake scorer, so no model is needed."""
+    d = tmp_path / "toy_probe"
+    SelectedProbe(0, np.zeros(4), 0.0, 0.0, 0.0, {"name": "toy", "view": VIEW, "readout": "followup",
+                                                 "effort": 0.5}).save(str(d))
+    return str(d)
+
+
+def request(sha: str, *episodes: dict, wait_s: float = 20) -> dict:
+    return {"protocol": PROTOCOL, "probes": [sha], "episodes": list(episodes), "wait_s": wait_s}
+
+
+def post(port: int, body, path: str = "/v1/score") -> tuple[int, dict]:
+    """(status, JSON answer) of one POST, with no retries."""
+    data = body if isinstance(body, bytes) else json.dumps(body).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
+                                                           method="POST"), timeout=60) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_a_failed_job_is_retried_and_computed_again(toy_probe):
+    """The GPU running out of memory, a CUDA error and a bug each answer 503 and leave no job behind, so the same
+    request computes again. The client retries a 503 until the scores come."""
+    sha = probe_sha(toy_probe)
+    for error in (torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 20.00 GiB"),
+                  RuntimeError("CUDA error: an illegal memory access was encountered"), ZeroDivisionError("a bug")):
+        scorer = FakeScorer(sha, fail=[error])
+        srv = Server(scorer, port=0, log=lambda m: None)
+        srv.start()
+        try:
+            code, answer = post(srv.port, request(sha, {"key": "a"}))
+            assert code == 503 and answer["error"].startswith(type(error).__name__) and not srv.jobs
+            code, answer = post(srv.port, request(sha, {"key": "a"}))
+            assert code == 200 and answer["results"][0]["scores"][sha]["score"] == 0.75
+            assert scorer.keys == [["a"], ["a"]]  # computed again, not the failure replayed
+        finally:
+            srv.stop()
+    scorer = FakeScorer(sha, fail=[torch.cuda.OutOfMemoryError("CUDA out of memory") for _ in range(2)])
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        mon = InklingProbeMonitor("toy", toy_probe, f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                  run_effort=0.5, max_backoff=0.05, log=lambda m: None)
+        assert [r.score for r in mon.score_batch([rollout(rows()[0])])] == [0.75] and len(scorer.keys) == 3
+    finally:
+        srv.stop()
+
+
+def test_a_bad_request_is_refused_for_good(toy_probe, monkeypatch):
+    """What the request causes is fatal: an episode that can't be replayed (422), an unknown probe or protocol (409), a
+    malformed request (400), an unknown path (404). The client raises at the first such answer. The real scorer tells
+    a rendering failure (``ReplayError``, before the GPU runs) from a failure of the forward pass (503)."""
+    sha = probe_sha(toy_probe)
+    scorer = FakeScorer(sha, fail=[ReplayError("episode 0 (key 'a') can't be replayed: ValueError: truncated turn")])
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        assert post(srv.port, request(sha, {"key": "a"}))[0] == 422 and not srv.jobs
+        assert post(srv.port, request("0" * 64, {"key": "a"}))[0] == 409
+        assert post(srv.port, {**request(sha, {"key": "a"}), "protocol": PROTOCOL + 1})[0] == 409
+        for bad in ([request(sha)], {**request(sha), "probes": sha}, {**request(sha), "probes": []},
+                    {**request(sha), "episodes": ["a"]}, {**request(sha), "wait_s": "soon"}, {"protocol": PROTOCOL}):
+            assert post(srv.port, bad)[0] == 400, bad
+        assert post(srv.port, b"{not json")[0] == 400
+        assert post(srv.port, request(sha), path="/v2/score")[0] == 404
+        assert len(scorer.keys) == 1  # only the first request reached the scorer
+        scorer.fail = [ReplayError("truncated turn")]
+        mon = InklingProbeMonitor("toy", toy_probe, f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                  run_effort=0.5, log=lambda m: None)
+        t = time.time()
+        with pytest.raises(FatalProbeError, match="422"):
+            mon.score_batch([rollout(rows()[0])])
+        assert time.time() - t < 1  # no retry
+    finally:
+        srv.stop()
+    real = ProbeScorer(None, [toy_probe])  # renders without a model
+    item = {**episode_item("Solve 0.", rows()[0]["env_meta"], RUN_ENV), "key": "ok"}
+    truncated = {**item, "turns": [{**item["turns"][0], "truncated": True}], "key": "bad"}
+    possible = {**item, "env_options": {**item["env_options"], "verifier_mode": "possible"}}
+    for episode in (truncated, possible, {"question": "neither turns nor an answer"}):
+        with pytest.raises(ReplayError, match="episode 1 .* can't be replayed in view with_reasoning"):
+            real.score([item, episode], [sha])
+    import monitordecorrelation.whitebox.features as features
+
+    def out_of_memory(*args, **kwargs):
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(features, "extract_features", out_of_memory)
+    srv = Server(real, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        code, answer = post(srv.port, request(sha, item, truncated))
+        assert code == 422 and "truncated turn" in answer["error"]
+        code, answer = post(srv.port, request(sha, item))
+        assert code == 503 and answer["error"].startswith("OutOfMemoryError")
+    finally:
+        srv.stop()
+
+
+def test_finished_jobs_are_kept_a_while_then_dropped(toy_probe, monkeypatch):
+    """A finished job answers a repeat without another forward pass for ``KEEP_S`` seconds, then is dropped. Only the
+    ``max_kept`` newest finished jobs stay, each without its request. A queued or running job is never dropped, so a
+    repeat joins it."""
+    import monitordecorrelation.whitebox.probe_server as probe_server
+
+    clock = Clock()
+    monkeypatch.setattr(probe_server, "time", clock)  # the server's clock only
+    sha = probe_sha(toy_probe)
+    scorer = FakeScorer(sha)
+    srv = Server(scorer, port=0, log=lambda m: None, max_kept=3)
+    srv.start()
+    try:
+        for _ in range(2):
+            assert post(srv.port, request(sha, {"key": "a"}))[0] == 200
+        clock.now += probe_server.KEEP_S - 1
+        assert post(srv.port, request(sha, {"key": "a"}))[0] == 200
+        assert scorer.keys == [["a"]]  # the repeats got the kept result
+        clock.now += 2
+        assert post(srv.port, request(sha, {"key": "a"}))[0] == 200
+        assert scorer.keys == [["a"], ["a"]]  # expired: computed again
+        for key in "bcde":  # all finishing at the same clock time
+            assert post(srv.port, request(sha, {"key": key}))[0] == 200
+        assert len(srv.jobs) == 3 and all(j.request is None and j.result for j in srv.jobs.values())
+        for key in "cdea":
+            assert post(srv.port, request(sha, {"key": key}))[0] == 200
+        assert [scorer.keys.count([k]) for k in "abcde"] == [3, 1, 1, 1, 1]  # c, d, e kept; a beyond the cap
+        scorer.gate = threading.Event()
+        assert post(srv.port, request(sha, {"key": "g"}, wait_s=0))[0] == 202  # running, held at the gate
+        clock.now += 10 * probe_server.KEEP_S
+        assert post(srv.port, request(sha, {"key": "h"}, wait_s=0))[0] == 202  # queued behind it
+        assert len(srv.jobs) == 2 and not any(j.done.is_set() for j in srv.jobs.values())  # the finished ones expired
+        scorer.gate.set()
+        assert post(srv.port, request(sha, {"key": "g"}))[0] == 200
+        assert scorer.keys.count(["g"]) == 1  # the repeat joined the running job
+    finally:
+        srv.stop()
+
+
+def raw_server(answers: list) -> int:
+    """A TCP server that reads one whole HTTP request per connection and answers with the next of ``answers``:
+    bytes as they are, then a close; "reset" closes with a TCP reset instead. Returns its port."""
+    sock = socket.create_server(("127.0.0.1", 0))
+
+    def run():
+        for answer in answers:
+            conn, _ = sock.accept()
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data and (chunk := conn.recv(65536)):
+                    data += chunk
+                head, _, body = data.partition(b"\r\n\r\n")
+                length = next((int(h.split(b":")[1]) for h in head.split(b"\r\n")
+                               if h.lower().startswith(b"content-length:")), 0)
+                while len(body) < length and (chunk := conn.recv(65536)):
+                    body += chunk
+                if answer == "reset":
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                else:
+                    conn.sendall(answer)
+        sock.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return sock.getsockname()[1]
+
+
+def http_answer(status: str, body: bytes, length: int | None = None) -> bytes:
+    """An HTTP response announcing ``length`` body bytes (default: all of ``body``)."""
+    n = len(body) if length is None else length
+    return f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {n}\r\n\r\n".encode() + body
+
+
+def test_the_client_retries_an_answer_lost_on_the_way(toy_probe):
+    """A tunnel dropping mid-answer: no answer at all, a reset, a body cut short (also a 503's), a body that isn't
+    JSON. The client retries each and returns the answer that finally arrives; a fatal status still raises at once."""
+    sha = probe_sha(toy_probe)
+    srv = Server(FakeScorer(sha), port=0, log=lambda m: None)
+    srv.start()
+    try:
+        mon = InklingProbeMonitor("toy", toy_probe, f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                  run_effort=0.5, max_backoff=0.05, log=lambda m: None)
+    finally:
+        srv.stop()
+    good = json.dumps({"results": [{"key": "k", "n_tokens": {VIEW: 3},
+                                    "scores": {sha: {"logit": 1.0, "score": 0.75}}}]}).encode()
+    mon.url = "http://127.0.0.1:%d" % raw_server([
+        b"", "reset", http_answer("200 OK", good[:20], len(good)), http_answer("200 OK", b"<html>a proxy</html>"),
+        http_answer("503 Service Unavailable", b'{"error": "CUDA', 100), http_answer("200 OK", good)])
+    assert [r.score for r in mon.score_batch([rollout(rows()[0])])] == [0.75]
+    mon.url = "http://127.0.0.1:%d" % raw_server([http_answer("422 Unprocessable Entity", b'{"error": "truncated"}')])
+    with pytest.raises(FatalProbeError, match="422"):
+        mon.score_batch([rollout(rows()[0])])
+
+
+def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http():
+    """check_probe_server.end_to_end_dirs: per dataset of the deployed probes, its with-reasoning follow-up probe
+    (the first two follow-up probes in path order were both OOD ones)."""
+    check = load_script("check_probe_server")
+    root = os.path.join("data", "probes", "Inkling-Small")
+    dirs = sorted(os.path.join(root, d, v, r) for d in ("diverse_deception", "terminal_prerl")
+                  for v in ("with_reasoning", "without_reasoning") for r in ("followup", "mean"))
+    want = [os.path.join(root, d, "with_reasoning", "followup") for d in ("diverse_deception", "terminal_prerl")]
+    assert check.end_to_end_dirs(dirs, root) == want
+    output_only = [d for d in dirs if "without_reasoning" in d]  # no with-reasoning probe deployed: the other view
+    assert check.end_to_end_dirs(output_only, root) == [w.replace("with_reasoning", "without_reasoning") for w in want]
+    assert check.end_to_end_dirs([d for d in dirs if "terminal_prerl" in d], root) == want[1:]
+    assert check.end_to_end_dirs([d for d in dirs if d.endswith("mean")], root) == []
 
 
 def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):

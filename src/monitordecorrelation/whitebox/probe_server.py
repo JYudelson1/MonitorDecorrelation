@@ -18,7 +18,12 @@ The score is σ(logit − t₁%), so 0.5 is the probe's 1%-FPR operating point.
   - It returns 200 {results: [{key, n_tokens, conversation_sha256, scores: {sha: {logit, score}}, router_topk}]},
     or 202 {status, position} if not done within ``wait_s``. The client then repeats the same request.
   - A request is identified by the hash of its body, so a repeat joins the same job instead of starting a new one.
-  - Errors: 409 for an unknown probe or protocol, 422 for an episode that can't be replayed.
+  - A finished job's result is kept for ``KEEP_S`` seconds (at most the ``MAX_KEPT`` newest), so a repeat after a
+    lost response gets it without a second forward pass. A failed job is forgotten at once: a repeat computes anew.
+  - Errors the request causes, which a retry can't fix: 400 for a malformed request, 404 for an unknown path, 409 for
+    an unknown probe or protocol, 422 for an episode that can't be replayed.
+  - 503 for any other failure (the GPU ran out of memory, a CUDA error, a bug): not the request's fault, so the
+    client retries it.
 - One GPU worker thread runs the jobs in order; the HTTP threads only queue them and wait.
 
 **Golden check:** each probe directory may hold ``golden.jsonl``: episodes with their stored token hashes and logits.
@@ -30,17 +35,26 @@ it can look like monitor degradation.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import queue
+import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 
 import numpy as np
 
 PROTOCOL = 1
+
+KEEP_S = 600.0
+"""Seconds a finished job's result stays in the server's job table, for a client whose answer got lost on the way."""
+
+MAX_KEPT = 64
+"""At most this many finished jobs are kept (the newest), so memory stays bounded however many requests come."""
 
 GOLDEN_MEAN_TOLERANCE = 0.3
 """Default bound on |mean Δlogit| over a probe's golden episodes (Δ = served − golden logit), in logits.
@@ -79,6 +93,20 @@ class GoldenCheckError(RuntimeError):
         self.report = report or {}
 
 
+class ReplayError(ValueError):
+    """An episode can't be rendered in a probe's view: the request's fault, so a retry can't help (HTTP 422)."""
+
+
+class UnknownProbeError(LookupError):
+    """A probe this scorer doesn't serve (HTTP 409)."""
+
+
+REPLAY_ERRORS = (ValueError, KeyError, IndexError, TypeError, AttributeError, NotImplementedError, RuntimeError)
+"""What rendering an episode raises when the episode is the problem: the replay's own refusals (ValueError,
+NotImplementedError, and the RuntimeError of its rendering checks) and a field that is missing or of the wrong type.
+Rendering runs on the CPU and depends only on the episode, so these are not transient: ``ReplayError``."""
+
+
 def probe_sha(probe_dir: str) -> str:
     """The probe's identity: sha256 over its probe.npz and meta.json."""
     h = hashlib.sha256()
@@ -92,6 +120,12 @@ def conversation_sha(tokens) -> str:
     return hashlib.sha256(np.asarray(tokens, dtype=np.int64).tobytes()).hexdigest()
 
 
+def item_sha(item: dict) -> str:
+    """An episode's identity: sha256 over its replay item (``episode_item``'s question, turns and env options), which
+    is all its score depends on. The live monitor keys episodes by its first 16 hex digits."""
+    return hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+
+
 @dataclass
 class Served:
     sha: str
@@ -103,10 +137,11 @@ class Served:
 
 @dataclass
 class Job:
-    request: dict
+    request: dict | None  # dropped once the job is done: only the worker needs it
     done: threading.Event = field(default_factory=threading.Event)
     result: dict | None = None
     error: tuple[int, str] | None = None
+    finished: float | None = None  # time.time() when it finished
 
 
 class ProbeScorer:
@@ -139,18 +174,39 @@ class ProbeScorer:
                                    "readout": s.readout, "layer": s.probe.layer, "threshold_1": s.probe.threshold_1}
                            for s in self.probes.values()}}
 
-    def score(self, episodes: list[dict], shas: list[str]) -> list[dict]:
-        """Score ``episodes`` (replay items) with the probes ``shas``: one feature pass per view needed."""
-        from monitordecorrelation.whitebox.features import extract_features
+    def render(self, episodes: list[dict], view: str) -> list:
+        """``episodes`` as probe inputs in ``view``. CPU only and a function of the episodes alone, so a failure is the
+        request's: ``ReplayError``."""
         from monitordecorrelation.whitebox.probe_datasets import item_messages
+
+        out = []
+        for i, ep in enumerate(episodes):
+            try:
+                out.append(self.replay.probe_input(item_messages(ep, view)))
+            except REPLAY_ERRORS as e:
+                key = ep.get("key") if isinstance(ep, dict) else None
+                raise ReplayError(f"episode {i} (key {key!r}) can't be replayed in view {view}: "
+                                  f"{type(e).__name__}: {e}") from e
+        return out
+
+    def score(self, episodes: list[dict], shas: list[str]) -> list[dict]:
+        """Score ``episodes`` (replay items) with the probes ``shas``: one feature pass per view needed.
+
+        Every episode is rendered in every view first, so one that can't be replayed raises ``ReplayError`` before the
+        GPU runs. What fails after that (out of memory, a CUDA error) raises as it is."""
+        from monitordecorrelation.whitebox.features import extract_features
         from monitordecorrelation.whitebox.probe_fit import ViewFeatures, feature_matrix
 
         unknown = [s for s in shas if s not in self.probes]
         if unknown:
-            raise LookupError(f"not served here: {unknown}")
+            raise UnknownProbeError(f"not served here: {unknown}")
+        if not episodes:
+            return []
+        views = sorted({self.probes[s].view for s in shas})
+        rendered = {view: self.render(episodes, view) for view in views}
         out = [{"key": ep.get("key"), "scores": {}} for ep in episodes]
-        for view in sorted({self.probes[s].view for s in shas}):
-            inputs = [self.replay.probe_input(item_messages(ep, view)) for ep in episodes]
+        for view in views:
+            inputs = rendered[view]
             feats = extract_features(self.model, inputs, self.sp, max_batch_tokens=self.max_batch_tokens)
             vf = ViewFeatures([str(i) for i in range(len(episodes))], feats, [])
             for i, p in enumerate(inputs):
@@ -213,13 +269,42 @@ class ProbeScorer:
         return report
 
 
-class Server:
-    """HTTP front for a ``ProbeScorer``: one GPU worker thread; requests are idempotent by body hash."""
+def malformed(request) -> str | None:
+    """What is wrong with the shape of a /v1/score request (its protocol already checked), or None."""
+    probes, episodes, wait_s = request.get("probes"), request.get("episodes"), request.get("wait_s", 20)
+    if not isinstance(probes, list) or not probes or not all(isinstance(s, str) for s in probes):
+        return "'probes' must be a non-empty list of probe sha256s"
+    if not isinstance(episodes, list) or not all(isinstance(ep, dict) for ep in episodes):
+        return "'episodes' must be a list of objects"
+    if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)) or not 0 <= wait_s <= 3600:
+        return "'wait_s' must be a number of seconds in [0, 3600]"
+    return None
 
-    def __init__(self, scorer: ProbeScorer, host: str = "127.0.0.1", port: int = 8178, log=print):
+
+def release_gpu_memory() -> None:
+    """After a failed forward: hand the allocator's cached blocks back, so a retry starts from unfragmented memory."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    gc.collect()  # the failed forward's tensors, if a reference cycle still holds them
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 — after a CUDA error the context may be gone; the retry will report it
+        pass
+
+
+class Server:
+    """HTTP front for a ``ProbeScorer``: one GPU worker thread; requests are idempotent by body hash.
+
+    The job table holds queued and running jobs until they finish. A finished job then stays ``keep_s`` seconds, and
+    only the ``max_kept`` newest do; a failed one is dropped at once, so a retry computes it again."""
+
+    def __init__(self, scorer: ProbeScorer, host: str = "127.0.0.1", port: int = 8178, log=print, *,
+                 keep_s: float = KEEP_S, max_kept: int = MAX_KEPT):
         from http.server import ThreadingHTTPServer
 
-        self.scorer, self.log = scorer, log
+        self.scorer, self.log, self.keep_s, self.max_kept = scorer, log, keep_s, max_kept
         self.jobs: dict[str, Job] = {}
         self.queue: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
@@ -238,35 +323,65 @@ class Server:
 
     def _work(self) -> None:
         while True:
-            key = self.queue.get()
-            if key is None:
+            item = self.queue.get()
+            if item is None:
                 return
-            job = self.jobs[key]
-            t = time.time()
+            key, job = item
+            t, detail = time.time(), None
             try:
                 results = self.scorer.score(job.request["episodes"], job.request["probes"])
                 job.result = {"results": results, "timing": {"forward_s": round(time.time() - t, 3)}}
-            except LookupError as e:
+            except UnknownProbeError as e:
                 job.error = (409, str(e))
-            except (ValueError, KeyError, NotImplementedError, RuntimeError) as e:
-                job.error = (422, f"{type(e).__name__}: {e}")
-            except Exception as e:  # noqa: BLE001 — a bad batch must not kill the worker
-                job.error = (500, f"{type(e).__name__}: {e}")
+            except ReplayError as e:
+                job.error = (422, str(e))
+            except Exception as e:  # noqa: BLE001 — out of GPU memory, a CUDA error, a bug: not the request's fault
+                job.error, detail = (503, f"{type(e).__name__}: {e}"), traceback.format_exc()
+            with self.lock:
+                job.request, job.finished = None, time.time()
+                if job.error is not None and self.jobs.get(key) is job:
+                    del self.jobs[key]  # not kept: a repeat of the request computes it again
+                self._prune(job.finished)
             job.done.set()
+            if detail is not None:
+                release_gpu_memory()  # out here: the except block's traceback held the failed forward's tensors
+                self._note(f"job {key[:12]} failed with 503; its client will retry:\n{detail}")
+            elif job.error is not None:
+                self._note(f"job {key[:12]} refused with {job.error[0]}: {job.error[1]}")
 
-    def submit(self, request: dict) -> tuple[int, dict]:
+    def _note(self, message: str) -> None:
+        try:
+            self.log(message)
+        except Exception:  # noqa: BLE001 — a broken log (closed stdout) must not stop the GPU worker
+            pass
+
+    def _prune(self, now: float) -> None:
+        """Drop the finished jobs older than ``keep_s``, and all but the ``max_kept`` newest. Call under the lock."""
+        finished = sorted((j.finished, n, k) for n, (k, j) in enumerate(self.jobs.items()) if j.finished is not None)
+        excess = len(finished) - self.max_kept
+        for rank, (at, _, k) in enumerate(finished):  # oldest first; the table's order breaks ties
+            if rank < excess or now - at > self.keep_s:
+                del self.jobs[k]
+
+    def submit(self, request) -> tuple[int, dict]:
+        if not isinstance(request, dict):
+            return 400, {"error": "the request must be a JSON object"}
         if request.get("protocol") != PROTOCOL:
             return 409, {"error": f"protocol {request.get('protocol')!r}; this server speaks {PROTOCOL}"}
-        unknown = [s for s in request.get("probes", []) if s not in self.scorer.probes]
+        problem = malformed(request)
+        if problem:
+            return 400, {"error": problem}
+        unknown = [s for s in request["probes"] if s not in self.scorer.probes]
         if unknown:
             return 409, {"error": f"probes not served here: {unknown}"}
         body = {k: request[k] for k in ("probes", "episodes")}
         key = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
         with self.lock:
+            self._prune(time.time())
             job = self.jobs.get(key)
             if job is None:
                 job = self.jobs[key] = Job(body)
-                self.queue.put(key)
+                self.queue.put((key, job))
         if not job.done.wait(float(request.get("wait_s", 20))):
             return 202, {"status": "queued", "position": self.queue.qsize()}
         if job.error:
@@ -302,7 +417,11 @@ class Server:
                 except (ValueError, json.JSONDecodeError):
                     self._send(400, {"error": "bad JSON"})
                     return
-                self._send(*server.submit(request))
+                try:
+                    code, payload = server.submit(request)
+                except Exception as e:  # noqa: BLE001 — answer rather than drop the connection; 5xx is retried
+                    code, payload = 500, {"error": f"{type(e).__name__}: {e}"}
+                self._send(code, payload)
 
             def log_message(self, fmt, *args):  # quiet: the RL runs poll often
                 pass

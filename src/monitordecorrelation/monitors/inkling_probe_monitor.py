@@ -8,16 +8,17 @@ It plugs into the same seam as the other monitors (``name`` / ``score`` / ``scor
 - **Checks at construction:** the run's effort and env options match the probe's; then a handshake checks that the
   server serves this exact probe (by sha) on the same reader.
 - **Retries:**
-  - Connection errors, timeouts, 202 (still running) and 5xx are retried forever, with backoff from 1 s up to
-    ``max_backoff`` and a warning every few minutes. A run that trains against the probe waits for it rather than
-    computing a reward without it.
-  - A version mismatch (409) or an episode the server can't replay (422) raises. The run then aborts through its usual
-    unscored-monitor check.
+  - Connection errors, timeouts, an answer cut off or not JSON (a tunnel dropping mid-answer), 202 (still running) and
+    5xx (503: the server failed for a reason of its own, such as running out of GPU memory) are retried forever, with
+    backoff from 1 s up to ``max_backoff`` and a warning every few minutes. A run that trains against the probe waits
+    for it rather than computing a reward without it.
+  - A request the server can never serve raises: malformed (400), an unknown path (404), a version mismatch (409) or an
+    episode it can't replay (422). The run then aborts through its usual unscored-monitor check.
 """
 
 from __future__ import annotations
 
-import hashlib
+import http.client
 import json
 import time
 import urllib.error
@@ -26,11 +27,28 @@ from typing import Sequence
 
 from monitordecorrelation.types import MonitorResult, Rollout
 from monitordecorrelation.whitebox.probe_datasets import REPLAY_ENV_KEYS, episode_item
-from monitordecorrelation.whitebox.probe_server import PROTOCOL, probe_sha
+from monitordecorrelation.whitebox.probe_server import PROTOCOL, item_sha, probe_sha
+
+FATAL_STATUS = (400, 404, 409, 422)
+"""The server's answers to a request it can never serve (whitebox/probe_server.py); every other status is retried."""
+
+RETRYABLE = (
+    OSError,  # no connection, a timeout, a reset (also urllib's URLError and http.client.RemoteDisconnected)
+    http.client.HTTPException,  # an answer cut off (IncompleteRead) or garbled (BadStatusLine)
+    json.JSONDecodeError, UnicodeDecodeError,  # a body that isn't the JSON the server sent, e.g. a truncated one
+)
 
 
 class FatalProbeError(RuntimeError):
     """The server refused for a reason retrying can't fix (version mismatch, unreplayable episode)."""
+
+
+def _error_text(e: urllib.error.HTTPError) -> str:
+    """An error answer's body, as far as it arrived: a connection dropping mid-body must not escape the retries."""
+    try:
+        return e.read().decode(errors="replace")[:500]
+    except (OSError, http.client.HTTPException) as cut:
+        return f"(body cut off: {type(cut).__name__})"
 
 
 class InklingProbeMonitor:
@@ -80,15 +98,17 @@ class InklingProbeMonitor:
                     delay = 1.0  # 202: the job is running; ask again at once
                     continue
             except urllib.error.HTTPError as e:
-                text = e.read().decode(errors="replace")[:500]
-                if e.code in (409, 422, 400, 404):
+                text = _error_text(e)
+                if e.code in FATAL_STATUS:
                     raise FatalProbeError(f"{self.name}: {method} {path} -> {e.code}: {text}") from None
                 problem = f"HTTP {e.code}: {text}"
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            except http.client.InvalidURL:
+                raise  # the configured server_url, not the connection: retrying can't fix it
+            except RETRYABLE as e:
                 problem = f"{type(e).__name__}: {e}"
             waited = time.time() - started
             if waited - warned > 180:
-                self.log(f"[{self.name}] probe server unreachable for {waited:.0f}s ({problem}); still retrying")
+                self.log(f"[{self.name}] no answer from the probe server for {waited:.0f}s ({problem}); still retrying")
                 warned = waited
             time.sleep(delay)
             delay = min(self.max_backoff, delay * 2)
@@ -106,7 +126,7 @@ class InklingProbeMonitor:
         out = []
         for r in rollouts:
             item = episode_item(r.prompt.text, self.episode_of(r), self.env_options)
-            item["key"] = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()[:16]
+            item["key"] = item_sha(item)[:16]
             out.append(item)
         return out
 

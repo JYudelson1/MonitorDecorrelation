@@ -10,7 +10,7 @@
      ``GOLDEN_MEAN_TOLERANCE``).
    Each probe's max, mean and sd of Δlogit go into the report, also when it fails.
 2. **End to end:** the HTTP server and ``InklingProbeMonitor`` score the golden episodes as RL rollouts would arrive;
-   the scores must equal the scorer's.
+   the scores must equal the scorer's. One IID and one OOD monitor: per dataset, its with-reasoning follow-up probe.
 3. **Throughput** of both batchings, in tokens per second.
 
 Exits 1 if a check fails.
@@ -24,6 +24,17 @@ import json
 import os
 import sys
 import time
+
+
+def end_to_end_dirs(dirs: list[str], root: str) -> list[str]:
+    """The monitors to check through HTTP: per dataset (``terminal_prerl`` = IID, ``diverse_deception`` = OOD) one
+    follow-up probe, the with-reasoning one if deployed, as an RL run uses them."""
+    picked: dict[str, str] = {}
+    for d in sorted(dirs, key=lambda d: (os.path.basename(os.path.dirname(d)) != "with_reasoning", d)):
+        dataset, _view, readout = os.path.relpath(d, root).split(os.sep)
+        if readout == "followup":
+            picked.setdefault(dataset, d)
+    return [picked[k] for k in sorted(picked)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 r = scorer.golden_check([d], tol, mean_tolerance=mean_tol)[probe_sha(d)]
                 res = {**r, "ok": r["max_dlogit"] <= tol and abs(r["mean_dlogit"]) <= mean_tol}
-            except RuntimeError as e:  # a GoldenCheckError carries the probe's numbers
+            except (RuntimeError, ValueError) as e:  # a GoldenCheckError has the probe's numbers (a ReplayError not)
                 res = {**getattr(e, "report", {}), "tolerance": tol, "mean_tolerance": mean_tol, "ok": False,
                        "error": str(e)}
             report["probes"].setdefault(name, {})[f"golden_max_batch_tokens_{mbt}"] = res
@@ -88,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     server.start()
     url = f"http://127.0.0.1:{server.port}"
     e2e = {}
-    for d in [d for d in dirs if d.endswith("followup")][:2]:
+    checked = end_to_end_dirs(dirs, args.probes_root)
+    log(f"end to end through HTTP: {[os.path.relpath(d, args.probes_root) for d in checked]}")
+    for d in checked:
         rows = [json.loads(line) for line in open(os.path.join(d, "golden.jsonl"))]
         env_options = rows[0]["episode"]["env_options"]
         rollouts = [Rollout(prompt=Prompt(text=r["episode"]["question"]), cot="", output="",
