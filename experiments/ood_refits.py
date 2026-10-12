@@ -6,8 +6,8 @@ that is refitting noise. For one fitted OOD probe (experiments/fit_probes.py):
 - **Refits:** ``--refits`` fits on pair-bootstrap resamples of its dev set, at its own layer and C.
 - **By layer:** one fit on all of dev at every layer, at its C, to show how transfer depends on the layer.
 
-    uv run python experiments/ood_refits.py --probe ../scratch/probes/bf16/diverse_deception/without_reasoning/followup \
-        --features ../scratch/features/bf16 --out ../scratch/ood_refits/bf16/followup
+    uv run python experiments/ood_refits.py --probe PROBES/bf16/diverse_deception/without_reasoning/followup \
+        --features FEATURES/bf16 --out OUT/ood_refits/bf16/followup
 
 **Scored for every fit:**
 - OOD test AUROC (in distribution);
@@ -19,7 +19,8 @@ that is refitting noise. For one fitted OOD probe (experiments/fit_probes.py):
 - the cosine of its weights to the original probe's.
 
 **Writes** ``refits.csv``, ``by_layer.csv`` and ``summary.json`` (each metric's value for the original probe, then
-the median and 5th/95th percentiles over the refits).
+the median and 5th/95th percentiles over the refits; the code version, provenance.code_version, as ``code``). An
+``--out`` that already holds any of them is refused, unless ``--overwrite``.
 """
 
 from __future__ import annotations
@@ -33,9 +34,11 @@ import time
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, auroc, load_items, thresholds
 
 VIEWS = ("with_reasoning", "without_reasoning")
+OUTPUTS = ("refits.csv", "by_layer.csv", "summary.json")
 
 
 class Scorer:
@@ -117,7 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--refits", type=int, default=50)
     ap.add_argument("--skip-layers", action="store_true", help="no by-layer fits")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overwrite", action="store_true", help="replace the outputs already in --out (else refused)")
     args = ap.parse_args(argv)
+    existing = [f for f in OUTPUTS if os.path.exists(os.path.join(args.out, f))]
+    if existing and not args.overwrite:
+        ap.error(f"{args.out} already holds {', '.join(existing)}; --overwrite replaces them")
+    code = code_version()
     log = lambda m: print(f"[refits {time.strftime('%H:%M:%S')}] {m}", flush=True)  # noqa: E731
 
     probe = SelectedProbe.load(args.probe)
@@ -140,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     os.makedirs(args.out, exist_ok=True)
     write_csv(os.path.join(args.out, "refits.csv"), refits)
     summary = {"probe": args.probe, "layer": probe.layer, "C": C, "readout": readout, "refits": len(refits),
-               "metrics": summarize({**original, "cosine_to_original": 1.0}, refits)}
+               "code": code, "metrics": summarize({**original, "cosine_to_original": 1.0}, refits)}
     if not args.skip_layers:
         src = LayerSource(os.path.join(args.features, "diverse_deception"), "without_reasoning", readout)
         by_layer = []
@@ -151,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         write_csv(os.path.join(args.out, "by_layer.csv"), by_layer)
         summary["by_layer_transfer_with_reasoning"] = {r["layer"]: r["transfer_auroc_with_reasoning"]
                                                         for r in by_layer}
+    elif os.path.exists(os.path.join(args.out, "by_layer.csv")):  # an earlier run's (--overwrite): not this one's
+        os.remove(os.path.join(args.out, "by_layer.csv"))
     with open(os.path.join(args.out, "summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1)
     m = summary["metrics"]

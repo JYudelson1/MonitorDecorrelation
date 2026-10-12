@@ -1,11 +1,10 @@
-"""Fit and evaluate one reader's Inkling probes on hub's CPUs, as pre-registered in
-docs/inkling_probes_preregistration.md.
+"""Fit and evaluate one reader's Inkling probes on CPUs, as pre-registered in docs/inkling_probes_preregistration.md.
 
-    uv run python experiments/fit_probes.py --reader nvfp4 --features scratch/features/nvfp4 \
-        --datasets data/probe_datasets --out scratch/probes/nvfp4
+    uv run python experiments/fit_probes.py --reader nvfp4 --features FEATURES/nvfp4 \
+        --datasets data/probe_datasets --out PROBES/nvfp4
 
 ``--features`` holds what the GPU session saved for that reader: ``<dataset>/<view>/shard_*``. Download it first, e.g.
-``hf buckets sync hf://buckets/probemaxxing/inkling-probes/features/nvfp4 scratch/features/nvfp4 --exclude "*/full/*"``.
+``hf buckets sync hf://buckets/probemaxxing/inkling-probes/features/nvfp4 FEATURES/nvfp4 --exclude "*/full/*"``.
 
 **Probes:**
 - **IID** (``terminal_prerl``): {with, without reasoning} × ``--readouts``. Label ``used_verifier``. Dev is
@@ -22,6 +21,13 @@ docs/inkling_probes_preregistration.md.
   (cross-fitted), concealment recall, OOD per-source and transfer results, baselines, and sensitivity rows.
 
 ``<out>/summary.md`` collects the headline numbers.
+
+**One --out, several runs:** a later run with other ``--readouts`` adds its probes to ``--out``, and
+``<out>/summary.json`` accumulates. A run refuses to start if a probe folder it would write already exists, unless
+``--overwrite`` (then that folder's files are rewritten).
+
+**Code version** (provenance.code_version): each probe's meta.json and summary.json entry record the code that fitted
+it as ``code``; meta.json also records the features' (their index.json's ``code``) as ``features_code``.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import time
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import (
     C_GRID, MOE_FIRST_LAYER, LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, cv_grid_source, load_items,
     make_folds, select, thresholds, within_group_auroc)
@@ -416,7 +423,19 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-baselines", action="store_true")
     ap.add_argument("--skip-sensitivity", action="store_true")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="rewrite probe folders that already exist in --out (else the run refuses to start)")
     args = ap.parse_args()
+    readouts = [r for r in args.readouts.split(",") if r]
+    targets = [os.path.join(args.out, "terminal_prerl", view, r) for view in ("with_reasoning", "without_reasoning")
+               for r in readouts if "iid" in args.probes]
+    targets += [os.path.join(args.out, "diverse_deception", "without_reasoning", r) for r in readouts
+                if "ood" in args.probes]
+    existing = [t for t in targets if os.path.exists(t)]
+    if existing and not args.overwrite:
+        ap.error(f"{len(existing)} of the probe folders this run would write already exist ({', '.join(existing)}); "
+                 "--overwrite rewrites them")
+    code = code_version()
 
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
     concealed = load_items(os.path.join(args.datasets, "terminal_concealed")) \
@@ -425,17 +444,19 @@ def main() -> int:
         if os.path.exists(os.path.join(args.features, "terminal_prerl", "index.json")) else {}
     provenance = {"reader": args.reader, "reader_info": index.get("reader"), "feature_format": index.get("feature_format"),
                   "versions": index.get("versions"), "prereg_sha256": prereg_sha(), "fitted_utc": time.strftime(
-                      "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats}
-    readouts = [r for r in args.readouts.split(",") if r]
+                      "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats,
+                  "code": code, "features_code": index.get("code")}
     summary = {}
     if "iid" in args.probes:
         for view in ("with_reasoning", "without_reasoning"):
             for readout in readouts:
-                summary[f"iid/{view}/{readout}"] = fit_iid(args, items, concealed, view, readout, provenance)
+                summary[f"iid/{view}/{readout}"] = {**fit_iid(args, items, concealed, view, readout, provenance),
+                                                    "code": code}
     if "ood" in args.probes:
         ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
         for readout in readouts:
-            summary[f"ood/{readout}"] = fit_ood(args, ood_items, items, concealed, readout, provenance)
+            summary[f"ood/{readout}"] = {**fit_ood(args, ood_items, items, concealed, readout, provenance),
+                                         "code": code}
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "summary.json")  # accumulates: a later run with other readouts adds its probes
     if os.path.exists(path):

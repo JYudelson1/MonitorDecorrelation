@@ -5,6 +5,8 @@ Checks:
 - The probe beats chance on test, with a confidence interval.
 - Every output is written: probe, meta with the pre-registration hash, CV grid, scores, metrics, summary.
 - The cross-fitted, concealment, OOD and transfer metrics are present.
+- Outputs record the code version; a run refuses to overwrite earlier outputs unless --overwrite, while fit_probes
+  runs with other readouts still share one --out, and compare_readers --from-json still rewrites its own folder.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -22,6 +25,7 @@ from monitordecorrelation.whitebox.probe_fit import SelectedProbe, auroc, select
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 L, D, SIGNAL_LAYER = 6, 32, 3
+CODE_KEYS = {"commit", "dirty", "diff_sha256", "source"}
 M, E, ROUTER_SIGNAL_LAYER = 4, 8, 2  # MoE layers × experts of the router logits, and the planted layer
 
 
@@ -271,7 +275,7 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
                 assert s["n"] == len(rows) == n_diag_rows and abs(s["mean"] - np.mean(b - a)) < 1e-12, s
                 assert abs(s["sd"] - np.std(b - a)) < 1e-12 and s["spearman"] > 0.9, s
                 assert abs(s["spearman"] - spearmanr(a, b).statistic) < 1e-12, s
-    assert report["decision"]["reader"] in ("nvfp4", "bf16")
+    assert report["decision"]["reader"] in ("nvfp4", "bf16") and set(report["code"]) == CODE_KEYS
     text = (tmp_path / "compare" / "report.md").read_text()
     assert text.startswith("# Reader comparison") and "## Report only" in text and "Batching floor" in text
     agree = report["routing_agreement_at_yes"]  # the readers share their router logits here
@@ -309,6 +313,26 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
     assert json.loads((tmp_path / "rerendered_old" / "decision.json").read_text())["decision"] == report["decision"]
     assert "## Report only" not in (tmp_path / "rerendered_old" / "report.md").read_text()
 
+    def compare(*args):
+        return subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"), *args],
+                              capture_output=True, text=True, cwd=REPO, timeout=600)
+
+    stamp = (tmp_path / "compare" / "decision.json").stat().st_mtime_ns
+    cp = compare("--probes", "unused", "--features", "unused", "--diagnostics", "unused", "--out",
+                 str(tmp_path / "compare"))  # refused before reading anything
+    assert cp.returncode == 2 and "--overwrite" in cp.stderr
+    assert (tmp_path / "compare" / "decision.json").stat().st_mtime_ns == stamp
+    mean_json = str(tmp_path / "compare_mean" / "decision.json")
+    cp = compare("--from-json", mean_json, "--out", str(tmp_path / "compare"))
+    assert cp.returncode == 2 and "--overwrite" in cp.stderr  # another comparison's folder: not without --overwrite
+    cp = compare("--from-json", mean_json, "--out", str(tmp_path / "compare_mean"))
+    assert cp.returncode == 0, cp.stderr[-3000:]  # its own folder: re-rendering is what --from-json is for
+    again = json.loads((tmp_path / "compare_mean" / "decision.json").read_text())
+    assert again["code"] == mean_report["code"] and set(again["from_json_code"]) == CODE_KEYS
+    assert again["decision"] == mean_report["decision"]
+    cp = compare("--from-json", str(tmp_path / "old.json"), "--out", str(tmp_path / "compare"), "--overwrite")
+    assert cp.returncode == 0, cp.stderr[-3000:]
+
 
 def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
     """experiments/ood_refits.py: the original probe's numbers equal fit_probes' own, and the refits and by-layer
@@ -322,10 +346,29 @@ def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
                          "--jobs", "2", "--readouts", "followup", "--probes", "ood", "--skip-baselines"],
                         capture_output=True, text=True, cwd=REPO, timeout=1800)
     assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    probe_dir = out / "diverse_deception" / "without_reasoning" / "followup"
+    meta = json.loads((probe_dir / "meta.json").read_text())
+    assert set(meta["code"]) == CODE_KEYS and meta["features_code"] is None  # the synthetic features have no index
+    assert json.loads((out / "summary.json").read_text())["ood/followup"]["code"] == meta["code"]
+
+    def fit(*args):
+        return subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader",
+                               "synthetic", "--features", str(feats), "--datasets", str(data), "--out", str(out),
+                               "--repeats", "1", "--jobs", "2", "--probes", "ood", "--skip-baselines", *args],
+                              capture_output=True, text=True, cwd=REPO, timeout=1800)
+
+    stamp = (probe_dir / "probe.npz").stat().st_mtime_ns
+    cp = fit("--readouts", "mean,followup")  # would rewrite the follow-up probe: refused before any fitting
+    assert cp.returncode == 2 and "--overwrite" in cp.stderr and str(probe_dir) in cp.stderr
+    assert (probe_dir / "probe.npz").stat().st_mtime_ns == stamp and not (out / "diverse_deception" /
+                                                                         "without_reasoning" / "mean").exists()
+    cp = fit("--readouts", "mean")  # other readouts into the same --out: added, and summary.json accumulates
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    assert set(json.loads((out / "summary.json").read_text())) == {"ood/followup", "ood/mean"}
+
     spec = importlib.util.spec_from_file_location("ood_refits", os.path.join(REPO, "experiments", "ood_refits.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    probe_dir = out / "diverse_deception" / "without_reasoning" / "followup"
     assert mod.main(["--probe", str(probe_dir), "--features", str(feats), "--datasets", str(data),
                      "--out", str(tmp_path / "refits"), "--refits", "6"]) == 0
     fitted = json.loads((probe_dir / "metrics.json").read_text())
@@ -338,6 +381,14 @@ def test_ood_refits_reproduce_the_fitted_probe_and_vary_around_it(tmp_path):
     assert summary["refits"] == 6 and m["cosine_to_original"]["median"] > 0.5
     assert len((tmp_path / "refits" / "by_layer.csv").read_text().splitlines()) == L  # header + layers 1..L-1
     assert summary["by_layer_transfer_with_reasoning"][str(SIGNAL_LAYER)] > 0.8
+    assert set(summary["code"]) == CODE_KEYS
+    again = ["--probe", str(probe_dir), "--features", str(feats), "--datasets", str(data), "--out",
+             str(tmp_path / "refits"), "--refits", "3", "--skip-layers"]
+    with pytest.raises(SystemExit):  # the folder holds an earlier run's outputs
+        mod.main(again)
+    assert mod.main([*again, "--overwrite"]) == 0
+    assert json.loads((tmp_path / "refits" / "summary.json").read_text())["refits"] == 3
+    assert not (tmp_path / "refits" / "by_layer.csv").exists()  # the earlier run's, not this one's
 
 
 def test_learning_curves_run_on_synthetic_probes(tmp_path):
@@ -368,4 +419,7 @@ def test_learning_curves_run_on_synthetic_probes(tmp_path):
     assert ood_full["transfer_auroc_with_reasoning"]["median"] > 0.8
     assert {(r["source"], r["trained_on"]) for r in summary["ood_sources"]} == {
         ("all", "all"), *((s, h) for s in ("a", "b") for h in ("only", "all_but"))}
-    assert all(r["fits"] == 2 for r in summary["ood_sources"])
+    assert all(r["fits"] == 2 for r in summary["ood_sources"]) and set(summary["code"]) == CODE_KEYS
+    with pytest.raises(SystemExit):  # an earlier run's outputs are there; --overwrite would replace them
+        mod.main(["--probes", str(out), "--features", str(feats), "--datasets", str(data),
+                  "--out", str(tmp_path / "curves")])

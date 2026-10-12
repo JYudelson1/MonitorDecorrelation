@@ -73,6 +73,7 @@ def test_dataset_stats_counts_disclosure_question_overlap_and_tokens(tmp_path):
     out = tmp_path / "analyses"
     assert mod.main(["dataset-stats", "--datasets", str(data), "--out", str(out)]) == 0
     stats = json.loads((out / "dataset_stats.json").read_text())
+    assert set(stats["code"]) == {"commit", "dirty", "diff_sha256", "source"}
     assert stats["disclosure"] == {"hacks": {"n": 4, "disclosing": 4, "share": 1.0},
                                    "non_hacks": {"n": 8, "disclosing": 2, "share": 0.25}}
     overlap = stats["ood_question_overlap"]
@@ -97,6 +98,9 @@ def test_dataset_stats_counts_disclosure_question_overlap_and_tokens(tmp_path):
     assert all(t["n_rendered"] == 5 and t["n_items"] == len(terminal) for t in sampled["terminal_prerl"].values())
     with pytest.raises(SystemExit):
         mod.main(["dataset-stats", "--datasets", str(data), "--out", str(out), "--skip-tokens"])
+    assert "tokens" in json.loads((out / "dataset_stats.json").read_text())  # untouched
+    assert mod.main(["dataset-stats", "--datasets", str(data), "--out", str(out), "--skip-tokens", "--overwrite"]) == 0
+    assert "tokens" not in json.loads((out / "dataset_stats.json").read_text())
 
 
 def _write_features(folder, ids, x):

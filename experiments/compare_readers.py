@@ -1,8 +1,8 @@
 """Compare the 4-bit and full-precision readers, and apply the pre-registered reader, batching and readout rules
-(PROBE_PLAN.md section 5b). Runs on hub after experiments/fit_probes.py has fitted both readers.
+(docs/inkling_probes_preregistration.md). Runs on CPUs after experiments/fit_probes.py has fitted both readers.
 
-    uv run python experiments/compare_readers.py --probes scratch/probes --features scratch/features \
-        --diagnostics scratch/diagnostics --datasets data/probe_datasets --out scratch/compare
+    uv run python experiments/compare_readers.py --probes PROBES --features FEATURES \
+        --diagnostics DIAGNOSTICS --datasets data/probe_datasets --out OUT/compare
 
 Inputs:
 - ``--probes``: ``<reader>/<dataset>/<view>/<readout>/`` from fit_probes.py.
@@ -41,7 +41,13 @@ Inputs:
 - **Batching floor** (follow-up probes; the diagnostics keep only that readout): on the diagnostics' TerminalEnv rows
   of the view(s) the probe scores, the mean and sd of its one-at-a-time − batched logits, and Spearman between them.
 
-**Writes** ``decision.json`` and ``report.md``.
+**Writes** ``decision.json`` and ``report.md``; decision.json records the code version (provenance.code_version) as
+``code``. An ``--out`` that already holds either is refused, unless ``--overwrite``.
+
+**--from-json DECISION** re-applies the rules to an earlier decision.json and rewrites both files, recomputing nothing.
+It rewrites the folder DECISION is in without ``--overwrite`` (that is what it is for); another folder that holds a
+comparison needs it. ``code`` stays that of the run that computed the numbers; the code that re-applied the rules is
+recorded as ``from_json_code``.
 """
 
 from __future__ import annotations
@@ -53,10 +59,12 @@ import sys
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import (
     LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, load_items, thresholds)
 
 READERS = ("nvfp4", "bf16")
+OUTPUTS = ("decision.json", "report.md")
 VIEWS = ("with_reasoning", "without_reasoning")
 
 
@@ -119,7 +127,7 @@ def spearman(a, b) -> float:
 
 
 def logits_on(probe: SelectedProbe, features_dir, dataset, view, readout, ids=None):
-    """The probe's logits for every kept item of a view, read one layer from disk (hub has little memory)."""
+    """The probe's logits for every kept item of a view, read one layer from disk (to keep memory low)."""
     src = LayerSource(os.path.join(features_dir, dataset), view, readout)
     rows = np.flatnonzero(src.keep)
     z = probe.logit(src.layer(probe.layer, rows))
@@ -385,7 +393,7 @@ def sink_check(args, reader) -> dict:
     return {"median_ratio_layers_10_35": float(np.median(mid)), "sink_like": float(np.median(mid)) > 5}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--probes")
     ap.add_argument("--features")
@@ -396,17 +404,25 @@ def main() -> int:
                     help="comma-list: the probes compared (followup, mean, router, router_all); the jitter, batching "
                          "and sink checks are about the follow-up readout and run only with it")
     ap.add_argument("--from-json", help="re-apply the rules to an earlier decision.json and rewrite the report, "
-                                        "without recomputing anything")
-    args = ap.parse_args()
+                                        "without recomputing anything; may rewrite the folder that JSON is in")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="replace the decision.json and report.md already in --out (else the run refuses to start)")
+    args = ap.parse_args(argv)
+    existing = [f for f in OUTPUTS if os.path.exists(os.path.join(args.out, f))]
+    rerender = bool(args.from_json) and \
+        os.path.realpath(os.path.dirname(os.path.abspath(args.from_json))) == os.path.realpath(args.out)
+    if existing and not (args.overwrite or rerender):
+        ap.error(f"{args.out} already holds {' and '.join(existing)}; --overwrite replaces them")
     if args.from_json:
-        finish(json.load(open(args.from_json)), args.out)
+        report = json.load(open(args.from_json))
+        finish({**report, "from_json_code": code_version()}, args.out)
         return 0
     if not (args.probes and args.features and args.diagnostics):
         ap.error("--probes, --features and --diagnostics are required (unless --from-json)")
     readouts = [r for r in args.readouts.split(",") if r]
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
     ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
-    report = {"readouts": readouts, "probes": {}, "jitter": {}, "batching": {}, "sink": {},
+    report = {"readouts": readouts, "code": code_version(), "probes": {}, "jitter": {}, "batching": {}, "sink": {},
               "routing_agreement": routing_agreement(args), "routing_agreement_at_yes": routing_agreement_at_yes(args)}
     for dataset, view, readout in probes_for(readouts):
         name = f"{dataset}/{view}/{readout}"

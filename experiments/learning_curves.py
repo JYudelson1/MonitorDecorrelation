@@ -1,8 +1,8 @@
 """Was there enough training data? Learning curves for one reader's follow-up probes, refitted at the fitted probe's
 layer and C on growing fractions of its training data.
 
-    uv run python experiments/learning_curves.py --probes ../scratch/probes/bf16 --features ../scratch/features/bf16 \
-        --out ../scratch/learning_curves/bf16
+    uv run python experiments/learning_curves.py --probes PROBES/bf16 --features FEATURES/bf16 \
+        --out OUT/learning_curves/bf16
 
 **IID** (TerminalEnv, label ``used_verifier``), per view:
 - **Training data:** a fraction of the dev tasks (train + val). Tasks with and without hacks are sampled separately,
@@ -24,7 +24,9 @@ layer and C on growing fractions of its training data.
   as the differences between compositions.
 
 **Writes** ``iid.csv``, ``ood.csv``, ``ood_sources.csv`` and ``summary.json``: per fraction, each metric's median and
-5th/95th percentiles. A fraction of 1 is the full training set, fitted once.
+5th/95th percentiles. A fraction of 1 is the full training set, fitted once. summary.json records the code version
+(provenance.code_version) as ``code``. An ``--out`` that already holds any of these files is refused, unless
+``--overwrite``.
 """
 
 from __future__ import annotations
@@ -39,9 +41,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, auroc, load_items, thresholds
 
 VIEWS = ("with_reasoning", "without_reasoning")
+OUTPUTS = ("iid.csv", "ood.csv", "ood_sources.csv", "summary.json")
 
 
 def used_verifier(it: dict) -> int:
@@ -87,7 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source-refits", type=int, default=10, help="bootstrap refits per source composition")
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overwrite", action="store_true", help="replace the outputs already in --out (else refused)")
     args = ap.parse_args(argv)
+    existing = [f for f in OUTPUTS if os.path.exists(os.path.join(args.out, f))]
+    if existing and not args.overwrite:
+        ap.error(f"{args.out} already holds {', '.join(existing)}; --overwrite replaces them")
+    code = code_version()
     log = lambda m: print(f"[curves {time.strftime('%H:%M:%S')}] {m}", flush=True)  # noqa: E731
     fractions = [float(f) for f in args.fractions.split(",")]
     rng = np.random.default_rng(args.seed)
@@ -202,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         write_csv(os.path.join(args.out, f"{name}.csv"), rows)
     iid_m = ("test_auroc", "test_tpr_at_1pct_fpr", "concealed_test_hacks_recall")
     ood_m = ("ood_test_auroc", *(f"{k}_{v}" for v in VIEWS for k in ("transfer_auroc", "tpr_at_t1")))
-    summary = {"probes": args.probes, "features": args.features,
+    summary = {"probes": args.probes, "features": args.features, "code": code,
                "iid": summarize(tables["iid"], ("view", "fraction"), iid_m),
                "ood": summarize(tables["ood"], ("fraction",), ood_m),
                "ood_sources": summarize(tables["ood_sources"], ("trained_on", "source"), ood_m)}

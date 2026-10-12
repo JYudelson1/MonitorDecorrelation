@@ -215,6 +215,7 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
     assert got["golden"] == len(items) == 10  # fewer than N_GOLDEN episodes: all of them
     meta = json.load(open(out / "meta.json"))
     assert meta["name"] == "probe_iid_x" and meta["golden_tolerance"] == dp.MEAN_TOLERANCE and meta["effort"] == 0.5
+    assert set(meta["deployed_code"]) == {"commit", "dirty", "diff_sha256", "source"}  # the deploying code
     assert set(got["serving_check"]) == {"test_auroc", "test_tpr_at_t1", "test_fpr_at_t1"}  # no diagnostics given
     scorer = ProbeScorer(world["model"], [str(out)])
     report = scorer.golden_check([str(out)], tolerance=meta["golden_tolerance"])

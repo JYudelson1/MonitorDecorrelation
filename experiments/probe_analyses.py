@@ -1,10 +1,10 @@
-"""Numbers behind PROBE_RESULTS.md that came from one-off snippets, as subcommands that write JSON to ``--out``.
+"""Numbers behind docs/INKLING_PROBES.md that came from one-off snippets, as subcommands that write JSON to ``--out``.
 
     uv run python experiments/probe_analyses.py dataset-stats --datasets data/probe_datasets \
-        --out ../scratch/analyses/<UTC timestamp>
-    uv run python experiments/probe_analyses.py near-threshold --features ../scratch/features/bf16 \
-        --probes ../scratch/probes/bf16/terminal_prerl/with_reasoning/followup,<more probe dirs> \
-        --out ../scratch/analyses/<UTC timestamp>
+        --out OUT/analyses/<UTC timestamp>
+    uv run python experiments/probe_analyses.py near-threshold --features FEATURES/bf16 \
+        --probes PROBES/bf16/terminal_prerl/with_reasoning/followup,<more probe dirs> \
+        --out OUT/analyses/<UTC timestamp>
 
 **dataset-stats** (``dataset_stats.json``; reads the datasets' items.jsonl only):
 - **Disclosure** (terminal_prerl): how many ``used_verifier`` hacks, and how many other episodes, have visible turn
@@ -25,9 +25,10 @@ lies within ``--k`` logits of t₁%, at:
   own view;
 - t₁% recalibrated on these features: the 99th percentile of the same episodes' logits.
 
-It sizes a re-scoring of only the episodes near t₁% (PROBE_RESULTS.md 3.4).
+It sizes a re-scoring of only the episodes near t₁% (the batching rule's fix, docs/INKLING_PROBES.md section 7).
 
-An output file that already exists is never overwritten.
+Each subcommand writes its own file, so both can share one ``--out``. A subcommand refuses to start if its file is
+already there, unless ``--overwrite``. Every file records the code version (provenance.code_version) as ``code``.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ import time
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, load_items, thresholds
 
 VIEWS = ("with_reasoning", "without_reasoning")
@@ -158,20 +160,22 @@ def main(argv: list[str] | None = None) -> int:
     nt.add_argument("--k", type=float, default=4.0, help="distance from t1, in logits")
     for p in (ds, nt):
         p.add_argument("--datasets", default="data/probe_datasets", help="folder with the dataset folders")
-        p.add_argument("--out", required=True, help="output folder, e.g. ../scratch/analyses/<UTC timestamp>")
+        p.add_argument("--out", required=True, help="output folder, e.g. OUT/analyses/<UTC timestamp>")
+        p.add_argument("--overwrite", action="store_true", help="replace this subcommand's file in --out")
     args = ap.parse_args(argv)
 
     path = os.path.join(args.out, args.command.replace("-", "_") + ".json")
-    if os.path.exists(path):
-        ap.error(f"{path} exists; pick a new --out")
+    if os.path.exists(path) and not args.overwrite:
+        ap.error(f"{path} exists; pick a new --out, or --overwrite replaces it")
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    code = code_version()
     if args.command == "dataset-stats":
         result = dataset_stats(args)
     else:
         items = load_items(os.path.join(args.datasets, "terminal_prerl"))
         result = {"features": os.path.abspath(args.features), "k": args.k,
                   "probes": {p: near_threshold(p, args.features, items, args.k) for p in args.probes.split(",") if p}}
-    result = {"command": args.command, "started_utc": started, **result}
+    result = {"command": args.command, "started_utc": started, "code": code, **result}
     os.makedirs(args.out, exist_ok=True)
     with open(path, "w") as fh:
         json.dump(result, fh, indent=1)

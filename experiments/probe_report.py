@@ -1,12 +1,12 @@
 """Collect the Inkling probe results into the repo, and render their tables into markdown files.
 
-    uv run python experiments/probe_report.py collect --scratch ../scratch --analyses ../scratch/analyses
+    uv run python experiments/probe_report.py collect --scratch RESULTS --analyses RESULTS/analyses
     uv run python experiments/probe_report.py render docs/INKLING_PROBES.md
     uv run python experiments/probe_report.py check docs/INKLING_PROBES.md
 
-The probes are fitted and analysed on hub, in a scratch folder outside the repo. ``collect`` copies the small result
-files into the repo, so the numbers travel with the code; ``render`` writes the docs' tables from them, so a table
-can't drift from the results it reports.
+The probes are fitted and analysed in a scratch folder outside the repo (``--scratch``). ``collect`` copies the small
+result files into the repo, so the numbers travel with the code; ``render`` writes the docs' tables from them, so a
+table can't drift from the results it reports.
 
 **collect** rebuilds these folders of ``--out`` (``data/probe_results/``), never with ``scores.jsonl`` (per episode,
 large):
@@ -23,7 +23,7 @@ large):
 Other files in ``--out`` (e.g. a hand-written ``PROVENANCE.md``) are kept as they are. Machine paths in the JSON
 and markdown files are rewritten: a path into a collected folder becomes its path relative to ``--out``, any other
 path its last component. ``MANIFEST.json`` lists every collected file with its source (relative to the folder
-holding ``--scratch``) and sha256.
+holding ``--scratch``) and sha256, and the code version that collected them (``code``, provenance.code_version).
 
 **render FILE** replaces what is between each pair of markers
 
@@ -200,6 +200,8 @@ def source_label(path: str, strip: str, sources: dict[str, str]) -> str:
 
 
 def collect(args) -> int:
+    from monitordecorrelation.provenance import code_version  # here: render and check never import the package
+
     probes = args.probes or os.path.join(args.scratch, "probes")
     readers = sorted(d for d in os.listdir(probes) if os.path.isdir(os.path.join(probes, d))) \
         if os.path.isdir(probes) else []
@@ -279,8 +281,8 @@ def collect(args) -> int:
         shutil.rmtree(tmp)
         raise SystemExit(f"collect: machine paths survived the rewriting in {', '.join(leaks)}; nothing written")
     with open(os.path.join(tmp, "MANIFEST.json"), "w") as fh:
-        json.dump({"written_by": "experiments/probe_report.py collect", "files": manifest}, fh, indent=1,
-                  sort_keys=True)
+        json.dump({"written_by": "experiments/probe_report.py collect", "code": code_version(), "files": manifest}, fh,
+                  indent=1, sort_keys=True)
         fh.write("\n")
     kept = sorted(n for n in os.listdir(out) if n not in OWNED) if os.path.isdir(out) else []
     for name in kept:  # not collect's: carried over as they are

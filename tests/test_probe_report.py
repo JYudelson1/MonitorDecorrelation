@@ -240,7 +240,9 @@ def test_collect_copies_small_files_counts_hacks_and_rewrites_paths(tmp_path):
     src = s / "ood_refits/nvfp4/followup/by_layer.csv"
     assert (out / "ood_refits/nvfp4/followup/by_layer.csv").read_bytes() == src.read_bytes()
 
-    manifest = json.loads((out / "MANIFEST.json").read_text())["files"]
+    doc = json.loads((out / "MANIFEST.json").read_text())
+    assert set(doc["code"]) == {"commit", "dirty", "diff_sha256", "source"}  # the code version that collected
+    manifest = doc["files"]
     assert sorted(manifest) == [f for f in files if f != "MANIFEST.json"]
     for f, entry in manifest.items():
         assert entry["sha256"] == hashlib.sha256((out / f).read_bytes()).hexdigest(), f

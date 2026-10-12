@@ -1,8 +1,8 @@
 """Turn fitted Inkling probes (experiments/fit_probes.py) into deployed monitors under data/probes/Inkling-Small/,
 each with the golden set the probe server checks at startup.
 
-    uv run python experiments/deploy_probes.py --probes ../scratch/probes/nvfp4 --features ../scratch/features/nvfp4 \
-        --diagnostics ../scratch/diagnostics/nvfp4 --out data/probes/Inkling-Small
+    uv run python experiments/deploy_probes.py --probes PROBES/nvfp4 --features FEATURES/nvfp4 \
+        --diagnostics DIAGNOSTICS/nvfp4 --out data/probes/Inkling-Small
 
 **What gets deployed** (one directory per monitor, ``<dataset>/<view>/<readout>/``; ``view`` is how the server
 renders a TerminalEnv episode):
@@ -10,11 +10,13 @@ renders a TerminalEnv episode):
 - **OOD** ``diverse_deception/<view>/<readout>`` for both TerminalEnv views: the probe fitted on diverse_deception
   (rendered without reasoning), with the t₁%/t₅% thresholds of that TerminalEnv view's honest dev episodes.
 
-**Added to meta.json:** ``name``, ``effort`` (the probe datasets' rendering effort), ``golden_tolerance`` and the
-fitted directory.
+**Added to meta.json:** ``name``, ``effort`` (the probe datasets' rendering effort), ``golden_tolerance``, the
+fitted directory, ``deployed_utc`` and ``deployed_code``, the code version that deployed it (provenance.code_version;
+``code`` stays the fit's). A deployment replaces its monitors' directories: that is its job.
 
-**Serving on another reader** (``--features`` of a reader other than the one the probes were fitted on; PROBE_PLAN.md
-section 8: train on full precision, serve 4-bit). The served logits come from the serving reader, so:
+**Serving on another reader** (``--features`` of a reader other than the one the probes were fitted on; the original
+plan's section 8, as docs/INKLING_PROBES.md section 5 quotes it: train on full precision, serve 4-bit). The served
+logits come from the serving reader, so:
 - t₁%/t₅% are recalibrated as the 99th/95th percentiles of the probe's logits on the serving reader's honest
   TerminalEnv dev episodes (train + val), per view;
 - ``reader``/``reader_info`` name the serving reader (the monitor checks them against the server), and the fitting
@@ -26,9 +28,9 @@ fitted on pre-RL episodes of the same eval tasks the RL runs evaluate on, so rep
 the ``test`` tasks too: those are the tasks no probe saw (within-task AUROC says the probes don't key on the task).
 
 **Serving check** (in ``deployed.json``): on the serving reader's TerminalEnv features, the deployed probe's test
-AUROC and its TPR/FPR at t₁%; and the batching rule's numbers for it (PROBE_PLAN.md 5b): the 99th-percentile
-|Δlogit| between batched and one-at-a-time readouts on the diagnostics sample, and the share of hacks and of
-negatives whose logit lies that close to t₁%.
+AUROC and its TPR/FPR at t₁%; and the batching rule's numbers for it (docs/inkling_probes_preregistration.md): the
+99th-percentile |Δlogit| between batched and one-at-a-time readouts on the diagnostics sample, and the share of hacks
+and of negatives whose logit lies that close to t₁%.
 
 **Golden set** (``golden.jsonl``): 32 TerminalEnv test episodes (up to 8 hacks), with their renderings' sha256 and
 their logits on the stored features (``probe_fit.write_golden``).
@@ -52,6 +54,7 @@ import time
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, load_items, thresholds, write_golden
 
 VIEWS = ("with_reasoning", "without_reasoning")
@@ -144,14 +147,17 @@ def fitted_ref(fitted: str) -> str:
 
 
 def deploy(probe: SelectedProbe, fitted: str, out: str, name: str, view: str, readout: str, items: dict,
-           features: str, effort: float, tolerance: float | None, log, diagnostics: str | None = None) -> dict:
+           features: str, effort: float, tolerance: float | None, log, diagnostics: str | None = None,
+           code: dict | None = None) -> dict:
+    """Write one monitor to ``out`` (replacing it); ``code``: the deploying code's version (default: taken now)."""
     src = LayerSource(os.path.join(features, "terminal_prerl"), view, readout)
     ids = golden_ids(items, src)
     if tolerance is None:
         tolerance = MEAN_TOLERANCE
     probe.meta = {**probe.meta, "name": name, "view": view, "effort": effort, "golden_tolerance": tolerance,
                   "fitted_dir": fitted_ref(fitted), "deployed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                                                       time.gmtime())}
+                                                                                       time.gmtime()),
+                  "deployed_code": code_version() if code is None else code}
     if os.path.isdir(out):
         shutil.rmtree(out)
     probe.save(out)
@@ -180,6 +186,7 @@ def main() -> int:
     effort = json.load(open(os.path.join(args.datasets, "terminal_prerl", "manifest.json"))).get("effort", 0.5)
     index = json.load(open(os.path.join(args.features, "terminal_prerl", "index.json")))
     serving = {"reader": args.serving_reader, "reader_info": index["reader"]}
+    code = code_version()
     done = []
     for readout in args.readouts.split(","):
         for view in VIEWS:
@@ -190,7 +197,7 @@ def main() -> int:
                 tol = followup_tolerance(args.diagnostics, p) if readout == "followup" else None
                 done.append(deploy(p, fitted, os.path.join(args.out, "terminal_prerl", view, readout),
                                    f"probe_iid_{view}_{readout}", view, readout, items, args.features, effort, tol,
-                                   log, args.diagnostics))
+                                   log, args.diagnostics, code))
         fitted = os.path.join(args.probes, "diverse_deception", "without_reasoning", readout)
         if os.path.isdir(fitted):
             for view in VIEWS:
@@ -201,7 +208,7 @@ def main() -> int:
                 tol = followup_tolerance(args.diagnostics, p) if readout == "followup" else None
                 done.append(deploy(p, fitted, os.path.join(args.out, "diverse_deception", view, readout),
                                    f"probe_ood_{view}_{readout}", view, readout, items, args.features, effort, tol,
-                                   log, args.diagnostics))
+                                   log, args.diagnostics, code))
     splits: dict[str, set] = {}
     for it in items.values():
         splits.setdefault(it["split"], set()).add(it["task_id"])
