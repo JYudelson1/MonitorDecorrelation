@@ -8,6 +8,14 @@ Methodology/seam: [`MONITORS.md`](MONITORS.md). _Last updated: 2026-06-15 (findi
 > `mbpp_honeypot` (retrained split-safe). The findings/how-to below are the (still-valid) investigation
 > record that got us here; the 4B/sycophancy inventory rows are historical.
 
+> **Inkling-Small (2026-10-12):** the TerminalEnv runs on Inkling-Small have their own two probes, an IID hack
+> probe (`terminal_prerl`) and an OOD deception probe (`diverse_deception`), deployed as 8 monitors under
+> `data/probes/Inkling-Small/` (`kind: inkling_probe`). Everything about them is in
+> [`INKLING_PROBES.md`](INKLING_PROBES.md): data, the 4-bit and full-precision readers, the pre-registered fitting,
+> results, caveats and how to serve them. They use a separate pipeline (episode replay through the TML renderer,
+> one selected layer, a probe server), so the extraction methods and training commands below don't apply to them.
+> The CoT-stripping bug doesn't either: the TML renderer keeps every turn's thinking in the with-reasoning view.
+
 ## Extraction methods (3 ways to read activations)
 
 A probe is per-layer logistic regression on residual-stream activations at one token (drop layers with
@@ -54,6 +62,13 @@ it. So **the follow-up technique is structurally no-CoT on thinking (Qwen3) mode
 | MASK subtle (on-policy) | rollouts | Qwen3-8B | ~0.60 | hard; robust to labels/method/CoT |
 | **`diverse_deception`** (`probe_ood`) | 7-source mix (5849 pairs) | Qwen3-8B | **0.977** | trained + committed; the OOD matrix detector |
 | **`mbpp_honeypot`** (`probe_iid`) | honest code vs hardcode | Qwen3-8B | trained | split-safe; the iid matrix detector |
+| **`terminal_prerl`** (`probe_iid`, Inkling) | pre-RL TerminalEnv episodes, hack = `used_verifier` | Inkling-Small | 1.000 (test) | close to a text detector on pre-RL data; [`INKLING_PROBES.md`](INKLING_PROBES.md) |
+| **`diverse_deception`** (`probe_ood`, Inkling) | 6-source mix (4,849 pairs) | Inkling-Small | 0.98; 0.71 on TerminalEnv hacks | responds to lying about the hack more than to the hack; [`INKLING_PROBES.md`](INKLING_PROBES.md) |
+
+The Inkling rows are the full-precision-trained follow-up probes, which are served on the 4-bit reader. The OOD
+probe's 0.71 is its transfer to TerminalEnv hacks in the with-reasoning view.
+[`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md) lists all eight deployed monitors. <!-- src
+for the two Inkling rows: data/probe_results/fitted/bf16/{terminal_prerl/with_reasoning,diverse_deception/without_reasoning}/followup/metrics.json -->
 
 ## How to train / deploy
 

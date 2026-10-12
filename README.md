@@ -56,6 +56,7 @@ sessions:
 | [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) | Concrete experiment designs, metrics, the degradation matrix. |
 | [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md) | The RL environment catalog (sycophancy, coding reward-hacking, ImpossibleBench, LiveCodeBench). |
 | [`docs/MONITORS.md`](docs/MONITORS.md) | The generic monitor abstraction (black-box + white-box) and the tinker-activations question. |
+| [`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md) | The Inkling-Small TerminalEnv probes: data, readers, the pre-registered fitting, results, caveats, and how to serve them. |
 | [`docs/INFRA.md`](docs/INFRA.md) | RL backend abstraction (tinker now, verl later), GRPO, and local-wandb logging. |
 | [`USAGE.md`](USAGE.md) | The runnable scripts (entrypoints) and how to run them. |
 | [`STATUS.md`](STATUS.md) | Living implementation checklist — what's built, tested, and correct. |

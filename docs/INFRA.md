@@ -1,6 +1,7 @@
 # Infrastructure
 
-How the RL substrate, algorithm, and logging fit together. Build state in [`../STATUS.md`](../STATUS.md).
+How the RL substrate, algorithm, and logging fit together, plus our own GPU jobs and storage (the last two
+sections). Build state in [`../STATUS.md`](../STATUS.md).
 
 ## Layers
 
@@ -83,3 +84,159 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
   still averaged over all rollouts (0 for invalid ones) — the reward actually deducted per rollout.
 - Not available: grad norm (tinker's `optim_step` returns no metrics for LoRA runs) and post-update KL
   (would cost an extra logprob pass per step).
+
+## GPU VMs on Nebius (`scripts/nebius_job.py`)
+
+The policy trains on tinker, but some jobs need our own GPUs: extracting Inkling-Small probe features, serving the
+Inkling probes, and scoring finished runs with them ([`INKLING_PROBES.md`](INKLING_PROBES.md),
+[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)). `scripts/nebius_job.py` turns such a job into one command on a fresh Nebius VM
+(NVIDIA B300 by default), and always cleans up. It is stdlib-only Python, so plain `python3` runs it.
+
+```bash
+python3 scripts/nebius_job.py prices                    # every region's price and capacity now (read-only)
+python3 scripts/nebius_job.py run --hours 2 --out runs/{stamp}-{name} --hf ORG/REPO[@REV] --fetch results -- '<job>'
+python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}    # keep the VM; prints the ssh line
+python3 scripts/nebius_job.py exec --host user@ip --out runs/x -- '<job>'   # any SSH box, no Nebius
+python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify
+python3 scripts/nebius_job.py list                      # instances and disks in every region
+python3 scripts/nebius_job.py budget                    # the spending ledger: limit, spent, reserved
+python3 scripts/nebius_job.py reap                      # clean up after a launcher that died mid-run
+```
+
+`run` and `up` accept `--dry-run`: the price check, then the create call, cloud-init and remote scripts, with nothing
+created.
+
+**Setup.**
+- The `nebius` CLI, authenticated with rights to create VMs in your projects (`NEBIUS_BIN` if it isn't on `PATH`).
+- **Where VMs may go:** a regions file (`--regions-file` or `NEBIUS_REGIONS_FILE`) with one project per region, its
+  subnet and the region's public-image project. The shape is in
+  [`scripts/nebius_regions.example.json`](../scripts/nebius_regions.example.json); keep the real one outside the repo.
+  A single project also works (`NEBIUS_PROJECT_ID`, `NEBIUS_SUBNET_ID`).
+- **SSH key:** `NEBIUS_SSH_KEY` names a private key; its `.pub` goes into the VM's cloud-init.
+- **Optional spending guard:** a ledger file (`--budget-file` or `NEBIUS_BUDGET_FILE`, created as
+  `{"limit_usd": N, "entries": []}`) and a spot bid per GPU-hour (`--max-gpu-price` or `NEBIUS_MAX_GPU_PRICE`).
+- **Optional HF token** with write access to the buckets (`--hf-token-file`), only for `--upload`.
+
+**What `run` does.**
+1. Quote every region of the regions file with Nebius's cost calculator, read the capacity advice, and create the VM
+   in the cheapest region that has the platform, capacity and quota, under `--max-price` if given. If creation fails
+   there, clean up and try the next.
+2. Bootstrap over SSH: a tmpfs RAM disk at `/mnt/ram`, lingering for the user, uv.
+3. Download the `--hf` weights into `/mnt/ram` (public repos, no token), detached.
+4. Push the repo (tracked files plus untracked files that aren't ignored, so `.env`, `.venv` and `.git` never travel)
+   and any `--push` inputs; `uv sync --locked`.
+5. Run the job, detached and polled. It gets `NEBIUS_JOB_DEADLINE` (the VM's scheduled shutdown, epoch seconds).
+6. `--upload` paths go straight from the VM to an HF bucket; `--fetch` paths and all logs come back into `--out`.
+7. Delete the VM and verify that neither it nor its boot disk is left. This runs in a `finally`, so errors,
+   preemption and Ctrl-C delete too; only `--keep` (and `up`) opt out.
+
+`job.json` in `--out` records the VM, the flags, timestamps, the exit code, whether the VM was preempted, every
+region's quote, the price every 15 minutes while the VM existed, and an estimated cost. Exit status: 0 on success;
+the job's own code if it failed; 2 for an infrastructure failure; 3 if the VM stopped mid-run; 75 if the job stopped
+early and no attempt was left; 130 on Ctrl-C.
+
+### Spot VMs: how they behave
+
+Since 2026-10-08 Nebius prices preemptible VMs on a per-region spot market:
+- **Prices move** as often as every 15 minutes, and a running VM's price moves too; billing is per second. On one day
+  the same 1× B300 cost about 8 times more in one region than in another, so the launcher always quotes every region.
+- **A pricing model is required** for a spot VM: follow the market price, or bid through a pricing policy
+  (`--max-gpu-price`). With a bid, Nebius never charges more than it, and the VM doesn't run while the market is
+  above it. You pay the market price, not the bid.
+- **Preemption:** Nebius sends SIGTERM 60 s before stopping a spot VM. Disks survive a stop; RAM, including
+  `/mnt/ram`, does not. A stopped VM still exists: only deleting it ends all billing.
+
+**What we saw** (one night of probe-feature extraction, 2026-10-10, summarized by `scripts/spot_events.py` from the
+launcher's `job.json` records): 12 VMs from 17 attempts, about 8 GPU-hours, about $30.
+- **4 preemptions,** about 1.4 per VM-hour. Three came within 2–5 minutes of the VM starting; both 8-GPU VMs created
+  that night were stopped before they finished booting. Every VM that survived its first ~5 minutes ran to its end,
+  except one stopped after 32 minutes.
+- **10 creations failed for lack of capacity,** each after a ~6-minute schedule timeout, at no cost, even when the
+  capacity advice said HIGH. Capacity advice is not a reservation.
+- **2 creations hit the public-IPv4 quota** (3 per region for our tenant), so at most 3 VMs fit in one region.
+- **Bid-triggered preemptions** happen when the market rises past the bid; prices rose through that night. Bid about
+  $1/GPU-hour above the current price.
+
+### Lessons learned (all built into the launcher)
+
+1. **Weights go into RAM.** The VM's network SSD sustains only ~47 MB/s once the page cache fills; HF → RAM ran at
+   hundreds of MB/s to GB/s. Not into `/dev/shm`: systemd-logind (`RemoveIPC=yes`, the default) deletes a user's
+   `/dev/shm` files when their last session ends, which once silently deleted a finished 171 GB download. Use a
+   separate tmpfs plus `loginctl enable-linger`.
+2. **Detach long remote commands properly:** `setsid nohup bash -lc '…' > log 2>&1 < /dev/null &`, with any `cd`
+   inside the quotes. `cd x && nohup … &` keeps the SSH channel open until the step ends.
+3. **Never `pkill -f PATTERN`** when the pattern also appears in your own command line: it kills the invoking shell.
+4. **`--recovery-policy FAIL`**, so the in-VM `shutdown -h +N` spending cap really stops the VM.
+5. **The managed boot disk needs a name,** and `instance delete` removes it too. Verify with `instance list` and
+   `disk list`.
+6. **A fresh `known_hosts` per run:** public IPs are reused across VMs.
+7. **No HF token for downloads** of public models: they run at full speed without one.
+8. **A preempted VM's serial console** (`nebius compute instance logs`) shows when it really stopped, even after the
+   VM is deleted. 8-GPU VMs print every PCIe device to a slow console and take ~4 minutes from RUNNING to SSH; 1-GPU
+   VMs about 1 minute.
+9. **Is the bid still above the price?** A pricing policy whose `status.scheduling_state` is
+   `SCHEDULING_STATE_BLOCKED` bids below the current spot price: its VMs won't be scheduled, and running ones get
+   preempted.
+10. **The ledger reserves the worst case** (bid × GPUs × `--hours`) until a VM is settled. After preemptions it can
+    refuse a relaunch whose likely cost would fit. That is the point of a hard cap.
+
+### Preemption, deadlines and relaunching
+
+- **Relaunch:** `run --attempts N` (default 3). After a spot preemption, or a job exit of 75 ("stopped early, saved
+  its progress, run me again"), a fresh VM runs the job again in whichever region is cheapest then, within the
+  budget. Attempt k logs to `--out/retry-k/`. While no region qualifies, it re-checks every 15 minutes for
+  `--wait-hours` (default 2).
+- **The job must resume from what it saved.** The probe extraction does (next section).
+- **Soft deadline:** a job that reads `NEBIUS_JOB_DEADLINE` can stop cleanly before `--hours` cuts it off. The
+  extraction starts a shard only if the shard and its upload fit before the deadline, and on SIGTERM (the 60 s notice)
+  it starts nothing new and lets the uploads finish. Either way it exits 75.
+- **A launcher that died** (e.g. its machine restarted): the VM powers itself off 15 minutes after its job ends,
+  instead of idling until `--hours`. `reap` (which `run` and `up` also do first when a ledger is set) deletes such
+  VMs once stopped and settles their reservations in the ledger from the prices the launcher sampled.
+- **`scripts/spot_events.py runs/`** builds a table of every VM attempt from the `job.json` records: creation failures
+  by kind and region, minutes to run, how each VM ended, cost, and preemptions per VM-hour.
+
+## Storage: Hugging Face buckets, saved as you go
+
+The Inkling probe data lives in two **private** Hugging Face storage buckets. Access must be granted by the owners
+(membership in both organizations); the probes in the repo work without them.
+
+| bucket | holds |
+|---|---|
+| `probemaxxing/inkling-probes` | `datasets/` (the probe datasets' items), `inputs/` (the raw pre-RL rollouts), `features/nvfp4/` (4-bit features, plus whole hidden states of a few episodes under `*/full/`), `diagnostics/` (reader diagnostics), `probes/` (fitted probes, comparisons, deployed copies), `runs/` and `sessions/` (GPU job reports and status) |
+| `probemaximizer/inkling-probes-bulk` | `features/bf16/` (full-precision features) |
+
+Each free organization gets 100 GB of private storage, hence two buckets.
+
+**Why HF buckets.** They are free under that quota and reachable from every region, so a relaunched job can move to
+the cheapest region and still find its work; the data ends up there anyway. From a 1× B300 VM uploads ran at ~170 MB/s
+with one uploader and ~530 MB/s with four, several times what extraction produces. Nebius disks and shared
+filesystems are tied to one region; Nebius Object Storage would need access keys on the VM.
+
+**The token.** With `--upload`, the launcher sends an HF token with write access over SSH into an owner-only file on
+the VM before the job starts, so the job can save its own progress. It is deleted when the upload step ends, and with
+the VM, and never appears on a command line, in a log or in `job.json`. No other secret goes to the VM.
+
+**Saving as you go** (`whitebox/store.py`). A store is a bucket prefix (`hf://buckets/NS/BUCKET/PREFIX`) or a local
+directory.
+- Work is saved in **units**: a unit's data files first, then its marker file in a separate call, because bucket
+  batches are not transactional. A marker in the store means its unit is complete.
+- Uploads run on a background thread, so the GPU never waits for the network. `flush` waits for them, e.g. within
+  the 60 s preemption notice.
+- Permanent errors (quota, permission) are not retried: they mark the store broken, and the extraction stops making
+  work it can't save.
+
+**Resuming.** `experiments/extract_probe_features.py --store` (and the session driver
+`experiments/run_probe_session.py`) save each 256-item shard as it finishes, and on any VM skip every shard whose
+marker and data are already in the store. A preemption therefore loses only the shards in progress.
+- `index.json` pins the settings that decide what a shard holds (dataset, reader, views, shard size, feature format,
+  library versions, batching budget). A run with other settings refuses to start rather than mix shards.
+- `--part i/n` splits a dataset's shards between processes, or VMs, that share one store.
+- The session driver exits 1 if a required reader failed (a relaunch wouldn't help), 75 if it stopped early with work
+  left (relaunch and resume), 76 if `--hours` left no time for even one shard (not relaunched).
+- **It paid off:** the full-precision session's VM was preempted 32 minutes in, when every essential shard was
+  already in the bucket. Nothing had to be redone.
+
+**Getting features back.** `scripts/fetch_features.py STORE DEST` downloads complete shards only, writing each
+marker last so an interrupted fetch resumes cleanly. `--keep followup,counts,answer_logp` keeps only some tensors per
+shard, for machines with little disk. `scripts/bucket_speed_test.py` measures upload speed from a VM.

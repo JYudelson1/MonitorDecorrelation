@@ -1,0 +1,21 @@
+{
+  "_comment": "Example regions file for scripts/nebius_job.py (--regions-file or NEBIUS_REGIONS_FILE). Copy it outside the repo and fill in your own IDs: one project per region, that project's subnet, and the region's public-image project. The tenant is used only for capacity advice. Top-level keys other than tenant and regions (like this one) are ignored.",
+  "tenant": "<tenant-id>",
+  "regions": {
+    "us-north1": {
+      "project": "<us-north1-project-id>",
+      "subnet": "<us-north1-subnet-id>",
+      "image_project": "<us-north1-public-image-project-id>"
+    },
+    "eu-west2": {
+      "project": "<eu-west2-project-id>",
+      "subnet": "<eu-west2-subnet-id>",
+      "image_project": "<eu-west2-public-image-project-id>"
+    },
+    "uk-south1": {
+      "project": "<uk-south1-project-id>",
+      "subnet": "<uk-south1-subnet-id>",
+      "image_project": "<uk-south1-public-image-project-id>"
+    }
+  }
+}

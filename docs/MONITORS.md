@@ -199,7 +199,7 @@ full dumps (`rollouts.jsonl`, `eval_rollouts.jsonl`) carry `finish_reason` and (
 | --- | --- | --- |
 | **CoT monitor** | CoT + output (text) | ✅ built — weak/strong via `model_id` (`cot_weak`/`cot_strong`) |
 | **Output monitor** | final output only (text) | ✅ built — `use_cot: false` (`out_weak`/`out_strong`) |
-| **Linear probe** | activations (white-box) | ✅ built — `probe_ood` + `probe_iid`, original-model probing |
+| **Linear probe** | activations (white-box) | ✅ built — `probe_ood` + `probe_iid`, original-model probing: Qwen3-8B (`kind: probe`) and Inkling-Small for the TerminalEnv (`kind: inkling_probe`, below) |
 | Activation oracle / non-linear probe | activations | later |
 | Behavioral eval | aggregate behavior over many rollouts | later |
 
@@ -255,6 +255,77 @@ forward` round-trip per step (deferred; only worth it for the activations-decomp
 
 **Rule of thumb:** tinker backend → **original-model** probing (frozen base, same size); local
 `TransformersBackend` → **trained-model** probing (live activations).
+
+## Inkling probe monitors (`kind: inkling_probe`)
+
+The Inkling-Small TerminalEnv runs use original-model probing through their own path: a probe server on one GPU,
+and `InklingProbeMonitor` (`monitors/inkling_probe_monitor.py`) as its client. The probes, their results and their
+caveats are in [`INKLING_PROBES.md`](INKLING_PROBES.md); the deployed monitors are listed in
+[`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md).
+
+**Config** (`InklingProbeMonitorSpec` in `experiment_config.py`):
+
+```json
+{"kind": "inkling_probe", "name": "probe_iid", "role": "held_out",
+ "probe_path": "data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup",
+ "server_url": "http://127.0.0.1:8178"}
+```
+
+- `role`: `held_out` or `train_against`, as for every monitor.
+- `threshold` (default 0.5) applies to the score σ(logit − t₁%), so 0.5 flags at the probe's 1% false-alarm point
+  on pre-RL honest episodes.
+- Rejected at load unless `env` is `terminal_verifier` and the policy is TML-rendered (Inkling). The run's
+  `thinking_effort` must equal the effort the probe's episodes were rendered at (0.5); that is checked when the
+  monitor is built.
+
+**The episode replay.** The probe must read exactly what it was trained on. So each rollout's episode record
+(`meta["episode"]`) becomes a replay item through `whitebox/probe_datasets.episode_item`, the function that built
+the training data, with the run's env options (`replay_env_options`: the env's own values, its defaults included).
+The server renders it with `whitebox/inkling_replay.py`, the RL loop's TML renderer at the probe's effort, in the
+probe's view, then appends the follow-up turn. A live episode thus renders byte for byte as a training episode did.
+Only replay fields leave the run, never the oracle's labels.
+
+**Checks when the monitor is built:**
+- the run's effort equals the probe's, and the run supplies every env option the replay needs;
+- the server serves this exact probe, identified by the sha256 of its `probe.npz` and `meta.json`;
+- the server's reader (loader and checkpoint revision) is the one in the probe's `reader_info`.
+
+**Failures and retries.** Connection errors, timeouts, 5xx and "still running" (202) answers are retried forever, with
+backoff from 1 s up to `max_backoff` and a warning every few minutes. So a run pauses while the server is down: a
+train-against run never computes a reward without the probe. A protocol or probe mismatch (409) or an episode the
+server can't replay (422) is fatal; the run then aborts through its usual unscored-monitor check. Each
+`MonitorResult.meta` holds the probe's name and sha256, the logit, the episode's token count and the experts the
+reader chose at "Yes".
+
+**The probe server** (`whitebox/probe_server.py`; command line `experiments/inkling_probe_server.py`):
+- **Scoring is the training extraction:** the same replay, view, follow-up, feature code and batching budget, then the
+  probe's readout and layer.
+- **One GPU,** any number of probes. Probes on the same view share one forward pass. `--max-batch-tokens 1` (the
+  default) scores one episode per forward pass, so a score doesn't depend on what else was in the batch: the
+  pre-registered batching rule fired.
+- **Protocol:** JSON over HTTP on localhost only; runs on other machines reach it through an SSH tunnel.
+  `GET /v1/meta` lists the reader, the effort and the probes; `POST /v1/score` scores episodes. A request is
+  identified by the hash of its body, so a repeated request joins the running job instead of starting another.
+- **Golden check:** each probe directory holds `golden.jsonl`, 32 test episodes with the sha256 of their rendering and
+  their logit on the stored features. At startup the server re-scores them. It refuses to start if a rendering
+  differs, or if a logit moves by more than the probe's `golden_tolerance`. GPU extraction isn't bit-reproducible,
+  so the tolerance is twice the largest batched-vs-one-at-a-time difference measured for that probe (at least 1
+  logit); for the mean probes, where that wasn't measured, it is 3. The check catches a wrong reader, layer or
+  rendering, and drift in transformers or the kernels, before it can look like monitor degradation.
+- **GPU check:** `experiments/check_probe_server.py` runs the golden check of every deployed probe at both batchings,
+  then the HTTP server → `InklingProbeMonitor` path, whose scores must equal the scorer's, then a throughput test. On
+  a real B300 it passed for the follow-up monitors (2026-10-10). The mean monitors, redeployed full-precision-trained
+  on 2026-10-12, have so far been checked on CPU only.
+
+**Post-hoc scoring, without a server.** Nothing in training reads a held-out probe's score, and runs save every eval
+episode in full (`eval_rollouts.jsonl`). So held-out Inkling probes can be scored after the runs:
+`experiments/eval_inkling_probes_on_runs.py` loads the reader once on a GPU, replays every valid eval episode of
+every run exactly as in training (with the run's own env options, after checking its effort against the probes'),
+and writes `probe_eval_<name>.jsonl` per run and probe: per eval step, AUROC against `behavior_present` and
+`used_verifier`, recall and false-alarm rate at 0.5, class means and counts. `eval/degradation.py` already reads that
+file for post-hoc probes. Per-episode scores go to `probe_scores_inkling.jsonl` in each run folder, so a rerun scores
+only what's missing. Only train-against runs need the live server. Commands:
+[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring).
 
 ## Training *against* a probe — the two mechanisms (which model feeds the probe?)
 
