@@ -211,7 +211,9 @@ def test_collect_copies_small_files_counts_hacks_and_rewrites_paths(tmp_path):
     assert not os.path.exists(out / "fitted/nvfp4/diverse_deception/without_reasoning/followup/hack_counts.json")
     for f in ("fitted/bf16/summary.json", "compare/followup/decision.json", "compare/mean_router/report.md",
               "ood_refits/nvfp4/followup/by_layer.csv", "learning_curves/bf16/ood_sources.csv",
-              "verify_fits/summary.json", "verify_fits/report.md", "analyses/dataset_stats.json", "MANIFEST.json"):
+              "verify_fits/20261012T000000Z/summary.json", "verify_fits/20261012T000000Z/report.md",
+              "verify_fits/20261011T000000Z/summary.json", "analyses/20261012T010000Z/dataset_stats.json",
+              "MANIFEST.json"):
         assert f in files, f
     counts = json.loads((out / probe / "hack_counts.json").read_text())
     assert counts == {"threshold_1": 0.0, "test": {"hacks": 4, "caught": 3, "tasks": 3, "tasks_caught": 2},
@@ -231,14 +233,15 @@ def test_collect_copies_small_files_counts_hacks_and_rewrites_paths(tmp_path):
     assert (curves["probes"], curves["features"]) == ("fitted/bf16", "bf16")
     report = (out / "compare/followup/report.md").read_text()
     assert "From fitted/bf16 and compare/followup/report.md." in report
-    verify = json.loads((out / "verify_fits/summary.json").read_text())
-    assert "bf16/terminal_prerl/with_reasoning/followup" in verify["probes"]  # the newest run
+    verify = json.loads((out / "verify_fits/20261012T000000Z/summary.json").read_text())  # every run is collected
+    assert "bf16/terminal_prerl/with_reasoning/followup" in verify["probes"]
     assert verify["args"]["check"] == ["bf16/followup=bf16"]
-    near = json.loads((out / "analyses/near_threshold.json").read_text())
+    near = json.loads((out / "analyses/20261012T010000Z/near_threshold.json").read_text())
     assert list(near["probes"]) == ["fitted/bf16/terminal_prerl/with_reasoning/followup",
                                     "terminal_prerl/with_reasoning/followup",
                                     "diverse_deception/with_reasoning/followup"]
-    assert json.loads((out / "analyses/dataset_stats.json").read_text())["datasets"] == "probe_datasets"
+    assert json.loads((out / "analyses/20261012T010000Z/dataset_stats.json").read_text())["datasets"] == \
+        "probe_datasets"
     src = s / "ood_refits/nvfp4/followup/by_layer.csv"
     assert (out / "ood_refits/nvfp4/followup/by_layer.csv").read_bytes() == src.read_bytes()
 
@@ -256,7 +259,8 @@ def test_collect_copies_small_files_counts_hacks_and_rewrites_paths(tmp_path):
     assert "source_sha256" not in manifest["ood_refits/nvfp4/followup/by_layer.csv"]
     assert manifest[f"{probe}/hack_counts.json"]["derived_from"] == [
         f"scratch/probes/nvfp4/terminal_prerl/with_reasoning/followup/{f}" for f in ("scores.jsonl", "meta.json")]
-    assert manifest["verify_fits/summary.json"]["source"] == "scratch/verify_fits/20261012T000000Z/summary.json"
+    assert manifest["verify_fits/20261012T000000Z/summary.json"]["source"] == \
+        "scratch/verify_fits/20261012T000000Z/summary.json"
 
 
 def test_collect_rebuilds_the_tree_and_refuses_an_empty_source(tmp_path):
@@ -329,11 +333,14 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "| bf16 | with | 5% | 4 | 20 | 1.000 [0.999, 1.000] | 100% [99.9%, 100%] | 100% [99.9%, 100%] |",
         "| bf16 | 195 (5%) | 20 | 1.000 [0.999, 1.000] |",
         "| bf16 | all but mask | 2,454 | 10 | 1.000 |",
-        "| bf16/terminal_prerl/with_reasoning/followup | 24 / 24 | reproduced (layer 3, C 0.001) | 0; 1.0e-12; 0; 0 | "
-        "pass |",
-        "| bf16/diverse_deception/without_reasoning/followup | — | — | — | fail: ValueError: boom |",
-        "1 of 2 probes pass. Run 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py aaaaaaaaaaaa, "
-        "probe_fit.py bbbbbbbbbbbb",
+        "| bf16/terminal_prerl/with_reasoning/followup | 20261012T000000Z | 24 / 24 | reproduced (layer 3, C 0.001) | "
+        "0; 1.0e-12; 0; 0 | pass |",
+        "| bf16/diverse_deception/without_reasoning/followup | 20261012T000000Z | — | — | — | fail: ValueError: boom |",
+        "| old | 20261011T000000Z | — / — | — | —; —; —; — | fail |",  # an older run's probe the newer one didn't check
+        "1 of 3 probes pass (each probe's newest check). Runs:",
+        "- `20261011T000000Z`: 1 probe. Run —.",
+        "- `20261012T000000Z`: 2 probes. Run 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py "
+        "aaaaaaaaaaaa, probe_fit.py bbbbbbbbbbbb (sha256).",
         "| terminal_prerl | with | 10,688 | 1,712 / 1,500 / 3,900 / 9,000 | 18.3M |",
         "97 of 98 hacks (99%) and 120 of 10,590 other episodes (1.1%)",
         "| mask | 800 | 160 | 160 | 1 (1 / 1) |",

@@ -17,8 +17,9 @@ large):
 - ``compare/<name>/{decision.json,report.md}`` (experiments/compare_readers.py; ``--compare NAME=DIR``);
 - ``ood_refits/<reader>/<readout>/{summary.json,refits.csv,by_layer.csv}`` (experiments/ood_refits.py);
 - ``learning_curves/<reader>/{summary.json,iid.csv,ood.csv,ood_sources.csv}`` (experiments/learning_curves.py);
-- ``verify_fits/{summary.json,report.md}`` (experiments/verify_fits.py) and ``analyses/*.json``
-  (experiments/probe_analyses.py), each from the folder given or its newest ``<timestamp>/`` subfolder.
+- ``verify_fits/<run>/{summary.json,report.md}`` (experiments/verify_fits.py) and ``analyses/<run>/*.json``
+  (experiments/probe_analyses.py): every ``<timestamp>/`` run folder of the folder given (or the folder itself, if it
+  holds the files). A table takes each probe's newest check, and each analysis from its newest run.
 
 Other files in ``--out`` (e.g. a hand-written ``PROVENANCE.md``) are kept as they are. Machine paths in the JSON
 and markdown files are rewritten: a path into a collected folder becomes its path relative to ``--out``, any other
@@ -130,14 +131,14 @@ class Rewriter:
         return {keys[k]: self.json(v) for k, v in x.items()}
 
 
-def newest(folder: str | None, pattern: str) -> str | None:
-    """``folder`` if it holds files matching ``pattern``, else its newest (last by name) subfolder that does."""
+def run_folders(folder: str | None, pattern: str) -> list[str]:
+    """``[folder]`` if it holds files matching ``pattern``, else its subfolders that do, one per run, oldest first
+    (by name: ``<timestamp>/``)."""
     if not folder or not os.path.isdir(folder):
-        return None
+        return []
     if glob.glob(os.path.join(folder, pattern)):
-        return folder
-    subs = sorted(d for d in os.listdir(folder) if glob.glob(os.path.join(folder, d, pattern)))
-    return os.path.join(folder, subs[-1]) if subs else None
+        return [folder]
+    return [os.path.join(folder, d) for d in sorted(os.listdir(folder)) if glob.glob(os.path.join(folder, d, pattern))]
 
 
 def sha256(path: str) -> str:
@@ -215,8 +216,10 @@ def collect(args) -> int:
         sources[f"compare/{name}"] = folder
     sources["ood_refits"] = args.ood_refits or os.path.join(args.scratch, "ood_refits")
     sources["learning_curves"] = args.learning_curves or os.path.join(args.scratch, "learning_curves")
-    sources["verify_fits"] = newest(args.verify_fits or os.path.join(args.scratch, "verify_fits"), "summary.json")
-    sources["analyses"] = newest(args.analyses, "*.json")
+    for run in run_folders(args.verify_fits or os.path.join(args.scratch, "verify_fits"), "summary.json"):
+        sources[f"verify_fits/{os.path.basename(run)}"] = run
+    for run in run_folders(args.analyses, "*.json"):
+        sources[f"analyses/{os.path.basename(run)}"] = run
     sources = {dest: folder for dest, folder in sources.items() if folder and os.path.isdir(folder)}
 
     files: list[tuple[str, str]] = []  # (source file, collected path)
@@ -235,7 +238,7 @@ def collect(args) -> int:
             if rel.split("/")[1] == "terminal_prerl" and os.path.isfile(os.path.join(probes, rel, "scores.jsonl")):
                 counted.append((os.path.join(probes, rel), f"fitted/{rel}"))
     for dest, folder in sources.items():
-        if dest.startswith("compare/") or dest == "verify_fits":
+        if dest.startswith(("compare/", "verify_fits/")):
             for f in COMPARE_FILES if dest.startswith("compare/") else VERIFY_FILES:
                 add(dest, f)
         elif dest in ("ood_refits", "learning_curves"):
@@ -243,7 +246,7 @@ def collect(args) -> int:
             for sub in sorted(glob.glob(os.path.join(folder, *depth))):
                 for f in OOD_REFIT_FILES if dest == "ood_refits" else CURVE_FILES:
                     add(dest, rel_join(os.path.relpath(sub, folder), f))
-        elif dest == "analyses":
+        elif dest.startswith("analyses/"):
             for path in sorted(glob.glob(os.path.join(folder, "*.json"))):
                 add(dest, os.path.basename(path))
 
@@ -425,6 +428,13 @@ class Results:
     def glob(self, pattern: str) -> list[list[str]]:
         """The collected paths matching ``pattern``, each split into its parts."""
         return sorted(os.path.relpath(p, self.root).split(os.sep) for p in glob.glob(os.path.join(self.root, pattern)))
+
+    def newest(self, pattern: str) -> str:
+        """The collected path matching ``pattern`` (a ``*`` for the run folder) of the newest run."""
+        hits = self.glob(pattern)
+        if not hits:
+            raise Missing(f"no {pattern} collected")
+        return "/".join(hits[-1])
 
     def probes(self, dataset: str) -> list[tuple[str, str, str]]:
         """(reader, view, readout) of every fitted probe of ``dataset`` with a metrics.json."""
@@ -834,41 +844,54 @@ def ood_source_mixes(r: Results) -> list[str]:
 
 
 def verify_fits(r: Results) -> list[str]:
-    s = r.json("verify_fits/summary.json")
-    probes = s.get("probes")
-    if not probes:
-        raise Missing("verify_fits/summary.json lists no probes")
+    runs = ["/".join(p) for p in r.glob("verify_fits/*/summary.json")]
+    if not runs:
+        raise Missing("no verify_fits/<run>/summary.json collected")
+    latest: dict[str, tuple[dict, str]] = {}  # probe -> (its newest check, that run's folder)
+    notes = []
+    for rel in runs:  # oldest first, so a later run's check of a probe replaces an earlier one's
+        s, run = r.json(rel), rel.split("/")[1]
+        probes = s.get("probes") or {}
+        for name, p in probes.items():
+            latest[name] = (p, run)
+        notes.append(f"- `{run}`: {len(probes)} probe{'' if len(probes) == 1 else 's'}. {verify_run(s)}")
+    if not latest:
+        raise Missing("verify_fits/*/summary.json list no probes")
     rows = []
-    for name, p in probes.items():
+    for name, (p, run) in latest.items():
         if "error" in p:
-            rows.append([name, "—", "—", "—", f"{p.get('verdict', 'fail')}: {p['error']}"])
+            rows.append([name, run, "—", "—", "—", f"{p.get('verdict', 'fail')}: {p['error']}"])
             continue
         cv, sel, refit = p.get("cv") or {}, p.get("selection") or {}, p.get("refit") or {}
         saved = sel.get("saved") or {}
-        rows.append([name, f"{cv.get('cells_matched', '—')} / {cv.get('cells_checked', '—')}",
+        rows.append([name, run, f"{cv.get('cells_matched', '—')} / {cv.get('cells_checked', '—')}",
                      str(sel.get("status", "—")) + (f" (layer {saved['layer']}, C {saved['C']:g})" if saved else ""),
                      "; ".join(sci((refit.get(k) or {}).get("max_abs_diff"))
                                for k in ("weights", "thresholds", "metrics", "test_logits")),
                      str(p.get("verdict", "—"))])
-    passed = sum(str(p.get("verdict", "")).startswith("pass") for p in probes.values())
+    passed = sum(str(p.get("verdict", "")).startswith("pass") for p, _ in latest.values())
+    return md_table(["probe", "run", "grid cells matched / checked", "selection",
+                     "largest Δ: weights; t₁/t₅; metrics; test logits", "verdict"], rows) + [
+        "", f"{passed} of {len(latest)} probes pass (each probe's newest check). Runs:", ""] + notes + legend(
+        "From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code",
+        "of the day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to",
+        "cv_grid.csv's to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics",
+        "and test logits (0: bit for bit).")
+
+
+def verify_run(s: dict) -> str:
+    """A verify_fits run's date and code: the commit, and the sha256 of the fitting code it ran."""
     code = s.get("code") or {}
     files = s.get("code_files") or code  # runs before 2026-10-12 06:40 UTC kept the file hashes under "code"
-    run = f"Run {s.get('created_utc', '—')}" + (
+    return f"Run {s.get('created_utc', '—')}" + (
         f" at commit {code['commit'][:12]}{' with uncommitted changes' if code.get('dirty') else ''}"
         if code.get("commit") else "") + (
         f" with fit_probes.py {files['fit_probes.py'][:12]}, probe_fit.py {files['probe_fit.py'][:12]} (sha256)"
-        if "fit_probes.py" in files and "probe_fit.py" in files else "")
-    return md_table(["probe", "grid cells matched / checked", "selection",
-                     "largest Δ: weights; t₁/t₅; metrics; test logits", "verdict"], rows) + [
-        "", f"{passed} of {len(probes)} probes pass. {run}."] + legend(
-        "From `verify_fits/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code of the",
-        "day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to cv_grid.csv's",
-        "to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics and test logits",
-        "(0: bit for bit).")
+        if "fit_probes.py" in files and "probe_fit.py" in files else "") + "."
 
 
 def dataset_stats(r: Results) -> list[str]:
-    rel = "analyses/dataset_stats.json"
+    rel = r.newest("analyses/*/dataset_stats.json")
     s = r.json(rel)
     lines: list[str] = []
     tokens = [(ds, view, v) for ds, by_view in (s.get("tokens") or {}).items() for view, v in (by_view or {}).items()]
@@ -959,9 +982,9 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--ood-refits", help="ood_refits.py's outputs, <reader>/<readout>/ (default: <scratch>/ood_refits)")
     c.add_argument("--learning-curves", help="learning_curves.py's outputs, <reader>/ (default: "
                                              "<scratch>/learning_curves)")
-    c.add_argument("--verify-fits", help="verify_fits.py's --out or one of its <timestamp>/ folders; the newest is "
-                                         "used (default: <scratch>/verify_fits)")
-    c.add_argument("--analyses", help="probe_analyses.py's --out, or a folder of them; the newest is used "
+    c.add_argument("--verify-fits", help="verify_fits.py's --out: every <timestamp>/ run in it (or one run folder) "
+                                         "(default: <scratch>/verify_fits)")
+    c.add_argument("--analyses", help="probe_analyses.py's --out: every <timestamp>/ run in it (or one run folder) "
                                       "(default: none)")
     c.add_argument("--out", default="data/probe_results")
     c.add_argument("--strip", help="removed from the sources listed in MANIFEST.json (default: the folder holding "
