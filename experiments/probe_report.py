@@ -843,9 +843,12 @@ def verify_fits(r: Results) -> list[str]:
                      str(p.get("verdict", "—"))])
     passed = sum(str(p.get("verdict", "")).startswith("pass") for p in probes.values())
     code = s.get("code") or {}
+    files = s.get("code_files") or code  # runs before 2026-10-12 06:40 UTC kept the file hashes under "code"
     run = f"Run {s.get('created_utc', '—')}" + (
-        f" with fit_probes.py {code['fit_probes.py'][:12]}, probe_fit.py {code['probe_fit.py'][:12]} (sha256)"
-        if "fit_probes.py" in code and "probe_fit.py" in code else "")
+        f" at commit {code['commit'][:12]}{' with uncommitted changes' if code.get('dirty') else ''}"
+        if code.get("commit") else "") + (
+        f" with fit_probes.py {files['fit_probes.py'][:12]}, probe_fit.py {files['probe_fit.py'][:12]} (sha256)"
+        if "fit_probes.py" in files and "probe_fit.py" in files else "")
     return md_table(["probe", "grid cells matched / checked", "selection",
                      "largest Δ: weights; t₁/t₅; metrics; test logits", "verdict"], rows) + [
         "", f"{passed} of {len(probes)} probes pass. {run}."] + legend(
