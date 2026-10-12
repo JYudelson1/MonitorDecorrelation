@@ -107,6 +107,8 @@ def test_verify_fits_reproduces_the_fitted_probes_and_catches_changes(tmp_path):
     cp, summary, out = _verify(tmp_path, "clean", data, feats, probes)
     assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
     assert len(summary["probes"]) == 6
+    assert set(summary["code"]) == {"commit", "dirty", "diff_sha256", "source"}  # provenance.code_version
+    assert set(summary["code_files"]) == {"fit_probes.py", "probe_fit.py", "verify_fits.py"}
     for name, r in summary["probes"].items():
         assert r["verdict"] == "pass" and r["selection"]["status"] == "reproduced", (name, r)
         assert 0 < r["cv"]["cells_checked"] == r["cv"]["cells_matched"], (name, r["cv"])
@@ -139,3 +141,12 @@ def test_verify_fits_reproduces_the_fitted_probes_and_catches_changes(tmp_path):
     assert r["verdict"] == "fail" and r["refit"]["weights"]["ok"]
     assert r["cv"]["cells_matched"] == r["cv"]["cells_checked"] - 1
     assert r["cv"]["mismatches"][0]["C"] == 1.0
+
+
+def test_an_existing_run_folder_is_refused_without_overwrite(tmp_path, monkeypatch, capsys):
+    taken = tmp_path / "verify" / "20261012T000000Z"
+    taken.mkdir(parents=True)
+    monkeypatch.setattr(vf, "run_folder", lambda parent, t: str(taken))
+    with pytest.raises(SystemExit) as e:
+        vf.main(["--probes", str(tmp_path), "--check", f"x/followup={tmp_path}", "--out", str(tmp_path / "verify")])
+    assert e.value.code == 2 and "--overwrite" in capsys.readouterr().err

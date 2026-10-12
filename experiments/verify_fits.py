@@ -1,8 +1,8 @@
 """Does today's code reproduce the fitted Inkling probes? Re-runs part of each fit of experiments/fit_probes.py, instead
-of the whole grid (hours on hub), and compares it with what the fit saved.
+of the whole grid (hours on CPUs), and compares it with what the fit saved.
 
-    uv run python experiments/verify_fits.py --probes ../scratch/probes --out ../scratch/verify_fits \
-        --check bf16/followup=../scratch/features/bf16 --check bf16/mean,router,router_all=../scratch/features_mr/bf16
+    uv run python experiments/verify_fits.py --probes PROBES --out OUT/verify_fits \
+        --check bf16/followup=FEATURES/bf16 --check nvfp4/mean,router,router_all=FEATURES/nvfp4
 
 ``--check READER/READOUTS=FEATURES`` (repeatable) picks the probes ``<probes>/<reader>/<dataset>/<view>/<readout>/``
 and the features they were fitted on. For each fitted IID and OOD probe of those readouts:
@@ -39,11 +39,13 @@ them at fitting time: one per worker, but ``router_all``'s single layer got ``--
 default threads, as fit_probes' main process did. ``--refit-threads`` caps them, at the cost of bitwise equality.
 A difference passes if it is ≤ ``--tol`` × max(1, |saved value|).
 
-**Memory.** On hub the page cache counts toward the pod's memory, and each layer is read once. So the shards' pages are
-dropped from it (posix_fadvise) once a layer is read, and after each refit.
+**Memory.** Each layer is read once, and in a container the page cache counts toward its memory. So the shards' pages
+are dropped from the cache (posix_fadvise) once a layer is read, and after each refit.
 
 **Writes** ``<out>/<UTC timestamp>/summary.json`` (per probe: cells checked and matched, the selection, the largest
-differences, the verdict) and ``report.md``.
+differences, the verdict) and ``report.md``. summary.json records the code version (provenance.code_version) as
+``code``, and the sha256 of fit_probes.py, probe_fit.py and this file as ``code_files``. A run's folder that already
+exists is refused, unless ``--overwrite``.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from monitordecorrelation.provenance import code_version
 from monitordecorrelation.whitebox import probe_fit
 from monitordecorrelation.whitebox.probe_fit import (
     C_GRID, FLAT_FALLBACK_C, LayerSource, SelectedProbe, _fit_path, auroc, ci, cluster_bootstrap, load_items,
@@ -553,14 +556,21 @@ def memory() -> str:
     return f"memory {cur / 2**30:.1f} GB (anon {anon / 2**30:.1f})" if cur else ""
 
 
+def run_folder(parent: str, t: float) -> str:
+    """This run's output folder: ``<--out>/<UTC timestamp>``."""
+    return os.path.join(parent, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t)))
+
+
 def fmt(x: float) -> str:
     return "0" if x == 0 else f"{x:.1e}"
 
 
 def report(summary: dict) -> str:
+    code, files = summary["code"], summary["code_files"]
+    commit = f"commit {code['commit'][:12]}{' (dirty)' if code['dirty'] else ''}" if code.get("commit") else "no commit"
     lines = ["# Do today's fit_probes.py and probe_fit.py reproduce the fitted probes?", "",
-             f"{summary['created_utc']}; code sha256 fit_probes.py {summary['code']['fit_probes.py'][:12]}, "
-             f"probe_fit.py {summary['code']['probe_fit.py'][:12]}; {summary['seconds']['total']:.0f} s "
+             f"{summary['created_utc']}; {commit}; sha256 fit_probes.py {files['fit_probes.py'][:12]}, "
+             f"probe_fit.py {files['probe_fit.py'][:12]}; {summary['seconds']['total']:.0f} s "
              f"(out-of-fold fits {summary['seconds']['cv']:.0f} s, refits {summary['seconds']['refit']:.0f} s). "
              "Cells: recomputed out-of-fold AUROC (mean and sd) equal to cv_grid.csv's to 5 decimals. "
              "Δ: the largest absolute difference from what was saved (0 = bit for bit).", "",
@@ -593,7 +603,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--probes", required=True, help="the folder with <reader>/<dataset>/<view>/<readout>/ probes")
     ap.add_argument("--check", action="append", required=True,
-                    help="READER/READOUTS=FEATURES, e.g. bf16/mean,router=../scratch/features_mr/bf16 (repeatable)")
+                    help="READER/READOUTS=FEATURES, e.g. bf16/mean,router=FEATURES/bf16 (repeatable)")
     ap.add_argument("--datasets", default="data/probe_datasets")
     ap.add_argument("--out", required=True, help="a <UTC timestamp> folder is made in it")
     ap.add_argument("--only", default="", help="comma-list: keep probes whose name contains one of these")
@@ -605,11 +615,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--full-grid", default="router,router_all", help="readouts whose whole grid is recomputed")
     ap.add_argument("--max-layers", type=int, help="give up re-deriving a selection that needs more layers than this")
     ap.add_argument("--tol", type=float, default=1e-9)
+    ap.add_argument("--overwrite", action="store_true", help="write into this run's folder even if it exists")
     args = ap.parse_args(argv)
     t_start = time.time()
-    out = os.path.join(args.out, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t_start)))
-    os.makedirs(out)  # now, so that a clash shows before the fits
-    code = {f: hashlib.sha256(open(path, "rb").read()).hexdigest() for f, path in (
+    out = run_folder(args.out, t_start)
+    if os.path.exists(out) and not args.overwrite:
+        ap.error(f"{out} already exists; --overwrite writes into it")
+    os.makedirs(out, exist_ok=True)  # now, so that a clash shows before the fits
+    code = code_version()
+    code_files = {f: hashlib.sha256(open(path, "rb").read()).hexdigest() for f, path in (
         ("fit_probes.py", os.path.join(HERE, "fit_probes.py")), ("probe_fit.py", probe_fit.__file__),
         ("verify_fits.py", os.path.abspath(__file__)))}  # the code that runs, before anyone edits it
     WATCH = MemoryWatch()
@@ -697,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         drop_cache(shard_files(p.features))
         log(f"{p.name}: {r['verdict']} ({r['seconds']['refit']:.0f} s refit); {memory()}")
     summary = {"created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "args": vars(args),
-               "code": code,
+               "code": code, "code_files": code_files,
                "seconds": {"cv": cv_seconds, "refit": time.time() - t_refit, "total": time.time() - t_start},
                **WATCH.stop(), **summary}
     with open(os.path.join(out, "summary.json"), "w") as fh:

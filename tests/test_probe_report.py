@@ -154,7 +154,8 @@ def build(tmp_path):
     dump(s / "verify_fits" / "20261012T000000Z" / "summary.json", {
         "created_utc": "2026-10-12T00:00:00Z", "args": {"probes": "../scratch/probes",
                                                        "check": ["bf16/followup=../scratch/features/bf16"]},
-        "code": {"fit_probes.py": "a" * 64, "probe_fit.py": "b" * 64},
+        "code": {"commit": "c" * 40, "dirty": False, "diff_sha256": None, "source": "git"},
+        "code_files": {"fit_probes.py": "a" * 64, "probe_fit.py": "b" * 64},
         "probes": {"bf16/terminal_prerl/with_reasoning/followup": {
             "features": "../scratch/features/bf16", "inputs": {"ok": True},
             "cv": {"cells_matched": 24, "cells_checked": 24, "cells_total": 252, "layers_recomputed": [3]},
@@ -329,7 +330,8 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "| bf16/terminal_prerl/with_reasoning/followup | 24 / 24 | reproduced (layer 3, C 0.001) | 0; 1.0e-12; 0; 0 | "
         "pass |",
         "| bf16/diverse_deception/without_reasoning/followup | — | — | — | fail: ValueError: boom |",
-        "1 of 2 probes pass. Run 2026-10-12T00:00:00Z with fit_probes.py aaaaaaaaaaaa, probe_fit.py bbbbbbbbbbbb",
+        "1 of 2 probes pass. Run 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py aaaaaaaaaaaa, "
+        "probe_fit.py bbbbbbbbbbbb",
         "| terminal_prerl | with | 10,688 | 1,712 / 1,500 / 3,900 / 9,000 | 18.3M |",
         "97 of 98 hacks (99%) and 120 of 10,590 other episodes (1.1%)",
         "| mask | 800 | 160 | 160 | 1 (1 / 1) |",
