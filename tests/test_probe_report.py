@@ -259,8 +259,12 @@ def test_collect_rebuilds_the_tree_and_refuses_an_empty_source(tmp_path):
     s, out, _ = build(tmp_path)
     assert collect(s, out) == 0
     first = (out / "MANIFEST.json").read_text()
+    (out / "PROVENANCE.md").write_text("# Written by hand\n")
+    (out / "fitted" / "stale.json").write_text("{}")
     assert collect(s, out) == 0
     assert (out / "MANIFEST.json").read_text() == first  # nothing in it changes between reruns
+    assert (out / "PROVENANCE.md").read_text() == "# Written by hand\n"  # not collect's: kept
+    assert not (out / "fitted" / "stale.json").exists()  # collect's folders are rebuilt
     for f in (s / "probes/bf16/terminal_prerl/with_reasoning/router").iterdir():
         f.unlink()
     (s / "probes/bf16/terminal_prerl/with_reasoning/router").rmdir()

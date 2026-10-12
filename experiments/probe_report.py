@@ -8,7 +8,7 @@ The probes are fitted and analysed on hub, in a scratch folder outside the repo.
 files into the repo, so the numbers travel with the code; ``render`` writes the docs' tables from them, so a table
 can't drift from the results it reports.
 
-**collect** rebuilds ``--out`` (``data/probe_results/``) from the results, never with ``scores.jsonl`` (per episode,
+**collect** rebuilds these folders of ``--out`` (``data/probe_results/``), never with ``scores.jsonl`` (per episode,
 large):
 - ``fitted/<reader>/<dataset>/<view>/<readout>/{probe.npz,meta.json,metrics.json,cv_grid.csv}`` and
   ``fitted/<reader>/summary.json`` (experiments/fit_probes.py). Each IID probe also gets ``hack_counts.json``, counted
@@ -20,9 +20,10 @@ large):
 - ``verify_fits/{summary.json,report.md}`` (experiments/verify_fits.py) and ``analyses/*.json``
   (experiments/probe_analyses.py), each from the folder given or its newest ``<timestamp>/`` subfolder.
 
-Machine paths in the JSON and markdown files are rewritten: a path into a collected folder becomes its path relative
-to ``--out``, any other path its last component. ``MANIFEST.json`` lists every file with its source (relative to the
-folder holding ``--scratch``) and sha256.
+Other files in ``--out`` (e.g. a hand-written ``PROVENANCE.md``) are kept as they are. Machine paths in the JSON
+and markdown files are rewritten: a path into a collected folder becomes its path relative to ``--out``, any other
+path its last component. ``MANIFEST.json`` lists every collected file with its source (relative to the folder
+holding ``--scratch``) and sha256.
 
 **render FILE** replaces what is between each pair of markers
 
@@ -62,6 +63,7 @@ CURVE_FILES = ("summary.json", "iid.csv", "ood.csv", "ood_sources.csv")
 VERIFY_FILES = ("summary.json", "report.md")
 DEFAULT_COMPARE = (("followup", "compare"), ("mean_router", "compare_mean_router"))
 TEXT = (".json", ".md", ".csv")
+OWNED = ("fitted", "compare", "ood_refits", "learning_curves", "verify_fits", "analyses", "MANIFEST.json")
 CONFIDENCE = 0.975  # the one-sided Clopper–Pearson bounds of test_set_bounds
 
 # ------------------------------------------------------------------------------------------------ collect
@@ -280,6 +282,10 @@ def collect(args) -> int:
         json.dump({"written_by": "experiments/probe_report.py collect", "files": manifest}, fh, indent=1,
                   sort_keys=True)
         fh.write("\n")
+    kept = sorted(n for n in os.listdir(out) if n not in OWNED) if os.path.isdir(out) else []
+    for name in kept:  # not collect's: carried over as they are
+        src = os.path.join(out, name)
+        (shutil.copytree if os.path.isdir(src) else shutil.copy2)(src, os.path.join(tmp, name))
     if os.path.isdir(out):
         os.replace(out, old)
     os.replace(tmp, out)
@@ -291,6 +297,8 @@ def collect(args) -> int:
     for name in ("compare", "ood_refits", "learning_curves", "verify_fits", "analyses"):
         if name not in by_top:
             print(f"[collect] nothing collected for {name}")
+    if kept:
+        print(f"[collect] kept as they were: {', '.join(kept)}")
     return 0
 
 
