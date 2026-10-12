@@ -318,16 +318,19 @@ def run_layers(tasks: list[tuple[Probe, int, int]], jobs: int) -> None:
         left = {}
         for p, _, _ in ts:
             left[p.name] = left.get(p.name, 0) + 1
-        with parallel_config(backend="loky", inner_max_num_threads=threads):
-            out = Parallel(n_jobs=max(1, min(jobs // threads, len(ts))), pre_dispatch="n_jobs", return_as="generator")(
-                delayed(_timed_fit_path)(p.src, layer, p.inputs["dev"], p.grid.y, p.inputs["folds"], C_GRID[:j + 1])
-                for p, layer, j in ts)
-            for (p, layer, j), (oof, secs) in zip(ts, out):
-                p.grid.add(layer, oof)
-                p.cv_seconds += secs
-                left[p.name] -= 1
-                if left[p.name] == 0:
-                    log(f"  {p.name}: {len(p.grid.oof)} layers known ({p.cv_seconds:.0f} s of fits); {memory()}")
+        # always in loky workers (n_jobs=1 would fit here, with BLAS's default threads); a multi-threaded group one
+        # task at a time, as cv_grid_source fitted router_all's single layer
+        for batch in [ts] if threads == 1 else [[t] for t in ts]:
+            with parallel_config(backend="loky", inner_max_num_threads=threads):
+                out = Parallel(n_jobs=max(2, min(jobs, len(batch))), pre_dispatch="n_jobs", return_as="generator")(
+                    delayed(_timed_fit_path)(p.src, layer, p.inputs["dev"], p.grid.y, p.inputs["folds"],
+                                             C_GRID[:j + 1]) for p, layer, j in batch)
+                for (p, layer, j), (oof, secs) in zip(batch, out):
+                    p.grid.add(layer, oof)
+                    p.cv_seconds += secs
+                    left[p.name] -= 1
+                    if left[p.name] == 0:
+                        log(f"  {p.name}: {len(p.grid.oof)} layers known ({p.cv_seconds:.0f} s of fits); {memory()}")
 
 
 def compare_cells(p: Probe) -> dict:
@@ -606,6 +609,9 @@ def main(argv: list[str] | None = None) -> int:
     t_start = time.time()
     out = os.path.join(args.out, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t_start)))
     os.makedirs(out)  # now, so that a clash shows before the fits
+    code = {f: hashlib.sha256(open(path, "rb").read()).hexdigest() for f, path in (
+        ("fit_probes.py", os.path.join(HERE, "fit_probes.py")), ("probe_fit.py", probe_fit.__file__),
+        ("verify_fits.py", os.path.abspath(__file__)))}  # the code that runs, before anyone edits it
     WATCH = MemoryWatch()
     from threadpoolctl import threadpool_limits
 
@@ -691,9 +697,7 @@ def main(argv: list[str] | None = None) -> int:
         drop_cache(shard_files(p.features))
         log(f"{p.name}: {r['verdict']} ({r['seconds']['refit']:.0f} s refit); {memory()}")
     summary = {"created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "args": vars(args),
-               "code": {f: hashlib.sha256(open(path, "rb").read()).hexdigest() for f, path in (
-                   ("fit_probes.py", os.path.join(HERE, "fit_probes.py")), ("probe_fit.py", probe_fit.__file__),
-                   ("verify_fits.py", os.path.abspath(__file__)))},
+               "code": code,
                "seconds": {"cv": cv_seconds, "refit": time.time() - t_refit, "total": time.time() - t_start},
                **WATCH.stop(), **summary}
     with open(os.path.join(out, "summary.json"), "w") as fh:
