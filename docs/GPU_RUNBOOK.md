@@ -29,6 +29,10 @@ the golden check guards against a different checkpoint.
 (which saves the patch in `--out`). Files under `data/runs/`, such as a run folder pushed for scoring, don't count
 as code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
 
+**Interrupting the launcher.** Ctrl-C, SIGTERM and SIGHUP all make it delete the VM (unless `--keep`) before it
+stops with exit 130. One that arrives during the delete is held until the delete completes. Start a long `run` under `nohup` (or in `tmux`)
+so that closing the terminal doesn't stop it.
+
 ### Serving
 
 1. **A B300 VM with the reader.** With the Nebius launcher:
@@ -41,7 +45,9 @@ as code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
    `up` picks the cheapest region and creates a spot VM. It sets up a RAM disk, uv and the repo (at `~/md` on the VM),
    downloads the weights to `/mnt/ram/Inkling-Small-NVFP4` with `hf download --revision … --local-dir`, and keeps the
    VM. The VM shuts itself down after `--hours`, but delete it as soon as you are done:
-   `python3 scripts/nebius_job.py down --name <vm>` (the name is in the output and in `--out`'s `job.json`).
+   `python3 scripts/nebius_job.py down --name <vm>` (the name is in the output and in `--out`'s `job.json`). If you
+   keep a spending ledger, pass it (`--budget-file`, or set `NEBIUS_BUDGET_FILE`): `down` then also settles the kept
+   VM's reservation, which otherwise stays at its worst case until `reap` finds the VM gone.
 
    On any other box with a B300: clone the repo, `uv sync --locked`, and download the reader the same way, to a fast
    local disk:

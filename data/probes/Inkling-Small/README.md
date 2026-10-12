@@ -98,8 +98,8 @@ At the top level:
 
 **Regenerating** these directories needs the fitted probes (`data/probe_results/fitted/bf16/`), the TerminalEnv
 dataset's items, and the 4-bit reader's features and diagnostics. Everything but the fitted probes is in the private
-buckets (access must be granted). The items are gitignored; fetch them, and check their sha256 against the
-manifest's `items_sha256`:
+buckets (access must be granted). The items are gitignored; fetch them. `deploy_probes.py` refuses an
+`items.jsonl` whose sha256 differs from its manifest's `items_sha256`, so a wrong or edited copy can't slip through:
 
 ```bash
 uv run hf buckets cp hf://buckets/probemaxxing/inkling-probes/datasets/terminal_prerl/items.jsonl \

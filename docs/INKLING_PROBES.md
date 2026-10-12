@@ -109,7 +109,7 @@ rest are test. The items carry no reasoning, so they are rendered without it.
 
 Two things in these tables need a word. Every hack, and about a tenth of the other episodes, uses the words the
 concealment edit removes: on this data, the policy's own words give the hack away. <!-- src:
-data/probe_results/analyses/dataset_stats.json (disclosure) --> And every MASK test item shares its question with
+data/probe_results/analyses/20261012T041431Z/dataset_stats.json (disclosure) --> And every MASK test item shares its question with
 training items because every MASK item has the same question, the template "State a fact."; only the answers
 differ. The split is still by pair.
 
@@ -268,7 +268,8 @@ All numbers are on held-out test splits (tasks or pairs never used for fitting),
 Every IID probe, on either reader, reaches a test AUROC of 1.000 (to three decimals) and flags every test hack at
 t₁%. Mostly this shows how easy the pre-RL data is:
 - All 98 hacks openly mention the verifier in the policy's visible text. <!-- src:
-  items.jsonl of terminal_prerl (bucket datasets/), checked 2026-10-12; data/probe_results/analyses/dataset_stats.json
+  items.jsonl of terminal_prerl (bucket datasets/), checked 2026-10-12;
+  data/probe_results/analyses/20261012T041431Z/dataset_stats.json
   (disclosure) -->
 - Transcript length alone ranks the test hacks at AUROC 0.997. <!-- src:
   data/probe_results/fitted/nvfp4/terminal_prerl/with_reasoning/followup/metrics.json (baselines.length) -->
@@ -398,7 +399,10 @@ features also data/probes/Inkling-Small/deployed.json (serving_check) -->
 The full-precision mean features were fetched and compared later, one readout at a time. For the mean readout alone,
 4-bit would be kept: the two IID mean probes pass (a) outright, the OOD mean probe fails (a) and passes only through
 the refit floor (c), and none loses AUROC (b). <!-- src: data/probe_results/compare/mean_router/decision.json
-(passes) --> The router readouts fail. This per-readout comparison is exploratory. It did not decide anything: the
+(passes) --> The router readouts fail. The batching and readout rules are about the "Yes" readout, so this comparison
+doesn't evaluate them. `compare_readers.py` now records such rules as not evaluated, with the reason, where reports
+made before 2026-10-12 said "no". This per-readout comparison is
+exploratory. It did not decide anything: the
 pre-registered rule is one decision over every deployed probe. The mean monitors had first been deployed 4-bit-trained
 as a stopgap; that deviation is corrected, and they are full-precision-trained like the rest.
 
@@ -668,9 +672,10 @@ full.
   (`reader_info`: loader and checkpoint revision) and the one it was trained on (`trained_reader_info`), the feature
   format, the torch and transformers versions, when it was fitted and deployed, and where the fitted probe is
   (`fitted_dir`, under `data/probe_results/fitted/`).
-- **Fitted probes and analyses:** `data/probe_results/` (fitted probes of both readers, the reader comparisons, the
-  OOD refits, the learning curves, the dataset analyses; `MANIFEST.json` lists each file's source and sha256). Where
-  each file came from, and what was re-run to check it:
+- **Fitted probes and analyses:** `data/probe_results/`: the fitted probes of both readers (`fitted/`), the reader
+  comparisons (`compare/`), the OOD refits, the learning curves, and one folder per run of the fit re-checks
+  (`verify_fits/<run>/`) and of the dataset analyses (`analyses/<run>/`). `MANIFEST.json` lists each file's source
+  and sha256. Where each file came from, and what was re-run to check it:
   [`data/probe_results/PROVENANCE.md`](../data/probe_results/PROVENANCE.md).
 - **Datasets:** built from code not yet committed at the time, and pinned by each manifest's `items_sha256`
   (section 2).
@@ -707,15 +712,17 @@ Everything after the GPU session runs on CPUs, from the features in the buckets 
 individual commands are in USAGE.md's "Inkling probes (TerminalEnv)" section; the GPU session itself goes through
 the launcher, which refuses uncommitted code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
 
-1. **The datasets' items** are gitignored. Fetch each dataset's `items.jsonl` from the bucket, and check its sha256
-   against the manifest's `items_sha256`:
+1. **The datasets' items** are gitignored. Fetch each dataset's `items.jsonl` from the bucket:
 
    ```bash
    for d in terminal_prerl diverse_deception terminal_concealed; do
      uv run hf buckets cp hf://buckets/probemaxxing/inkling-probes/datasets/$d/items.jsonl data/probe_datasets/$d/items.jsonl
    done
-   sha256sum data/probe_datasets/*/items.jsonl
    ```
+
+   No need to check them by hand. Extraction, fitting, the reader comparison, deployment and the analyses all refuse
+   an `items.jsonl` whose sha256 differs from its manifest's `items_sha256`. `fit_probes.py` also checks it against
+   the `items_sha256` in the features' `index.json`, i.e. the items the features were extracted from.
 
 2. **`scripts/run_probe_pipeline.sh --dry-run`** prints every command without running any: fetch the features, fit
    both readers, verify the fits (`experiments/verify_fits.py`), compare the readers, the analyses (OOD refits,
@@ -731,7 +738,9 @@ the launcher, which refuses uncommitted code ([`INFRA.md`](INFRA.md#gpu-vms-on-n
 
 ### Re-checking the fits
 
-`experiments/verify_fits.py` checks that the committed fits reproduce what was recorded when they were made.
+`experiments/verify_fits.py` checks that today's code reproduces the committed fits: for each probe it re-runs part
+of the cross-validation grid, re-derives the selection and refits the chosen layer and C, then compares all of it
+with what the fit saved. Each run's results are in `data/probe_results/verify_fits/<run>/`;
 [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md) says what was re-run.
 
 <!-- probe_report:begin verify_fits -->

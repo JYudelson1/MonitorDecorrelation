@@ -97,10 +97,11 @@ python3 scripts/nebius_job.py prices                    # every region's price a
 python3 scripts/nebius_job.py run --hours 2 --out runs/{stamp}-{name} --hf ORG/REPO[@REV] --fetch results -- '<job>'
 python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}    # keep the VM; prints the ssh line
 python3 scripts/nebius_job.py exec --host user@ip --out runs/x -- '<job>'   # any SSH box, no Nebius
-python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify
+python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify (--budget-file:
+                                                        # also settle a kept VM's reservation in the ledger)
 python3 scripts/nebius_job.py list                      # instances and disks in every region
 python3 scripts/nebius_job.py budget                    # the spending ledger: limit, spent, reserved
-python3 scripts/nebius_job.py reap                      # clean up after a launcher that died mid-run
+python3 scripts/nebius_job.py reap                      # clean up after a launcher that died; settle kept VMs gone
 ```
 
 `run` and `up` accept `--dry-run`: the price check, then the create call, cloud-init and remote scripts, with nothing
@@ -129,7 +130,14 @@ created.
 5. Run the job, detached and polled. It gets `NEBIUS_JOB_DEADLINE` (the VM's scheduled shutdown, epoch seconds).
 6. `--upload` paths go straight from the VM to an HF bucket; `--fetch` paths and all logs come back into `--out`.
 7. Delete the VM and verify that neither it nor its boot disk is left. This runs in a `finally`, so errors,
-   preemption and Ctrl-C delete too; only `--keep` (and `up`) opt out.
+   preemption and Ctrl-C delete too; only `--keep` (and `up`) opt out. A failed instance listing is retried within
+   the delete's deadline, and if listing never works, the VM's known id is still deleted.
+
+**Signals.** Ctrl-C, SIGTERM and SIGHUP (the launching machine shutting down, its terminal closing) are handled
+alike: the launcher deletes the VM (unless `--keep`), then stops. One that arrives while the VM is being deleted is held: the delete
+completes, then the launcher stops with exit 130 and makes no further attempt. SIGTERM or SIGHUP during the post-job
+fetches skips the rest of them, so the delete starts sooner. A SIGHUP the launcher inherited as ignored stays ignored,
+so under `nohup` it outlives its terminal.
 
 **Only committed code is pushed.** `run`, `up` and `exec` refuse a working tree with uncommitted changes (tracked
 changes, or untracked files that would travel) before anything is priced or created, and check again at each push.
@@ -140,10 +148,11 @@ not code, so a run folder pushed for post-hoc scoring doesn't block a launch. Th
 its outputs from that file (`src/monitordecorrelation/provenance.py`).
 
 `job.json` in `--out` records the VM, the flags, the code version pushed, timestamps, the exit code, whether the VM
-was preempted, every region's quote, the price every 15 minutes while the VM existed, and an estimated cost. Exit
-status: 0 on success;
-the job's own code if it failed; 2 for an infrastructure failure; 3 if the VM stopped mid-run; 75 if the job stopped
-early and no attempt was left; 130 on Ctrl-C.
+was preempted, every region's quote, the price every 15 minutes while the VM existed, and an estimated cost.
+
+**Exit status:** 0 on success; the job's own code if it failed; 2 for an infrastructure failure (a delete that failed
+included, whatever signal came); 3 if the VM stopped mid-run; 75 if the job stopped early and no attempt was left;
+130 on Ctrl-C, SIGTERM or SIGHUP, also when it arrived while the VM was being deleted.
 
 ### Spot VMs: how they behave
 
@@ -188,7 +197,10 @@ launcher's `job.json` records): 12 VMs from 17 attempts, about 8 GPU-hours, abou
    `SCHEDULING_STATE_BLOCKED` bids below the current spot price: its VMs won't be scheduled, and running ones get
    preempted.
 10. **The ledger reserves the worst case** (bid × GPUs × `--hours`) until a VM is settled. After preemptions it can
-    refuse a relaunch whose likely cost would fit. That is the point of a hard cap.
+    refuse a relaunch whose likely cost would fit. That is the point of a hard cap. A kept VM (`up`, `run --keep`)
+    stays reserved until `down` deletes it with the ledger (`--budget-file` or `NEBIUS_BUDGET_FILE`), or `reap` finds
+    it gone; either settles it from the prices its launcher sampled. A `run --keep` that never created a VM isn't
+    left reserved.
 
 ### Preemption, deadlines and relaunching
 
@@ -199,10 +211,17 @@ launcher's `job.json` records): 12 VMs from 17 attempts, about 8 GPU-hours, abou
 - **The job must resume from what it saved.** The probe extraction does (next section).
 - **Soft deadline:** a job that reads `NEBIUS_JOB_DEADLINE` can stop cleanly before `--hours` cuts it off. The
   extraction starts a shard only if the shard and its upload fit before the deadline, and on SIGTERM (the 60 s notice)
-  it starts nothing new and lets the uploads finish. Either way it exits 75.
+  it starts nothing new and lets the uploads finish. Either way it exits 75, also when uploads were still running or
+  had failed: what didn't reach the store is extracted again on resume.
 - **A launcher that died** (e.g. its machine restarted): the VM powers itself off 15 minutes after its job ends,
-  instead of idling until `--hours`. `reap` (which `run` and `up` also do first when a ledger is set) deletes such
-  VMs once stopped and settles their reservations in the ledger from the prices the launcher sampled.
+  instead of idling until `--hours`. `reap` (which `run` and `up` also do first when a ledger is set) deletes such a
+  VM once it has stopped, or once it is overdue: 30 minutes past its `--hours` cap, or an hour old with no job
+  started. Then it settles the reservation from the prices that launcher sampled.
+  - reap reads the VM's `job.json` from the `--out` the ledger recorded, an absolute path (older entries hold a
+    relative one, tried from the current directory, the repo and the ledger's folder), and trusts it only if it names
+    that VM. If it can't find the record, it can't tell whether the job still runs, so only the `--hours` cap (plus
+    30 minutes) makes the VM overdue.
+  - reap never deletes a kept VM (`up`, `run --keep`). It settles a kept VM's reservation once the VM is gone.
 - **`scripts/spot_events.py runs/`** builds a table of every VM attempt from the `job.json` records: creation failures
   by kind and region, minutes to run, how each VM ended, cost, and preemptions per VM-hour.
 
@@ -233,17 +252,23 @@ directory.
   batches are not transactional. A marker in the store means its unit is complete.
 - Uploads run on a background thread, so the GPU never waits for the network. `flush` waits for them, e.g. within
   the 60 s preemption notice.
-- Permanent errors (quota, permission) are not retried: they mark the store broken, and the extraction stops making
-  work it can't save.
+- Permanent errors (quota, permission) are not retried: they mark the store broken, the extraction stops making
+  work it can't save, and it exits 1, since a relaunch could save nothing either.
 
 **Resuming.** `experiments/extract_probe_features.py --store` (and the session driver
 `experiments/run_probe_session.py`) save each 256-item shard as it finishes, and on any VM skip every shard whose
 marker and data are already in the store. A preemption therefore loses only the shards in progress.
 - `index.json` pins the settings that decide what a shard holds (dataset, reader, views, shard size, feature format,
   library versions, batching budget). A run with other settings refuses to start rather than mix shards.
+- The dataset is pinned too: extraction refuses an `items.jsonl` whose sha256 differs from its manifest's
+  `items_sha256`, before any model loads.
 - `--part i/n` splits a dataset's shards between processes, or VMs, that share one store.
-- The session driver exits 1 if a required reader failed (a relaunch wouldn't help), 75 if it stopped early with work
-  left (relaunch and resume), 76 if `--hours` left no time for even one shard (not relaunched).
+- Exit codes of `extract_probe_features.py` and of the session driver `run_probe_session.py`:
+  - **75**, resumable: stopped by the deadline or SIGTERM, also when uploads were still running or had failed then.
+    A shard whose marker and data are not both in the store isn't done, so the next run extracts it again.
+  - **1**, failed: the store refuses uploads (quota, permission), or uploads failed with nothing stopping the run.
+    In the session, a required reader that fails ends it with 1 (a relaunch wouldn't help).
+  - **76** (session only): `--hours` left no time for even one shard, so a relaunch would only repeat that.
 - **It paid off:** the full-precision session's VM was preempted 32 minutes in, when every essential shard was
   already in the bucket. Nothing had to be redone.
 
