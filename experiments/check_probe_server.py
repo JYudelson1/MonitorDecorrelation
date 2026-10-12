@@ -3,8 +3,12 @@
     uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
         --probes-root data/probes/Inkling-Small --out results/check_probe_server.json
 
-1. **Golden check** of every deployed probe at its own tolerance, scoring one episode per forward
-   (``--max-batch-tokens 1``, the batching rule's fix) and batched as in the extraction (65,536 tokens).
+1. **Golden check** of every deployed probe, scoring one episode per forward (``--max-batch-tokens 1``, the batching
+   rule's fix) and batched as in the extraction (65,536 tokens):
+   - max |Δlogit| within the probe's own tolerance;
+   - |mean Δlogit| within ``--golden-mean-tolerance`` (a systematic shift; whitebox/probe_server.py
+     ``GOLDEN_MEAN_TOLERANCE``).
+   Each probe's max, mean and sd of Δlogit go into the report, also when it fails.
 2. **End to end:** the HTTP server and ``InklingProbeMonitor`` score the golden episodes as RL rollouts would arrive;
    the scores must equal the scorer's.
 3. **Throughput** of both batchings, in tokens per second.
@@ -23,11 +27,16 @@ import time
 
 
 def main(argv: list[str] | None = None) -> int:
+    from monitordecorrelation.whitebox.probe_server import GOLDEN_MEAN_TOLERANCE
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
     ap.add_argument("--probes-root", default="data/probes/Inkling-Small")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
+    ap.add_argument("--golden-mean-tolerance", type=float, default=GOLDEN_MEAN_TOLERANCE,
+                    help="max |mean Δlogit| over each probe's golden episodes: a systematic shift (default "
+                         f"{GOLDEN_MEAN_TOLERANCE}, probe_server.GOLDEN_MEAN_TOLERANCE; inf turns the check off)")
     args = ap.parse_args(argv)
 
     import numpy as np
@@ -54,11 +63,13 @@ def main(argv: list[str] | None = None) -> int:
         for d in dirs:
             name = os.path.relpath(d, args.probes_root)
             tol = json.load(open(os.path.join(d, "meta.json")))["golden_tolerance"]
+            mean_tol = args.golden_mean_tolerance
             try:
-                r = scorer.golden_check([d], tol)[probe_sha(d)]
-                res = {**r, "tolerance": tol, "ok": r["max_dlogit"] <= tol}
-            except RuntimeError as e:
-                res = {"tolerance": tol, "ok": False, "error": str(e)}
+                r = scorer.golden_check([d], tol, mean_tolerance=mean_tol)[probe_sha(d)]
+                res = {**r, "ok": r["max_dlogit"] <= tol and abs(r["mean_dlogit"]) <= mean_tol}
+            except RuntimeError as e:  # a GoldenCheckError carries the probe's numbers
+                res = {**getattr(e, "report", {}), "tolerance": tol, "mean_tolerance": mean_tol, "ok": False,
+                       "error": str(e)}
             report["probes"].setdefault(name, {})[f"golden_max_batch_tokens_{mbt}"] = res
             report["ok"] &= res["ok"]
             log(f"golden {name} (max_batch_tokens {mbt}): {res}")

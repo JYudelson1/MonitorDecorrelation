@@ -22,9 +22,10 @@ The score is σ(logit − t₁%), so 0.5 is the probe's 1%-FPR operating point.
 - One GPU worker thread runs the jobs in order; the HTTP threads only queue them and wait.
 
 **Golden check:** each probe directory may hold ``golden.jsonl``: episodes with their stored token hashes and logits.
-At startup the server re-scores them, and refuses to start if a rendering differs or a logit moves more than
-``golden_tolerance``. That catches drift in transformers, the kernels, the replay or the reader before it can look like
-monitor degradation.
+At startup the server re-scores them, and refuses to start if a rendering differs, a logit moves more than
+``golden_tolerance``, or the logits moved on average by more than a tight tolerance (a systematic shift;
+``GOLDEN_MEAN_TOLERANCE`` by default). That catches drift in transformers, the kernels, the replay or the reader before
+it can look like monitor degradation.
 """
 
 from __future__ import annotations
@@ -40,6 +41,42 @@ from dataclasses import dataclass, field
 import numpy as np
 
 PROTOCOL = 1
+
+GOLDEN_MEAN_TOLERANCE = 0.3
+"""Default bound on |mean Δlogit| over a probe's golden episodes (Δ = served − golden logit), in logits.
+
+**Why a second check:** the max |Δ| check (each probe's ``golden_tolerance``, 2.5–3.4) is there for a wrong reader,
+layer or rendering, which throws single episodes far off. A systematic shift passes it: every logit moving ~0.3 (a
+different library version or kernel) stays far inside 2.5. Yet a +0.3 shift raises the false-alarm rate at t₁% from 1%
+to 1.2–1.7% (the IID probes' honest dev episodes). The mean of the golden Δs exposes such a shift.
+
+**Calibration** (4-bit reader, follow-up probes; the mean probes' golden jitter is several times smaller):
+- **No change, only batching.** The golden logits come from batched features, while the server scores one episode per
+  forward (or batched with other neighbours). Per-episode Δ then has mean −0.01 to −0.06 and sd 0.3–0.6 logits.
+  So the mean over a probe's 32 golden episodes has a standard error of 0.05–0.11.
+  - A correct stack exceeds 0.3 with probability ~1.2% per probe at the worst mean (−0.06) and sd (0.6).
+  - With each follow-up probe's own mean and sd (the 4-bit diagnostics sample, 228 inputs), the chance that any of
+    the four does is ~1%.
+- **A real shift.** The 4-bit and full-precision readers differ by +0.16 / −0.36 logits on average.
+  - A 0.36 shift is caught with probability 0.5–0.99 per probe over that noise range (more often when it moves
+    several probes at once).
+  - A shift of ≥ 0.55 is caught with ≥ 95% probability per probe.
+  - A 0.16 shift mostly passes: 32 golden logits with batching noise can't resolve it.
+- **Tighter costs false refusals.** 0.25 would catch a 0.3 shift more often (per follow-up probe 0.54–0.89 instead of
+  0.31–0.69), but a correct stack would fail it ~4× as often (~4% that one of the four follow-up probes does).
+- **Later:** once the golden logits are re-derived one episode per forward (the batching rule's later fix), the null
+  mean is ~0 and its spread small, so this can be much tighter (measure that spread first).
+
+The servers' ``--golden-mean-tolerance`` overrides it (``inf`` turns the check off). It lives here, not in meta.json:
+meta.json is part of the probe's identity (``probe_sha``)."""
+
+
+class GoldenCheckError(RuntimeError):
+    """A golden episode renders or scores differently. ``report`` has the probe's numbers, when they were computed."""
+
+    def __init__(self, message: str, report: dict | None = None):
+        super().__init__(message)
+        self.report = report or {}
 
 
 def probe_sha(probe_dir: str) -> str:
@@ -133,8 +170,18 @@ class ProbeScorer:
                     out[i]["scores"][s] = {"logit": float(logit[i]), "score": float(score[i]) if keep[i] else None}
         return out
 
-    def golden_check(self, probe_dirs: list[str], tolerance: float) -> dict:
-        """Re-score each probe's golden episodes; raises if a rendering or a logit has moved."""
+    def golden_check(self, probe_dirs: list[str], tolerance: float, *,
+                     mean_tolerance: float = GOLDEN_MEAN_TOLERANCE) -> dict:
+        """Re-score each probe's golden episodes; raises ``GoldenCheckError`` if a rendering or the logits have moved.
+
+        With Δ = served − golden logit over a probe's golden episodes, it requires:
+        - every rendering identical (sha256);
+        - max |Δ| ≤ ``tolerance``: no single episode far off;
+        - |mean Δ| ≤ ``mean_tolerance``: no systematic shift (``GOLDEN_MEAN_TOLERANCE``);
+        - every Δ finite.
+
+        Returns {sha: {n, max_dlogit, mean_dlogit, sd_dlogit, tolerance, mean_tolerance}}. A failure's error carries
+        the same numbers for its probe as ``report``."""
         report = {}
         for d in probe_dirs:
             path = os.path.join(d, "golden.jsonl")
@@ -144,14 +191,25 @@ class ProbeScorer:
             rows = [json.loads(line) for line in open(path)]
             got = self.score([r["episode"] for r in rows], [sha])
             view = self.probes[sha].view
-            worst = 0.0
             for r, g in zip(rows, got):
                 if g["conversation_sha256"][view] != r["conversation_sha256"]:
-                    raise RuntimeError(f"golden check: {d}: episode {r['episode'].get('key')} renders differently")
-                worst = max(worst, abs(g["scores"][sha]["logit"] - r["logit"]))
-            if worst > tolerance:
-                raise RuntimeError(f"golden check: {d}: a logit moved by {worst:.4f} > {tolerance}")
-            report[sha] = {"n": len(rows), "max_dlogit": worst}
+                    raise GoldenCheckError(f"golden check: {d}: episode {r['episode'].get('key')} renders differently")
+            dl = np.array([g["scores"][sha]["logit"] - r["logit"] for r, g in zip(rows, got)], dtype=np.float64)
+            stats = {"n": len(rows), "max_dlogit": float(np.abs(dl).max()) if dl.size else 0.0,
+                     "mean_dlogit": float(dl.mean()) if dl.size else 0.0,
+                     "sd_dlogit": float(dl.std(ddof=1)) if dl.size > 1 else 0.0,
+                     "tolerance": tolerance, "mean_tolerance": mean_tolerance}
+            problems = []
+            if not np.isfinite(dl).all():
+                problems.append("a logit is not finite")
+            if stats["max_dlogit"] > tolerance:
+                problems.append(f"a logit moved by {stats['max_dlogit']:.4f} > {tolerance}")
+            if abs(stats["mean_dlogit"]) > mean_tolerance:
+                problems.append(f"the logits shifted by {stats['mean_dlogit']:+.4f} on average, beyond "
+                                f"±{mean_tolerance} (sd {stats['sd_dlogit']:.4f})")
+            if problems:
+                raise GoldenCheckError(f"golden check: {d}: {'; '.join(problems)} over {len(rows)} episodes", stats)
+            report[sha] = stats
         return report
 
 

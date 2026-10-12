@@ -3,15 +3,18 @@
 
 Checks:
 - Served scores of RL-style rollouts equal the probe applied to the training features.
-- The golden check passes, and refuses a changed rendering.
+- The golden check passes, and refuses a changed rendering, a systematic shift of the logits and a non-finite logit.
 - A wrong effort, or a probe the server doesn't serve, fails at construction.
 - A client that starts before the server waits for it.
 - Identical concurrent requests share one forward pass.
+- The post-hoc scorer's per-step metrics, also on the tasks no probe saw.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import math
 import os
 import threading
 import time
@@ -27,9 +30,19 @@ from monitordecorrelation.whitebox.extraction import Job, extract, prepare, read
 from monitordecorrelation.whitebox.probe_datasets import counts, terminal_items, write_dataset
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
-from monitordecorrelation.whitebox.probe_server import ProbeScorer, Server, probe_sha
+from monitordecorrelation.whitebox.probe_server import (
+    GOLDEN_MEAN_TOLERANCE, GoldenCheckError, ProbeScorer, Server, probe_sha)
 
 VIEW = "with_reasoning"
+
+
+def load_script(name: str):
+    """experiments/<name>.py as a module."""
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(os.path.dirname(__file__), "..", "experiments", f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def rows():
@@ -130,6 +143,37 @@ def test_the_golden_check_refuses_a_changed_rendering(world, tmp_path):
         scorer.golden_check([str(bad)], tolerance=1e-2)
 
 
+def test_the_golden_check_refuses_a_systematic_shift(world, tmp_path):
+    """Golden logits all 0.5 off: each within the max tolerance (1.0), so only the mean check refuses them. The same
+    0.5 with alternating signs is jitter, not a shift: it passes. A non-finite logit fails."""
+    import shutil
+
+    probe = tmp_path / "probe"
+    shutil.copytree(world["probe_dir"], probe)
+    golden = [json.loads(line) for line in (probe / "golden.jsonl").read_text().splitlines()]
+    scorer, sha = ProbeScorer(world["model"], [str(probe)]), probe_sha(str(probe))
+
+    def check(offsets, **kw):  # the golden logits moved by offsets (golden.jsonl isn't part of the probe's sha)
+        (probe / "golden.jsonl").write_text("".join(json.dumps({**r, "logit": r["logit"] + o}) + "\n"
+                                                    for r, o in zip(golden, offsets)))
+        return scorer.golden_check([str(probe)], tolerance=1.0, **kw)
+
+    assert len(golden) == 4 and GOLDEN_MEAN_TOLERANCE < 0.45
+    max_only = check([0.5] * 4, mean_tolerance=float("inf"))[sha]  # what the max check alone let through
+    assert max_only["max_dlogit"] == pytest.approx(0.5, abs=0.02) and max_only["tolerance"] == 1.0
+    assert max_only["mean_dlogit"] == pytest.approx(-0.5, abs=0.02) and max_only["sd_dlogit"] < 0.02
+    with pytest.raises(GoldenCheckError, match=r"shifted by -0\.\d+ on average") as err:
+        check([0.5] * 4)  # the default mean tolerance
+    assert err.value.report["mean_dlogit"] == pytest.approx(-0.5, abs=0.02)
+    assert err.value.report["mean_tolerance"] == GOLDEN_MEAN_TOLERANCE
+    with pytest.raises(GoldenCheckError, match=r"shifted by \+0\.\d+ on average"):
+        check([-0.5] * 4, mean_tolerance=0.4)  # the other direction, a given tolerance
+    jitter = check([0.5, -0.5] * 2)[sha]
+    assert jitter["max_dlogit"] == pytest.approx(0.5, abs=0.02) and abs(jitter["mean_dlogit"]) < 0.02
+    with pytest.raises(GoldenCheckError, match="not finite"):
+        check([float("nan"), 0.0, 0.0, 0.0])
+
+
 def test_a_client_waits_for_a_late_server_and_requests_are_shared(world):
     scorer = ProbeScorer(world["model"], [world["probe_dir"]])
     calls = []
@@ -191,7 +235,8 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
 
 def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
     """experiments/check_probe_server.py end to end on the tiny model: golden checks at both batchings, throughput,
-    and the HTTP server + monitor agreeing with the scorer."""
+    and the HTTP server + monitor agreeing with the scorer. Golden logits shifted by a constant fail it, with the
+    mean shift in the report."""
     import importlib.util
 
     def load(name):
@@ -211,30 +256,42 @@ def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
               str(deployed / "terminal_prerl" / VIEW / "followup"), "probe_iid_x", VIEW, "followup", items, str(root),
               0.5, None, log=lambda m: None)
     out = tmp_path / "check.json"
-    assert check.main(["--model", world["nvfp4_dir"], "--probes-root", str(deployed), "--out", str(out),
-                       "--device", "cpu"]) == 0
+    argv = ["--model", world["nvfp4_dir"], "--probes-root", str(deployed), "--out", str(out), "--device", "cpu"]
+    assert check.main(argv) == 0
     report = json.loads(out.read_text())
     assert report["ok"] and set(report["throughput"]) == {"1", "65536"} and len(report["end_to_end"]) == 1
+    golden = report["probes"][os.path.join("terminal_prerl", VIEW, "followup")]
+    assert set(golden) == {"golden_max_batch_tokens_1", "golden_max_batch_tokens_65536"}
+    for res in golden.values():
+        assert res["ok"] and res["mean_tolerance"] == GOLDEN_MEAN_TOLERANCE and abs(res["mean_dlogit"]) < 0.02
+    # every golden logit 0.5 too high: inside the max tolerance (3.0), outside the mean tolerance given
+    path = deployed / "terminal_prerl" / VIEW / "followup" / "golden.jsonl"
+    stored = [json.loads(line) for line in path.read_text().splitlines()]
+    path.write_text("".join(json.dumps({**r, "logit": r["logit"] + 0.5}) + "\n" for r in stored))
+    assert check.main([*argv, "--golden-mean-tolerance", "0.4"]) == 1
+    report = json.loads(out.read_text())
+    assert not report["ok"] and all(e["ok"] for e in report["end_to_end"].values())
+    for res in report["probes"][os.path.join("terminal_prerl", VIEW, "followup")].values():
+        assert not res["ok"] and res["mean_tolerance"] == 0.4 and res["max_dlogit"] < res["tolerance"] == 3.0
+        assert res["mean_dlogit"] == pytest.approx(-0.5, abs=0.02) and "shifted by" in res["error"]
 
 
-def test_posthoc_scoring_of_saved_runs(world, tmp_path):
+def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     """experiments/eval_inkling_probes_on_runs.py on a fake RL run: every valid eval episode scored as in training,
-    per-step metrics in the file the degradation matrix reads, and a rerun scores nothing twice."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "posthoc", os.path.join(os.path.dirname(__file__), "..", "experiments", "eval_inkling_probes_on_runs.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    per-step metrics in the file the degradation matrix reads, also on the tasks no probe saw, and a rerun scores
+    nothing twice. Without a task-splits file, the unseen-task fields are left out with a warning."""
+    mod = load_script("eval_inkling_probes_on_runs")
     run = tmp_path / "terminal_run_s0"
     run.mkdir()
     saved = [{**r, "step": 0 if i < 6 else 10} for i, r in enumerate(rows())]
     saved.append({**rows()[0], "step": 10, "invalid_reason": "unparsed"})  # never scored
     (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in saved))
     (run / "run_info.json").write_text(json.dumps({"config": {"env_options": RUN_ENV, "thinking_effort": 0.5}}))
+    splits = tmp_path / "task_splits.json"
+    splits.write_text(json.dumps({"test": ["t0", "t4"], "train": ["t1", "t2"], "val": ["t3"]}))
     argv = [str(run), "--model", world["nvfp4_dir"], "--probes", world["probe_dir"], "--names", "probe_iid",
             "--device", "cpu", "--chunk", "4"]
-    assert mod.main(argv) == 0
+    assert mod.main([*argv, "--task-splits", str(splits)]) == 0
     scored = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
     assert sorted(r["line"] for r in scored) == list(range(1, 11))
     row_of = {i: n for n, i in enumerate(world["vf"].ids)}
@@ -245,8 +302,48 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path):
     per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
     assert [r["step"] for r in per_step] == [0, 10] and [r["n"] for r in per_step] == [6, 4]
     assert {"auroc", "auroc_used_verifier", "recall_at_threshold", "fpr_at_threshold"} <= set(per_step[0])
-    assert mod.main(argv) == 0  # nothing left to score
+    # unseen: t0 at step 0 (the hack t0/0 and t0/1), t4 at step 10 (two honest episodes: no AUROC, no recall)
+    assert [(r["n_unseen"], r["n_pos_unseen"]) for r in per_step] == [(2, 1), (2, 0)]
+    assert set(mod.UNSEEN_FIELDS.values()) <= set(per_step[1])
+    assert math.isnan(per_step[1]["auroc_unseen"]) and math.isnan(per_step[1]["recall_at_threshold_unseen"])
+    assert per_step[1]["fpr_at_threshold_unseen"] in (0.0, 0.5, 1.0)
+    capsys.readouterr()
+    assert mod.main([*argv, "--task-splits", str(tmp_path / "absent.json")]) == 0  # nothing left to score
+    assert "WARNING: no task splits" in capsys.readouterr().out
     assert len((run / "probe_scores_inkling.jsonl").read_text().splitlines()) == 10
+    again = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
+    assert json.dumps(again) == json.dumps([{k: v for k, v in r.items() if not k.endswith("_unseen")}
+                                            for r in per_step])  # the other fields unchanged
     opts, effort = mod.run_replay_options({"config": {"env_options": {"verifier_mode": "submit_corrupted"},
                                                       "thinking_effort": 0.5}})
     assert effort == 0.5 and opts["max_turns"] == 4 and opts["require_explanation"] is False  # the env's defaults
+
+
+def test_posthoc_metrics_on_unseen_tasks():
+    """eval_inkling_probes_on_runs.step_metrics: the *_unseen fields count only the unseen tasks' scored episodes, are
+    NaN where undefined, and leave the other fields as they were."""
+    mod = load_script("eval_inkling_probes_on_runs")
+
+    def row(step, task, score, behavior, used=False):
+        return {"step": step, "task_id": task, "behavior_present": behavior, "used_verifier": used,
+                "scores": {"p": {"logit": 0.0, "score": score}}}
+
+    episodes = [row(0, "a", 0.9, True, used=True), row(0, "a", 0.2, False, used=True), row(0, "b", 0.6, False),
+                row(0, "b", 0.1, False), row(0, "b", None, True),  # unscored: not counted anywhere
+                row(0, "seen", 0.4, True), row(0, "seen", 0.7, False),
+                row(5, "b", 0.3, False), row(5, "seen", 0.8, True),
+                row(7, "seen", 0.9, True), row(7, None, 0.1, False)]
+    plain = mod.step_metrics(episodes, "p")
+    got = mod.step_metrics(episodes, "p", unseen={"a", "b"})
+    assert not any(k.endswith("_unseen") for r in plain for k in r)
+    assert json.dumps([{k: r[k] for k in p} for r, p in zip(got, plain)]) == json.dumps(plain)  # NaN-safe equality
+    s0, s5, s7 = got
+    assert (s0["n"], s0["n_pos"], s0["auroc"]) == (6, 2, 0.75)
+    assert (s0["n_unseen"], s0["n_pos_unseen"]) == (4, 1)
+    assert (s0["auroc_unseen"], s0["auroc_used_verifier_unseen"]) == (1.0, 0.75)
+    assert s0["recall_at_threshold_unseen"] == 1.0 and s0["fpr_at_threshold_unseen"] == pytest.approx(1 / 3)
+    assert (s5["n_unseen"], s5["n_pos_unseen"], s5["fpr_at_threshold_unseen"]) == (1, 0, 0.0)  # one honest episode
+    assert all(math.isnan(s5[k]) for k in ("auroc_unseen", "auroc_used_verifier_unseen", "recall_at_threshold_unseen"))
+    assert (s7["n_unseen"], s7["n_pos_unseen"]) == (0, 0)  # none
+    assert all(math.isnan(s7[k]) for k in ("auroc_unseen", "auroc_used_verifier_unseen", "recall_at_threshold_unseen",
+                                           "fpr_at_threshold_unseen"))

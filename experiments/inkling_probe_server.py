@@ -8,7 +8,8 @@ Then, on the machine running the RL loop: ``ssh -N -L 8178:127.0.0.1:8178 md@<vm
 URL to ``http://127.0.0.1:8178`` (monitors/inkling_probe_monitor.py).
 
 The server refuses to start if a probe's golden episodes render differently or score differently than when the probe
-was fitted (``--golden-tolerance``, in logits).
+was fitted, in logits: one episode by more than ``--golden-tolerance``, or all of them by more than
+``--golden-mean-tolerance`` on average (a systematic shift; the default is calibrated in whitebox/probe_server.py).
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import time
 
 
 def main() -> int:
+    from monitordecorrelation.whitebox.probe_server import GOLDEN_MEAN_TOLERANCE
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="the reader checkpoint (local dir): NVFP4 or BF16 Inkling-Small")
     ap.add_argument("--probes", required=True, help="comma-list of probe directories (probe.npz + meta.json)")
@@ -32,6 +35,9 @@ def main() -> int:
                          "batches like the extraction: ~2x faster, but a score then depends on its batch")
     ap.add_argument("--golden-tolerance", type=float, default=None,
                     help="max |Δlogit| on the golden episodes (default: each probe's own, else 1.0)")
+    ap.add_argument("--golden-mean-tolerance", type=float, default=GOLDEN_MEAN_TOLERANCE,
+                    help="max |mean Δlogit| over each probe's golden episodes: a systematic shift (default "
+                         f"{GOLDEN_MEAN_TOLERANCE}, probe_server.GOLDEN_MEAN_TOLERANCE; inf turns the check off)")
     args = ap.parse_args()
 
     from monitordecorrelation.whitebox.extraction import reader_info
@@ -45,8 +51,12 @@ def main() -> int:
              else load_inkling_text(args.model)).eval()
     print(f"[probe-server] loaded {args.model} in {time.time() - t:.0f}s", flush=True)
     scorer = ProbeScorer(model, dirs, max_batch_tokens=args.max_batch_tokens, reader_info=reader_info(model, args.model))
-    tolerances = [json.load(open(f"{d}/meta.json")).get("golden_tolerance", 1.0) for d in dirs]
-    report = scorer.golden_check(dirs, args.golden_tolerance if args.golden_tolerance is not None else max(tolerances))
+    report = {}
+    for d in dirs:  # each probe at its own max tolerance; the mean tolerance is the server's
+        tol = args.golden_tolerance
+        if tol is None:
+            tol = json.load(open(f"{d}/meta.json")).get("golden_tolerance", 1.0)
+        report.update(scorer.golden_check([d], tol, mean_tolerance=args.golden_mean_tolerance))
     print(f"[probe-server] golden check passed: {json.dumps(report)}", flush=True)
     server = Server(scorer, args.host, args.port, log=lambda m: print(f"[probe-server] {m}", flush=True))
     server.start()
