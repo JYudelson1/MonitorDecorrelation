@@ -27,13 +27,22 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/check_inkling_nvfp4.py` | **GPU acceptance check** for the NVFP4 Inkling reader: load, greedy sanity, real episodes, the BF16 comparison, decode, throughput. Exits 1 on a failed check. | a JSON report |
 | `scripts/bucket_speed_test.py` | **Upload speed to an HF bucket** from the machine it runs on, through `whitebox/store.py`. Random 0.5 GB files with one uploader, then several in parallel, plus a download. It deletes what it uploaded. Run it on a GPU VM with `nebius_job.py run --upload …`. | JSON summary (`--out`) |
 | `experiments/run_probe_session.py` | **The GPU session** for Inkling probe features, from a JSON plan (`experiments/session_plans/`): several readers and copies on one VM (`CUDA_VISIBLE_DEVICES` per worker), every dataset, then the reader diagnostics. Each worker saves shards to its store; `part_offset`/`parts_total` split a reader across VMs. Exits 75 if unfinished (the launcher relaunches and it resumes). | the stores in the plan; `status.json` in its status store |
-| `experiments/fit_probes.py` | **Fit the Inkling probes** for one reader on hub (CPU): the pre-registered selection (PROBE_PLAN.md 5b) over layers × C, refit, thresholds, test metrics with CIs, hard subsets, concealment, baselines, OOD transfer. Streams one layer at a time from the shards (hub has ~16 GB). `--readouts`, `--probes iid,ood`, `--skip-baselines`. ~10 min per TerminalEnv grid, ~1 h per OOD grid with 6 jobs. | `<out>/<dataset>/<view>/<readout>/{probe.npz,meta.json,metrics.json,cv_grid.csv,scores.jsonl}` + `summary.{json,md}` |
-| `experiments/compare_readers.py` | **4-bit vs full precision** under the pre-registered reader, batching and readout rules, with rule (c)'s refit floor. | `<out>/{decision.json,report.md}` |
-| `experiments/deploy_probes.py` | **Package fitted probes as monitors**: IID per view and readout; OOD with each TerminalEnv view's thresholds; a 32-episode golden set each; the probes' task splits. | `data/probes/Inkling-Small/<dataset>/<view>/<readout>/`, `task_splits.json`, `deployed.json` |
-| `experiments/inkling_probe_server.py` | **Serve Inkling probes** from one GPU to RL runs (HTTP on localhost; reach it over an SSH tunnel). Refuses to start if a golden episode renders or scores differently. | stdout |
+| `experiments/fit_probes.py` | **Fit the Inkling probes** for one reader on CPU: the pre-registered selection (docs/inkling_probes_preregistration.md) over layers × C, refit, thresholds, test metrics with CIs, hard subsets, concealment, baselines, OOD transfer. Streams one layer at a time from the shards (fits in ~16 GB). `--readouts` (followup, mean, router, router_all), `--probes iid,ood`, `--skip-baselines`; refuses to overwrite an existing probe folder unless `--overwrite`. ~10 min per TerminalEnv grid, ~1 h per OOD grid with 6 jobs. | `<out>/<dataset>/<view>/<readout>/{probe.npz,meta.json,metrics.json,cv_grid.csv,scores.jsonl}` + `summary.{json,md}` |
+| `experiments/compare_readers.py` | **4-bit vs full precision** under the pre-registered reader, batching and readout rules, with rule (c)'s refit floor; `--readouts` (one decision per readout, reported); report only: weight cosine, score shift, each reader's probe on both readers' features, the batching floor, routing agreement at "Yes". `--from-json` re-renders a saved decision.json; `--overwrite`. | `<out>/{decision.json,report.md}` |
+| `experiments/deploy_probes.py` | **Package fitted probes as monitors**: IID per view and readout; OOD with each TerminalEnv view's thresholds; served on another reader → thresholds recalibrated on its honest dev episodes; a 32-episode golden set each; the probes' task splits; each probe's serving check in deployed.json. | `data/probes/Inkling-Small/<dataset>/<view>/<readout>/`, `task_splits.json`, `deployed.json` |
+| `experiments/inkling_probe_server.py` | **Serve Inkling probes** from one GPU to RL runs (HTTP on localhost; reach it over an SSH tunnel), one episode per forward by default. Refuses to start if a golden episode renders differently, or scores differently (each probe's max \|Δlogit\| tolerance, and `--golden-mean-tolerance`, default 0.3 logits, for a systematic shift). | stdout |
 | `scripts/fetch_features.py` | **Download features** from a store, optionally keeping only some tensors per shard (`--keep followup,counts,answer_logp`); complete shards only, marker last, resumable. | `<dest>/<dataset>/<view>/shard_*` |
 | `scripts/spot_events.py` | **Every Nebius VM attempt** from the launcher's `job.json` files: creation failures by kind and region, minutes to run, how it ended, cost; preemptions per VM-hour. | stdout, `--md`, `--json` |
-| `scripts/nebius_job.py` | **One-command GPU job on Nebius**: pick the cheapest region by current spot price and capacity (`--max-price` cap optional), create a B300 VM, push the repo, download HF weights to RAM, run, fetch, and always delete (`run` / `up` / `exec` / `down` / `list` / `prices` / `budget` / `reap`, `--dry-run`). After a spot preemption or a job exit of 75, it relaunches on a fresh VM (`--attempts`, default 3) within the budget. | `--out` dir with logs + `job.json` (later attempts in `retry-k/`) |
+| `scripts/nebius_job.py` | **One-command GPU job on Nebius**: pick the cheapest region by current spot price and capacity (`--max-price` cap optional), create a B300 VM, push the repo, download HF weights to RAM, run, fetch, and always delete (`run` / `up` / `exec` / `down` / `list` / `prices` / `budget` / `reap`, `--dry-run`). After a spot preemption or a job exit of 75, it relaunches on a fresh VM (`--attempts`, default 3) within the budget. Refuses uncommitted code unless `--allow-dirty` (the patch is then saved in `--out`); pushes CODE_VERSION.json so the VM's outputs record their commit. | `--out` dir with logs + `job.json` (later attempts in `retry-k/`) |
+| `experiments/check_probe_server.py` | **GPU check of the serving path** with the deployed probes: golden checks one episode per forward and batched, throughput, and the HTTP server + `InklingProbeMonitor` against the scorer. Exits 1 on a failed check. | a JSON report |
+| `experiments/eval_inkling_probes_on_runs.py` | **Post-hoc probe scoring** of finished TerminalEnv runs' saved eval episodes on one GPU (replayed as in training, resumable). Per eval step: AUROC vs `behavior_present` and `used_verifier`, recall/FPR at 0.5, and the same on the tasks no probe saw (`--task-splits`). | `<run>/probe_eval_<name>.jsonl`, `<run>/probe_scores_inkling.jsonl` |
+| `experiments/verify_fits.py` | **Does today's code reproduce the fitted probes?** Recomputes a slice of each probe's CV grid, re-derives the selection and refits the chosen probe, then compares with the saved files. | `<out>/{summary.json,report.md}` |
+| `experiments/ood_refits.py` | **How stable is the OOD probe's transfer?** Pair-bootstrap refits at the probe's layer and C, and one fit per layer, each scored in distribution and on TerminalEnv. `--overwrite`. | `<out>/{summary.json,refits.csv,by_layer.csv}` |
+| `experiments/learning_curves.py` | **Was there enough training data?** Refits on growing fractions of the training data (IID by task, OOD by pair), and bootstrap refits of each OOD source mix. `--overwrite`. | `<out>/{summary.json,iid.csv,ood.csv,ood_sources.csv}` |
+| `experiments/probe_analyses.py` | One-off probe numbers as code. `dataset-stats` (items only): hacks that mention the verifier, OOD question overlap, token counts (`--sample N`); `near-threshold`: honest dev episodes within `--k` logits of t₁% (own and recalibrated). Refuses its own existing file unless `--overwrite`. | `<out>/{dataset_stats,near_threshold}.json` |
+| `experiments/probe_report.py` | **Probe results into the repo and the docs.** `collect` copies the small result files into data/probe_results/ (with MANIFEST.json); `render FILE` fills the tables between `probe_report` markers; `check FILE` exits 1 if they're stale. | `data/probe_results/`, the rendered doc |
+| `scripts/run_probe_pipeline.sh` | **The CPU-side probe pipeline** as one resumable entry point: fetch → fit → verify → compare → analyses → deploy → collect + render, printing every command (`--dry-run`). | `<scratch>/pipeline/<timestamp>/` |
+| `scripts/verify_bucket_copy.py` | **Check a local folder against an HF bucket prefix** (`hf://buckets/NS/BUCKET/PREFIX`) by size and Xet content hash; exit 1 on a missing or different file (`--exact`: also files only in the bucket). | stdout |
 | `experiments/build_syco_pairs.py` | Build real-CoT sycophancy contrastive pairs (resample policy, label by ground-truth/judge/both) for the on-domain probe. | a `*.jsonl` of pairs |
 | `experiments/test_many_monitors.py` | Monitor bakeoff: policy behavior frequency + each candidate monitor's detection AUROC (class-balanced). | `data/runs/<name>/monitor_bakeoff.json` |
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
@@ -466,20 +475,25 @@ Features go straight to the HF bucket as each shard finishes (`--store`), instea
 Store features as bfloat16, which the extraction script does. Inkling's mid-layer activations reach ~5e4
 at the readout, too close to float16's 65504.
 
-**The whole pipeline as run on 2026-10-10** (results: `md_files/PROBE_RESULTS.md` in the project):
+**The whole pipeline** (results, caveats and design: `docs/INKLING_PROBES.md`). `scripts/run_probe_pipeline.sh` runs
+the CPU-side steps 2–7 in order (`--dry-run` prints the commands); SCRATCH below is any folder with room for the features.
 1. **GPU session(s):** `experiments/run_probe_session.py --plan experiments/session_plans/<plan>.json` through
-   `nebius_job.py run`.
+   `nebius_job.py run` (commit first: it refuses uncommitted code).
    - The 4-bit plans split the datasets over four 1-GPU VMs (`probe_session_nvfp4_part{0..3}of4.json`).
    - `probe_session_bf16.json` runs two full-precision copies on an 8× B300.
-2. **Fetch** to hub: `scripts/fetch_features.py STORE DEST` (`--keep followup,counts,answer_logp` when disk is short).
-3. **Fit** on hub, per reader: `experiments/fit_probes.py --reader nvfp4 --features ../scratch/features/nvfp4
-   --out ../scratch/probes/nvfp4 --jobs 6`.
-4. **Compare:** `experiments/compare_readers.py --probes ../scratch/probes --features ../scratch/features
-   --diagnostics ../scratch/diagnostics --out ../scratch/compare`.
-5. **Deploy:** `experiments/deploy_probes.py --probes ../scratch/probes/bf16 --features ../scratch/features/nvfp4
-   --diagnostics ../scratch/diagnostics/nvfp4 --readouts followup`, i.e. full-precision probes served on 4-bit,
-   thresholds recalibrated. Then the same with `--probes ../scratch/probes/nvfp4 --readouts mean`.
-6. **Check the serving path on a GPU:** `experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4`.
+2. **Fetch:** `scripts/fetch_features.py STORE SCRATCH/features/<reader>` (`--keep followup,counts,answer_logp` to keep
+   only the "Yes" readout).
+3. **Fit,** per reader: `experiments/fit_probes.py --reader nvfp4 --features SCRATCH/features/nvfp4
+   --out SCRATCH/probes/nvfp4 --jobs 6`.
+4. **Verify** the fits reproduce: `experiments/verify_fits.py` (see its `--help`).
+5. **Compare:** `experiments/compare_readers.py --probes SCRATCH/probes --features SCRATCH/features
+   --diagnostics SCRATCH/diagnostics --out SCRATCH/compare/<name> --readouts followup` (then `mean`).
+6. **Deploy** (the pre-registered rule chose full precision for every deployed probe):
+   `experiments/deploy_probes.py --probes SCRATCH/probes/bf16 --features SCRATCH/features/nvfp4
+   --diagnostics SCRATCH/diagnostics/nvfp4 --readouts followup` — full-precision probes served on the 4-bit reader,
+   thresholds recalibrated; then `--readouts mean` with the 4-bit mean features.
+7. **Results into the repo:** `experiments/probe_report.py collect`, then `render docs/INKLING_PROBES.md`.
+8. **Check the serving path on a GPU:** `experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4`.
 
 ### Using the deployed Inkling probes in a run
 
@@ -487,7 +501,7 @@ at the readout, too close to float16's 65504.
 # serving VM: one B300, 4-bit reader, pinned to the revision the probes record
 python3 scripts/nebius_job.py up --hours 12 --max-gpu-price 4.5 --preset 1gpu-24vcpu-346gb \
     --hf thinkingmachines/Inkling-Small-NVFP4@b6a99534467840620d411e4cd4ad5819b2610d9c
-uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 --max-batch-tokens 1 \
+uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
     --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup
 ssh -N -L 8178:127.0.0.1:8178 md@<vm>        # on the RL machine
 ```
