@@ -37,7 +37,7 @@ What ``run`` does (``exec`` is the SSH part only, so a non-Nebius box works too)
 1. Pick the region (above). Create the VM there, wait for RUNNING with a public IP, then wait for SSH.
 2. Bootstrap: RAM disk, lingering, uv.
 3. Start the ``--hf`` downloads, detached.
-4. Push the repo and the ``--push`` inputs.
+4. Push the repo, with its ``CODE_VERSION.json`` (below), and the ``--push`` inputs.
 5. ``uv sync --locked``. If torch can't see the GPU, fall back to scripts/setup_box.sh.
 6. Wait for the downloads, then run the job, detached and polled.
    - With ``--upload``, the HF token reaches the VM before the job, so the job can save its own progress as it goes
@@ -45,7 +45,7 @@ What ``run`` does (``exec`` is the SSH part only, so a non-Nebius box works too)
    - The job gets ``NEBIUS_JOB_DEADLINE``, the VM's scheduled shutdown in epoch seconds, so it can stop cleanly
      before ``--hours`` cuts it off.
    - When the job ends, the VM schedules its own power-off 15 minutes later, unless ``--hours`` comes sooner. If
-     the launcher has died (e.g. hub restarted), the VM stops itself instead of idling until ``--hours``.
+     the launcher has died (e.g. its machine restarted), the VM stops itself instead of idling until ``--hours``.
 7. Upload (``--upload``), then fetch the ``--fetch`` paths and all remote logs.
 8. Delete the VM and verify that neither it nor its boot disk is left.
 Step 8 runs in a ``finally``, so errors, preemption and Ctrl-C all still delete; only ``--keep``
@@ -64,6 +64,15 @@ continues up to N VMs in all.
 
 Leftovers: run/up first ``reap`` the ledger. Reap finds reservations whose launcher died mid-run, deletes their VM
 once it has stopped, and settles them from that launcher's sampled prices. ``reap`` does only that.
+
+Code version: the pushed repo has no .git, so each push also writes ``CODE_VERSION.json`` into it: the launching
+machine's ``code_version`` of what it pushed (commit, dirty, diff_sha256; src/monitordecorrelation/provenance.py).
+Code on the VM stamps its outputs from that file. ``job.json`` records it as ``code``.
+- run/up/exec refuse a working tree with uncommitted changes (tracked changes, or untracked files that would travel)
+  before anything is created, and again at each push (the tree may change during a run), unless ``--allow-dirty``.
+- With ``--allow-dirty``, a push with changes saves them in that attempt's ``--out``: ``code.diff``, the patch from
+  the commit to what was pushed (its sha256 is ``diff_sha256``; ``git apply`` it on a checkout of the commit to
+  rebuild the code), and ``code_untracked.txt``, the untracked files in it.
 
 Lessons from the manual session, built in here:
 - Weights go to a tmpfs RAM disk at /mnt/ram, for two reasons.
@@ -95,6 +104,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -127,6 +137,19 @@ ALIVE_STATES = {"RUNNING", "STARTING", "CREATING", "UPDATING"}
 SSH_DOWN = 255  # ssh's own failure code (the remote command's codes pass through)
 
 
+def _load_provenance():
+    """src/monitordecorrelation/provenance.py, by its path: the package's __init__ needs the project's dependencies,
+    that file only the stdlib."""
+    spec = importlib.util.spec_from_file_location(
+        "nebius_job_provenance", REPO / "src" / "monitordecorrelation" / "provenance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+provenance = _load_provenance()
+
+
 class InfraError(RuntimeError):
     """Provisioning, SSH, setup or teardown failed."""
 
@@ -136,7 +159,8 @@ class VmStopped(RuntimeError):
 
 
 class LauncherSignal(KeyboardInterrupt):
-    """SIGTERM or SIGHUP to the launcher (e.g. hub shutting down): handled like Ctrl-C, so the VM is still deleted."""
+    """SIGTERM or SIGHUP to the launcher (e.g. its machine shutting down): handled like Ctrl-C, so the VM is still
+    deleted."""
 
 
 def _raise_launcher_signal(signum, frame):
@@ -312,6 +336,44 @@ def repo_files(repo: Path = REPO) -> list[str]:
 
     files = sorted(set(ls()) | set(ls("--others", "--exclude-standard")))
     return [f for f in files if shippable(f) and (repo / f).is_file()]
+
+
+def code_version(repo: Path) -> dict:
+    """``provenance.code_version`` of the repo being pushed: {commit, dirty, diff_sha256, source}."""
+    return provenance.code_version(repo)
+
+
+def save_code_changes(out: Path) -> dict:
+    """``provenance.save_changes``: the stamp, and the uncommitted changes' patch and untracked list in ``out``."""
+    return provenance.save_changes(out, REPO)
+
+
+def code_problem(code: dict) -> str | None:
+    """Why ``code`` may not be pushed without --allow-dirty (None: it may)."""
+    if code["dirty"] is False:
+        return None
+    if code["dirty"]:
+        return "it has uncommitted changes (tracked changes, or untracked files that would travel)"
+    return "its commit can't be told (not a git checkout, or git failed)"
+
+
+def describe_code(code: dict) -> str:
+    if not code.get("commit"):
+        return "code version unknown"
+    changes = f" + uncommitted changes (patch sha256 {(code['diff_sha256'] or '?')[:12]})" if code["dirty"] else ""
+    return f"commit {code['commit'][:12]}{changes}"
+
+
+def check_code(allow_dirty: bool) -> dict:
+    """The launch check, before anything is created: the repo's code version, or SystemExit if it has uncommitted
+    changes (or no knowable commit) and ``allow_dirty`` is not set."""
+    code = code_version(REPO)
+    problem = code_problem(code)
+    if problem and not allow_dirty:
+        raise SystemExit(f"refusing to push {REPO}: {problem}. Commit the changes, or pass --allow-dirty to push them "
+                         f"anyway; their patch is then saved in --out ({provenance.PATCH_FILE}).")
+    log(f"code: {describe_code(code)}" + (f" ({problem}; --allow-dirty)" if problem else ""))
+    return code
 
 
 def detached(script: str, step: str, cwd: str | None = None) -> str:
@@ -931,11 +993,12 @@ class JobSpec:
     hf: list[tuple[str, str | None, str]] = field(default_factory=list)
     fetches: list[str] = field(default_factory=list)
     uploads: list[tuple[str, str]] = field(default_factory=list)  # (remote path, hf://buckets/... destination)
-    hf_token_file: Path | None = None  # on hub; on the VM from the job's start until the upload step ends
+    hf_token_file: Path | None = None  # on the launching machine; on the VM from the job's start until the upload ends
     env: list[tuple[str, str]] = field(default_factory=list)
     extra_gpu: bool = False
     poll_interval: float = 15.0
     poweroff_minutes: int | None = None  # the VM powers itself off this long after the job (run, not kept)
+    allow_dirty: bool = False  # push uncommitted changes (their patch is saved in ``out``)
 
 
 @dataclass
@@ -967,6 +1030,7 @@ class Record:
     attempt: int = 1  # run --attempts: which VM this was
     creates: list = field(default_factory=list)  # every creation tried: region, price, start, minutes, error
     retries: list = field(default_factory=list)  # on attempt 1: the --out dirs of the later attempts
+    code: dict | None = None  # the code version pushed, as written to the VM's CODE_VERSION.json
 
     def save(self, out: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
@@ -1054,6 +1118,40 @@ def push_repo(remote: Remote, files: list[str]) -> None:
         os.unlink(listing)
 
 
+def stamp_push(job: JobSpec, rec: Record) -> dict:
+    """The code version of what is about to be pushed, taken now: the tree may have changed since launch, or since the
+    last attempt. Uncommitted changes without --allow-dirty are refused (InfraError); with it, their patch and
+    untracked list are saved in ``job.out``. Recorded in job.json as ``code``."""
+    code = code_version(REPO)
+    problem = code_problem(code)
+    if problem and not job.allow_dirty:
+        raise InfraError(f"not pushing {REPO}: {problem}, and --allow-dirty was not given")
+    if code["dirty"] and code["source"] == "git":
+        try:
+            code = save_code_changes(job.out)  # stamps again, from the same bytes as the saved patch
+        except Exception as e:  # noqa: BLE001 — pushing changes nobody could rebuild defeats --allow-dirty
+            raise InfraError(f"could not save the uncommitted changes in {job.out}: {e}") from e
+        if code["dirty"]:
+            log(f"pushing uncommitted changes (--allow-dirty): their patch is {job.out / provenance.PATCH_FILE}")
+    elif problem:
+        log(f"pushing anyway (--allow-dirty): {problem}; with no git checkout, no patch can be saved")
+    if not code["dirty"]:  # a patch left by an earlier push into the same --out is not this one's
+        for name in (provenance.PATCH_FILE, provenance.UNTRACKED_FILE):
+            (job.out / name).unlink(missing_ok=True)
+    rec.code = code
+    rec.save(job.out)
+    return code
+
+
+def push_code_version(remote: Remote, code: dict) -> None:
+    """CODE_VERSION.json at the root of the pushed repo, which has no .git: provenance.code_version reads it there."""
+    target = f"{REMOTE_REPO}/{provenance.CODE_VERSION_FILE}"
+    with tempfile.TemporaryFile() as fh:
+        fh.write((json.dumps(code, indent=1) + "\n").encode())
+        fh.seek(0)
+        remote.run(f"mkdir -p {REMOTE_REPO} && cat > {target}.tmp && mv {target}.tmp {target}", stdin=fh, timeout=60)
+
+
 def push_path(remote: Remote, local: str, dest: str) -> None:
     src, target = Path(local).expanduser(), shlex.quote(remote_path(dest))
     if src.is_dir():
@@ -1102,8 +1200,10 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
         start(remote, "download", download_script(job.hf))
         log(f"downloading {', '.join(r for r, _, _ in job.hf)} to {RAM_DIR} (detached)")
     files = repo_files()
-    log(f"pushing the repo: {len(files)} files")
+    code = stamp_push(job, rec)
+    log(f"pushing the repo: {len(files)} files, {describe_code(code)}")
     push_repo(remote, files)
+    push_code_version(remote, code)
     for local, dest in job.pushes:
         log(f"pushing {local} -> {remote_path(dest)}")
         push_path(remote, local, dest)
@@ -1251,7 +1351,7 @@ def job_spec(args, cmd: list[str], name: str) -> JobSpec:
             raise SystemExit(f"--upload needs a Hugging Face token in {token_file} (--hf-token-file)")
     return JobSpec(out=expand_out(args.out, name, stamp), command=job_command(cmd) if cmd else None,
                    pushes=pushes, hf=hf, fetches=list(args.fetch), uploads=uploads, hf_token_file=token_file,
-                   env=env, extra_gpu=args.extra_gpu, poll_interval=args.poll_interval)
+                   env=env, extra_gpu=args.extra_gpu, poll_interval=args.poll_interval, allow_dirty=args.allow_dirty)
 
 
 def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) -> int:
@@ -1268,6 +1368,12 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
           f"{REPO} -> {spec.user}@<ip>:{REMOTE_REPO}/")
     for local, dest in job.pushes:
         print(f"{local} -> {remote_path(dest)}")
+    code = code_version(REPO)
+    print(f"== code version (now; taken again at each push) -> {REMOTE_REPO}/{provenance.CODE_VERSION_FILE} and "
+          f"job.json ==\n{json.dumps(code)}")
+    if code["dirty"] and code["source"] == "git":
+        print(f"uncommitted changes (--allow-dirty): their patch -> {job.out / provenance.PATCH_FILE}, the untracked "
+              f"files in it -> {job.out / provenance.UNTRACKED_FILE}")
     print(f"== bootstrap (over ssh) ==\n{bootstrap_script()}")
     if job.hf:
         print(f"== downloads (detached, started right after bootstrap) ==\n{download_script(job.hf)}\n")
@@ -1298,7 +1404,7 @@ def all_regions(args, regions: list[Region]) -> list[Region]:
 
 def launcher_alive(entry: dict) -> bool:
     """Is the launcher that made this reservation still running? Checkable on the same host only. A different
-    host (e.g. hub came back as a new pod) means that launcher is gone."""
+    host (e.g. the launching machine came back as a new container) means that launcher is gone."""
     pid = entry.get("pid")
     if not pid or entry.get("host") != socket.gethostname():
         return False
@@ -1310,7 +1416,7 @@ def launcher_alive(entry: dict) -> bool:
 
 
 def reap(args, budget: Budget, regions: list[Region]) -> None:
-    """Clean up after launchers that died mid-run (e.g. hub restarted).
+    """Clean up after launchers that died mid-run (e.g. their machine restarted).
 
     For each reservation whose launcher is gone:
     - delete its VM once the VM has stopped (it powers itself off after its job, or at ``--hours``);
@@ -1370,6 +1476,7 @@ def cmd_vm(args, cmd: list[str]) -> int:
     - Attempt k > 1 writes to ``--out``/retry-k/."""
     base = vm_spec(args)
     first_job = job_spec(args, cmd, base.name)
+    check_code(first_job.allow_dirty)  # before anything is priced, reaped or created
     if args.cmd == "run" and not args.keep:
         first_job = replace(first_job, poweroff_minutes=POWEROFF_AFTER_JOB_MINUTES)
     key = _require(args.ssh_key, "--ssh-key", "NEBIUS_SSH_KEY")
@@ -1637,6 +1744,7 @@ def cmd_exec(args, cmd: list[str]) -> int:
     job = job_spec(args, cmd, args.name)
     if job.command is None:
         raise SystemExit("exec needs a job command after --")
+    check_code(job.allow_dirty)
     rec = Record(mode="exec", host=args.host, command=job.command,
                  flags={k: v for k, v in vars(args).items() if k not in ("func",)})
     remote = Remote(args.host, job.out / "known_hosts", str(Path(args.ssh_key).expanduser()) if args.ssh_key else None)
@@ -1775,6 +1883,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="exported for the job (no secrets)")
     remote.add_argument("--extra-gpu", action="store_true", help="uv sync --extra gpu (flash-attn, causal-conv1d, …)")
     remote.add_argument("--poll-interval", type=float, default=15.0, help="seconds between job log polls")
+    remote.add_argument("--allow-dirty", action="store_true",
+                        help="push a working tree with uncommitted changes (refused otherwise); each push then saves "
+                             f"their patch in its --out as {provenance.PATCH_FILE}, with the untracked files listed in "
+                             f"{provenance.UNTRACKED_FILE}")
 
     vm = argparse.ArgumentParser(add_help=False)
     vm.add_argument("--subnet-id", default=os.environ.get("NEBIUS_SUBNET_ID"),

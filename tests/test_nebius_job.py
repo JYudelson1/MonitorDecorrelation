@@ -6,6 +6,7 @@ and the SSH steps with fakes, and check that the VM is deleted whatever happens 
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -26,6 +27,14 @@ sys.modules["nebius_job"] = nj  # dataclasses resolve annotations through sys.mo
 _spec.loader.exec_module(nj)
 
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyOnly hub: test key"
+CLEAN = {"commit": "c0de1" * 8, "dirty": False, "diff_sha256": None, "source": "git"}
+REAL_CODE_VERSION = nj.code_version
+
+
+@pytest.fixture(autouse=True)
+def committed_code(monkeypatch):
+    """Every test pushes a clean, committed tree unless it says otherwise: the real checkout may be anything."""
+    monkeypatch.setattr(nj, "code_version", lambda repo: dict(CLEAN))
 
 # Trimmed from the real `nebius compute instance create --format json` output of 2026-10-09.
 CREATED = {
@@ -1184,3 +1193,119 @@ def test_no_relaunch_when_the_budget_covers_less_than_half_an_hour(tmp_path, mon
                                          "--budget-file", str(ledger)), "--", "true"])
     assert code == nj.EXIT_STOPPED and FakeNebius.clouds["project-u02"].created == 1
     assert "not relaunching" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------------------------- code version
+
+
+def _git(repo: Path, *args: str) -> str:
+    cp = subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                         "-c", "commit.gpgsign=false", *args], check=True, capture_output=True, text=True)
+    return cp.stdout.strip()
+
+
+def test_uncommitted_changes_are_refused_before_anything_is_created(tmp_path, monkeypatch, fake_cloud):
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    dirty = {**CLEAN, "dirty": True, "diff_sha256": "d" * 64}
+    for stamp, why in ((dirty, "uncommitted changes"), (nj.provenance.unknown(), "can't be told")):
+        monkeypatch.setattr(nj, "code_version", lambda repo, s=stamp: dict(s))
+        for argv in (["run", *_run_args(tmp_path), "--", "true"],
+                     ["run", "--dry-run", *_run_args(tmp_path), "--", "true"], ["up", *_run_args(tmp_path)],
+                     ["exec", "--host", "md@h", "--out", str(tmp_path / "out"), "--", "true"]):
+            with pytest.raises(SystemExit, match=why):
+                nj.main(argv)
+        assert not FakeNebius.clouds and not (tmp_path / "out").exists()  # not even a price was asked
+    assert nj.main(["run", *_run_args(tmp_path, "--allow-dirty"), "--", "true"]) == 0
+    assert FakeNebius.clouds["project-x"].created == 1 and not FakeNebius.clouds["project-x"].alive
+
+
+def test_the_dry_run_shows_the_code_version(tmp_path, monkeypatch, capsys, fake_cloud):
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    assert nj.main(["run", "--dry-run", *_run_args(tmp_path), "--", "true"]) == 0
+    text = capsys.readouterr().out
+    assert "== code version" in text and "md/CODE_VERSION.json" in text and json.dumps(CLEAN) in text
+    assert "code.diff" not in text and not (tmp_path / "out").exists()
+
+
+def test_the_code_version_goes_up_with_the_repo_before_setup(tmp_path, monkeypatch):
+    events = []
+
+    class Ok(nj.Remote):
+        def run(self, command, **kw):
+            if "CODE_VERSION.json" in command:
+                events.append(("code", kw["stdin"].read()))
+            return subprocess.CompletedProcess([], 0, b"", b"")
+
+    monkeypatch.setattr(nj, "repo_files", lambda: ["a.py"])
+    monkeypatch.setattr(nj, "push_repo", lambda remote, files: events.append(("repo", files)))
+    monkeypatch.setattr(nj, "start", lambda remote, step, script, cwd=None: events.append(("start", step)))
+    monkeypatch.setattr(nj, "poll", lambda remote, step, out, **kw: 0)
+    rec = nj.Record(mode="exec")
+    assert nj.remote_steps(Ok("md@h", tmp_path / "kh"), nj.JobSpec(out=tmp_path, command="true"), rec) == 0
+    assert events[:2] == [("repo", ["a.py"]), ("code", (json.dumps(CLEAN, indent=1) + "\n").encode())]
+    assert events[2:] == [("start", "setup"), ("start", "job")]
+    assert rec.code == CLEAN == json.loads((tmp_path / "job.json").read_text())["code"]
+    events.clear()  # the tree changed since launch: refused at the push, before anything goes up
+    monkeypatch.setattr(nj, "code_version", lambda repo: {**CLEAN, "dirty": True, "diff_sha256": "d" * 64})
+    with pytest.raises(nj.InfraError, match="--allow-dirty"):
+        nj.remote_steps(Ok("md@h", tmp_path / "kh"), nj.JobSpec(out=tmp_path, command="true"), nj.Record(mode="exec"))
+    assert events == []
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_a_dirty_push_saves_the_patch_that_rebuilds_what_was_pushed(tmp_path, monkeypatch):
+    """A throwaway repo's real code version: refused while dirty without --allow-dirty. With it, the patch saved in
+    --out rebuilds exactly the files pushed, and the VM's copy (no .git) reads the stamp from CODE_VERSION.json."""
+    repo, home, out = tmp_path / "repo", tmp_path / "home", tmp_path / "out"
+    (repo / "src").mkdir(parents=True)
+    home.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "src" / "a.py").write_text("x = 1\n")
+    (repo / "run.sh").write_text("echo hi\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "first")
+    monkeypatch.setattr(nj, "REPO", repo)
+    monkeypatch.setattr(nj, "code_version", REAL_CODE_VERSION)
+    rec = nj.Record(mode="exec")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert nj.stamp_push(nj.JobSpec(out=out), rec) == {"commit": head, "dirty": False, "diff_sha256": None,
+                                                       "source": "git"}
+
+    (repo / "src" / "a.py").write_text("x = 2\n")
+    (repo / "src" / "new.py").write_text("y = 3\n")
+    (repo / ".env.local").write_text(f"TOKEN={SENTINEL}\n")  # untracked and not ignored: never pushed or recorded
+    with pytest.raises(nj.InfraError, match="uncommitted changes"):
+        nj.stamp_push(nj.JobSpec(out=out), rec)
+    assert not (out / "code.diff").exists()
+    code = nj.stamp_push(nj.JobSpec(out=out, allow_dirty=True), rec)
+    assert code["dirty"] is True and code["commit"] == head and rec.code == code
+    assert json.loads((out / "job.json").read_text())["code"] == code
+    patch = (out / "code.diff").read_bytes()
+    assert hashlib.sha256(patch).hexdigest() == code["diff_sha256"] and SENTINEL.encode() not in patch
+    assert (out / "code_untracked.txt").read_text() == "src/new.py\n"
+
+    r = LocalRemote(home)
+    files = nj.repo_files(repo)
+    assert files == ["run.sh", "src/a.py", "src/new.py"]
+    nj.push_repo(r, files)
+    nj.push_code_version(r, code)
+    vm_copy = home / "md"
+    assert json.loads((vm_copy / "CODE_VERSION.json").read_text()) == code
+    assert nj.provenance.code_version(vm_copy) == {**code, "source": "file"}  # what code on the VM stamps
+
+    rebuilt = tmp_path / "rebuilt"
+    subprocess.run(["git", "clone", "-q", str(repo), str(rebuilt)], check=True, capture_output=True)
+    _git(rebuilt, "apply", str(out / "code.diff"))
+    for f in files:
+        assert (rebuilt / f).read_bytes() == (vm_copy / f).read_bytes(), f
+
+    _git(repo, "add", "src")
+    _git(repo, "commit", "-q", "-m", "second")
+    assert nj.stamp_push(nj.JobSpec(out=out), rec)["dirty"] is False  # .env.local doesn't count
+    assert not (out / "code.diff").exists() and not (out / "code_untracked.txt").exists()  # not this push's
+
+
+def test_what_never_travels_is_never_recorded():
+    for path in (".env", ".env.local", "a/.envrc", ".venv/lib/x.py", "src/__pycache__/m.cpython-311.pyc", "m.pyc",
+                 ".git/config", ".gitignore", "src/env.py", "data/x.json"):
+        assert nj.shippable(path) is not nj.provenance.never_recorded(path), path
