@@ -34,7 +34,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `scripts/fetch_features.py` | **Download features** from a store, optionally keeping only some tensors per shard (`--keep followup,counts,answer_logp`); complete shards only, marker last, resumable. | `<dest>/<dataset>/<view>/shard_*` |
 | `scripts/spot_events.py` | **Every Nebius VM attempt** from the launcher's `job.json` files: creation failures by kind and region, minutes to run, how it ended, cost; preemptions per VM-hour. | stdout, `--md`, `--json` |
 | `scripts/nebius_job.py` | **One-command GPU job on Nebius**: pick the cheapest region by current spot price and capacity (`--max-price` cap optional), create a B300 VM, push the repo, download HF weights to RAM, run, fetch, and always delete (`run` / `up` / `exec` / `down` / `list` / `prices` / `budget` / `reap`, `--dry-run`). After a spot preemption or a job exit of 75, it relaunches on a fresh VM (`--attempts`, default 3) within the budget. Refuses uncommitted code unless `--allow-dirty` (the patch is then saved in `--out`); pushes CODE_VERSION.json so the VM's outputs record their commit. | `--out` dir with logs + `job.json` (later attempts in `retry-k/`) |
-| `experiments/check_probe_server.py` | **GPU check of the serving path** with the deployed probes: golden checks one episode per forward and batched, throughput, and the HTTP server + `InklingProbeMonitor` against the scorer. Exits 1 on a failed check. | a JSON report |
+| `experiments/check_probe_server.py` | **GPU check of the serving path** with the deployed probes: golden checks one episode per forward and batched, throughput, and the HTTP server + `InklingProbeMonitor` against the scorer (one IID and one OOD with-reasoning follow-up monitor). Exits 1 on a failed check. | a JSON report |
 | `experiments/eval_inkling_probes_on_runs.py` | **Post-hoc probe scoring** of finished TerminalEnv runs' saved eval episodes on one GPU (replayed as in training, resumable). Per eval step: AUROC vs `behavior_present` and `used_verifier`, recall/FPR at 0.5, and the same on the tasks no probe saw (`--task-splits`). | `<run>/probe_eval_<name>.jsonl`, `<run>/probe_scores_inkling.jsonl` |
 | `experiments/verify_fits.py` | **Does today's code reproduce the fitted probes?** Recomputes a slice of each probe's CV grid, re-derives the selection and refits the chosen probe, then compares with the saved files. | `<out>/{summary.json,report.md}` |
 | `experiments/ood_refits.py` | **How stable is the OOD probe's transfer?** Pair-bootstrap refits at the probe's layer and C, and one fit per layer, each scored in distribution and on TerminalEnv. `--overwrite`. | `<out>/{summary.json,refits.csv,by_layer.csv}` |
@@ -519,6 +519,9 @@ ssh -N -L 8178:127.0.0.1:8178 md@<vm>        # on the RL machine
   was batched with.
 - **Startup check:** the server refuses to start if a golden episode renders or scores differently.
 - **Constructing the monitor** fails if the server doesn't serve that exact probe or reader revision.
+- **Failures:** a request the server can never serve (malformed, unknown probe, an episode it can't render) aborts the
+  run; anything else (out of GPU memory, a dropped tunnel) is retried. A failure that repeats on every attempt
+  therefore stalls the run, with a warning every 3 minutes: nothing restarts the server. See docs/MONITORS.md.
 
 ## Probe-investigation scripts (2026-06-15 — see docs/PROBES.md)
 
