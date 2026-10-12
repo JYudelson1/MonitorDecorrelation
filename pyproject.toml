@@ -16,11 +16,25 @@ dependencies = [
     "peft>=0.19.1",
     "tml-renderers>=0.1.0",
     "reasoning-gym>=0.1.25",
-    # Inkling (`inkling_mm_model`) needs >=5.14; see [tool.uv].override-dependencies —
+    # Inkling (`inkling_mm_model`) arrived in 5.14, but whitebox/model.py's text-only conversion map
+    # (both Inkling loaders) passes WeightConverter.force_cpu, new in 5.16.0: the Inkling tests fail
+    # on 5.14.0 and 5.15.1 and pass on 5.16.0-5.19.0. See [tool.uv].override-dependencies —
     # tinker-cookbook still declares transformers<=5.5.4.
-    "transformers>=5.14.0",
+    "transformers>=5.16.0",
     # Inkling's AutoProcessor pulls InklingImageProcessor (torchvision backend) even for text-only.
     "torchvision>=0.20",
+    # Imported directly by the Inkling probe code; each bound is the first release with what it calls.
+    # HF Storage Buckets (HfApi.list_bucket_tree / batch_bucket_files / download_bucket_files):
+    # whitebox/store.py, scripts/fetch_features.py.
+    "huggingface-hub>=1.5.0",
+    # Bucket transfers run on hf_xet; hf_xet.hash_files checks a bucket copy by its Xet hash. Same
+    # platforms as huggingface-hub's own hf-xet requirement.
+    "hf-xet>=1.3.0; platform_machine == 'x86_64' or platform_machine == 'amd64' or platform_machine == 'AMD64' or platform_machine == 'arm64' or platform_machine == 'ARM64' or platform_machine == 'aarch64'",
+    # get_slice(k)[:, layer, :] (an integer index) on safe_open'd shards; transformers needs >=0.8 anyway.
+    "safetensors>=0.4.3",
+    # B300 VMs run driver 580 / CUDA 13.0; 2.11 is the first torch whose default Linux wheels are
+    # CUDA 13 builds (2.10: CUDA 12.8). Only 2.14.1 has run on a B300.
+    "torch>=2.11",
 ]
 
 # GPU-only acceleration kernels for the white-box forward passes (Qwen3.5 is a hybrid
@@ -34,11 +48,13 @@ gpu = [
     "causal-conv1d; sys_platform == 'linux'",
 ]
 
-# tinker-cookbook 0.5.7 pins transformers<=5.5.4, which predates Inkling day-0 support (5.14).
-# Override so the whitebox path can load `inkling_mm_model` without waiting on a cookbook bump.
+# tinker-cookbook 0.5.7 pins transformers<=5.5.4, which predates Inkling day-0 support (5.14) and the
+# WeightConverter.force_cpu our Inkling loaders use (5.16). Override so the whitebox path can load
+# `inkling_mm_model` without waiting on a cookbook bump. An override replaces every transformers
+# requirement, ours included: keep it equal to the bound in `dependencies`.
 [tool.uv]
 override-dependencies = [
-    "transformers>=5.14.0",
+    "transformers>=5.16.0",
 ]
 
 [build-system]
