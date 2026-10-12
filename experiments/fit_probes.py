@@ -1,4 +1,5 @@
-"""Fit and evaluate one reader's Inkling probes on hub's CPUs, as pre-registered in PROBE_PLAN.md section 5b.
+"""Fit and evaluate one reader's Inkling probes on hub's CPUs, as pre-registered in
+docs/inkling_probes_preregistration.md.
 
     uv run python experiments/fit_probes.py --reader nvfp4 --features scratch/features/nvfp4 \
         --datasets data/probe_datasets --out scratch/probes/nvfp4
@@ -39,18 +40,17 @@ from monitordecorrelation.whitebox.probe_fit import (
     C_GRID, MOE_FIRST_LAYER, LayerSource, SelectedProbe, auroc, ci, cluster_bootstrap, cv_grid_source, load_items,
     make_folds, select, thresholds, within_group_auroc)
 
-PLAN = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "md_files",
-                    "PROBE_PLAN.md")
+PLAN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs",
+                    "inkling_probes_preregistration.md")
 
 
 def prereg_sha() -> str | None:
-    """sha256 of PROBE_PLAN.md section 5b, the rules this script follows."""
+    """sha256 of the pre-registration's whole file, the rules this script follows. The file is section 5b of the
+    original plan, byte for byte, so this is the hash every fitted probe's meta.json records."""
     if not os.path.exists(PLAN):
         return None
-    text = open(PLAN).read()
-    start = text.find("## 5b. Pre-registered analysis")
-    end = text.find("## 6.", start)
-    return hashlib.sha256(text[start:end].encode()).hexdigest() if start >= 0 and end > start else None
+    with open(PLAN, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 def log(msg: str) -> None:
