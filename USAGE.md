@@ -499,7 +499,7 @@ the CPU-side steps 2–7 in order (`--dry-run` prints the commands); SCRATCH bel
 
 ```bash
 # serving VM: one B300, 4-bit reader, pinned to the revision the probes record
-python3 scripts/nebius_job.py up --hours 12 --max-gpu-price 4.5 --preset 1gpu-24vcpu-346gb \
+python3 scripts/nebius_job.py up --hours 12 --max-gpu-price 4.5 --preset 1gpu-24vcpu-346gb --out runs/{stamp}-{name} \
     --hf thinkingmachines/Inkling-Small-NVFP4@b6a99534467840620d411e4cd4ad5819b2610d9c
 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
     --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup
