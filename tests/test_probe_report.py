@@ -109,6 +109,14 @@ def build(tmp_path):
             dump(d / "metrics.json", iid_metrics() if dataset == "terminal_prerl" else ood_metrics())
             dump(d / "cv_grid.csv", "layer,C,cv_auroc,cv_auroc_sd\n3,0.001,1.00000,0.00000\n")
             dump(d / "scores.jsonl", scores())
+    for dataset, view, cv in (("terminal_prerl", "with_reasoning", 1.0), ("diverse_deception", "without_reasoning", 0.97)):
+        d = s / "probes" / "bf16" / dataset / view / "followup_prev"  # the readout fallback: a tie, then lower
+        d.mkdir(parents=True)
+        (d / "probe.npz").write_bytes(b"PK\x03\x04 not really a zip")
+        dump(d / "meta.json", meta("bf16", dataset, view, "followup_prev"))
+        m = iid_metrics() if dataset == "terminal_prerl" else ood_metrics()
+        dump(d / "metrics.json", {**m, "selection": {**m["selection"], "cv_auroc": cv}})
+        dump(d / "cv_grid.csv", "layer,C,cv_auroc,cv_auroc_sd\n3,0.001,1.00000,0.00000\n")
     by = {"followup": "bf16"}
     dump(s / "compare" / "decision.json", {
         "probes": {"terminal_prerl/with_reasoning/followup": compared(False),
@@ -342,6 +350,11 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "- `20261012T000000Z`: 2 probes. Run 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py "
         "aaaaaaaaaaaa, probe_fit.py bbbbbbbbbbbb (sha256).",
         "| terminal_prerl | with | 10,688 | 1,712 / 1,500 / 3,900 / 9,000 | 18.3M |",
+        "| IID, with | bf16 | followup | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
+        "| IID, with | bf16 | followup_prev | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
+        "| OOD | bf16 | followup_prev | 3, 0.01 | 0.9700 | 0.977 [0.971, 0.982] | — | 0.909 / 0.842 |",
+        "Per the readout rule (the higher dev CV AUROC; `followup` on a tie): IID, with (bf16) → `followup` (tie); "
+        "OOD (bf16) → `followup` (higher).",
         "97 of 98 hacks (99%) and 120 of 10,590 other episodes (1.1%)",
         "| mask | 800 | 160 | 160 | 1 (1 / 1) |",
     ]

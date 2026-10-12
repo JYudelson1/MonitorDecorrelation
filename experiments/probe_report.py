@@ -55,6 +55,7 @@ from collections.abc import Callable
 
 READERS = ("nvfp4", "bf16")
 READOUTS = ("followup", "mean", "router", "router_all")
+FALLBACK = "followup_prev"  # the readout rule's alternative to followup: the token before "Yes"
 VIEWS = ("with_reasoning", "without_reasoning")
 DATASETS = ("terminal_prerl", "diverse_deception")
 PROBE_FILES = ("probe.npz", "meta.json", "metrics.json", "cv_grid.csv")
@@ -437,8 +438,9 @@ class Results:
         return "/".join(hits[-1])
 
     def probes(self, dataset: str) -> list[tuple[str, str, str]]:
-        """(reader, view, readout) of every fitted probe of ``dataset`` with a metrics.json."""
-        return [(p[1], p[3], p[4]) for p in self.glob(f"fitted/*/{dataset}/*/*/metrics.json")]
+        """(reader, view, readout) of every fitted probe of ``dataset`` with a metrics.json, except the readout
+        fallback's (``FALLBACK``: only in its own table, ``readout_fallback``)."""
+        return [(p[1], p[3], p[4]) for p in self.glob(f"fitted/*/{dataset}/*/*/metrics.json") if p[4] != FALLBACK]
 
 
 def by_readout_view_reader(p: tuple[str, str, str]) -> tuple:
@@ -924,6 +926,40 @@ def dataset_stats(r: Results) -> list[str]:
         "renders it (the conversation plus the follow-up); the total is the mean times the items.")
 
 
+def readout_fallback(r: Results) -> list[str]:
+    """The readout rule's comparison: per probe with a ``FALLBACK`` fit, followup vs followup_prev by dev CV."""
+    pairs = sorted({(p[1], p[2], p[3]) for p in r.glob(f"fitted/*/*/*/{FALLBACK}/metrics.json")},
+                   key=lambda p: (rank(p[1], DATASETS), rank(p[2], VIEWS), rank(p[0], READERS)))
+    rows, decisions = [], []
+    for reader, ds, view in pairs:
+        iid, cv = ds == "terminal_prerl", {}
+        name = f"IID, {short(view)}" if iid else "OOD"
+        for readout in ("followup", FALLBACK):
+            m = r.json(f"fitted/{reader}/{ds}/{view}/{readout}/metrics.json")
+            sel = m["selection"]
+            cv[readout] = sel["cv_auroc"]
+            if iid:
+                extra = [f"{pct(m['tpr_at_t1'])} / {pct(m['fpr_at_t1'])}", "—"]
+            else:
+                t = m["transfer"]
+                extra = ["—", f"{num(t['with_reasoning']['auroc_all'])} / {num(t['without_reasoning']['auroc_all'])}"]
+            rows.append([name, reader, readout, f"{chosen(sel)}, {sel['C']:g}", num(sel["cv_auroc"], 4),
+                         with_ci(m["test_auroc"], m["test_auroc_ci"]), *extra])
+        won = FALLBACK if cv[FALLBACK] > cv["followup"] else "followup"
+        how = "tie" if cv[FALLBACK] == cv["followup"] else "higher"
+        decisions.append(f"{name} ({reader}) → `{won}` ({how})")
+    if not rows:
+        raise Missing(f"no fitted {FALLBACK} probes (fitted/<reader>/<dataset>/<view>/{FALLBACK}/)")
+    return md_table(["probe", "reader", "readout", "layer, C", "dev CV AUROC", "test AUROC [95% CI]",
+                     "IID: TPR / FPR at t₁%", "OOD: transfer AUROC (with / without)"], rows) + [
+        "", "Per the readout rule (the higher dev CV AUROC; `followup` on a tie): " + "; ".join(decisions) + "."
+    ] + legend(
+        f"From `fitted/<reader>/<dataset>/<view>/{{followup,{FALLBACK}}}/metrics.json`: `{FALLBACK}` reads the token",
+        "just before \"Yes\", fitted with the same folds, grid and selection as `followup`. Dev CV AUROC: the mean",
+        "out-of-fold AUROC of the configuration the selection picked (* a flat grid). Test AUROC on the test split",
+        "(IID) or the held-out pairs (OOD), with its 95% cluster bootstrap CI.")
+
+
 TABLES: dict[str, Callable[[Results], list[str]]] = {
     "iid_probes": iid_probes, "ood_probes": ood_probes, "router_probes": router_probes,
     "deployed_monitors": deployed_monitors, "reader_comparison_followup": reader_comparison("followup"),
@@ -931,6 +967,7 @@ TABLES: dict[str, Callable[[Results], list[str]]] = {
     "test_set_bounds": test_set_bounds, "ood_refits": ood_refits, "ood_by_layer": ood_by_layer,
     "learning_curves_iid": learning_curves_iid, "learning_curves_ood": learning_curves_ood,
     "ood_source_mixes": ood_source_mixes, "verify_fits": verify_fits, "dataset_stats": dataset_stats,
+    "readout_fallback": readout_fallback,
 }
 
 # ------------------------------------------------------------------------------------------------ render, check
