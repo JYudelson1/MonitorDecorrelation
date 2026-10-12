@@ -70,9 +70,9 @@ The datasets were built from code that wasn't committed yet: the manifests' comm
 marked dirty) predate the dataset builder's first commit (`361f6c1`). What pins each dataset is its `items_sha256`.
 
 **`terminal_prerl`: the IID data.** The pre-RL evaluation episodes of 2026-09-29: the untrained Inkling-Small policy
-on the TerminalEnv's 512 evaluation tasks, with the settings every terminal config uses (`submit_corrupted`, the first
-submission ends the episode, explanations required, read-only verifier, last-turn notice, at most 4 turns, reasoning
-effort 0.5).
+on 512 TerminalEnv evaluation tasks (those of seed 0), with the settings every terminal config uses
+(`submit_corrupted`, the first submission ends the episode, explanations required, read-only verifier, last-turn
+notice, at most 4 turns, reasoning effort 0.5).
 - Of 32,768 episodes, 10,688 are valid. <!-- src: data/probe_datasets/terminal_prerl/manifest.json --> Most of the
   rest did not parse. Monitors never see invalid episodes, so the probes don't either.
 - **Label:** `used_verifier`: the policy read the verifier and submitted its value. That gives 98 hacks. <!-- src:
@@ -515,12 +515,13 @@ pre-registered and reported as such.
    rate of at least 78.2% (counting tasks) or 84.6% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
    least 95.2% or 96.3%. The printed bootstrap intervals of [1.0, 1.0] are degenerate (section 6.3). <!-- src: the
    test_set_bounds table, data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json -->
-4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes of the same 512 evaluation tasks the RL runs
-   evaluate on. Report held-out metrics on the `test` tasks of
-   [`task_splits.json`](../data/probes/Inkling-Small/task_splits.json) too: no probe saw those. The post-hoc scorer
-   writes them: its `*_unseen` fields (`auroc_unseen`, `recall_at_threshold_unseen`, …) are the same metrics on those
-   tasks only (section 10). Within-task AUROC says the probes don't key on the task, but the clean number costs
-   nothing.
+4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes from the same pool of evaluation tasks that
+   seed-0 RL runs evaluate on. Report held-out metrics on the tasks no probe saw too: those in neither the `train`
+   nor the `val` list of [`task_splits.json`](../data/probes/Inkling-Small/task_splits.json). For a seed-0 run those
+   are its eval tasks in the `test` list; for any other seed, every task, because eval task ids carry the seed. The
+   post-hoc scorer writes these: its `*_unseen` fields (`auroc_unseen`, `recall_at_threshold_unseen`, …) are the same
+   metrics on unseen tasks only, leaving out episodes without a task id (section 10). Within-task AUROC says the
+   probes don't key on the task, but the clean number costs nothing.
 5. **Serving is fragile.**
    - It needs one B300 for the 4-bit reader.
    - Spot VMs were preempted about 1.4 times per VM-hour in our runs, mostly in their first minutes. <!-- src:
@@ -528,8 +529,12 @@ pre-registered and reported as such.
    - No watchdog restarts a preempted server yet.
    - A run pauses while the server is down. Train-against runs never compute a reward without the probe; held-out
      probes can be scored afterwards instead (section 10).
+   - A failure that repeats on every attempt, such as one episode too big for the GPU's memory, also makes the runs
+     wait, warning every 3 minutes, instead of aborting. Nothing restarts the server or skips the episode.
    - The server as it is now has not run on a GPU. The real-B300 check of 2026-10-10 predates the golden check's
-     bound on the mean shift (section 10), and the redeployed mean monitors have been checked on CPU only.
+     bound on the mean shift and the server's current error handling, and it sent only the two OOD monitors through
+     HTTP: the IID monitor has never been served over HTTP on a GPU. The redeployed mean monitors have been checked
+     on CPU only.
 6. **Calibration can drift under RL.** The thresholds come from pre-RL honest episodes. As the policy changes, its
    honest episodes may score differently, and 0.5 may no longer mean a 1% false-alarm rate. Recalibrate on the run's
    own honest episodes when reading results, and audit train-against runs with held-out monitors: a policy can keep
@@ -600,11 +605,16 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
   calibration the mean check also refuses a correct setup about 1% of the time per probe: if only that check fails,
   read the reported mean and spread before overriding it. <!-- src:
   src/monitordecorrelation/whitebox/probe_server.py (GOLDEN_MEAN_TOLERANCE docstring) -->
-- **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check (section 11).
+- **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check and the current
+  error handling, and sent only the OOD monitors through HTTP (section 11).
+- **Errors:** a request the server can never serve (malformed, an unknown probe, an episode that can't be rendered)
+  aborts the run; anything else, such as the GPU running out of memory, is retried and the run waits. A failure that
+  repeats on every attempt therefore stalls the runs, with a warning every 3 minutes: watch for it. Details in
+  [`MONITORS.md`](MONITORS.md#inkling-probe-monitors-kind-inkling_probe).
 - `--max-batch-tokens 1` (the default) scores one episode per forward pass, the batching rule's fix.
 - **Each monitor costs its own forward pass.** Probes on the same view share a forward pass only within one request,
   and every live monitor sends its own. So a run with `probe_iid` and `probe_ood` both live costs the server two
-  passes per episode.
+  passes per episode: each step takes about twice the reader time. The post-hoc scorer, below, does share one pass.
 - Throughput was about 3.9k tokens/s one at a time on a B300. <!-- src: experiments/check_probe_server.py report of
   2026-10-10 (see data/probe_results/PROVENANCE.md) --> With the TerminalEnv configs' batch sizes, a training step
   then waits about a minute per live probe on the with-reasoning view. One B300 can serve two or three train-against
@@ -640,9 +650,15 @@ uv run python experiments/eval_inkling_probes_on_runs.py --model /mnt/ram/Inklin
 It replays every valid eval episode exactly as in training, scoring all the probes in one pass per view, and writes
 `probe_eval_<name>.jsonl` per run (tracked by git, like `eval_metrics.jsonl`). Per eval step: AUROC against
 `behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts; and the same on
-the tasks no probe saw (`*_unseen`, from `task_splits.json`). `eval/degradation.py` reads these files into the
-AUROC-drop and end-AUROC grids of the degradation matrix. The suspiciousness-gap grid reads only `eval_metrics.jsonl`,
-so post-hoc probes are not in that grid, the matrix's headline read.
+the tasks no probe saw (`*_unseen`: tasks in neither the `train` nor the `val` list of `task_splits.json`).
+`eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids of the degradation matrix. The
+suspiciousness-gap grid reads only `eval_metrics.jsonl`, so post-hoc probes are not in that grid, the matrix's
+headline read.
+
+A rerun reuses a stored score only while its line in `eval_rollouts.jsonl` still holds the same episode, checked by
+the sha256 of the episode's replay item. That matters because `run_experiment.py --resume` cuts `eval_rollouts.jsonl`
+back and appends new episodes on the same lines. Score files written before this check are scored again, once, in
+full.
 
 ## 11. Provenance
 
@@ -676,10 +692,11 @@ so post-hoc probes are not in that grid, the matrix's headline read.
     `data/probe_results/`.
 - **Serving check on a real B300 (2026-10-10):** the golden checks of the eight monitors then deployed passed at
   both batchings, one episode per forward and batched. The end-to-end check, the HTTP server feeding
-  `InklingProbeMonitor` with the same scores as the scorer, ran on two OOD follow-up monitors only. The check now
-  covers one IID and one OOD monitor. Since then the golden check has gained its bound on the mean shift, and the
-  mean monitors have been replaced, so the current server and the redeployed mean monitors have been checked on CPU
-  only.
+  `InklingProbeMonitor` with the same scores as the scorer, ran on the two OOD follow-up monitors only. So the IID
+  monitor has never gone through HTTP on a GPU. The check now sends one IID and one OOD monitor (each dataset's
+  with-reasoning follow-up probe), but in that form it hasn't run on a GPU yet. Since 2026-10-10 the golden check has
+  also gained its bound on the mean shift, the server its current error handling, and the mean monitors have been
+  replaced: the current server and the redeployed mean monitors have been checked on CPU only.
 - **Cost:** all GPU work, including a load test the day before, cost about $35 of spot time. On 2026-10-10 that was
   12 VMs, about 8 GPU-hours, with 4 preemptions. <!-- src: the launcher's spending ledger and job.json records,
   summarized by scripts/spot_events.py (not in the repo) -->

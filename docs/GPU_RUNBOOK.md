@@ -54,7 +54,9 @@ as code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
 2. **Optional: check the serving path first** (exits 1 on failure). It loads its own copy of the reader, and one B300
    can't hold two (~179 GiB each), so run it before starting the server, or stop the server first. It runs every
    deployed probe's golden check at both batchings, the HTTP server → `InklingProbeMonitor` path for one IID and one
-   OOD monitor (their scores must equal the scorer's), and a throughput test.
+   OOD monitor (each dataset's with-reasoning follow-up probe; their scores must equal the scorer's), and a
+   throughput test. In this form it hasn't run on a GPU yet: the B300 check of 2026-10-10 sent only the two OOD
+   monitors through HTTP, so the IID monitor has never been served over HTTP on a GPU.
 
    ```bash
    cd ~/md && uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
@@ -74,7 +76,7 @@ as code ([`INFRA.md`](INFRA.md#gpu-vms-on-nebius-scriptsnebius_jobpy)).
    the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on average (`--golden-mean-tolerance`).
    That mean bound refuses a correct setup about 1% of the time per probe, by its own calibration: if only the mean
    check fails, read the reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
-   this bound, so the server in its current form has not yet run on a GPU.
+   this bound and the server's current error handling, so the server in its current form has not yet run on a GPU.
 
 4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
 
@@ -92,15 +94,29 @@ minutes. Nothing restarts a preempted server yet. Runs don't fail: their monitor
 train-against runs pause. To recover, start a new VM and server as above and re-open the tunnel on the same local
 port. An on-demand VM costs several times more but isn't preempted.
 
+**Failures.** A request the server can never serve (malformed, an unknown probe, an episode that can't be rendered)
+aborts the run. Any other failure, such as the GPU running out of memory, is retried: the server drops the failed
+job and the monitor asks again. A failure that repeats on every attempt, e.g. one episode too big for the GPU,
+therefore stalls the runs, each warning every 3 minutes in its log, and nothing restarts the server or skips the
+episode. Watch the runs' logs. The status codes are in
+[`MONITORS.md`](MONITORS.md#inkling-probe-monitors-kind-inkling_probe).
+
 ### Post-hoc scoring of finished runs
 
 `experiments/eval_inkling_probes_on_runs.py` loads the reader once and replays every valid eval episode of each run
 exactly as in training, scoring all the probes in one pass per view. It writes per run and probe
 `probe_eval_<name>.jsonl`, tracked by git: per eval step, AUROC against `behavior_present` and `used_verifier`,
-recall and false-alarm rate at 0.5, class means and counts, and the same on the tasks no probe saw (`*_unseen`, from
-`--task-splits`, by default the deployed probes' `task_splits.json`). `eval/degradation.py` reads these files into
-the AUROC-drop and end-AUROC grids (not the suspiciousness-gap grid, which reads `eval_metrics.jsonl` only).
-Per-episode scores are appended to `probe_scores_inkling.jsonl`, so an interrupted session resumes where it stopped.
+recall and false-alarm rate at 0.5, class means and counts, and the same on the tasks no probe saw (`*_unseen`).
+`eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids (not the suspiciousness-gap grid,
+which reads `eval_metrics.jsonl` only).
+- **Unseen tasks** are those in neither the `train` nor the `val` list of `--task-splits` (by default the deployed
+  probes' `task_splits.json`). For a seed-0 run those are its eval tasks in the `test` list; for any other seed,
+  every task, since eval task ids carry the seed. Episodes without a task id are left out of the `*_unseen` fields.
+- **Resuming:** per-episode scores are appended to `probe_scores_inkling.jsonl`, so an interrupted session goes on
+  where it stopped. A stored score is reused only while its line in `eval_rollouts.jsonl` still holds the same
+  episode, by the sha256 of the episode's replay item: `run_experiment.py --resume` cuts `eval_rollouts.jsonl` back
+  and appends new episodes on the same lines. Score files written before this check are scored again, once, in
+  full.
 
 ```bash
 # on a 1× B300 with the reader in /mnt/ram and the runs' folders (eval_rollouts.jsonl + run_info.json)

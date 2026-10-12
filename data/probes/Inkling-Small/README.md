@@ -33,10 +33,10 @@ Each directory is `<dataset>/<view>/<readout>/`:
 
 **Which to use.** `probe_iid` and `probe_ood` as above. Both read the with-reasoning view, but served live they
 still cost one forward pass each: every monitor sends its own requests to the server, and only probes within one
-request share a pass. (The post-hoc scorer, `experiments/eval_inkling_probes_on_runs.py`, does score them in one
-pass.) Use the mean probes only to compare evasion strategies: a mean over a long transcript is easy to dilute. Two
-cautions, in short: on pre-RL data the IID probe is close to a text detector, and the OOD probe responds to lying
-about the hack more than to the hack.
+request share a pass. With both live, each step takes about twice the reader time of one. (The post-hoc scorer,
+`experiments/eval_inkling_probes_on_runs.py`, does score them in one pass.) Use the mean probes only to compare
+evasion strategies: a mean over a long transcript is easy to dilute. Two cautions, in short: on pre-RL data the IID
+probe is close to a text detector, and the OOD probe responds to lying about the hack more than to the hack.
 
 ## Score and thresholds
 
@@ -79,8 +79,11 @@ At the top level:
   tolerance, and a `serving_check` on the 4-bit reader's features (test AUROC and the shares of hacks and of honest
   episodes flagged at t₁%; for the follow-up probes also the batching-rule numbers).
 - **`task_splits.json`**: the TerminalEnv task ids of the probes' `train`, `val` and `test` splits. The probes were
-  fitted on pre-RL episodes of the same evaluation tasks the RL runs use, so report held-out metrics on the `test`
-  tasks too: no probe saw those.
+  fitted, selected and calibrated on pre-RL episodes of the `train` and `val` tasks, which come from the same pool
+  as a seed-0 RL run's eval tasks. Every other task is unseen by the probes: a seed-0 run's eval tasks in the `test`
+  list, and every task of a run with another seed, since eval task ids carry the seed. Report held-out metrics on
+  unseen tasks too; the post-hoc scorer writes them as its `*_unseen` fields (episodes without a task id are left
+  out).
 
 ## Using them
 

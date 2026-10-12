@@ -292,24 +292,44 @@ Only replay fields leave the run, never the oracle's labels.
   revision from the metadata `hf download --local-dir` leaves next to the weights; when it can't tell, the server and
   the monitor warn, and only the golden check guards against a different checkpoint.
 
-**Failures and retries.** Connection errors, timeouts, 5xx and "still running" (202) answers are retried forever, with
-backoff from 1 s up to a cap and a warning every few minutes. The cap is the `InklingProbeMonitor` constructor's
-`max_backoff` (60 s), not a config field. So a run pauses while the server is down: a
-train-against run never computes a reward without the probe. A protocol or probe mismatch (409) or an episode the
-server can't replay (422) is fatal; the run then aborts through its usual unscored-monitor check. Each
-`MonitorResult.meta` holds the probe's name and sha256, the logit, the episode's token count and the experts the
+**Failures and retries.** The server's answers, and what the client does with each:
+
+| status | meaning | client |
+| --- | --- | --- |
+| 200 | the scores | |
+| 202 | still running | asks again at once |
+| 400 | a malformed request, or a body that isn't JSON | raises |
+| 404 | an unknown path | raises |
+| 409 | an unknown protocol or probe | raises |
+| 422 | an episode that can't be rendered (rendering runs on the CPU, before the GPU) | raises |
+| 503 | scoring failed after rendering: GPU out of memory, a CUDA error, a bug | retries; the server has dropped the failed job, so the retry computes it again |
+| 500 | an unexpected error in the HTTP handler | retries |
+
+- The client also retries connection errors, timeouts, and an answer that is cut off or isn't JSON (e.g. a tunnel
+  dropping mid-answer). It retries forever, with backoff from 1 s up to a cap and a warning every 3 minutes. The cap
+  is the `InklingProbeMonitor` constructor's `max_backoff` (60 s), not a config field. So a run pauses while the
+  server is down: a train-against run never computes a reward without the probe.
+- A status the client raises on aborts the run through its usual unscored-monitor check. An invalid `server_url`
+  raises too.
+- **Known risk:** a failure that repeats on every attempt, such as one episode too big for the GPU's memory, is a 503
+  like any other. The run then waits, warning every 3 minutes, instead of aborting. Nothing restarts the server or
+  skips the episode: someone has to notice the warnings.
+
+Each `MonitorResult.meta` holds the probe's name and sha256, the logit, the episode's token count and the experts the
 reader chose at "Yes".
 
 **The probe server** (`whitebox/probe_server.py`; command line `experiments/inkling_probe_server.py`):
 - **Scoring is the training extraction:** the same replay, view, follow-up, feature code and batching budget, then the
   probe's readout and layer.
 - **One GPU,** any number of probes. A request's probes on the same view share one forward pass, but each monitor
-  sends its own requests, so two live monitors cost two passes per episode. `--max-batch-tokens 1` (the default)
-  scores one episode per forward pass, so a score doesn't depend on what else was in the batch: the pre-registered
-  batching rule fired.
+  sends its own requests: with `probe_iid` and `probe_ood` both live, every step costs about twice the reader time
+  of one. `--max-batch-tokens 1` (the default) scores one episode per forward pass, so a score doesn't depend on what
+  else was in the batch: the pre-registered batching rule fired.
 - **Protocol:** JSON over HTTP on localhost only; runs on other machines reach it through an SSH tunnel.
   `GET /v1/meta` lists the reader, the effort and the probes; `POST /v1/score` scores episodes. A request is
-  identified by the hash of its body, so a repeated request joins the running job instead of starting another.
+  identified by the hash of its body, so a repeated request joins the running job instead of starting another. A
+  finished job's result is kept for 600 s (at most the 64 newest), so a client whose answer got lost gets it again
+  without a second forward pass; a failed job is dropped at once.
 - **Golden check:** each probe directory holds `golden.jsonl`, 32 test episodes with the sha256 of their rendering and
   their logit on the stored features. At startup the server re-scores them. It refuses to start if a rendering
   differs, if a logit moves by more than the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on
@@ -323,11 +343,14 @@ reader chose at "Yes".
   - The check catches a wrong reader, layer or rendering, and drift in transformers or the kernels, before it can
     look like monitor degradation.
 - **GPU check:** `experiments/check_probe_server.py` runs the golden check of every deployed probe at both batchings,
-  then the HTTP server → `InklingProbeMonitor` path for one IID and one OOD monitor, whose scores must equal the
-  scorer's, then a throughput test. It loads its own reader, so run it before starting the server on the same GPU.
-  On a real B300 (2026-10-10) the golden checks of the monitors then deployed passed at both batchings, and the end
-  to end path passed for two OOD follow-up monitors. That run predates the mean bound and the redeployed mean
-  monitors, so the current server has been checked on CPU only.
+  then the HTTP server → `InklingProbeMonitor` path for one IID and one OOD monitor (each dataset's with-reasoning
+  follow-up probe), whose scores must equal the scorer's, then a throughput test. It loads its own reader, so run it
+  before starting the server on the same GPU.
+  - On a real B300 (2026-10-10) the golden checks of the monitors then deployed passed at both batchings. The end to
+    end part then sent the two OOD follow-up monitors, so **the IID monitor has never gone through HTTP on a GPU**.
+  - That run also predates the golden check's mean bound, the redeployed mean monitors and the server's current
+    error handling. The check in its current form hasn't run on a GPU yet; the current server has been checked on
+    CPU only.
 
 **Post-hoc scoring, without a server.** Nothing in training reads a held-out probe's score, and runs save every eval
 episode in full (`eval_rollouts.jsonl`). So held-out Inkling probes can be scored after the runs:
@@ -336,8 +359,17 @@ every run exactly as in training (with the run's own env options, after checking
 and writes `probe_eval_<name>.jsonl` per run and probe (tracked by git): per eval step, AUROC against
 `behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts, and the same on
 the tasks no probe saw (`*_unseen`). `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids;
-the suspiciousness-gap grid reads only `eval_metrics.jsonl`. Per-episode scores go to `probe_scores_inkling.jsonl` in
-each run folder, so a rerun scores only what's missing. Only train-against runs need the live server. Commands:
+the suspiciousness-gap grid reads only `eval_metrics.jsonl`.
+- **Unseen tasks** are those in neither the `train` nor the `val` list of the probes' `task_splits.json`: for a run
+  with seed 0 its `test` tasks, for any other seed every task, since eval task ids carry the seed. Episodes without a
+  task id are left out of the `*_unseen` fields.
+- **Resuming:** per-episode scores go to `probe_scores_inkling.jsonl` in each run folder. A stored score is reused only
+  while its line in `eval_rollouts.jsonl` still holds the same episode, by the sha256 of the episode's replay item
+  (the hash the live monitor keys episodes by). A line number alone isn't enough: `run_experiment.py --resume` cuts
+  `eval_rollouts.jsonl` back and appends new episodes on the same lines. Score files written before this check are
+  scored again, once, in full.
+
+Only train-against runs need the live server. Commands:
 [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring).
 
 ## Training *against* a probe — the two mechanisms (which model feeds the probe?)
