@@ -93,8 +93,17 @@ def test_both_readers_extract_everything_and_run_diagnostics(setup):
     assert sorted(json.loads(r.read_text())["part"] for r in runs) == [0, 1]  # two workers shared the dataset
     status = json.loads((stores / "status" / "status.json").read_text())
     assert {r: v["state"] for r, v in status["readers"].items()} == {"nvfp4": "done", "bf16": "done"}
+    code = status["attempts"][0]["code"]  # the code version, here and in every output of the session
+    assert set(code) == {"commit", "dirty", "diff_sha256", "source"}
+
+    def same_code(other: dict) -> bool:  # each process takes its own: the working tree may change in between
+        return (other["commit"], other["source"]) == (code["commit"], code["source"])
+
+    assert same_code(json.loads((stores / "nvfp4" / "terminal_tiny" / "index.json").read_text())["code"])
+    assert all(same_code(json.loads(r.read_text())["code"]) for r in runs)
     assert "[nvfp4.1" in cp.stdout and "[bf16.0" in cp.stdout  # worker output is merged, with prefixes
     diag = json.loads((stores / "diagnostics" / "nvfp4" / "done.json").read_text())
+    assert same_code(diag["code"])
     assert diag["n_inputs"] == 3 * 2 + 4 and diag["jitter_rel_max"] < 0.05  # 2 + 1 TerminalEnv items x 2 views
     labels = {d["label"] for d in diag["items"] if d["view"] == "with_reasoning"}
     assert labels == {0, 1}  # from the real TerminalEnv set, not the concealment set (hacks only)

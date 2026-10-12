@@ -12,6 +12,9 @@ loads a reader once and runs several datasets and parts with it.
   - ``index.json`` fixes the settings that decide what each shard holds: dataset, reader, views, shard size and so
     on. A run with other settings refuses to start rather than mix shards.
   - Never change the shard size between runs.
+  - The code version (``code``: provenance.code_version) is recorded, not checked: a run may resume another
+    commit's shards. ``index.json`` has the code of the run that wrote it last; each run record has its own, with
+    the shards that run extracted (``extracted``).
 - **Parts:** ``part``/``parts`` split the shards between processes that share the store. A process takes the
   shards whose position in the (view, shard) list is ``part`` modulo ``parts``. Each process writes its own run
   record under ``runs/``.
@@ -32,9 +35,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from monitordecorrelation.provenance import code_version
+
 EXIT_UNFINISHED = 75  # stopped early (deadline or preemption notice); finished shards are saved: run again to resume
 EXIT_NO_PROGRESS = 76  # stopped at the deadline before finishing a single shard: a rerun with the same --hours won't help
-# Settings that fix which items land in which shard and what a shard holds: a resumed run must match them.
+# Settings that fix which items land in which shard and what a shard holds: a resumed run must match them. Not
+# "code": resuming with another commit's code is allowed, and each run records its own.
 RESUME_KEYS = ("dataset", "model_name", "effort", "follow_up", "views", "splits", "limit", "n_items", "shard_size",
                "full_activations", "feature_format", "versions")
 MODEL_KEYS = ("n_layers", "d_model", "reader", "max_batch_tokens")
@@ -165,7 +171,7 @@ def prepare(job: Job) -> Prepared:
         "model": job.model, "model_name": os.path.basename(job.model.rstrip("/")), "effort": effort,
         "follow_up": list(FOLLOW_UP), "views": views, "splits": sorted(splits), "limit": job.limit,
         "n_items": len(items), "shard_size": job.shard_size, "full_activations": job.full_activations,
-        "feature_format": FEATURE_FORMAT, "versions": library_versions(),
+        "feature_format": FEATURE_FORMAT, "versions": library_versions(), "code": code_version(),
     }))
     p = Prepared(job, items, views, effort, pick_full(items, job.full_activations) if job.full_activations else set(),
                  (len(items) + job.shard_size - 1) // job.shard_size, settings)
@@ -221,9 +227,11 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
     write_json(index_path, index)
     started = now()
     run = {"started_utc": started, "host": socket.gethostname(), "part": job.part, "parts": job.parts,
+           "code": p.settings["code"],
            "deadline_utc": None if deadline == float("inf") else
            datetime.fromtimestamp(deadline, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "shards_extracted": 0, "tokens": 0, "seconds": None, "finished_utc": None, "stopped_early": None}
+           "shards_extracted": 0, "extracted": [], "tokens": 0, "seconds": None, "finished_utc": None,
+           "stopped_early": None}
     run_rel = f"runs/{started.replace(':', '')}-{socket.gethostname()}-part{job.part}of{job.parts}.json"
     run_path = os.path.join(job.out, run_rel)
     os.makedirs(os.path.dirname(run_path), exist_ok=True)
@@ -291,6 +299,7 @@ def extract(model, p: Prepared, *, stop: StopFlag | None = None, deadline: float
         extract_seconds += dt
         run["tokens"] += n_tok
         run["shards_extracted"] += 1
+        run["extracted"].append(rel)
         log(f"{view} shard {k + 1}/{p.n_shards}: {len(chunk)} items, {n_tok} tokens, {dt:.1f}s "
             f"({n_tok / max(dt, 1e-9):.0f} tok/s)")
 

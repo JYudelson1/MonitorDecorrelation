@@ -14,6 +14,9 @@ and a run record under ``<out>/runs/``. The work is done by whitebox/extraction.
   continues where the last one stopped.
   - A run whose settings differ from the stored ``index.json`` (dataset, reader, views, shard size, …) refuses to
     start, rather than mix shards.
+  - The code version is not such a setting: ``index.json`` and each run record carry ``code``
+    (provenance.code_version; on a VM, the CODE_VERSION.json that scripts/nebius_job.py pushed), and a run may resume
+    shards that another commit made. Each run record also lists the shards that run extracted.
 - **Parts:** ``--part i/n`` takes every n-th shard, so n processes (one per GPU) can share a dataset and a store.
 - **Stops before it is stopped:**
   - Given a deadline (``NEBIUS_JOB_DEADLINE``, epoch seconds), it starts a shard only if the shard and the upload

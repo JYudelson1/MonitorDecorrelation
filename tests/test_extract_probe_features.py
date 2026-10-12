@@ -7,8 +7,10 @@ dataset builder. Checks:
 - An index that describes the run.
 - Full activations for the requested items.
 - A second run resumes: finished shards are skipped.
+- The code version in the index and in each run record, with the shards that run extracted.
 - With ``--store``:
-  - a run on a "new VM" (empty ``--out``) redoes only what the store lacks;
+  - a run on a "new VM" (empty ``--out``) redoes only what the store lacks, also when the stored shards come from
+    another commit;
   - a deadline or SIGTERM stops it cleanly with exit 75;
   - it refuses to mix shards made with other settings;
   - two processes (``--part 0/2``, ``1/2``) share a dataset through one store.
@@ -44,6 +46,7 @@ TURNS = [
 
 SCRIPT = os.path.join(REPO, "experiments", "extract_probe_features.py")
 PROGRESS = re.compile(r"shard \d+/\d+:")  # one line per extracted shard
+CODE_KEYS = {"commit", "dirty", "diff_sha256", "source"}
 
 
 def run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -116,6 +119,9 @@ def test_extraction_writes_resumable_shards(tmp_path):
 
     assert summary(first)["complete"] is True and index["feature_format"] == "inkling-probe-features/v2"
     assert [r["shards_extracted"] for r in run_records(out)] == [6]
+    [record] = run_records(out)
+    assert set(index["code"]) == CODE_KEYS and record["code"] == index["code"]
+    assert sorted(record["extracted"]) == sorted(f"{v}/shard_{k:05d}" for v in index["views"] for k in range(3))
 
     stamp = (out / "with_reasoning" / "shard_00000.safetensors").stat().st_mtime_ns
     second = run(args)
@@ -138,6 +144,9 @@ def test_a_new_vm_resumes_from_the_store(tmp_path):
     # Lost on the way: one shard's marker (its data made it), another shard's data (its marker made it).
     (store / "with_reasoning" / "shard_00001.jsonl").unlink()
     (store / "without_reasoning" / "shard_00002.safetensors").unlink()
+    index = json.loads((store / "index.json").read_text())  # and the shards there came from another commit
+    other = {"commit": "0" * 40, "dirty": False, "diff_sha256": None, "source": "file"}
+    (store / "index.json").write_text(json.dumps({**index, "code": other}))
     second = run([*common_args(nvfp4_dir, dataset, tmp_path / "vm2"), "--store", str(store),
                   "--full-activations", "2"])
     assert second.returncode == 0, second.stderr[-3000:]
@@ -147,6 +156,9 @@ def test_a_new_vm_resumes_from_the_store(tmp_path):
                                                                                  "shard_00002.jsonl"]
     assert summary(second)["complete"] is True
     assert sorted(r["shards_extracted"] for r in run_records(store)) == [2, 6]
+    assert sorted(len(r["extracted"]) for r in run_records(store)) == [2, 6]
+    [last] = [r for r in run_records(store) if r["shards_extracted"] == 2]
+    assert json.loads((store / "index.json").read_text())["code"] == last["code"] != other  # the last run's
 
 
 def test_a_deadline_stops_before_a_shard_and_the_next_run_finishes(tmp_path):

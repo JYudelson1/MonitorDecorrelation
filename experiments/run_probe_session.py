@@ -36,6 +36,10 @@ code:
 **Optional readers that fail.**
 - A failed optional reader (e.g. full precision that won't load) is recorded in ``status.json`` in the status store.
 - It is not retried on a relaunch unless ``--retry-failed`` is given.
+
+**Code version.** ``status.json`` records each attempt's code version (``code``, provenance.code_version: on a VM, the
+CODE_VERSION.json that scripts/nebius_job.py pushed), as do the extraction's index and run records and the
+diagnostics' ``done.json``.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
+from monitordecorrelation.provenance import code_version  # noqa: E402
 from monitordecorrelation.whitebox.extraction import (  # noqa: E402
     EXIT_NO_PROGRESS, EXIT_UNFINISHED, Job, StopFlag, extract, now, prepare)
 
@@ -126,7 +131,7 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
     wlog(f"diagnostics on {len(inputs)} inputs ({sum(len(p.tokens) for p in inputs)} tokens)")
     tensors, summary = diagnostics.run(model, inputs, special_ids(replay),
                                        max_batch_tokens=plan.get("max_batch_tokens", 65536))
-    summary.update(reader=reader, model=plan["readers"][reader]["model"], finished_utc=now(),
+    summary.update(reader=reader, model=plan["readers"][reader]["model"], finished_utc=now(), code=code_version(),
                    items=[{"id": it["id"], "view": view, "label": it["label"], "split": it["split"]}
                           for it, view in sample])
     out = os.path.join(plan["out"], "diagnostics", reader)
@@ -210,7 +215,8 @@ def driver(plan: dict, plan_path: str, retry_failed: bool) -> int:
     stopping = {"at": None}
     signal.signal(signal.SIGTERM, lambda s, f: stopping.update(at=time.time()))  # workers stop themselves
     store, status = load_status(plan)
-    status.setdefault("attempts", []).append({"started_utc": now(), "host": os.uname().nodename})
+    status.setdefault("attempts", []).append({"started_utc": now(), "host": os.uname().nodename,
+                                              "code": code_version()})
     readers = status.setdefault("readers", {})
     procs: dict = {}
     order = []
