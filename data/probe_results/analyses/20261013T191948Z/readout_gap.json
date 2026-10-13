@@ -1,0 +1,46 @@
+{
+ "command": "readout-gap",
+ "started_utc": "2026-10-13T19:21:43Z",
+ "code": {
+  "commit": "dae7fd6f5ea1fe4b73b8a5bc786262b0461870e8",
+  "dirty": false,
+  "diff_sha256": null,
+  "source": "git"
+ },
+ "readouts": [
+  "followup",
+  "followup_prev"
+ ],
+ "difference": "followup_prev - followup",
+ "probes": {
+  "fitted/bf16/diverse_deception/without_reasoning": {
+   "dataset": "diverse_deception",
+   "view": "without_reasoning",
+   "cluster": "pair",
+   "n": 1940,
+   "n_positive": 970,
+   "n_clusters": 970,
+   "layers": {
+    "followup": 26,
+    "followup_prev": 27
+   },
+   "test_auroc": {
+    "followup": 0.9785269422892975,
+    "followup_prev": 0.9791975767881815
+   },
+   "difference": 0.0006706344988840485,
+   "bootstrap": {
+    "n": 2000,
+    "seed": 0,
+    "n_nan": 0,
+    "sd": 0.0012226843842144048,
+    "ci": [
+     -0.001786879583377643,
+     0.003104793283026889
+    ],
+    "share_above_zero": 0.7135
+   },
+   "spearman": 0.9628749321405184
+  }
+ }
+}

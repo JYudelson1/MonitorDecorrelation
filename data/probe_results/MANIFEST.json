@@ -1,7 +1,7 @@
 {
  "code": {
-  "commit": "76acf45634257b4ae66556c584483499514c087e",
-  "diff_sha256": "2836535a10f4eca93dd1ff6ad0dcd946ada69be0b2ca913957c9d229c8fc6dbe",
+  "commit": "dae7fd6f5ea1fe4b73b8a5bc786262b0461870e8",
+  "diff_sha256": "1559ca2d224fedfa199120abddcdbdc2120ffbae547dd28e1cadaad030b9a247",
   "dirty": true,
   "source": "git"
  },
@@ -15,6 +15,16 @@
    "sha256": "e641b5b9e48b20253ca448675cfa1e877fddb256e7eb1dd882477a9806c2a70f",
    "source": "scratch/analyses/20261012T073030Z/near_threshold.json",
    "source_sha256": "381160a8fce11e9a85a077aae635147dbf03e59cb0e009ea1357810ed820b3c3"
+  },
+  "analyses/20261013T191948Z/massive_dims.json": {
+   "sha256": "0df4aaefd01460370905e82a057b78ffcf8442d5a1fe6e6af2a011877be6cae4",
+   "source": "scratch/analyses/20261013T191948Z/massive_dims.json",
+   "source_sha256": "e21a47dc64728a92ae27215b23490916e3ef1054a6e9677bf17c929238b778e8"
+  },
+  "analyses/20261013T191948Z/readout_gap.json": {
+   "sha256": "c27c659b096894f8327411adeb6c3566769bccc7250f5e1eeda9bef0c51d354c",
+   "source": "scratch/analyses/20261013T191948Z/readout_gap.json",
+   "source_sha256": "3fda8e5eb5f857f633d13b53d0a14b924fe5eaf184d85ffa7e26d2359a3b0218"
   },
   "compare/followup/decision.json": {
    "sha256": "aaeddaea52d11c1fe843c0e1022fa3ecdcfc870d69e1cccb23022ce36c39a81a",
