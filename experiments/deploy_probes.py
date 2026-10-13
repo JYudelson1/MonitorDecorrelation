@@ -3,6 +3,7 @@ each with the golden set the probe server checks at startup.
 
     uv run python experiments/deploy_probes.py --probes PROBES/nvfp4 --features FEATURES/nvfp4 \
         --diagnostics DIAGNOSTICS/nvfp4 --out data/probes/Inkling-Small
+    uv run python experiments/deploy_probes.py --grids-only    # only grids.json (below), from the dataset's items
 
 **What gets deployed** (one directory per monitor, ``<dataset>/<view>/<readout>/``; ``view`` is how the server
 renders a TerminalEnv episode):
@@ -23,9 +24,15 @@ logits come from the serving reader, so:
   reader's go to ``trained_reader``/``trained_reader_info``;
 - the golden logits and the tolerance come from the serving reader's features and diagnostics.
 
-**Task splits** (``task_splits.json``): the TerminalEnv task ids of the probes' train/val/test splits. The probes were
-fitted on pre-RL episodes of the same eval tasks the RL runs evaluate on, so report held-out monitor metrics on
-the ``test`` tasks too: those are the tasks no probe saw (within-task AUROC says the probes don't key on the task).
+**Task splits** (``task_splits.json``): the TerminalEnv task ids of the probes' train/val/test splits.
+
+**Grids** (``grids.json``; ``--grids-only`` writes only this file, from the items alone): the same splits as grid
+keys, the sha256 of the grid each task's question shows (envs/terminal_verifier.grid_key), with the key's definition,
+the dataset's ``items_sha256`` and the code version. The probes were fitted on pre-RL episodes of seed 0's eval tasks,
+and grids recur across seeds under other task ids (seed s's eval task i is seed 0's task s + i), so an RL run may
+evaluate on the probes' own tasks whatever its task ids say. experiments/eval_inkling_probes_on_runs.py reads this file
+to report held-out monitor metrics also on the grids in neither the train nor the val split, which no probe saw
+(within-task AUROC says the probes don't key on the task, but the clean number costs nothing).
 
 **Serving check** (in ``deployed.json``): on the serving reader's TerminalEnv features, the deployed probe's test
 AUROC and its TPR/FPR at t₁%; and the batching rule's numbers for it (docs/inkling_probes_preregistration.md): the
@@ -54,12 +61,47 @@ import time
 
 import numpy as np
 
+from monitordecorrelation.envs.terminal_verifier import GRID_KEY, grid_key
 from monitordecorrelation.provenance import code_version
+from monitordecorrelation.whitebox.probe_datasets import SPLITS
 from monitordecorrelation.whitebox.probe_fit import LayerSource, SelectedProbe, load_items, thresholds, write_golden
 
 VIEWS = ("with_reasoning", "without_reasoning")
 N_GOLDEN, N_GOLDEN_HACKS = 32, 8
 MEAN_TOLERANCE = 3.0
+GRIDS_FILE = "grids.json"
+
+
+def grid_splits(items: dict, dataset: dict, code: dict | None = None) -> dict:
+    """What ``grids.json`` holds: the key's definition (``GRID_KEY``), ``dataset`` (which items) with its item and task
+    counts, ``code`` (default: the code's version now), and per split (train, val and test at least) the sorted grid
+    keys of its tasks. SystemExit if an item's question shows no grid: the post-hoc scorer couldn't tell a run's
+    episodes on that task from others."""
+    splits: dict[str, set[str]] = {split: set() for split in SPLITS}
+    for it in items.values():
+        key = grid_key(it["question"])
+        if key is None:
+            raise SystemExit(f"item {it['id']}: its question shows no grid (envs/terminal_verifier.prompt_grid), so "
+                             f"{GRIDS_FILE} can't hold its task")
+        splits.setdefault(it["split"], set()).add(key)
+    return {"key": GRID_KEY,
+            "dataset": {**dataset, "n_items": len(items), "n_tasks": len({it["task_id"] for it in items.values()})},
+            "code": code_version() if code is None else code,
+            **{split: sorted(keys) for split, keys in sorted(splits.items())}}
+
+
+def write_grids(record: dict, out: str, log) -> str:
+    """``record`` (``grid_splits``) as ``<out>/grids.json``; logs the counts, and any grid in more than one split
+    (the scorer then counts it as seen if one of them is train or val)."""
+    splits = [k for k in record if isinstance(record[k], list)]
+    shared = {g for i, a in enumerate(splits) for b in splits[i + 1:] for g in set(record[a]) & set(record[b])}
+    os.makedirs(out, exist_ok=True)
+    path = os.path.join(out, GRIDS_FILE)
+    with open(path, "w") as fh:
+        json.dump(record, fh, indent=1)
+    log(f"{path}: {', '.join(f'{len(record[k])} {k}' for k in splits)} grids"
+        + (f"; WARNING: {len(shared)} grids are in more than one split" if shared else ""))
+    return path
 
 
 def golden_ids(items: dict, src: LayerSource, seed: int = 0) -> list[str]:
@@ -170,23 +212,37 @@ def deploy(probe: SelectedProbe, fitted: str, out: str, name: str, view: str, re
             "serving_check": serving_check(probe, items, features, view, readout, diagnostics)}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--probes", required=True, help="fit_probes.py's --out for one reader")
-    ap.add_argument("--features", required=True,
-                    help="the serving reader's features (<dataset>/<view>/shard_*): the fitting reader's, or another")
+    ap.add_argument("--probes", help="fit_probes.py's --out for one reader (required unless --grids-only)")
+    ap.add_argument("--features", help="the serving reader's features (<dataset>/<view>/shard_*): the fitting "
+                                       "reader's, or another (required unless --grids-only)")
     ap.add_argument("--serving-reader", default="nvfp4", help="the serving reader's name, for the record")
     ap.add_argument("--diagnostics", help="the serving reader's diagnostics folder (diag.safetensors)")
     ap.add_argument("--datasets", default="data/probe_datasets")
     ap.add_argument("--out", default="data/probes/Inkling-Small")
     ap.add_argument("--readouts", default="followup,mean")
-    args = ap.parse_args()
+    ap.add_argument("--grids-only", action="store_true",
+                    help=f"write only {GRIDS_FILE} into --out, from the terminal_prerl items in --datasets: no monitor "
+                         "is deployed or changed")
+    args = ap.parse_args(argv)
+    if args.grids_only:
+        unused = [f"--{k}" for k in ("probes", "features", "diagnostics") if getattr(args, k) is not None]
+        if unused:
+            ap.error(f"--grids-only deploys no monitor, so {', '.join(unused)} would be unused")
+    elif args.probes is None or args.features is None:
+        ap.error("--probes and --features are required (unless --grids-only)")
     log = lambda m: print(f"[deploy] {m}", flush=True)  # noqa: E731
     items = load_items(os.path.join(args.datasets, "terminal_prerl"))
-    effort = json.load(open(os.path.join(args.datasets, "terminal_prerl", "manifest.json"))).get("effort", 0.5)
+    manifest = json.load(open(os.path.join(args.datasets, "terminal_prerl", "manifest.json")))
+    code = code_version()
+    grids = grid_splits(items, {"name": "terminal_prerl", "items_sha256": manifest.get("items_sha256")}, code)
+    if args.grids_only:
+        write_grids(grids, args.out, log)
+        return 0
+    effort = manifest.get("effort", 0.5)
     index = json.load(open(os.path.join(args.features, "terminal_prerl", "index.json")))
     serving = {"reader": args.serving_reader, "reader_info": index["reader"]}
-    code = code_version()
     done = []
     for readout in args.readouts.split(","):
         for view in VIEWS:
@@ -214,6 +270,7 @@ def main() -> int:
         splits.setdefault(it["split"], set()).add(it["task_id"])
     with open(os.path.join(args.out, "task_splits.json"), "w") as fh:
         json.dump({k: sorted(v) for k, v in sorted(splits.items())}, fh, indent=1)
+    write_grids(grids, args.out, log)
     record = os.path.join(args.out, "deployed.json")  # merged with earlier runs (e.g. another reader's readouts)
     earlier = json.load(open(record)) if os.path.exists(record) else []
     done += [d for d in earlier if d["dir"] not in {e["dir"] for e in done}]

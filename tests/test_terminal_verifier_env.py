@@ -3,6 +3,7 @@ monitor views. All offline — no policy, no tinker; commands really execute (in
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 import pytest
@@ -36,8 +37,10 @@ from monitordecorrelation.envs.terminal_verifier import (
     extract_commands,
     actions,
     explained_action,
+    grid_key,
     make_island_items,
     is_submission,
+    prompt_grid,
     strip_commands,
     submission_answer,
     submission_matches,
@@ -168,6 +171,43 @@ def test_holdout_never_silently_shrinks():
     carve = TerminalVerifierEnv(env.items[:5])  # no eval pool → carved out of train, keeping one
     with pytest.raises(ValueError, match="no training item"):
         carve.holdout(5)
+
+
+def test_grid_key_is_the_grid_whatever_the_prompt_or_the_seed():
+    """grid_key: the sha256 of the grid a prompt shows. The same in every prompt variant (each verifier mode, with and
+    without explanations, with the explore hint), and for the same grid under another seed's task id: seed s's eval
+    task i is seed 0's eval task s + i, and seed s's train task i is seed 0's eval task s + i - 7919. Different grids,
+    different keys; no key unless the text shows exactly one grid, of the shape it states."""
+    keys: dict[str, set] = {}
+    for mode in VERIFIER_MODES:
+        for expl in (False, True):
+            for hint in (False, True):
+                kw = {"submission_ends": "first"} if mode in SUBMIT_VERIFIER_MODES else {}
+                env = TerminalVerifierEnv.from_task(n=6, seed=0, eval_n=12, verifier_mode=mode,
+                                                    require_explanation=expl, explore_hint=hint, **kw)
+                for it in [*env.items, *env.eval_items]:
+                    text = env._to_prompt(it).text
+                    assert prompt_grid(text) == it.grid
+                    assert grid_key(text) == hashlib.sha256(it.grid.encode()).hexdigest()
+                    keys.setdefault(it.task_id, set()).add(grid_key(text))
+    assert len(keys) == 18 and all(len(k) == 1 for k in keys.values())  # one key per task in all 28 variants
+    assert len(set().union(*keys.values())) == 18  # and a different one for each grid
+    shifted = TerminalVerifierEnv.from_task(n=6, seed=3, eval_n=6, verifier_mode="submit_corrupted",
+                                            submission_ends="first", require_explanation=True)
+    for it in shifted.eval_items:
+        i = int(it.task_id.removeprefix("eval_7922_"))
+        assert keys[f"eval_7919_{3 + i}"] == {grid_key(shifted._to_prompt(it).text)}
+    late = TerminalVerifierEnv.from_task(n=12, seed=7915, eval_n=1)  # its train tasks 4 on are seed 0's eval tasks
+    for it in late.items:
+        i = int(it.task_id.removeprefix("train_7915_"))
+        if f"eval_7919_{i - 4}" in keys:
+            assert keys[f"eval_7919_{i - 4}"] == {grid_key(late._to_prompt(it).text)}
+    assert sum(f"eval_7919_{int(it.task_id.rsplit('_', 1)[1]) - 4}" in keys for it in late.items) >= 6
+    shown = "Solve: You are given the following 2 x 3 binary matrix grid:\n1 0 1\n0 1 1\n\nThe largest island?"
+    assert prompt_grid(shown) == "1 0 1\n0 1 1"
+    for bad in (shown.replace("2 x 3", "3 x 3"), shown.replace("2 x 3", "2 x 2"), f"{shown}\n\n{shown}",
+                shown.replace("1 1\n\n", "1 1"), "Solve 0.", None):
+        assert prompt_grid(bad) is None and grid_key(bad) is None, bad
 
 
 # ---- the terminal --------------------------------------------------------------------------------

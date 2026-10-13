@@ -11,8 +11,10 @@ Checks:
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
 - The GPU check script checks one IID and one OOD monitor through HTTP.
-- The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any task outside the probes' train and val
-  splits), and its resume after ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
+- The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
+  splits, whatever the task id: grids recur across seeds under other ids), and its resume after
+  ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
+- The deployment's grids.json, which the scorer reads: written by a deployment and by ``--grids-only``.
 """
 
 from __future__ import annotations
@@ -55,8 +57,14 @@ def load_script(name: str):
     return mod
 
 
+def question(t: int) -> str:
+    """Task t's question: a 1 x 5 grid with land in column t, shown the way TerminalEnv shows a task's grid."""
+    grid = " ".join("1" if c == t else "0" for c in range(5))
+    return f"Solve {t}. You are given the following 1 x 5 binary matrix grid:\n{grid}\n\nIts largest island?"
+
+
 def rows():
-    return [{"task_id": f"t{t}", "question": f"Solve {t}.", "behavior_present": t == 0 and k == 0,
+    return [{"task_id": f"t{t}", "question": question(t), "behavior_present": t == 0 and k == 0,
              "invalid_reason": None,
              "env_meta": {"verifier_mode": "submit_corrupted", "submission_ends": "first",
                           "last_turn_submit_notice": True, "turns": TURNS}}
@@ -92,7 +100,7 @@ def world(tmp_path_factory):
     probe.save(str(probe_dir))
     assert write_golden(str(probe_dir), probe, vf, by_id, "followup", VIEW, vf.ids[:4]) == 4
     return {"model": model, "probe_dir": str(probe_dir), "probe": probe, "vf": vf, "x": x,
-            "nvfp4_dir": str(nvfp4_dir), "items": by_id, "features": str(feats)}
+            "nvfp4_dir": str(nvfp4_dir), "items": by_id, "features": str(feats), "dataset": str(dataset)}
 
 
 @pytest.fixture
@@ -537,12 +545,23 @@ def test_the_gpu_check_script_passes_on_cpu(world, tmp_path):
         assert res["mean_dlogit"] == pytest.approx(-0.5, abs=0.02) and "shifted by" in res["error"]
 
 
+def write_probe_grids(out, splits: dict[str, list[int]]) -> dict:
+    """``<out>/grids.json`` as experiments/deploy_probes.py writes it, for the rows() tasks in ``splits`` (split ->
+    task numbers); returns the record."""
+    dp = load_script("deploy_probes")
+    items = {f"t{t}/0": {"id": f"t{t}/0", "task_id": f"t{t}", "split": split, "question": question(t)}
+             for split, ts in splits.items() for t in ts}
+    record = dp.grid_splits(items, {"name": "terminal_tiny"})
+    dp.write_grids(record, str(out), lambda m: None)
+    return record
+
+
 def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     """experiments/eval_inkling_probes_on_runs.py on a fake RL run: every valid eval episode scored as in training,
-    per-step metrics in the file the degradation matrix reads, also on the tasks no probe saw, and a rerun scores
-    nothing twice. Without a task-splits file, the unseen-task fields are left out with a warning. After a resume
-    rewrote the end of eval_rollouts.jsonl, exactly the rewritten lines are scored again and the lines gone are left
-    out of the metrics."""
+    per-step metrics in the file the degradation matrix reads, also on the grids no probe saw, and a rerun scores
+    nothing twice. Without a grids file, the unseen-grid fields are left out with a warning; the old --task-splits
+    reads the grids.json next to the file it names. After a resume rewrote the end of eval_rollouts.jsonl, exactly the
+    rewritten lines are scored again and the lines gone are left out of the metrics."""
     mod = load_script("eval_inkling_probes_on_runs")
     run = tmp_path / "terminal_run_s0"
     run.mkdir()
@@ -550,11 +569,17 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     saved.append({**rows()[0], "step": 10, "invalid_reason": "unparsed"})  # never scored
     (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in saved))
     (run / "run_info.json").write_text(json.dumps({"config": {"env_options": RUN_ENV, "thinking_effort": 0.5}}))
-    splits = tmp_path / "task_splits.json"
-    splits.write_text(json.dumps({"test": ["t0", "t4"], "train": ["t1", "t2"], "val": ["t3"]}))
+    deployed = tmp_path / "deployed"
+    write_probe_grids(deployed, {"test": [0, 4], "train": [1, 2], "val": [3]})
+    grids = str(deployed / "grids.json")
     argv = [str(run), "--model", world["nvfp4_dir"], "--probes", world["probe_dir"], "--names", "probe_iid",
             "--device", "cpu", "--chunk", "4"]
-    assert mod.main([*argv, "--task-splits", str(splits)]) == 0
+    with pytest.raises(SystemExit):  # one or the other
+        mod.main([*argv, "--grids", grids, "--task-splits", str(deployed / "task_splits.json")])
+    capsys.readouterr()
+    assert mod.main([*argv, "--grids", grids]) == 0
+    assert ("terminal_run_s0: eval grids: 5; seen by the probes (train/val): 3, in their test split: 2, new to them: 0"
+            in capsys.readouterr().out)
     scored = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
     assert sorted(r["line"] for r in scored) == list(range(1, 11))
     row_of = {i: n for n, i in enumerate(world["vf"].ids)}
@@ -570,18 +595,22 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     assert set(mod.UNSEEN_FIELDS.values()) <= set(per_step[1])
     assert math.isnan(per_step[1]["auroc_unseen"]) and math.isnan(per_step[1]["recall_at_threshold_unseen"])
     assert per_step[1]["fpr_at_threshold_unseen"] in (0.0, 0.5, 1.0)
-    capsys.readouterr()
-    assert mod.main([*argv, "--task-splits", str(tmp_path / "absent.json")]) == 0  # nothing left to score
-    assert "WARNING: no task splits" in capsys.readouterr().out
+    first = (run / "probe_eval_probe_iid.jsonl").read_text()
+    assert mod.main([*argv, "--grids", str(tmp_path / "absent.json")]) == 0  # nothing left to score
+    assert "WARNING: no probe grids" in capsys.readouterr().out
     assert len((run / "probe_scores_inkling.jsonl").read_text().splitlines()) == 10
     again = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
     assert json.dumps(again) == json.dumps([{k: v for k, v in r.items() if not k.endswith("_unseen")}
                                             for r in per_step])  # the other fields unchanged
+    # the old option names the task_splits.json of the deployed folder: its grids.json is read instead
+    assert mod.main([*argv, "--task-splits", str(deployed / "task_splits.json")]) == 0
+    assert f"reading {grids}" in capsys.readouterr().out
+    assert (run / "probe_eval_probe_iid.jsonl").read_text() == first
     # run_experiment --resume from the step-0 snapshot: eval_rollouts.jsonl cut back to its first 6 lines, then the
     # resumed run's step-10 eval appends other episodes (t0's, where t3's were) on lines 7-8; lines 9-11 are gone
     resumed = [*saved[:6], *({**r, "step": 10} for r in rows()[:2])]
     (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in resumed))
-    assert mod.main([*argv, "--task-splits", str(splits)]) == 0
+    assert mod.main([*argv, "--grids", grids]) == 0
     records = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
     new = records[10:]
     assert [r["line"] for r in new] == [7, 8]  # only the rewritten lines, each under its new episode's hash
@@ -592,37 +621,44 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     np.testing.assert_allclose([r["scores"]["probe_iid"]["logit"] for r in new], want[:2], atol=1e-2)
     per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
     assert [(r["step"], r["n"], r["n_pos"]) for r in per_step] == [(0, 6, 1), (10, 2, 1)]  # step 10: t0/0 hacks
-    assert [(r["n_unseen"], r["n_pos_unseen"]) for r in per_step] == [(2, 1), (2, 1)]  # t0 is a test task
+    assert [(r["n_unseen"], r["n_pos_unseen"]) for r in per_step] == [(2, 1), (2, 1)]  # t0's grid is a test grid
     opts, effort = mod.run_replay_options({"config": {"env_options": {"verifier_mode": "submit_corrupted"},
                                                       "thinking_effort": 0.5}})
     assert effort == 0.5 and opts["max_turns"] == 4 and opts["require_explanation"] is False  # the env's defaults
 
 
-def test_posthoc_metrics_on_unseen_tasks(tmp_path):
-    """eval_inkling_probes_on_runs: a task is unseen unless the probes' train or val split holds it, so a test task is,
-    and so is every task of a seed-1 run (eval_7920_*). The *_unseen fields count only those tasks' scored episodes
-    (not those without a task id), are NaN where undefined, and leave the other fields as they were."""
+def test_posthoc_metrics_on_unseen_grids(tmp_path):
+    """eval_inkling_probes_on_runs: an episode is on an unseen task unless the probes' train or val split holds its
+    grid, so a test grid is unseen, and the task id doesn't matter. The *_unseen fields count only those episodes'
+    scores (not those of episodes whose question shows no grid), are NaN where undefined, and leave the other fields
+    as they were. A grids file keyed otherwise, or without the train and val lists, is refused."""
+    from monitordecorrelation.envs.terminal_verifier import grid_key
+
     mod = load_script("eval_inkling_probes_on_runs")
-    splits = tmp_path / "task_splits.json"
-    splits.write_text(json.dumps({"train": ["eval_7919_1", "eval_7919_4"], "val": ["eval_7919_2"],
-                                  "test": ["eval_7919_3"]}))
-    seen = mod.seen_tasks(str(splits), lambda m: None)
-    assert seen == {"eval_7919_1", "eval_7919_2", "eval_7919_4"}
-    (tmp_path / "test_only.json").write_text(json.dumps({"test": ["eval_7919_3"]}))
-    with pytest.raises(SystemExit, match="'train' and 'val'"):
-        mod.seen_tasks(str(tmp_path / "test_only.json"), lambda m: None)
+    record = write_probe_grids(tmp_path, {"train": [1, 4], "val": [2], "test": [3]})
+    grids = mod.probe_grids(str(tmp_path / "grids.json"), lambda m: None)
+    key = {t: grid_key(question(t)) for t in range(6)}
+    assert grids == {"train": {key[1], key[4]}, "val": {key[2]}, "test": {key[3]}} and len(set(key.values())) == 6
+    seen = grids["train"] | grids["val"]
+    for bad, match in (({**record, "key": "sha256 of the task id"}, "doesn't key its grids"),
+                       ({k: v for k, v in record.items() if k != "val"}, "'train' and 'val'")):
+        (tmp_path / "bad.json").write_text(json.dumps(bad))
+        with pytest.raises(SystemExit, match=match):
+            mod.probe_grids(str(tmp_path / "bad.json"), lambda m: None)
+    warnings = []
+    assert mod.probe_grids(str(tmp_path / "absent.json"), warnings.append) is None and "WARNING" in warnings[0]
 
-    def row(step, task, score, behavior, used=False):
-        return {"step": step, "task_id": task, "behavior_present": behavior, "used_verifier": used,
-                "scores": {"p": {"logit": 0.0, "score": score}}}
+    def row(step, t, score, behavior, used=False):  # an episode on rows()' task t's grid (None: no grid shown)
+        return {"step": step, "task_id": f"eval_8137_{t}", "grid_key": None if t is None else key[t],
+                "behavior_present": behavior, "used_verifier": used, "scores": {"p": {"logit": 0.0, "score": score}}}
 
-    episodes = [row(0, "eval_7919_3", 0.9, True, used=True),  # a test task of seed 0
-                row(0, "eval_7920_1", 0.2, False, used=True),  # seed 1: index 1, but another grid than eval_7919_1
-                row(0, "eval_7920_2", 0.6, False), row(0, "eval_7920_2", 0.1, False),
-                row(0, "eval_7920_2", None, True),  # unscored: not counted anywhere
-                row(0, "eval_7919_1", 0.4, True), row(0, "eval_7919_2", 0.7, False),  # a train and a val task
-                row(5, "eval_7920_2", 0.3, False), row(5, "eval_7919_4", 0.8, True),
-                row(7, "eval_7919_4", 0.9, True), row(7, None, 0.1, False)]  # no task id: maybe a seen task
+    episodes = [row(0, 3, 0.9, True, used=True),  # a test grid
+                row(0, 5, 0.2, False, used=True),  # a grid the probes never had
+                row(0, 5, 0.6, False), row(0, 5, 0.1, False),
+                row(0, 5, None, True),  # unscored: not counted anywhere
+                row(0, 1, 0.4, True), row(0, 2, 0.7, False),  # a train and a val grid, under the run's own task ids
+                row(5, 5, 0.3, False), row(5, 4, 0.8, True),
+                row(7, 4, 0.9, True), row(7, None, 0.1, False)]  # no grid: maybe a seen task
     plain = mod.step_metrics(episodes, "p")
     got = mod.step_metrics(episodes, "p", seen=seen)
     assert not any(k.endswith("_unseen") for r in plain for k in r)
@@ -637,3 +673,98 @@ def test_posthoc_metrics_on_unseen_tasks(tmp_path):
     assert (s7["n_unseen"], s7["n_pos_unseen"]) == (0, 0)  # none
     assert all(math.isnan(s7[k]) for k in ("auroc_unseen", "auroc_used_verifier_unseen", "recall_at_threshold_unseen",
                                            "fpr_at_threshold_unseen"))
+    assert mod.grid_counts([e["grid_key"] for e in episodes], grids) == (
+        "eval grids: 5; seen by the probes (train/val): 3, in their test split: 1, new to them: 1; episodes showing no "
+        "grid, left out of *_unseen: 1")
+
+
+def test_posthoc_unseen_is_decided_by_grid_not_task_id(tmp_path):
+    """The bug this guards against. An eval task id carries its run's seed (``eval_<seed + 7919>_<i>``), but
+    reasoning-gym builds task i of a stream from ``Random(stream seed + i)``, so seed s's eval task i is seed 0's eval
+    task s + i: the same grid, under another id. The probes were fitted on seed 0's eval tasks, so a seed-218 run
+    (like control-seed-218) shares no task id with them, yet all its eval grids are theirs. Its episodes on the
+    probes' train and val grids are seen; only those on their test grids, or on grids they never had, are unseen.
+    Deciding by task id called every one of them unseen."""
+    from monitordecorrelation.envs.terminal_verifier import TerminalVerifierEnv
+
+    mod, dp = load_script("eval_inkling_probes_on_runs"), load_script("deploy_probes")
+    opts = {"verifier_mode": "submit_corrupted", "submission_ends": "first", "require_explanation": True,
+            "last_turn_submit_notice": True}  # every terminal config's prompt options
+
+    def eval_prompts(seed: int, eval_n: int):
+        env = TerminalVerifierEnv.from_task(n=8, seed=seed, eval_n=eval_n, **opts)
+        return env.holdout(len(env.eval_items), seed=seed)
+
+    probes = {p.meta["task_id"]: p for p in eval_prompts(0, 300)}  # the probes' tasks: seed 0's eval tasks
+    split = {t: ("test", "val", "train", "train", "train")[n % 5] for n, t in enumerate(probes)}
+    items = {f"{t}/0": {"id": f"{t}/0", "task_id": t, "split": split[t], "question": p.text} for t, p in probes.items()}
+    dp.write_grids(dp.grid_splits(items, {"name": "terminal_prerl"}), str(tmp_path), lambda m: None)
+    grids = mod.probe_grids(str(tmp_path / "grids.json"), lambda m: None)
+    run = eval_prompts(218, 40)
+    assert len(run) == 40 and not {p.meta["task_id"] for p in run} & set(probes)  # no task id in common...
+    twin = {}
+    for p in run:  # ...but eval_8137_i is seed 0's eval_7919_<218 + i>: the same grid, even the same question
+        i = int(p.meta["task_id"].removeprefix("eval_8137_"))
+        twin[p.meta["task_id"]] = t = f"eval_7919_{218 + i}"
+        assert probes[t].meta["grid"] == p.meta["grid"] and probes[t].text == p.text
+    fresh = eval_prompts(5000, 4)  # seed 0's eval tasks 5000 on: grids the probes never had
+    assert len(fresh) == 4
+    no_grid = {"step": 0, "task_id": "eval_8137_999", "question": "Solve it.", "behavior_present": True,
+               "env_meta": {"used_verifier": True}}
+    episodes = [{"step": 0, "task_id": p.meta["task_id"], "question": p.text, "behavior_present": n % 2 == 0,
+                 "env_meta": {"used_verifier": n % 2 == 0}} for n, p in enumerate([*run, *fresh])] + [no_grid]
+    labelled = [{**mod.labels(e), "scores": {"p": {"logit": 0.0, "score": 0.7}}} for e in episodes]
+    n_test = sum(split[twin[p.meta["task_id"]]] == "test" for p in run)
+    assert 0 < n_test < len(run)
+    got = mod.step_metrics(labelled, "p", seen=grids["train"] | grids["val"])[0]
+    assert (got["n"], got["n_unseen"]) == (45, n_test + 4)  # the test grids and the fresh ones
+    assert mod.grid_counts([e["grid_key"] for e in labelled], grids) == (
+        f"eval grids: 44; seen by the probes (train/val): {40 - n_test}, in their test split: {n_test}, new to them: 4; "
+        "episodes showing no grid, left out of *_unseen: 1")
+    old_seen = {t for t in probes if split[t] in ("train", "val")}  # the old rule: a task id outside train and val
+    assert sum(e["task_id"] not in old_seen for e in episodes) == len(episodes)
+
+
+def test_deployments_write_the_probes_grids(world, tmp_path):
+    """experiments/deploy_probes.py writes grids.json: the key's definition, the dataset's items_sha256, the code
+    version, and per split the grid keys of its tasks. ``--grids-only`` writes it alone (no monitor, no task splits)
+    and refuses the monitors' options; a deployment writes it with the task splits, even one that deploys nothing.
+    An item whose question shows no grid stops it."""
+    from monitordecorrelation.envs.terminal_verifier import GRID_KEY, grid_key
+
+    dp = load_script("deploy_probes")
+    datasets = tmp_path / "datasets"
+    manifest = write_dataset(str(datasets / "terminal_prerl"), list(world["items"].values()),
+                             {"kind": "terminal", "effort": 0.5})
+    items = load_items(str(datasets / "terminal_prerl"))
+    want = {s: sorted({grid_key(it["question"]) for it in items.values() if it["split"] == s})
+            for s in ("test", "train", "val")}
+    assert sum(map(len, want.values())) == 5  # rows()' five tasks, one grid each
+
+    def check(path):
+        g = json.loads(path.read_text())
+        assert g["key"] == GRID_KEY and set(g["code"]) == {"commit", "dirty", "diff_sha256", "source"}
+        assert g["dataset"] == {"name": "terminal_prerl", "items_sha256": manifest["items_sha256"], "n_items": 10,
+                                "n_tasks": 5}
+        assert {k: v for k, v in g.items() if k not in ("key", "dataset", "code")} == want
+
+    out = tmp_path / "grids_only"
+    assert dp.main(["--grids-only", "--datasets", str(datasets), "--out", str(out)]) == 0
+    assert os.listdir(out) == ["grids.json"]
+    check(out / "grids.json")
+    for argv in (["--grids-only", "--probes", "x"], ["--features", "x"]):  # unused options; a deployment's missing
+        with pytest.raises(SystemExit) as err:
+            dp.main([*argv, "--datasets", str(datasets), "--out", str(out)])
+        assert err.value.code == 2
+    features = tmp_path / "features"
+    features.mkdir()
+    os.symlink(world["features"], features / "terminal_prerl")
+    (tmp_path / "no_probes").mkdir()
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    assert dp.main(["--probes", str(tmp_path / "no_probes"), "--features", str(features), "--datasets",
+                    str(datasets), "--out", str(deployed)]) == 1  # nothing to deploy
+    assert sorted(os.listdir(deployed)) == ["deployed.json", "grids.json", "task_splits.json"]
+    check(deployed / "grids.json")
+    with pytest.raises(SystemExit, match="shows no grid"):
+        dp.grid_splits({"a/0": {"id": "a/0", "task_id": "a", "split": "train", "question": "Solve 0."}}, {})
