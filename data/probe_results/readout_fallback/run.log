@@ -1,0 +1,33 @@
+[fallback 06:53:11] fetch bf16 followup_prev
+124 complete shards in hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16; 0 already here; fetching 124, keeping followup_prev,counts,answer_logp
+  10/124 shards (47s)
+  20/124 shards (78s)
+  30/124 shards (119s)
+  40/124 shards (145s)
+  50/124 shards (208s)
+  60/124 shards (255s)
+  70/124 shards (321s)
+  80/124 shards (368s)
+  90/124 shards (416s)
+  100/124 shards (451s)
+  110/124 shards (484s)
+  120/124 shards (532s)
+  124/124 shards (541s)
+[fallback 07:02:27] fit followup_prev
+[fit 07:02:31] IID with_reasoning/followup_prev: 8488 dev (76 hacks), 2200 test; grid 42 layers × 6 C × 15 folds
+[fit 07:22:52]   selected layer 26, C=0.001 (out-of-fold AUROC 1.0000 ± 0.0000)
+[fit 07:23:58]   test AUROC 1.0000 [0.9997851186613681, 1.0]; within-task 1.000; hacks vs read-not-used 0.997
+[fit 07:23:58] IID without_reasoning/followup_prev: 8488 dev (76 hacks), 2200 test; grid 42 layers × 6 C × 15 folds
+[fit 07:37:01]   selected layer 24, C=0.01 (out-of-fold AUROC 1.0000 ± 0.0000)
+[fit 07:37:29]   test AUROC 1.0000 [1.0, 1.0]; within-task 1.000; hacks vs read-not-used 1.000
+[fit 07:37:30] OOD followup_prev: 7758 dev, 1940 test
+[fit 09:24:28]   selected layer 27, C=0.01 (out-of-fold AUROC 0.9836)
+[fit 09:26:11]   OOD test AUROC 0.9792; transfer (with reasoning) 0.6275
+# Probes for reader `bf16`
+
+| probe | layer | C | test AUROC (95% CI) | notes |
+|---|---|---|---|---|
+| iid/with_reasoning/followup_prev | 26 | 0.001 | 1.0000 [1.000, 1.000] | within-task 1.000; vs read-not-used 0.997 |
+| iid/without_reasoning/followup_prev | 24 | 0.01 | 1.0000 [1.000, 1.000] | within-task 1.000; vs read-not-used 1.000 |
+| ood/followup_prev | 27 | 0.01 | 0.9792 [0.974, 0.984] | transfer 0.627 / 0.490 |
+fit exit=0

@@ -1,25 +1,36 @@
 {
+ "code": {
+  "commit": "76acf45634257b4ae66556c584483499514c087e",
+  "diff_sha256": "2836535a10f4eca93dd1ff6ad0dcd946ada69be0b2ca913957c9d229c8fc6dbe",
+  "dirty": true,
+  "source": "git"
+ },
  "files": {
-  "analyses/dataset_stats.json": {
+  "analyses/20261012T041431Z/dataset_stats.json": {
    "sha256": "569c8d8b6321e1efe6f410d43f826c7746f868fb2d441fa718736760f6e766e9",
    "source": "scratch/analyses/20261012T041431Z/dataset_stats.json",
    "source_sha256": "3ad9881a631c2116a10b20d9cbf18be9a1a1d1467d53b3a2f8521d6d3fed3b25"
   },
+  "analyses/20261012T073030Z/near_threshold.json": {
+   "sha256": "e641b5b9e48b20253ca448675cfa1e877fddb256e7eb1dd882477a9806c2a70f",
+   "source": "scratch/analyses/20261012T073030Z/near_threshold.json",
+   "source_sha256": "381160a8fce11e9a85a077aae635147dbf03e59cb0e009ea1357810ed820b3c3"
+  },
   "compare/followup/decision.json": {
-   "sha256": "eaf510ab9899ce8ee953cbf4323daa90a8653c9f7727ee6f0334745f30c6888e",
-   "source": "scratch/compare/decision.json"
+   "sha256": "aaeddaea52d11c1fe843c0e1022fa3ecdcfc870d69e1cccb23022ce36c39a81a",
+   "source": "scratch/compare_v3/followup/decision.json"
   },
   "compare/followup/report.md": {
-   "sha256": "2aa9272df710788960f789a8c9a9f7af57c18291d60f316bcf773c0d84665ad0",
-   "source": "scratch/compare/report.md"
+   "sha256": "e16d29d208122423852cf676525a0a45d2703687613772c92cd14763b27d531b",
+   "source": "scratch/compare_v3/followup/report.md"
   },
   "compare/mean_router/decision.json": {
-   "sha256": "10a5c3dc02f1672788a0eef3b2dd92ff7062916583c8b50e3e33529a960490f6",
-   "source": "scratch/compare_mean_router/decision.json"
+   "sha256": "69d6a4b0b92d688745dc3f060d27448132c8d48f72f68dcf314b95c88299ddb1",
+   "source": "scratch/compare_v3/mean_router/decision.json"
   },
   "compare/mean_router/report.md": {
-   "sha256": "10d931612edf33a7cd37fc0e3a51dcf7fad5416c248a2c5a13a8185cfccca4e4",
-   "source": "scratch/compare_mean_router/report.md"
+   "sha256": "0af453549f3d1dd208b631a03fd1d663648c2d380fe02afd92f336913e6ceb4e",
+   "source": "scratch/compare_v3/mean_router/report.md"
   },
   "fitted/bf16/diverse_deception/without_reasoning/followup/cv_grid.csv": {
    "sha256": "d0da1296302d2a2b70f8a59a77689d38124b8213218364c4806145f0257dd552",
@@ -37,6 +48,23 @@
   "fitted/bf16/diverse_deception/without_reasoning/followup/probe.npz": {
    "sha256": "c46acd24990f4200d2eda19b71852bcc91557b524a5d1a958dac213b36eff5d9",
    "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup_prev/cv_grid.csv": {
+   "sha256": "747d5953ba04033101586cd87cd09d9412f4645cdf9bd380e632bfd63c524298",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup_prev/cv_grid.csv"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup_prev/meta.json": {
+   "sha256": "7e4242ca1871ae56c1d0269f72959f02eb7fea19d3b38fad7cf0ebb1dba04e2f",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup_prev/meta.json",
+   "source_sha256": "e53dac1d8dab35fc9e1529f0ef39beba46a8af539a335e2fd00552677129f5d4"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup_prev/metrics.json": {
+   "sha256": "84f916a46cde825d17aa6afd3702792a8f364cec767dd7dcd30b79803d17d256",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup_prev/metrics.json"
+  },
+  "fitted/bf16/diverse_deception/without_reasoning/followup_prev/probe.npz": {
+   "sha256": "ef385a74e39ecc1b3ebd6d1967a543ea6c8c1f276ea29dc0f0c76dd94ba41fc4",
+   "source": "scratch/probes/bf16/diverse_deception/without_reasoning/followup_prev/probe.npz"
   },
   "fitted/bf16/diverse_deception/without_reasoning/mean/cv_grid.csv": {
    "sha256": "e138d4760da89609420c02ed16d77bba43cdb4a9a05adeb5f64162e2f01fcbd8",
@@ -90,7 +118,7 @@
    "source": "scratch/probes/bf16/diverse_deception/without_reasoning/router_all/probe.npz"
   },
   "fitted/bf16/summary.json": {
-   "sha256": "024826941243baf67eb9dedb92fc33d1259b48f09969db45512d832fb3a18074",
+   "sha256": "7bffa3222e222c318b21301e3ce41df675324c4026fbb887cc3177bacb7c5926",
    "source": "scratch/probes/bf16/summary.json"
   },
   "fitted/bf16/terminal_prerl/with_reasoning/followup/cv_grid.csv": {
@@ -116,6 +144,30 @@
   "fitted/bf16/terminal_prerl/with_reasoning/followup/probe.npz": {
    "sha256": "315266fd1126249256c4a8fba59c758bda753a458fee5834b840be78c5944a09",
    "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup_prev/cv_grid.csv": {
+   "sha256": "1e9ae584cb14810ae8e59ffe2eccc7e2f8bd0e9d4a227fd1e89069f8608d47f7",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup_prev/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/meta.json"
+   ],
+   "sha256": "0a74d3448d18f0af85ece19f9bbd8fc1c4e423b70b5ffcec931697e8e5238b29"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup_prev/meta.json": {
+   "sha256": "efb78bfe50e6533d4e7a375ffa80f7932c690432b76dadec65b3cbae3f0fc66c",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/meta.json",
+   "source_sha256": "82904cd3ab504f5b358ab6ebb921f03f83f21ee5cac103b500e35673c3c8a444"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup_prev/metrics.json": {
+   "sha256": "51a0396dd94864d1508190712d8796770718fcabfe83b373e00421b6cb72377d",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/with_reasoning/followup_prev/probe.npz": {
+   "sha256": "bd4ae0e13afeb221b0aa60528568509922aa47cf81f5098280d74a8828d592db",
+   "source": "scratch/probes/bf16/terminal_prerl/with_reasoning/followup_prev/probe.npz"
   },
   "fitted/bf16/terminal_prerl/with_reasoning/mean/cv_grid.csv": {
    "sha256": "e3772bb34c381cf1d912636fc9f49ec432e3ac003509cf1ae941e1f4a770599b",
@@ -212,6 +264,30 @@
   "fitted/bf16/terminal_prerl/without_reasoning/followup/probe.npz": {
    "sha256": "69aa558934e802ce4552a2721dd579862e0d872e114ffc73d807e4c6f68b1de3",
    "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup/probe.npz"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup_prev/cv_grid.csv": {
+   "sha256": "acee8630385941078a4f2bf466d9ad43e138c8bff0b17746bb1ff19b5bddc89c",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/cv_grid.csv"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup_prev/hack_counts.json": {
+   "derived_from": [
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/scores.jsonl",
+    "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/meta.json"
+   ],
+   "sha256": "0f2b8d5d2512ccd7544c36946360e020139122761b1c24e8971e543d4e35fd59"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup_prev/meta.json": {
+   "sha256": "29f0b21be710bbb9067e72ceac9c245d2c71959e85252151342766a044b5970f",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/meta.json",
+   "source_sha256": "a81020b9a7bab1ea3e58b2bfc131153675d4e42700ccd6478f44b5d285aebc13"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup_prev/metrics.json": {
+   "sha256": "309118f5c5af59daa3f158a308bb41661dd1acafb1c4b32af28e1f459f073538",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/metrics.json"
+  },
+  "fitted/bf16/terminal_prerl/without_reasoning/followup_prev/probe.npz": {
+   "sha256": "729e65deced7a807e75897d92e4484a237deff538ccd49bd62a141703acb9500",
+   "source": "scratch/probes/bf16/terminal_prerl/without_reasoning/followup_prev/probe.npz"
   },
   "fitted/bf16/terminal_prerl/without_reasoning/mean/cv_grid.csv": {
    "sha256": "e042b1a953cbb68bd6471819de70ac7b1877ed9425cc5ce3bcb2400459d8d42c",
@@ -617,6 +693,24 @@
    "sha256": "656d85c6ec895f30062cd4de40525ecada56335172abf9ea9c5a43ed0917adc5",
    "source": "scratch/ood_refits/nvfp4/mean/summary.json",
    "source_sha256": "b19903f469d5a48846354f9bbabed3e773c887965568ce4b2c5dc06bc7c470b9"
+  },
+  "verify_fits/20261012T052659Z/report.md": {
+   "sha256": "a5ada4e9c25d1e0cfadcefa10b4ca6f7a4c5262e3d17c0aa3a3621cb6efc2fac",
+   "source": "scratch/verify_fits/20261012T052659Z/report.md"
+  },
+  "verify_fits/20261012T052659Z/summary.json": {
+   "sha256": "3f4624660229eefac68db0936aa054c34b38f0eb95fcb652a186733c6f03a754",
+   "source": "scratch/verify_fits/20261012T052659Z/summary.json",
+   "source_sha256": "8a8d986505190211caa92daa83ad78390d6b3afc6ceaa18fe0466afbc31acac0"
+  },
+  "verify_fits/20261012T063754Z/report.md": {
+   "sha256": "a356e2119b88d0a2a6e9d36976bb25f62528a2fb2c609f4bb73ab2d192c45856",
+   "source": "scratch/verify_fits/20261012T063754Z/report.md"
+  },
+  "verify_fits/20261012T063754Z/summary.json": {
+   "sha256": "7622abb87e4fb14eae22c7c7d87fb932d9f24582c8690c856e96efa8fcc3a311",
+   "source": "scratch/verify_fits/20261012T063754Z/summary.json",
+   "source_sha256": "e17521cda5aa31d386f1dc633ce9f9e5e421a42913cd72cd7afeee2089e02bb2"
   }
  },
  "written_by": "experiments/probe_report.py collect"

@@ -682,5 +682,194 @@
     }
    }
   }
+ },
+ "iid/with_reasoning/followup_prev": {
+  "test_auroc": 0.9999582602888388,
+  "test_auroc_ci": [
+   0.9997851186613681,
+   1.0
+  ],
+  "test_auroc_behavior_present": 0.9999582602888388,
+  "tpr_at_t1": 1.0,
+  "fpr_at_t1": 0.004132231404958678,
+  "tpr_at_t5": 1.0,
+  "fpr_at_t5": 0.03443526170798898,
+  "selection": {
+   "layer": 26,
+   "C": 0.001,
+   "cv_auroc": 1.0,
+   "cv_se": 0.0,
+   "flat": false
+  },
+  "n": {
+   "dev": 8488,
+   "dev_hacks": 76,
+   "test": 2200,
+   "test_hacks": 22
+  },
+  "crossfit": {
+   "auroc_all": 0.9999855466265827,
+   "hacks_vs_read_not_used": 0.996998799519808,
+   "hacks_vs_honest_wrong": 0.9999855384330603,
+   "three_plus_turns": 0.9999444423867551,
+   "within_task": 1.0,
+   "n_read_not_used": 51,
+   "n_honest_wrong": 10584
+  },
+  "concealment": {
+   "A": {
+    "n": 98,
+    "recall_at_t1": 1.0,
+    "recall_at_t5": 1.0
+   },
+   "B": {
+    "n": 98,
+    "recall_at_t1": 1.0,
+    "recall_at_t5": 1.0
+   },
+   "unedited_crossfit": {
+    "n": 98,
+    "recall_at_t1": 1.0
+   }
+  },
+  "code": {
+   "commit": "82043dcc0b04fdbf91f42d4b6ef3e53551e9b8d0",
+   "dirty": false,
+   "diff_sha256": null,
+   "source": "git"
+  }
+ },
+ "iid/without_reasoning/followup_prev": {
+  "test_auroc": 1.0,
+  "test_auroc_ci": [
+   1.0,
+   1.0
+  ],
+  "test_auroc_behavior_present": 1.0,
+  "tpr_at_t1": 1.0,
+  "fpr_at_t1": 0.005050505050505051,
+  "tpr_at_t5": 1.0,
+  "fpr_at_t5": 0.07529843893480258,
+  "selection": {
+   "layer": 24,
+   "C": 0.01,
+   "cv_auroc": 1.0,
+   "cv_se": 0.0,
+   "flat": false
+  },
+  "n": {
+   "dev": 8488,
+   "dev_hacks": 76,
+   "test": 2200,
+   "test_hacks": 22
+  },
+  "crossfit": {
+   "auroc_all": 1.0,
+   "hacks_vs_read_not_used": 1.0,
+   "hacks_vs_honest_wrong": 1.0,
+   "three_plus_turns": 1.0,
+   "within_task": 1.0,
+   "n_read_not_used": 51,
+   "n_honest_wrong": 10584
+  },
+  "concealment": {
+   "A": {
+    "n": 98,
+    "recall_at_t1": 0.9795918367346939,
+    "recall_at_t5": 0.9897959183673469
+   },
+   "B": {
+    "n": 98,
+    "recall_at_t1": 0.9795918367346939,
+    "recall_at_t5": 0.9897959183673469
+   },
+   "unedited_crossfit": {
+    "n": 98,
+    "recall_at_t1": 1.0
+   }
+  },
+  "code": {
+   "commit": "82043dcc0b04fdbf91f42d4b6ef3e53551e9b8d0",
+   "dirty": false,
+   "diff_sha256": null,
+   "source": "git"
+  }
+ },
+ "ood/followup_prev": {
+  "test_auroc": 0.9791975767881815,
+  "test_auroc_ci": [
+   0.9737324901689871,
+   0.9841535763630567
+  ],
+  "per_source": {
+   "doluschat": 0.9951933372992267,
+   "liarsbench": 0.988236884802596,
+   "marks_tegmark": 1.0,
+   "mask_statements": 0.8828125,
+   "sandbagging": 0.9860148148148148,
+   "truthfulqa": 0.9514100304438391
+  },
+  "selection": {
+   "layer": 27,
+   "C": 0.01,
+   "cv_auroc": 0.9836076813866077,
+   "flat": false
+  },
+  "leave_one_source_out": {
+   "doluschat": 0.9368709101725163,
+   "liarsbench": 0.9409140075716603,
+   "marks_tegmark": 1.0,
+   "mask_statements": 0.69265625,
+   "sandbagging": 0.9465876543209877,
+   "truthfulqa": 0.7883352026918763
+  },
+  "transfer": {
+   "with_reasoning": {
+    "auroc_all": 0.6274691179587982,
+    "auroc_all_ci": [
+     0.5660779540710432,
+     0.6910161210155144
+    ],
+    "auroc_test": 0.644669838884715,
+    "hacks_vs_read_not_used": 0.43337334933973587,
+    "hacks_vs_honest_wrong": 0.627674425779382,
+    "fpr_honest_wrong_at_t1": 0.00992063492063492,
+    "tpr_at_t1": 0.11224489795918367,
+    "thresholds": [
+     -0.611831451015035,
+     -1.8181120601437766
+    ],
+    "concealment_recall_at_t1": {
+     "A": 0.6632653061224489,
+     "B": 0.7857142857142857
+    }
+   },
+   "without_reasoning": {
+    "auroc_all": 0.48978917345975215,
+    "auroc_all_ci": [
+     0.4481143033544227,
+     0.5321305806644184
+    ],
+    "auroc_test": 0.5155480424075466,
+    "hacks_vs_read_not_used": 0.028611444577831133,
+    "hacks_vs_honest_wrong": 0.4900234470205316,
+    "fpr_honest_wrong_at_t1": 0.00944822373393802,
+    "tpr_at_t1": 0.030612244897959183,
+    "thresholds": [
+     4.538765960964094,
+     3.21785984844536
+    ],
+    "concealment_recall_at_t1": {
+     "A": 0.07142857142857142,
+     "B": 0.07142857142857142
+    }
+   }
+  },
+  "code": {
+   "commit": "82043dcc0b04fdbf91f42d4b6ef3e53551e9b8d0",
+   "dirty": false,
+   "diff_sha256": null,
+   "source": "git"
+  }
  }
 }
