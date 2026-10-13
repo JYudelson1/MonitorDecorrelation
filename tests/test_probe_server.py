@@ -14,7 +14,8 @@ Checks:
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
   splits, whatever the task id: grids recur across seeds under other ids), and its resume after
   ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
-- The deployment's grids.json, which the scorer reads: written by a deployment and by ``--grids-only``.
+- The deployment's grids.json, which the scorer reads: written by a deployment and by ``--grids-only``; the committed
+  one matches the committed task splits.
 """
 
 from __future__ import annotations
@@ -719,8 +720,8 @@ def test_posthoc_unseen_is_decided_by_grid_not_task_id(tmp_path):
     got = mod.step_metrics(labelled, "p", seen=grids["train"] | grids["val"])[0]
     assert (got["n"], got["n_unseen"]) == (45, n_test + 4)  # the test grids and the fresh ones
     assert mod.grid_counts([e["grid_key"] for e in labelled], grids) == (
-        f"eval grids: 44; seen by the probes (train/val): {40 - n_test}, in their test split: {n_test}, new to them: 4; "
-        "episodes showing no grid, left out of *_unseen: 1")
+        f"eval grids: 44; seen by the probes (train/val): {40 - n_test}, in their test split: {n_test}, new to them: "
+        "4; episodes showing no grid, left out of *_unseen: 1")
     old_seen = {t for t in probes if split[t] in ("train", "val")}  # the old rule: a task id outside train and val
     assert sum(e["task_id"] not in old_seen for e in episodes) == len(episodes)
 
@@ -768,3 +769,23 @@ def test_deployments_write_the_probes_grids(world, tmp_path):
     check(deployed / "grids.json")
     with pytest.raises(SystemExit, match="shows no grid"):
         dp.grid_splits({"a/0": {"id": "a/0", "task_id": "a", "split": "train", "question": "Solve 0."}}, {})
+
+
+def test_the_deployed_grids_match_the_deployed_task_splits():
+    """data/probes/Inkling-Small/grids.json: keyed as this code keys grids (else the scorer refuses it: rebuild it
+    with deploy_probes.py --grids-only), one distinct grid per task of task_splits.json, split for split, and built
+    from the items the dataset's manifest pins."""
+    from monitordecorrelation.envs.terminal_verifier import GRID_KEY
+
+    repo = os.path.join(os.path.dirname(__file__), "..")
+    root = os.path.join(repo, "data", "probes", "Inkling-Small")
+    grids = json.load(open(os.path.join(root, "grids.json")))
+    splits = json.load(open(os.path.join(root, "task_splits.json")))
+    manifest = json.load(open(os.path.join(repo, "data", "probe_datasets", "terminal_prerl", "manifest.json")))
+    assert grids["key"] == GRID_KEY and grids["dataset"]["items_sha256"] == manifest["items_sha256"]
+    assert {s: len(grids[s]) for s in splits} == {s: len(ids) for s, ids in splits.items()} == {
+        "test": 102, "train": 308, "val": 102}
+    keys = [k for s in splits for k in grids[s]]
+    assert len(set(keys)) == len(keys) == grids["dataset"]["n_tasks"]
+    loaded = load_script("eval_inkling_probes_on_runs").probe_grids(os.path.join(root, "grids.json"), print)
+    assert len(loaded["train"] | loaded["val"]) == 410 and len(loaded["test"]) == 102

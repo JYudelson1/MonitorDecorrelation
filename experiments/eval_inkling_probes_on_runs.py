@@ -39,7 +39,8 @@ only what's missing. ``--out-dir DIR`` writes to ``DIR/<run name>/`` instead of 
     recurs across seeds: reasoning-gym builds task i of a stream from ``Random(stream seed + i)``, so seed s's eval
     task i is seed 0's eval task s + i. The probes' 512 tasks are seed 0's eval tasks up to index 659, so the eval
     pool of a run with a seed below 660 holds some of them, under ids the probes never had. control-seed-218's 64
-    eval grids are all theirs: 48 in their train or val split, 16 in test.
+    eval grids are all theirs: 48 in their train or val split, 16 in test. Seeds from about 660 to 7,250 keep a run's
+    train and eval grids clear of them (docs/INKLING_PROBES.md, caveat 4).
   - A task's grid key: the sha256 of the grid its question shows (envs/terminal_verifier.grid_key). An episode whose
     question shows no grid is left out of these fields: its task may be a seen one.
   - NaN where undefined (no such episode, or only one class).
