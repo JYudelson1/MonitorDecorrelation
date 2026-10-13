@@ -952,7 +952,8 @@ def readout_fallback(r: Results) -> list[str]:
         raise Missing(f"no fitted {FALLBACK} probes (fitted/<reader>/<dataset>/<view>/{FALLBACK}/)")
     return md_table(["probe", "reader", "readout", "layer, C", "dev CV AUROC", "test AUROC [95% CI]",
                      "IID: TPR / FPR at t₁%", "OOD: transfer AUROC (with / without)"], rows) + [
-        "", "Per the readout rule (the higher dev CV AUROC; `followup` on a tie): " + "; ".join(decisions) + "."
+        "", "If the readout rule fires, its comparison (the higher dev CV AUROC; `followup` on a tie) picks: "
+        + "; ".join(decisions) + "."
     ] + legend(
         f"From `fitted/<reader>/<dataset>/<view>/{{followup,{FALLBACK}}}/metrics.json`: `{FALLBACK}` reads the token",
         "just before \"Yes\", fitted with the same folds, grid and selection as `followup`. Dev CV AUROC: the mean",

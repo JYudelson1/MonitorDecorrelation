@@ -353,8 +353,8 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "| IID, with | bf16 | followup | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
         "| IID, with | bf16 | followup_prev | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
         "| OOD | bf16 | followup_prev | 3, 0.01 | 0.9700 | 0.977 [0.971, 0.982] | — | 0.909 / 0.842 |",
-        "Per the readout rule (the higher dev CV AUROC; `followup` on a tie): IID, with (bf16) → `followup` (tie); "
-        "OOD (bf16) → `followup` (higher).",
+        "If the readout rule fires, its comparison (the higher dev CV AUROC; `followup` on a tie) picks: IID, with "
+        "(bf16) → `followup` (tie); OOD (bf16) → `followup` (higher).",
         "97 of 98 hacks (99%) and 120 of 10,590 other episodes (1.1%)",
         "| mask | 800 | 160 | 160 | 1 (1 / 1) |",
     ]
@@ -418,3 +418,12 @@ def test_cp_lower_is_the_exact_clopper_pearson_bound():
         p = pr.cp_lower(k, n)
         tail = sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1))
         assert tail == pytest.approx(0.025, abs=1e-9)
+
+
+def test_the_repo_docs_tables_match_the_collected_results():
+    """docs/INKLING_PROBES.md's tables are exactly what render makes from data/probe_results/ and the deployed
+    monitors: a changed result without a re-render, or a hand edit inside a marked table, fails here."""
+    repo = os.path.join(os.path.dirname(__file__), "..")
+    assert pr.main(["check", os.path.join(repo, "docs", "INKLING_PROBES.md"),
+                    "--results", os.path.join(repo, "data", "probe_results"),
+                    "--deployed", os.path.join(repo, "data", "probes", "Inkling-Small")]) == 0

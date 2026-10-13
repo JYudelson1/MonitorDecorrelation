@@ -647,7 +647,7 @@ pre-registered sensitivity check:
 | OOD | bf16 | followup | 26, 0.01 | 0.9827 | 0.979 [0.973, 0.983] | — | 0.712 / 0.557 |
 | OOD | bf16 | followup_prev | 27, 0.01 | 0.9836 | 0.979 [0.974, 0.984] | — | 0.627 / 0.490 |
 
-Per the readout rule (the higher dev CV AUROC; `followup` on a tie): IID, with (bf16) → `followup` (tie); IID, without (bf16) → `followup` (tie); OOD (bf16) → `followup_prev` (higher).
+If the readout rule fires, its comparison (the higher dev CV AUROC; `followup` on a tie) picks: IID, with (bf16) → `followup` (tie); IID, without (bf16) → `followup` (tie); OOD (bf16) → `followup_prev` (higher).
 
 From `fitted/<reader>/<dataset>/<view>/{followup,followup_prev}/metrics.json`: `followup_prev` reads the token just before "Yes", fitted with the same folds, grid and selection as `followup`. Dev CV AUROC: the mean out-of-fold AUROC of the configuration the selection picked (* a flat grid). Test AUROC on the test split (IID) or the held-out pairs (OOD), with its 95% cluster bootstrap CI.
 
