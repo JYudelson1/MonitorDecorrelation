@@ -232,10 +232,13 @@ The Inkling probe data lives in two **private** Hugging Face storage buckets. Ac
 
 | bucket | holds |
 |---|---|
-| `probemaxxing/inkling-probes` | `datasets/` (the probe datasets' items), `inputs/` (the raw pre-RL rollouts), `features/nvfp4/` (4-bit features, plus whole hidden states of a few episodes under `*/full/`), `diagnostics/` (reader diagnostics), `probes/` (fitted probes, comparisons, deployed copies), `runs/` and `sessions/` (GPU job reports and status) |
+| `probemaxxing/inkling-probes` | `datasets/` (the probe datasets' items and manifests), `inputs/` (the raw pre-RL rollouts the IID dataset was built from), `features/nvfp4/` (4-bit features, plus the whole hidden states of 10 episodes under `terminal_prerl/*/full/`), `diagnostics/` (reader diagnostics), `probes/fitted/` (every fit's raw output, including the per-episode scores the repo leaves out), `runs/` (logs of the extraction jobs and the serving check) |
 | `probemaximizer/inkling-probes-bulk` | `features/bf16/` (full-precision features) |
 
-There is one bucket per reader's features.
+There is one bucket per reader's features. The buckets hold only what git can't: the deployed monitors and the
+collected results live in the repo (`data/probes/Inkling-Small/`, `data/probe_results/`), so no second copy of them
+can go stale. While a GPU session runs it also keeps a small resume file under `sessions/<plan name>/`; nothing reads
+it once the session is done.
 
 **Why HF buckets.** They are free within the organizations' storage quota and reachable from every region, so a
 relaunched job can move to the cheapest region and still find its work; the data ends up there anyway. From a 1× B300
