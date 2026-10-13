@@ -374,9 +374,9 @@ verifier without using it above the hacks, strongly so without reasoning.
 
 | IID probes | test split: hacks caught | test split: tasks caught | cross-fitted: hacks caught | cross-fitted: tasks caught |
 |---|---|---|---|---|
-| all 16 | 22/22, ≥ 0.846 | 15/15, ≥ 0.782 | 98/98, ≥ 0.963 | 75/75, ≥ 0.952 |
+| all 16 | 22/22, ≥ 0.845 | 15/15, ≥ 0.781 | 98/98, ≥ 0.963 | 75/75, ≥ 0.952 |
 
-k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pearson lower bound on the rate (it exceeds x with 97.5% confidence, the lower end of a 95% two-sided interval). Hacks: per episode. Tasks: the tasks with hacks, one counting as caught only if all its hacks are; tasks are the independent unit, as a task's hacks are alike. Test split: the probe on its held-out test tasks. Cross-fitted: every hack of every split, each scored by a model fitted without its task (5 folds by task). From `fitted/<reader>/terminal_prerl/<view>/<readout>/hack_counts.json` (else, hacks only, metrics.json).
+k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pearson lower bound on the rate, rounded down (it exceeds x with 97.5% confidence, the lower end of a 95% two-sided interval). Hacks: per episode. Tasks: the tasks with hacks, one counting as caught only if all its hacks are; tasks are the independent unit, as a task's hacks are alike. Test split: the probe on its held-out test tasks. Cross-fitted: every hack of every split, each scored by a model fitted without its task (5 folds by task). From `fitted/<reader>/terminal_prerl/<view>/<readout>/hack_counts.json` (else, hacks only, metrics.json).
 
 <!-- probe_report:end test_set_bounds -->
 
@@ -406,7 +406,7 @@ show any uncertainty. Read them as "no error observed", not as certainty.
 | probe_iid_without_reasoning_followup | bf16 → nvfp4 | 22 | -4.96 | 1.000 | 100% / 0.60% | 32 (3.36) | 1.16; 0% / 2.8% |
 | probe_iid_without_reasoning_mean | bf16 → nvfp4 | 22 | -3.46 | 1.000 | 100% / 0.55% | 32 (3) | — |
 
-From `data/probes/Inkling-Small/deployed.json`: each monitor's serving check on the serving reader's TerminalEnv test split, label `used_verifier` (for OOD monitors, their transfer). A monitor served on another reader than it was trained on has t₁% recalibrated on the serving reader's honest dev episodes. Golden: the episodes the server checks at startup, and the largest logit difference it accepts. Batching (follow-up monitors): the 99th percentile of the absolute logit difference between batched and one-at-a-time readouts, and the shares of hacks and of honest episodes that close to t₁%.
+From `data/probes/Inkling-Small/deployed.json`: each monitor's serving check on the serving reader's TerminalEnv test split, label `used_verifier` (for OOD monitors, their transfer). A monitor served on another reader than it was trained on has t₁% recalibrated on the serving reader's honest dev episodes. Golden: the episodes the server checks at startup, and the largest logit difference it accepts. Batching (follow-up monitors): the 99th percentile of the absolute logit difference between batched and one-at-a-time readouts, and the shares of the view's hacks and honest episodes, over every split, that close to t₁%.
 
 <!-- probe_report:end deployed_monitors -->
 
@@ -848,7 +848,7 @@ hacks doesn't move: many times more pairs give the same median and nearly the sa
 | bf16 | sandbagging only | 490 | 10 | 0.776 | 0.618 [0.351, 0.861] | 0.675 [0.315, 0.871] |
 | bf16 | truthfulqa only | 416 | 10 | 0.853 | 0.484 [0.242, 0.865] | 0.526 [0.275, 0.937] |
 
-From `learning_curves/<reader>/summary.json`'s `ood_sources`: the OOD follow-up probe refitted on pair-bootstrap resamples of one mix of its training sources, at its layer and C: median [5th, 95th percentile] over the fits.
+From `learning_curves/<reader>/summary.json`'s `ood_sources`: the OOD follow-up probe refitted on pair-bootstrap resamples of one mix of its training sources, at its layer and C: median [5th, 95th percentile] over the fits. Pairs: the median number of distinct pairs in a resample, about 63% of the mix, since a bootstrap resample repeats some pairs and leaves out others.
 
 <!-- probe_report:end ood_source_mixes -->
 
@@ -1133,26 +1133,26 @@ says which code each run used.
 | bf16/terminal_prerl/with_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 19, C 0.01) | 0; 0; 0; 0 | pass |
 | bf16/terminal_prerl/without_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 18, C 0.01) | 0; 0; 0; 0 | pass |
 | bf16/diverse_deception/without_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 23, C 0.1) | 0; 0; 0; 0 | pass |
-| bf16/terminal_prerl/with_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.001) | 0; 0; 0; 0 | pass |
-| bf16/terminal_prerl/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.001) | 0; 0; 0; 0 | pass |
-| bf16/diverse_deception/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.01) | 0; 0; 0; 0 | pass |
+| bf16/terminal_prerl/with_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.001) | 0; 0; 0; 0 | pass |
+| bf16/terminal_prerl/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.001) | 0; 0; 0; 0 | pass |
+| bf16/diverse_deception/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.01) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/with_reasoning/mean | 20261012T052659Z | 120 / 120 | reproduced (layer 30, C 0.1) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/without_reasoning/mean | 20261012T052659Z | 24 / 24 | reproduced (layer 22, C 0.001) | 0; 0; 0; 0 | pass |
 | nvfp4/diverse_deception/without_reasoning/mean | 20261012T052659Z | 32 / 32 | reproduced (layer 22, C 0.01) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/with_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 22, C 0.01) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/without_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 18, C 0.01) | 0; 0; 0; 0 | pass |
 | nvfp4/diverse_deception/without_reasoning/router | 20261012T052659Z | 240 / 240 | reproduced (layer 28, C 0.1) | 0; 0; 0; 0 | pass |
-| nvfp4/terminal_prerl/with_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.001) | 0; 0; 0; 0 | pass |
-| nvfp4/terminal_prerl/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.001) | 0; 0; 0; 0 | pass |
-| nvfp4/diverse_deception/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (layer 0, C 0.01) | 0; 0; 0; 0 | pass |
+| nvfp4/terminal_prerl/with_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.001) | 0; 0; 0; 0 | pass |
+| nvfp4/terminal_prerl/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.001) | 0; 0; 0; 0 | pass |
+| nvfp4/diverse_deception/without_reasoning/router_all | 20261012T052659Z | 6 / 6 | reproduced (all MoE layers, C 0.01) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/with_reasoning/followup | 20261012T063754Z | 102 / 102 | reproduced (layer 25, C 0.0001) | 0; 0; 0; 0 | pass |
 | nvfp4/terminal_prerl/without_reasoning/followup | 20261012T063754Z | 24 / 24 | reproduced (layer 22, C 0.001) | 0; 0; 0; 0 | pass |
 | nvfp4/diverse_deception/without_reasoning/followup | 20261012T063754Z | 72 / 72 | reproduced (layer 26, C 0.01) | 0; 0; 0; 0 | pass |
 
 24 of 24 probes pass (each probe's newest check). Runs:
 
-- `20261012T052659Z`: 21 probes. Run 2026-10-12T06:34:05Z with fit_probes.py 83cfb844029d, probe_fit.py 5ce6ede25b68 (sha256).
-- `20261012T063754Z`: 3 probes. Run 2026-10-12T07:05:46Z at commit 269485102a5e with fit_probes.py 320f1df5a531, probe_fit.py f95e167c3f74 (sha256).
+- `20261012T052659Z`: 21 probes. Finished 2026-10-12T06:34:05Z after 67 min with fit_probes.py 83cfb844029d, probe_fit.py 5ce6ede25b68 (sha256).
+- `20261012T063754Z`: 3 probes. Finished 2026-10-12T07:05:46Z after 28 min at commit 269485102a5e with fit_probes.py 320f1df5a531, probe_fit.py f95e167c3f74 (sha256).
 
 From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code of the day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to cv_grid.csv's to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics and test logits (0: bit for bit).
 

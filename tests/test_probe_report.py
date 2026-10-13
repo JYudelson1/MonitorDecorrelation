@@ -334,8 +334,8 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "100% / 1.0%; 100% / 1.0% |",
         "| diverse_deception/without_reasoning/followup | nvfp4 | 0.970 / 0.970 | 0.900 / 0.900 | 0.800 / 0.800 |",
         "| terminal_prerl/with_reasoning/followup | bf16 | nvfp4 | with | 30 | +0.010 (0.050) | 0.990 |",
-        f"| all 4 | 3/4, ≥ {pr.num(pr.cp_lower(3, 4))} | 2/3, ≥ {pr.num(pr.cp_lower(2, 3))} | "
-        f"9/10, ≥ {pr.num(pr.cp_lower(9, 10))} | 5/6, ≥ {pr.num(pr.cp_lower(5, 6))} |",
+        f"| all 4 | 3/4, ≥ {pr.floor_num(pr.cp_lower(3, 4))} | 2/3, ≥ {pr.floor_num(pr.cp_lower(2, 3))} | "
+        f"9/10, ≥ {pr.floor_num(pr.cp_lower(9, 10))} | 5/6, ≥ {pr.floor_num(pr.cp_lower(5, 6))} |",
         "| followup | nvfp4 | 3, 0.01 | 50 | 0.909; 0.909 [0.836, 0.956] |",
         "| 3 | **0.91** (0.977) |",
         "| bf16 | with | 5% | 4 | 20 | 1.000 [0.999, 1.000] | 100% [99.9%, 100%] | 100% [99.9%, 100%] |",
@@ -346,8 +346,8 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "| bf16/diverse_deception/without_reasoning/followup | 20261012T000000Z | — | — | — | fail: ValueError: boom |",
         "| old | 20261011T000000Z | — / — | — | —; —; —; — | fail |",  # an older run's probe the newer one didn't check
         "1 of 3 probes pass (each probe's newest check). Runs:",
-        "- `20261011T000000Z`: 1 probe. Run —.",
-        "- `20261012T000000Z`: 2 probes. Run 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py "
+        "- `20261011T000000Z`: 1 probe. Finished —.",
+        "- `20261012T000000Z`: 2 probes. Finished 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py "
         "aaaaaaaaaaaa, probe_fit.py bbbbbbbbbbbb (sha256).",
         "| terminal_prerl | with | 10,688 | 1,712 / 1,500 / 3,900 / 9,000 | 18.3M |",
         "| IID, with | bf16 | followup | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
@@ -418,6 +418,11 @@ def test_cp_lower_is_the_exact_clopper_pearson_bound():
         p = pr.cp_lower(k, n)
         tail = sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1))
         assert tail == pytest.approx(0.025, abs=1e-9)
+
+
+def test_lower_bounds_are_rounded_down():
+    assert pr.floor_num(0.84563) == "0.845" and pr.floor_num(0.78198) == "0.781" and pr.floor_num(0.963) == "0.963"
+    assert pr.bound((22, 22)).endswith(pr.floor_num(pr.cp_lower(22, 22))) and pr.floor_num(float("nan")) == "—"
 
 
 def test_the_repo_docs_tables_match_the_collected_results():

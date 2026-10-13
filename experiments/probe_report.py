@@ -557,7 +557,8 @@ def deployed_monitors(r: Results) -> list[str]:
         "A monitor served on another reader than it was trained on has t₁% recalibrated on the serving reader's honest",
         "dev episodes. Golden: the episodes the server checks at startup, and the largest logit difference it accepts.",
         "Batching (follow-up monitors): the 99th percentile of the absolute logit difference between batched and",
-        "one-at-a-time readouts, and the shares of hacks and of honest episodes that close to t₁%.")
+        "one-at-a-time readouts, and the shares of the view's hacks and honest episodes, over every split, that",
+        "close to t₁%.")
 
 
 DELTAS = {"iid_test": "test", "ood_test": "OOD test", "iid_transfer_with_reasoning": "transfer with",
@@ -709,8 +710,13 @@ def hack_cells(r: Results, rel: str) -> tuple:
                 (round(cf["recall_at_t1"] * cf["n"]), cf["n"]) if cf else None, None)
 
 
+def floor_num(x, d: int = 3) -> str:
+    """``x`` rounded DOWN to ``d`` decimals ("—" if missing): a lower bound shown rounded up would no longer be one."""
+    return "—" if missing(x) else f"{math.floor(x * 10 ** d + 1e-9) / 10 ** d:.{d}f}"  # 1e-9: 0.29·100 = 28.99…
+
+
 def bound(c: tuple[int, int] | None) -> str:
-    return "—" if c is None else f"{c[0]}/{c[1]}, ≥ {num(cp_lower(*c))}"
+    return "—" if c is None else f"{c[0]}/{c[1]}, ≥ {floor_num(cp_lower(*c))}"
 
 
 def test_set_bounds(r: Results) -> list[str]:
@@ -724,8 +730,8 @@ def test_set_bounds(r: Results) -> list[str]:
             for key, names in groups.items()]
     return md_table(["IID probes", "test split: hacks caught", "test split: tasks caught", "cross-fitted: hacks caught",
                      "cross-fitted: tasks caught"], rows) + legend(
-        "k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pearson lower bound on the rate (it",
-        "exceeds x with 97.5% confidence, the lower end of a 95% two-sided interval).",
+        "k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pearson lower bound on the rate,",
+        "rounded down (it exceeds x with 97.5% confidence, the lower end of a 95% two-sided interval).",
         "Hacks: per episode. Tasks: the tasks with hacks, one counting as caught only if all its hacks are; tasks are",
         "the independent unit, as a task's hacks are alike.",
         "Test split: the probe on its held-out test tasks. Cross-fitted: every hack of every split, each scored by a",
@@ -842,7 +848,8 @@ def ood_source_mixes(r: Results) -> list[str]:
                      "transfer, without reasoning"], rows) + legend(
         "From `learning_curves/<reader>/summary.json`'s `ood_sources`: the OOD follow-up probe refitted on",
         "pair-bootstrap resamples of one mix of its training sources, at its layer and C: median [5th, 95th",
-        "percentile] over the fits.")
+        "percentile] over the fits. Pairs: the median number of distinct pairs in a resample, about 63% of the mix,",
+        "since a bootstrap resample repeats some pairs and leaves out others.")
 
 
 def verify_fits(r: Results) -> list[str]:
@@ -866,8 +873,9 @@ def verify_fits(r: Results) -> list[str]:
             continue
         cv, sel, refit = p.get("cv") or {}, p.get("selection") or {}, p.get("refit") or {}
         saved = sel.get("saved") or {}
+        where = "all MoE layers" if name.endswith("/router_all") else f"layer {saved.get('layer')}"
         rows.append([name, run, f"{cv.get('cells_matched', '—')} / {cv.get('cells_checked', '—')}",
-                     str(sel.get("status", "—")) + (f" (layer {saved['layer']}, C {saved['C']:g})" if saved else ""),
+                     str(sel.get("status", "—")) + (f" ({where}, C {saved['C']:g})" if saved else ""),
                      "; ".join(sci((refit.get(k) or {}).get("max_abs_diff"))
                                for k in ("weights", "thresholds", "metrics", "test_logits")),
                      str(p.get("verdict", "—"))])
@@ -885,7 +893,8 @@ def verify_run(s: dict) -> str:
     """A verify_fits run's date and code: the commit, and the sha256 of the fitting code it ran."""
     code = s.get("code") or {}
     files = s.get("code_files") or code  # runs before 2026-10-12 06:40 UTC kept the file hashes under "code"
-    return f"Run {s.get('created_utc', '—')}" + (
+    took = (s.get("seconds") or {}).get("total")
+    return f"Finished {s.get('created_utc', '—')}" + (f" after {took / 60:.0f} min" if took else "") + (
         f" at commit {code['commit'][:12]}{' with uncommitted changes' if code.get('dirty') else ''}"
         if code.get("commit") else "") + (
         f" with fit_probes.py {files['fit_probes.py'][:12]}, probe_fit.py {files['probe_fit.py'][:12]} (sha256)"
