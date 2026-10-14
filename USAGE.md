@@ -82,11 +82,33 @@ a multiple of `eval_every`; wandb keeps rows a crashed run logged past the snaps
 snapshot waits for an in-flight background eval, which stalls training only if `save_every` is not a
 multiple of `eval_every` (every repo config has it as one).
 
+**Starting a new run from another run's checkpoint (not a resume).** `init_from_tinker_ckpt` takes a
+tinker training-state path (`tinker://<run>/weights/<name>` — a run's `final_checkpoint.txt` /
+`checkpoint_<k>.txt`) and starts a **fresh** run at those **weights only** (`load_state`): new Adam
+moments, step 0, its own run dir / logs / λ schedule. E.g. train against a monitor starting from a
+finished control run:
+
+```bash
+uv run python experiments/run_experiment.py --config experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json \
+    --set init_from_tinker_ckpt=$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt) \
+          run_name=mbpp_inkling_qmonitors_cot_q3_weak_s0_fromctrl
+# or via the batch launcher: -I <ckpt> sets it on every job, -R <suffix> (required with -I) renames them
+scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json -n 1 -s -D \
+    -I "$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt)" -R fromctrl
+```
+
+The checkpoint's base model + LoRA rank are checked against `policy` / `lora_rank` (tinker
+`weights_info`) before a training client is created. The **KL penalty still anchors to the raw
+`policy`**, so with `kl_coef` > 0 the run starts with nonzero KL. The step-0 eval measures the init
+checkpoint. The path lands in `config.json`, in `run_info.json` (`init_from_tinker_ckpt`: path + tinker's
+metadata), and in the wandb config + an `init_from_ckpt` tag. `--resume` of such a run loads its own latest
+state (weights + optimizer) — the init checkpoint is not reloaded.
+
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
-thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank lr seed
-n_prompts_pool probe_server_url monitors`.
+thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank init_from_tinker_ckpt
+lr seed n_prompts_pool probe_server_url monitors`.
 `stop_after_zero_behavior_steps` (null = off, the default) = N ends training once the **train**
 `behavior_rate` has been exactly 0 on N consecutive steps (any env); the final eval + checkpoint still
 run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
@@ -108,6 +130,7 @@ something the run then quietly ignores. The conditional fields:
 | `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) — repo controls spell it `"penalty_coef": null`; `run_grpo` re-checks this for a hand-built `RunConfig` |
 | `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
 | `probe_server_url` | — | no monitor is a probe |
+| `init_from_tinker_ckpt` | — (null = start from `policy`) | not a `tinker://…/weights/…` path; the transformers backend. At launch the checkpoint's base model / LoRA rank must equal `policy` / `lora_rank` |
 
 The env-dependent three (`max_tokens` / `answer_tokens` / `think_budget`) are checked once the env is
 built, so the error names the env; the rest fail at config load. `--set` goes through the same
@@ -223,6 +246,8 @@ scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D   # -D = d
 # ⭐ recommended for a real batch: -s -P -D (resume-safe · shared probe server · detached), high -j:
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P -D
 scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an already-running probe server
+# -I = start every job from a tinker checkpoint's weights (fresh optimizer); -R = run_name suffix (needed with -I)
+scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors -n 1 -s -D -I tinker://…/weights/… -R fromctrl
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```

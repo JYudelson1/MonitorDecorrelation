@@ -42,6 +42,16 @@ Run directories and resuming
   It appends to the same directory (first dropping whatever was logged after the saved state),
   equivalent to having run n_steps in one go (details: rl/train.py, "Resuming"). Every other config
   field must equal the saved state's, and --resume on a name with no saved state fails.
+
+Starting a NEW run from another run's checkpoint (not a resume)
+  init_from_tinker_ckpt=<tinker://…/weights/<name>> starts the policy at that checkpoint's WEIGHTS with a
+  FRESH optimizer, step 0, and a new run directory — e.g. train against a monitor starting from a
+  finished control run's final state:
+      uv run python experiments/run_experiment.py --config experiments/configs/<row>.json \
+          --set init_from_tinker_ckpt=$(cat data/runs/<control_run>/final_checkpoint.txt) \
+                run_name=<row>_s0_fromctrl
+  The checkpoint must be a LoRA of the config's policy at its lora_rank (checked against tinker before
+  anything starts). KL-to-base (kl_coef > 0) still anchors to the raw policy. (queue_runs.sh: -I / -R.)
 """
 
 from __future__ import annotations
@@ -176,12 +186,17 @@ def main() -> None:
     # Backend
     if cfg.backend == "tinker":
         from monitordecorrelation.backends.tinker_backend import TinkerBackend
-        backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
-                                kl_coef=cfg.kl_coef,
-                                # None exactly when kl_coef is 0, i.e. when the discount is unused.
-                                kl_discount_factor=cfg.kl_discount_factor or 0.0,
-                                thinking_effort=cfg.thinking_effort,
-                                resume_from=resume_state["state_checkpoint"] if resume_state else None)
+        try:
+            backend = TinkerBackend(cfg.policy, lora_rank=cfg.lora_rank, learning_rate=lr, seed=cfg.seed,
+                                    kl_coef=cfg.kl_coef,
+                                    # None exactly when kl_coef is 0, i.e. when the discount is unused.
+                                    kl_discount_factor=cfg.kl_discount_factor or 0.0,
+                                    thinking_effort=cfg.thinking_effort,
+                                    resume_from=resume_state["state_checkpoint"] if resume_state else None,
+                                    # weights only, fresh optimizer; ignored by the backend on a resume
+                                    init_from=cfg.init_from_tinker_ckpt)
+        except ValueError as e:  # an init checkpoint that does not match policy / lora_rank
+            raise SystemExit(f"config {args.config}: {e}") from e
     else:
         from monitordecorrelation.backends.transformers_backend import TransformersBackend
         # kl_coef / thinking_effort are rejected by ExperimentConfig for this backend (it implements
@@ -221,10 +236,12 @@ def main() -> None:
     _wandb_group = f"{cfg.experiment}/{short}"
     # Project: from the config file or --set wandb_project=…; else the LoggingConfig default.
     _wandb_project = cfg.wandb_project or LoggingConfig.wandb_project
-    _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"])]
+    _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"]),
+                   *(["init_from_ckpt"] if cfg.init_from_tinker_ckpt else [])]
 
     run_config = RunConfig(
-        env=cfg.env, backend=cfg.backend, base_model=cfg.policy, rl_algo="grpo",
+        env=cfg.env, backend=cfg.backend, base_model=cfg.policy,
+        init_from_tinker_ckpt=cfg.init_from_tinker_ckpt, rl_algo="grpo",
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
         eval_every=cfg.eval_every, eval_size=cfg.eval_size,
         eval_samples_per_prompt=cfg.eval_samples_per_prompt,
@@ -246,6 +263,10 @@ def main() -> None:
     subset_note = f" subset={cfg.subset}" if cfg.subset is not None else ""
     print(f"  env={cfg.env} behavior={env.behavior_name} | {cfg.batch_size}x{cfg.group_size} "
           f"rollouts/step x {cfg.n_steps} steps{subset_note}")
+    if cfg.init_from_tinker_ckpt:
+        print(f"  init weights: {cfg.init_from_tinker_ckpt} (fresh optimizer"
+              + ("; superseded by the resumed state" if resume_state else "")
+              + (f"; KL still anchored to {cfg.policy}" if cfg.kl_coef else "") + ")")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
     if getattr(env, "multi_turn", False):
         src = "env default" if cfg.think_budget == "auto" else "config"
@@ -258,6 +279,10 @@ def main() -> None:
         max_tokens=cfg.max_tokens, think_budget=think_budget, answer_tokens=cfg.answer_tokens,
         run_info={"experiment": cfg.experiment, "subset": cfg.subset, "lr": lr,
                   "think_budget": think_budget,  # the RESOLVED value (config.json may say "auto")
+                  # where the weights started: the checkpoint + tinker's metadata on it (None = policy)
+                  "init_from_tinker_ckpt": (
+                      {"path": cfg.init_from_tinker_ckpt, "weights_info": getattr(backend, "init_info", None)}
+                      if cfg.init_from_tinker_ckpt else None),
                   "config": cfg.model_dump()},
         resume=resume_state,
     )

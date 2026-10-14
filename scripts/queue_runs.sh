@@ -12,7 +12,8 @@
 # high-level start/done/FAILED line per job, and the tail of any job that fails.
 #
 # Usage:
-#   scripts/queue_runs.sh -c <config|dir> [-n NUM_SEEDS] [-j MAX_JOBS] [-d] [-s] [-- EXTRA --set k=v ...]
+#   scripts/queue_runs.sh -c <config|dir> [-n NUM_SEEDS] [-j MAX_JOBS] [-d] [-s] [-I CKPT -R SUFFIX]
+#                         [-- EXTRA --set k=v ...]
 #
 #   -c PATH   a config file OR a directory of configs (*.json/*.yaml/*.yml). REQUIRED.
 #   -n N      run seeds 0..N-1 (default: 1).
@@ -28,6 +29,12 @@
 #             Model is read from the first config's `policy`; port from `-p` / $PROBE_PORT (default 8177).
 #   -p PORT   port for the -P probe server (default 8177). Use a distinct port per concurrent batch.
 #   -U URL    use an ALREADY-running probe server at URL (instead of -P starting one).
+#   -I CKPT   start every run from this tinker training-state checkpoint (tinker://<run>/weights/<name>,
+#             e.g. the contents of a finished run's final_checkpoint.txt): its WEIGHTS, with a FRESH
+#             optimizer — sets init_from_tinker_ckpt on every run. Needs -R.
+#   -R SUFF   append `_<SUFF>` to every run_name (after the seed swap), e.g. -R fromctrl →
+#             <name>_s0_fromctrl. Required with -I, so a from-checkpoint run never collides with (or,
+#             under -s, gets skipped as) the from-scratch run of the same config. Usable on its own too.
 #   -h        this help.
 #   Anything after a literal `--` is appended verbatim to every run's `--set` overrides,
 #             e.g.  -- n_steps=20 kl_coef=0   (handy for a quick short-run smoke of the whole matrix).
@@ -46,6 +53,9 @@
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -s
 #   # shared probe server → run MANY in parallel without per-run 8B copies, detached:
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -P -D
+#   # train against a monitor starting from a finished control run's final weights (fresh optimizer):
+#   scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json -n 1 -s -D \
+#       -I "$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt)" -R fromctrl
 #
 # To follow a single live job:  tail -f data/runs/<run_name>/run.log
 #
@@ -58,7 +68,8 @@ REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 
 # ---- worker mode: `bash queue_runs.sh __worker <seed>\t<cfg>\t<runname>\t<logpath>` -------------------
 # Re-entrant entry point invoked once per job by xargs. Kept above arg-parsing so it never falls through
-# to the launcher logic. Extra --set overrides arrive via the exported QR_EXTRA_SETS env var.
+# to the launcher logic. Extra --set overrides arrive via the exported QR_EXTRA_SETS env var, the -I
+# checkpoint via QR_INIT_CKPT.
 if [ "${1:-}" = "__worker" ]; then
     cd "$REPO_ROOT"
     IFS=$'\t' read -r seed cfg runname logpath <<<"$2"
@@ -72,9 +83,11 @@ if [ "${1:-}" = "__worker" ]; then
     mkdir -p "$(dirname "$logpath")"
     # shellcheck disable=SC2086  # QR_EXTRA_SETS is intentionally word-split into separate k=v tokens
     printf '▶ %s  %-44s seed=%s  → %s\n' "$(date +%H:%M:%S)" "$runname" "$seed" "$logpath"
+    init_set=()
+    [ -n "${QR_INIT_CKPT:-}" ] && init_set=(init_from_tinker_ckpt="$QR_INIT_CKPT")
     if uv run python experiments/run_experiment.py \
-            --config "$cfg" --set seed="$seed" run_name="$runname" ${QR_EXTRA_SETS:-} \
-            >"$logpath" 2>&1; then
+            --config "$cfg" --set seed="$seed" run_name="$runname" ${init_set[@]+"${init_set[@]}"} \
+            ${QR_EXTRA_SETS:-} >"$logpath" 2>&1; then
         : >"$(dirname "$logpath")/QUEUE_DONE"   # completion sentinel for -s/--skip-existing
         printf '✓ %s  %-44s done\n' "$(date +%H:%M:%S)" "$runname"
     else
@@ -88,18 +101,21 @@ fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
 CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""; PROBE_PORT_ARG=""
-while getopts ":c:n:j:U:p:dsDPh" opt; do
+INIT_CKPT=""; RUN_SUFFIX=""
+while getopts ":c:n:j:U:p:I:R:dsDPh" opt; do
     case "$opt" in
         c) CONFIG="$OPTARG" ;;
         n) NUM_SEEDS="$OPTARG" ;;
         j) MAX_JOBS="$OPTARG" ;;
         U) PROBE_URL="$OPTARG" ;;
         p) PROBE_PORT_ARG="$OPTARG" ;;
+        I) INIT_CKPT="$OPTARG" ;;
+        R) RUN_SUFFIX="$OPTARG" ;;
         d) DRY_RUN=1 ;;
         s) SKIP_EXISTING=1 ;;
         D) DETACH=1 ;;
         P) PROBE_SERVER=1 ;;
-        h) sed -n '2,50p' "$SELF"; exit 0 ;;
+        h) awk 'NR > 1 && /^set -euo pipefail/ { exit } NR > 1' "$SELF"; exit 0 ;;
         \?) echo "unknown option -$OPTARG (try -h)" >&2; exit 2 ;;
         :) echo "option -$OPTARG needs an argument" >&2; exit 2 ;;
     esac
@@ -108,6 +124,17 @@ shift $((OPTIND - 1))
 EXTRA_SETS="$*"   # everything after `--` (or any trailing args) → passthrough --set overrides
 
 [ -n "$CONFIG" ] || { echo "error: -c <config|dir> is required (try -h)" >&2; exit 2; }
+if [ -n "$INIT_CKPT" ]; then
+    [[ "$INIT_CKPT" == tinker://*/weights/* ]] || {
+        echo "error: -I $INIT_CKPT is not a tinker training-state path (tinker://<run>/weights/<name>)" >&2; exit 2; }
+    [ -n "$RUN_SUFFIX" ] || {
+        echo "error: -I needs -R <suffix>, so these runs don't share names (and -s skips) with the" \
+             "from-scratch runs of the same configs" >&2; exit 2; }
+fi
+if [ -n "$RUN_SUFFIX" ] && ! [[ "$RUN_SUFFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "error: -R $RUN_SUFFIX: use letters, digits, '.', '_', '-' only (it becomes part of a directory name)" >&2
+    exit 2
+fi
 cd "$REPO_ROOT"
 [ -e "$CONFIG" ] || { echo "error: config path not found: $CONFIG" >&2; exit 2; }
 
@@ -151,6 +178,8 @@ PY
 records=(); planned=0; skipped=0
 echo "Planning: ${#configs[@]} config(s) × $NUM_SEEDS seed(s), up to $MAX_JOBS parallel"
 [ -n "$EXTRA_SETS" ] && echo "  extra overrides: $EXTRA_SETS"
+[ -n "$INIT_CKPT" ] && echo "  init weights:    $INIT_CKPT (fresh optimizer)"
+[ -n "$RUN_SUFFIX" ] && echo "  run_name suffix: _$RUN_SUFFIX"
 echo
 for cfg in "${configs[@]}"; do
     base_name="$(read_run_name "$cfg")"
@@ -161,6 +190,7 @@ for cfg in "${configs[@]}"; do
         else
             runname="${base_name}_s${s}"
         fi
+        [ -n "$RUN_SUFFIX" ] && runname="${runname}_${RUN_SUFFIX}"
         logpath="data/runs/${runname}/run.log"
         if [ "$SKIP_EXISTING" -eq 1 ] && [ -e "data/runs/${runname}/QUEUE_DONE" ]; then
             printf '  skip  %-44s (already done)\n' "$runname"
@@ -188,6 +218,8 @@ if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     [ "$PROBE_SERVER" -eq 1 ] && set -- "$@" -P     # detached child owns the probe server
     [ -n "$PROBE_URL" ] && set -- "$@" -U "$PROBE_URL"
     [ -n "$PROBE_PORT_ARG" ] && set -- "$@" -p "$PROBE_PORT_ARG"
+    [ -n "$INIT_CKPT" ] && set -- "$@" -I "$INIT_CKPT"
+    [ -n "$RUN_SUFFIX" ] && set -- "$@" -R "$RUN_SUFFIX"
     # shellcheck disable=SC2086  # split EXTRA_SETS back into separate k=v tokens after the `--`
     [ -n "$EXTRA_SETS" ] && set -- "$@" -- $EXTRA_SETS
     QR_DETACHED=1 nohup bash "$SELF" "$@" >"$batchlog" 2>&1 </dev/null &
@@ -227,6 +259,7 @@ fi
 echo "Launching at $(date +%H:%M:%S) — full logs in data/runs/<run>/run.log"
 echo "----------------------------------------------------------------------"
 export QR_EXTRA_SETS="$EXTRA_SETS"
+export QR_INIT_CKPT="$INIT_CKPT"
 # xargs -0 -n1 -P: one NUL-delimited record per worker, MAX_JOBS at a time. `bash "$SELF" __worker`
 # gets the record appended as its final arg. `|| true` so a single failed job doesn't abort the batch
 # (xargs exits 123 if any child failed); we report failures inline above and summarise below.

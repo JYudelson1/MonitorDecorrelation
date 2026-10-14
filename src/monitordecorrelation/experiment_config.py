@@ -272,6 +272,18 @@ class ExperimentConfig(_Strict):
         "would be silently ignored.",
     )
     lora_rank: int = 16
+    init_from_tinker_ckpt: str | None = Field(
+        None,
+        description="start the policy from a saved tinker TRAINING STATE instead of the raw `policy` "
+        "weights — a `tinker://<run>/weights/<name>` path (what `save_state` writes: the "
+        "final_checkpoint.txt / checkpoint_<k>.txt of an earlier run), not a `sampler_weights/` one. "
+        "Only the WEIGHTS are loaded (`load_state`): the optimizer starts fresh (new Adam moments, "
+        "step 0), as does the run's step counter / λ schedule / logs. Tinker backend only. The "
+        "checkpoint's base model and LoRA rank must equal `policy` / `lora_rank` (checked against "
+        "tinker at launch). The KL penalty (kl_coef > 0) still anchors to the raw `policy`, NOT to "
+        "this checkpoint. On --resume the run's own saved state (weights + optimizer) wins; this "
+        "only seeds a fresh run. None (the default) = start from `policy`.",
+    )
     lr: float | None = Field(
         None, description="None = TM-estimated LoRA LR for the policy"
     )
@@ -358,6 +370,20 @@ class ExperimentConfig(_Strict):
                 f"probe_server_url={self.probe_server_url!r} is set but no monitor is a probe, so nothing "
                 "would read from it — drop the key"
             )
+
+        if self.init_from_tinker_ckpt is not None:
+            ckpt = self.init_from_tinker_ckpt
+            if not ckpt.startswith("tinker://") or "/weights/" not in ckpt:
+                errs.append(
+                    f"init_from_tinker_ckpt={ckpt!r} is not a tinker training-state path — expected "
+                    "tinker://<run>/weights/<name> (a save_state checkpoint, e.g. a run's "
+                    "final_checkpoint.txt; sampler_weights/ paths carry no trainable state)"
+                )
+            if self.backend != "tinker":
+                errs.append(
+                    f"init_from_tinker_ckpt is a tinker checkpoint, which the {self.backend!r} backend "
+                    "cannot load — it would be ignored; use the tinker backend or drop the key"
+                )
 
         if self.backend == "transformers":
             # The local backend implements plain GRPO only: no KL-to-base, and no TML rendering.

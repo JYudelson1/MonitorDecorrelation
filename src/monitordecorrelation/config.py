@@ -43,6 +43,10 @@ class RunConfig:
     # verbalizing default. See docs/INFRA.md.
     backend: str = "tinker"
     base_model: str = "Qwen/Qwen3-8B"
+    # The tinker checkpoint the policy's weights started from (None = ``base_model`` itself). A RECORD
+    # for run_info / wandb: the backend did the loading (TinkerBackend(init_from=…)), the loop never
+    # reads it.
+    init_from_tinker_ckpt: str | None = None
 
     # Detectors. The crux invariant: held_out never enters the gradient.
     train_against: list[MonitorSpec] = field(default_factory=list)
