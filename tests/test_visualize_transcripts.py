@@ -187,3 +187,20 @@ def test_text_search_after_rewrite_matches_current_contents(server):
     code, lst = get("/api/rollouts", q="needle")
     assert code == 200 and lst["total"] == 3
     assert get("/api/rollouts", q="old")[1]["total"] == 0
+
+
+def test_passes_visible_is_indexed_from_either_dump_shape_and_filterable(server):
+    p, get = server
+    recs = [_rec("ev", i) | {"env_meta": {"passes_visible": i < 2}} for i in range(3)]       # eval dump
+    recs += [_rec("tr", i) | {"env": {"meta": {"passes_visible": i == 0}}} for i in range(2)]  # train dump
+    recs += [_rec("slim", 0)]                                                                  # no env meta
+    _write(p, recs)
+    code, lst = get("/api/rollouts")
+    assert code == 200 and lst["has_passes_visible"] is True
+    assert {e["task_id"]: e["passes_visible"] for e in lst["entries"]} == {
+        "ev-0": True, "ev-1": True, "ev-2": False, "tr-0": True, "tr-1": False, "slim-0": None}
+    assert sorted(e["task_id"] for e in get("/api/rollouts", visible=1)[1]["entries"]) == ["ev-0", "ev-1", "tr-0"]
+    # unknown (no env meta) matches neither value
+    assert sorted(e["task_id"] for e in get("/api/rollouts", visible=0)[1]["entries"]) == ["ev-2", "tr-1"]
+    _write(p, [_rec("slim", i) for i in range(2)])
+    assert get("/api/rollouts")[1]["has_passes_visible"] is False

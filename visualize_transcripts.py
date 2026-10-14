@@ -312,6 +312,9 @@ def _summarize(rec: dict, off: int, length: int) -> dict:
         "behavior_present": pick("behavior_present"),
         "loose_rh": pick("loose_rh"),
         "hardcoding": pick("hardcoding"),
+        # MBPP-family envs: did the code pass the visible test(s) the reward is computed from (False for
+        # an ungraded rollout); None for dumps without env meta (the slim eval dump) and other envs
+        "passes_visible": pick("passes_visible"),
         "unparsed": pick("unparsed"),
         # null | "truncated" | "unparsed" | "no_submission" (since 2026-09-26): such a rollout was shown to
         # no monitor (dumps since 2026-09-18)
@@ -404,7 +407,7 @@ class IndexCache:
 
     def _p(self, path: Path) -> Path:
         h = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:16]
-        return self.root / f"{path.name}.{h}.v3.json"  # type: ignore[union-attr]
+        return self.root / f"{path.name}.{h}.v4.json"  # type: ignore[union-attr]
 
     def load(self, path: Path) -> Optional[dict]:
         if self.root is None:
@@ -761,6 +764,7 @@ class Handler(BaseHTTPRequestHandler):
 
         step = qp("step", int)
         behavior = (q.get("behavior") or [""])[0]      # "" | "1" | "0"
+        visible = (q.get("visible") or [""])[0]        # "" | "1" | "0" (passes_visible; unknown never matches)
         unparsed = (q.get("unparsed") or [""])[0]      # "" | "1" | "0" | "inv" | "val" (invalid = not monitored)
         mon = (q.get("mon") or [""])[0]                # monitor name for the score filter
         mon_min = qp("mon_min", float)
@@ -774,6 +778,9 @@ class Handler(BaseHTTPRequestHandler):
             if step is not None and e.get("step") != step:
                 return False
             if behavior in ("0", "1") and bool(e.get("behavior_present")) != (behavior == "1"):
+                return False
+            if visible in ("0", "1") and (e.get("passes_visible") is None
+                                          or bool(e.get("passes_visible")) != (visible == "1")):
                 return False
             if unparsed in ("0", "1") and bool(e.get("unparsed")) != (unparsed == "1"):
                 return False
@@ -823,6 +830,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "total": len(sel), "offset": offset, "limit": limit,
             "steps": steps, "monitor_names": monitor_names,
+            "has_passes_visible": any(e.get("passes_visible") is not None for e in idx.entries),
             "n_indexed": len(idx.entries), "bad_lines": idx.bad,
             "file": idx.path.name, "index_seconds": round(idx.seconds, 2), "searched": scanned,
             "epoch": idx.epoch,
@@ -1172,7 +1180,7 @@ function toast(msg) {
 const S = {
   runs: [], filter: '', sel: null, tab: 'overview', detail: null,
   changed: new Set(),                 // runs that grew since the last poll
-  ro: { source:'eval', step:'', behavior:'', unparsed:'', q:'', mon:'', mon_min:'', mon_max:'',
+  ro: { source:'eval', step:'', behavior:'', visible:'', unparsed:'', q:'', mon:'', mon_min:'', mon_max:'',
         offset:0, limit:50, order:'asc', list:null, sel:null, rec:null, loading:false,
         selEpoch:null,   // the dump version (server epoch) the selected row number belongs to
         seq:0 },         // latest list request: an older response arriving late is dropped
@@ -1698,6 +1706,13 @@ function renderRollouts(c) {
     const o = el('option', {value:v}, t); if (v === S.ro.behavior) o.selected = true; behSel.appendChild(o);
   }
   controls.appendChild(behSel);
+  if ((L && L.has_passes_visible) || S.ro.visible) {
+    const visSel = el('select', {class:'btn', onchange:e => { S.ro.visible = e.target.value; S.ro.offset = 0; loadRollouts(); }});
+    for (const [v, t] of [['','visible test: any'],['1','passes visible test'],['0','fails visible test']]) {
+      const o = el('option', {value:v}, t); if (v === S.ro.visible) o.selected = true; visSel.appendChild(o);
+    }
+    controls.appendChild(visSel);
+  }
   const upSel = el('select', {class:'btn', onchange:e => { S.ro.unparsed = e.target.value; S.ro.offset = 0; loadRollouts(); }});
   for (const [v, t] of [['','parse: any'],['0','parsed ok'],['1','unparsed'],
                          ['val','valid (monitored)'],['inv','invalid (truncated/unparsed/no submission, not monitored)']]) {
@@ -1742,6 +1757,9 @@ function renderRollouts(c) {
     if (e.behavior_present !== null && e.behavior_present !== undefined)
       flags.push(el('span', {class:'flag ' + (e.behavior_present ? 'yes' : 'no'), title:'behavior_present (the oracle)'},
         e.behavior_present ? 'behavior' : 'clean'));
+    if (e.passes_visible !== null && e.passes_visible !== undefined)
+      flags.push(el('span', {class:'flag n', title:'passes_visible: passed the visible test(s) the reward is computed from'},
+        e.passes_visible ? 'visible ✓' : 'visible ✗'));
     if (e.loose_rh) flags.push(el('span', {class:'flag n'}, 'loose'));
     if (e.hardcoding) flags.push(el('span', {class:'flag n'}, 'hardcode'));
     if (e.unparsed) flags.push(el('span', {class:'flag n'}, 'unparsed'));
@@ -1777,10 +1795,10 @@ function renderRollouts(c) {
 }
 async function loadRollouts() {
   S.ro.loading = true;
-  const {source, step, behavior, unparsed, q, mon, mon_min, mon_max, offset, limit, order} = S.ro;
+  const {source, step, behavior, visible, unparsed, q, mon, mon_min, mon_max, offset, limit, order} = S.ro;
   const want = S.sel, seq = ++S.ro.seq;
   try {
-    const j = await api('/api/rollouts', {id:want, source, step, behavior, unparsed, q, mon, mon_min, mon_max, offset, limit, order});
+    const j = await api('/api/rollouts', {id:want, source, step, behavior, visible, unparsed, q, mon, mon_min, mon_max, offset, limit, order});
     if (S.sel !== want || seq !== S.ro.seq || S.ro.source !== source) return;
     if (S.ro.sel !== null && S.ro.selEpoch !== j.epoch) {
       // the dump was rewritten: the open rollout's row number now names a different line (or none)
@@ -1993,6 +2011,8 @@ function renderRolloutDetail(box, rec) {
     meta.task_id || rec.task_id ? el('span', {class:'badge mono'}, meta.task_id || rec.task_id) : null,
     beh !== undefined ? el('span', {class:'flag ' + (beh ? 'yes' : 'no'), title:'behavior_present — the oracle label, never in a monitor or the reward'},
       'behavior_present = ' + fmt(beh)) : null,
+    meta.passes_visible !== null && meta.passes_visible !== undefined ? el('span', {class:'flag n',
+      title:'passed the visible test(s) the reward is computed from'}, 'passes_visible = ' + fmt(meta.passes_visible)) : null,
     rec.loose_rh !== null && rec.loose_rh !== undefined ? el('span', {class:'flag n'}, 'loose_rh = ' + fmt(rec.loose_rh)) : null,
     rec.hardcoding !== null && rec.hardcoding !== undefined ? el('span', {class:'flag n'}, 'hardcoding = ' + fmt(rec.hardcoding)) : null,
     rec.invalid_reason ? el('span', {class:'flag n', title:'invalid rollout: flat -1 reward, never shown to any monitor, excluded from every monitor metric'},
