@@ -84,8 +84,8 @@ At the top level:
   definition), with the dataset's `items_sha256` and the code version that wrote it. The RL runs evaluate on these
   grids under other task ids: an eval task id carries its run's seed (`eval_<seed + 7919>_<i>`), but seed s's eval
   task i is seed 0's task s + i, the same grid. So a run with a seed below 660 evaluates partly or wholly on the
-  probes' grids. The configs' seed is 0, and Vlad's runs used seeds such as 12, 33–35, 100–109 and 218: his
-  control-seed-218 shares no task id with the probes, yet all 64 of its eval grids are here, 48 in `train` or `val`
+  probes' grids. The configs' seed is 0. Vlad's current batch (LoRA rank 8, from 2026-09-30) used seeds 200–218, his earlier
+  rank-64 runs 0–35 and 100–109; every one is below 660. His control-seed-218 shares no task id with the probes, yet all 64 of its eval grids are here, 48 in `train` or `val`
   and 16 in `test`. Seeds from about 660 to 7,250 keep a run's train and eval grids clear of the probes' data, apart
   from one grid repeated by chance in each of two bands
   ([`docs/INKLING_PROBES.md`](../../../docs/INKLING_PROBES.md#9-known-problems-and-caveats), caveat 4). Report

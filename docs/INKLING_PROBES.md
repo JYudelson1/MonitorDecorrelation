@@ -879,7 +879,9 @@ pre-registered and reported as such.
    reasoning-gym builds task i of a stream from `Random(stream seed + i)`, so seed s's eval task i is seed 0's task
    s + i. The probes' 512 tasks are seed 0's eval tasks with indices 0 to 659 <!-- src:
    data/probes/Inkling-Small/task_splits.json -->, so a run with a seed below 660 evaluates partly or wholly on them.
-   The configs' seed is 0, and Vlad's runs used seeds such as 12, 33–35, 100–109 and 218. His control-seed-218
+   The configs' seed is 0. Vlad's current batch (LoRA rank 8, from 2026-09-30) used seeds 200–218, his earlier
+   rank-64 runs 0–35 and 100–109; every one is below 660. <!-- src: the run configs in the W&B project
+   jyudel-redwood-research/terminal-env-inkling-small, 2026-10-14 --> His control-seed-218
    shares no task id with the probes' dataset, yet all 64 of its eval grids are in it: 48 in the train or val split,
    16 in test. <!-- src: control-seed-218's eval_rollouts.jsonl (Vlad's control run of 2026-10-02, sha256
    e085920a…, not in the repo or the buckets): its questions' grid keys against data/probes/Inkling-Small/grids.json,
