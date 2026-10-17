@@ -349,6 +349,9 @@ def test_render_fills_every_table_and_check_catches_edits(tmp_path):
         "- `20261011T000000Z`: 1 probe. Finished —.",
         "- `20261012T000000Z`: 2 probes. Finished 2026-10-12T00:00:00Z at commit cccccccccccc with fit_probes.py "
         "aaaaaaaaaaaa, probe_fit.py bbbbbbbbbbbb (sha256).",
+        # what "metrics" covers, counted from the newest checks; the failed OOD check compared none
+        "The main metrics: 9 numbers per IID probe (test AUROC and its CI, AUROC under behavior_present, TPR and FPR "
+        "at t₁% and t₅%, the counts) and per OOD probe (test AUROC and its CI,",
         "| terminal_prerl | with | 10,688 | 1,712 / 1,500 / 3,900 / 9,000 | 18.3M |",
         "| IID, with | bf16 | followup | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",
         "| IID, with | bf16 | followup_prev | 3*, 0.001 | 1.0000 | 0.99998 [0.99980, 1.000] | 75% / 0.37% | — |",

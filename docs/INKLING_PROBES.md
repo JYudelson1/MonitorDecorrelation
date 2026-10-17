@@ -1140,20 +1140,30 @@ the launcher, which refuses uncommitted code ([`INFRA.md`](INFRA.md#gpu-vms-on-n
    them to save time).
 4. **The result scripts refuse to overwrite** earlier results unless given `--overwrite`. The pipeline passes it when
    it reruns a step that failed, never for a finished step.
-5. `scripts/verify_bucket_copy.py` checks a local folder against a bucket prefix, byte for byte, before the local copy
-   is deleted.
+5. `scripts/verify_bucket_copy.py` checks that every file of a local folder is in a bucket prefix with the same size
+   and Xet content hash, before the local copy is deleted.
 
 ### Re-checking the fits
 
-`experiments/verify_fits.py` checks that today's code reproduces the committed fits: for each probe it re-runs part
-of the cross-validation grid, re-derives the selection and refits the chosen layer and C, then compares all of it
-with what the fit saved. All 24 fitted probes reproduce bit for bit, in two runs: `verify_fits/20261012T052659Z`
-with 21 probes, and `verify_fits/20261012T063754Z` with the three 4-bit follow-up probes. The 2,207 recomputed grid
-cells equal the stored ones (to the 5 decimals `cv_grid.csv` keeps), every selection comes out the same, and the
-weights, both thresholds, the metrics and the test logits are identical to the bit. <!-- src:
-data/probe_results/verify_fits/{20261012T052659Z,20261012T063754Z}/summary.json --> The readout fallback's
-`followup_prev` fits came later and were not re-checked. [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
-says which code each run used.
+`experiments/verify_fits.py` checks that the fitting code reproduces the committed fits: for each probe it re-runs
+part of the cross-validation grid, re-derives the selection and refits the chosen layer and C, then compares that
+with what the fit saved. All 24 fitted probes pass, in two runs: `verify_fits/20261012T052659Z` with 21 probes, run
+with the fitting code of `b416f89` (2026-10-10), and `verify_fits/20261012T063754Z` with the three 4-bit follow-up
+probes, at `2694851` (2026-10-12). What was compared, and how closely: <!-- src:
+data/probe_results/verify_fits/{20261012T052659Z,20261012T063754Z}/summary.json -->
+- the 2,207 recomputed grid cells (out-of-fold AUROC, mean and sd over the repeats) equal the stored ones to the 5
+  decimals `cv_grid.csv` keeps;
+- every selection (layer, C, flat or not) comes out the same;
+- the refits' weights, t₁% and t₅%, test logits and main metrics are identical to the bit (largest difference 0).
+  The main metrics are 12 numbers per IID probe (test AUROC and its CI, AUROC under `behavior_present`, TPR and FPR
+  at t₁% and t₅%, the counts) and 33 per OOD probe (test AUROC and its CI, per source, and each TerminalEnv view's
+  transfer metrics).
+
+Not re-checked: what rests on the IID probes' cross-fit (section 6.1's hacks vs read-not-used, within-task AUROC and
+concealed hacks caught, and section 6.3's cross-fitted counts), the OOD probes' leave-one-source-out, the baselines
+and the sensitivity rows; nor the readout fallback's `followup_prev` fits, which came later. Since `b416f89` the
+fitting code has changed only in ways that don't change a fit's numbers.
+[`PROVENANCE.md`](../data/probe_results/PROVENANCE.md) says which code each run used, and what changed since.
 
 <!-- probe_report:begin verify_fits -->
 
@@ -1189,7 +1199,7 @@ says which code each run used.
 - `20261012T052659Z`: 21 probes. Finished 2026-10-12T06:34:05Z after 67 min with fit_probes.py 83cfb844029d, probe_fit.py 5ce6ede25b68 (sha256).
 - `20261012T063754Z`: 3 probes. Finished 2026-10-12T07:05:46Z after 28 min at commit 269485102a5e with fit_probes.py 320f1df5a531, probe_fit.py f95e167c3f74 (sha256).
 
-From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code of the day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to cv_grid.csv's to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics and test logits (0: bit for bit).
+From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code each run records (above) and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs (mean and sd over the repeats) equal to cv_grid.csv's, which keeps 5 decimals. Δ: the largest absolute difference from the saved weights and intercept, t₁% and t₅%, main metrics and test logits (0: identical, bit for bit). The main metrics: 12 numbers per IID probe (test AUROC and its CI, AUROC under behavior_present, TPR and FPR at t₁% and t₅%, the counts) and 33 numbers per OOD probe (test AUROC and its CI, per source, each TerminalEnv view's transfer metrics). Not re-checked: the IID probes' cross-fitted hard subsets and concealment, leave-one-source-out, the baselines and the sensitivity rows.
 
 <!-- probe_report:end verify_fits -->
 

@@ -8,8 +8,9 @@ are UTC; "4-bit" is the NVFP4 reader, "full precision" the bf16 one.
 **Code versions.** Code stamping (`src/monitordecorrelation/provenance.py`) arrived on 2026-10-12 between 04:52 and
 05:29 (`ca9a1a0` to `28eaff4`). Anything made since records `code: {commit, dirty, diff_sha256, source}`; the deployed
 monitors also record `deployed_code`. The datasets, features, fits and the older analyses predate it, so their code
-version is reconstructed below. For the fits that matters least: the code of 2026-10-12 reproduces them bit for bit
-(see "Checks").
+version is reconstructed below. For the fits that matters least: re-running part of each fit reproduces it (see
+"Checks": 21 probes with the fitting code of `b416f89`, 2026-10-10, the three 4-bit follow-up probes at `2694851`,
+2026-10-12).
 
 ## Datasets (`data/probe_datasets/`)
 
@@ -119,13 +120,20 @@ and `code` fields record their `items_sha256` and the commit. No monitor changed
 ## Checks
 
 - **Fits reproduce** (`verify_fits/<run>/`). `experiments/verify_fits.py` recomputed a slice of each fit's CV grid
-  (2,207 cells in all), re-derived the selection and refitted the chosen probe. All 24 fitted probes reproduce bit for
-  bit: weights, t₁%/t₅%, metrics and test logits.
+  (2,207 cells in all), re-derived the selection and refitted the chosen probe. All 24 fitted probes pass:
+  - every recomputed grid cell (out-of-fold AUROC, mean and sd) equals `cv_grid.csv`'s to its 5 decimals, and every
+    selection comes out the same;
+  - the refits' weights, t₁%/t₅%, test logits and main metrics (12 numbers per IID probe, 33 per OOD probe) equal the
+    saved ones to the bit (largest difference 0);
+  - not re-checked: the IID probes' cross-fitted hard subsets and concealment, leave-one-source-out, the baselines and
+    the sensitivity rows.
   - `20261012T052659Z` (05:26–06:34): 21 probes, everything but the 4-bit follow-up probes. It ran `fit_probes.py`
-    and `probe_fit.py` as of `b416f89` (sha256 `83cfb844…`, `5ce6ede2…`); its own commit is not on this branch, so
-    its summary records the file hashes only.
+    and `probe_fit.py` as of `b416f89` (2026-10-10; sha256 `83cfb844…`, `5ce6ede2…`), with `verify_fits.py` as of
+    `0337bcf`; its own commit is not on this branch, so its summary records the file hashes only.
   - `20261012T063754Z` (06:37–07:05): the three 4-bit follow-up probes, at `2694851`.
-  - Since then the fitting code changed only to check the items' hashes (`0af255e`).
+  - Since `b416f89` the fitting code (`fit_probes.py`, `probe_fit.py`) changed only to read the pre-registration from
+    the repo (`93c455a`), to stamp its outputs and refuse to overwrite them (`28eaff4`), in docstrings (`628fe00`) and
+    to check the items' hashes (`0af255e`, the only change since `2694851`).
 - **Serving on a GPU, 2026-10-10 08:16–08:28** (one 1×B300, the 4-bit reader at `b6a99534…`, the eight monitors of
   the first deployment, committed just afterwards in `c7ee855`):
   - every monitor's golden check passed, one episode per forward and batched;
