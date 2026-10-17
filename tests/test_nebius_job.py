@@ -14,9 +14,11 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1531,3 +1533,444 @@ def test_run_keep_without_a_vm_leaves_nothing_reserved(tmp_path, monkeypatch, re
     entry = json.loads(ledger.read_text())["entries"][-1]
     assert (entry["kind"], entry["usd"]) == ("spent", 0.0) and not entry.get("kept")
     assert json.loads((tmp_path / "out" / "job.json").read_text())["kept"] is False
+
+
+# ------------------------------------------------------------------------------------- CPU VMs, keys, root jobs
+
+KEY = "tk-SECRETkey-NEVERtoBEseen-0123456789abcdef"  # a distinctive fake key: it must never show anywhere
+CPU = ("--platform", "cpu-d3", "--preset", "32vcpu-128gb", "--on-demand", "--image-family", "ubuntu24.04-driverless")
+# the pre-RL rollouts this was built for (episode workers as given: N)
+ROLLOUT = [".venv/bin/python", "experiments/eval_terminal_monitors_baseline.py", "--config",
+           "experiments/configs/terminal_verifier_control.json", "--n-prompts", "512", "--samples", "64",
+           "--episode-workers", "N", "--run-name", "pre-rl-probe-v2", "--set", "monitors=[]", "seed=1000000"]
+GPU_SETUP = """set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --locked
+if ! uv run --no-sync python -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)'; then
+  echo "torch cannot see the GPU with the locked wheel: retargeting via scripts/setup_box.sh"
+  bash scripts/setup_box.sh
+fi
+uv run --no-sync python -c 'import torch as t; print("torch", t.__version__, t.version.cuda, t.cuda.get_device_name(0))'
+"""
+
+
+@pytest.fixture
+def keys(tmp_path, monkeypatch):
+    """This machine's key folder (hub's ~/.secrets) with one key, tinker_api_key; the VM's RAM-disk key folder under
+    tmp_path; and no spot bid from the environment."""
+    folder = tmp_path / "secrets"
+    folder.mkdir(mode=0o700)
+    (folder / "tinker_api_key").write_text(KEY)
+    monkeypatch.setattr(nj, "SECRETS_DIR", str(folder))
+    monkeypatch.setattr(nj, "REMOTE_SECRETS", str(tmp_path / "ram" / "secrets"))
+    monkeypatch.delenv("NEBIUS_MAX_GPU_PRICE", raising=False)
+    return folder
+
+
+def _strings(obj):
+    """Every string value in a JSON document (not its keys)."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _strings(v)
+
+
+def test_a_cpu_preset_missing_from_the_capacity_advice_is_still_priced(regions_file, monkeypatch, capsys):
+    """The advice lists GPU presets only: a CPU preset it doesn't list is priced in every region (on demand), its
+    capacity and quota unknown. One it does list keeps its advice; a GPU preset it doesn't list is still skipped."""
+    monkeypatch.setattr(FakeNebius, "CAPACITY", [*FakeNebius.CAPACITY,
+                                                 _advice("eu-west2", platform="cpu-d3", preset="32vcpu-128gb")])
+    _, regions = nj.load_regions(str(regions_file))
+    offers = {o.region: o for o in nj.survey("nebius", regions, "tenant-t", "cpu-d3", "32vcpu-128gb", spot=False)}
+    assert {r: o.price for r, o in offers.items()} == pytest.approx(
+        {"uk-south1": 76.9, "eu-west2": 12.9, "us-north1": 9.9, "us-central1": 20.0})  # the fake's on-demand: 10x
+    assert all(not o.note for o in offers.values())
+    assert (offers["us-north1"].level, offers["us-north1"].available) == (None, None)
+    assert offers["eu-west2"].level == "LOW"  # listed: its on-demand advice
+    assert [o.region for o in nj.candidates(list(offers.values()), None)][0] == "us-north1"
+    gpu = {o.region: o for o in nj.survey("nebius", regions, "tenant-t", "gpu-b300-sxm", "1gpu-24vcpu-346gb", True)}
+    assert gpu["us-central1"].note == "gpu-b300-sxm/1gpu-24vcpu-346gb not offered here"
+    assert gpu["us-central1"].price is None
+    assert nj.main(["prices", "--regions-file", str(regions_file), *CPU[:4], "--on-demand"]) == 0
+    lines = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()[2:] if line.strip()}
+    assert "<- cheapest" in lines["us-north1"] and "?" in lines["us-north1"] and "not offered" not in lines["uk-south1"]
+
+
+def test_on_demand_ignores_the_environments_spot_bid_and_refuses_the_flag(tmp_path, monkeypatch, capsys,
+                                                                          regions_file):
+    monkeypatch.setenv("NEBIUS_MAX_GPU_PRICE", "2.5")  # what a wrapper (hub's bin/gpu-job) exports by default
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    assert nj.main(["run", *_region_args(tmp_path, regions_file, *CPU), "--", "true"]) == 0
+    assert "--on-demand: ignoring NEBIUS_MAX_GPU_PRICE=2.5, a spot bid" in capsys.readouterr().out
+    cloud = FakeNebius.clouds["project-u02"]  # us-north1, the cheapest on demand too
+    argv = cloud.create_argv
+    assert "--on-demand" in argv and "--spot-pricing-policy-id" not in argv and "--follows-spot-price" not in argv
+    assert (_flag(argv, "--resources-platform"), _flag(argv, "--resources-preset")) == ("cpu-d3", "32vcpu-128gb")
+    assert _flag(argv, "--boot-disk-managed-disk-source-image-family-image-family") == "ubuntu24.04-driverless"
+    assert not any(c.policies for c in FakeNebius.clouds.values())
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert rec["spot"] is False and rec["flags"]["max_gpu_price"] is None and rec["max_price"] is None
+    with pytest.raises(SystemExit, match="spot bid; it does not apply to --on-demand"):  # given on the command line
+        nj.main(["run", *_region_args(tmp_path, regions_file, *CPU, "--max-gpu-price", "2.5"), "--", "true"])
+    with pytest.raises(SystemExit, match="CPU VMs run --on-demand"):
+        nj.main(["run", *_region_args(tmp_path, regions_file, *CPU[:4]), "--", "true"])
+    created = cloud.created
+    assert nj.main(["run", *_region_args(tmp_path, regions_file), "--", "true"]) == 0  # spot keeps the bid
+    assert cloud.created == created + 1 and _flag(cloud.create_argv, "--spot-pricing-policy-id") == "pricingpolicy-1"
+    assert json.loads((tmp_path / "out" / "job.json").read_text())["flags"]["max_gpu_price"] == 2.5
+
+
+def test_the_budget_holds_an_on_demand_cpu_vm_at_its_fixed_price(tmp_path, monkeypatch, capsys, regions_file):
+    """The worst case is the on-demand price x --hours, and neither the ledger nor job.json claims a GPU."""
+    monkeypatch.delenv("NEBIUS_MAX_GPU_PRICE", raising=False)
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    monkeypatch.setattr(FakeNebius, "PRICES", {**PRICES, "project-u02": 0.106})  # us-north1: $1.06/h on demand
+    ledger = _ledger(tmp_path, 0.0)
+    args = _region_args(tmp_path, regions_file, *CPU, "--hours", "3", "--budget-file", str(ledger))
+    assert nj.main(["run", "--dry-run", *args, "--", "true"]) == 0
+    text = capsys.readouterr().out
+    assert "would reserve $3.18" in text and "== pricing: on-demand, $1.06/h in us-north1" in text
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    assert nj.main(["run", *args, "--", "true"]) == 0
+    entry = json.loads(ledger.read_text())["entries"][-1]
+    assert entry["what"].endswith(" (cpu-d3/32vcpu-128gb, ≤3 h)") and "×" not in entry["what"]
+    assert entry["kind"] == "spent" and entry["usd"] <= 3.18
+    assert entry["note"] == "conservative estimate from the sampled on-demand prices"
+    text = capsys.readouterr().out
+    assert "from the sampled on-demand prices" in text and "sampled spot" not in text
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert not [s for s in _strings(rec) if "gpu" in s.lower()], "job.json names a GPU"
+
+
+def test_the_setup_without_a_gpu_skips_the_torch_check_and_the_gpu_one_is_unchanged(tmp_path, monkeypatch, capsys,
+                                                                                     fake_cloud):
+    cpu = nj.setup_script(False, gpu=False)
+    assert cpu.splitlines()[2] == "uv sync --locked" and "sys.version.split()[0]" in cpu
+    assert not any(word in cpu for word in ("import torch", "torch.cuda", "setup_box", "nvidia", "sudo"))
+    assert nj.setup_script(False) == GPU_SETUP  # byte for byte what it was
+    assert nj.setup_script(True) == GPU_SETUP.replace("uv sync --locked", "uv sync --locked --extra gpu").replace(
+        "setup_box.sh\n", "setup_box.sh --extra gpu\n")
+    p = nj.build_parser()
+    exec_args = ["exec", "--host", "md@h", "--out", str(tmp_path)]
+    job = nj.job_spec(p.parse_args([*exec_args, "--no-gpu"]), ["true"], "exec")
+    assert job.gpu is False and nj.job_setup_script(job) == cpu
+    assert nj.job_spec(p.parse_args([*exec_args]), ["true"], "exec").gpu is True
+    assert nj.job_spec(p.parse_args(["run", "--hours", "1", "--out", str(tmp_path), *CPU]), ["true"], "x").gpu is False
+    for argv in ([*exec_args, "--no-gpu", "--extra-gpu"], ["run", "--hours", "1", "--out", str(tmp_path), *CPU,
+                                                           "--extra-gpu"]):
+        with pytest.raises(SystemExit, match="--extra-gpu needs a GPU"):
+            nj.job_spec(p.parse_args(argv), ["true"], "x")
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    assert nj.main(["run", "--dry-run", *_run_args(tmp_path, *CPU), "--", "true"]) == 0
+    text = capsys.readouterr().out
+    assert cpu in text and "import torch" not in text and "--on-demand" in text
+    assert nj.main(["run", "--dry-run", *_run_args(tmp_path), "--", "true"]) == 0  # a GPU run: as before
+    text = capsys.readouterr().out
+    assert GPU_SETUP in text and "== keys" not in text and "sudo -n -E" not in text and "\ntrap " not in text
+
+
+def test_secret_flags_parse_and_a_missing_or_empty_key_is_refused(tmp_path, monkeypatch, capsys, fake_cloud, keys):
+    s = nj.parse_secret("tinker_api_key")
+    assert (s.name, s.env, s.path) == ("tinker_api_key", "TINKER_API_KEY", keys / "tinker_api_key")
+    assert nj.parse_secret("wandb.key=WANDB_API_KEY").env == "WANDB_API_KEY"
+    for bad in ("", "../x", ".hidden", "a b", "x/y", "=ENV"):
+        with pytest.raises(ValueError, match="--secret wants NAME"):
+            nj.parse_secret(bad)
+    with pytest.raises(ValueError, match="name one: --secret tinker-key=ENV"):  # TINKER-KEY is no variable name
+        nj.parse_secret("tinker-key")
+    with pytest.raises(ValueError, match="not a key") as err:  # a key typed after = (as for --env) is not echoed
+        nj.parse_secret(f"tinker_api_key={KEY}")
+    assert KEY not in str(err.value)
+    with pytest.raises(ValueError, match="given twice"):
+        nj.job_secrets(["tinker_api_key", "tinker_api_key=OTHER"], set())
+    for specs, taken in ((["tinker_api_key"], {"TINKER_API_KEY"}), (["a=X", "b=X"], set()), (["path=PATH"], set())):
+        with pytest.raises(ValueError, match="already set"):
+            nj.job_secrets(specs, taken)
+    exec_args = ["exec", "--host", "md@h", "--out", str(tmp_path / "o")]
+
+    def spec(*extra):
+        return nj.job_spec(nj.build_parser().parse_args([*exec_args, *extra]), ["true"], "exec")
+
+    assert spec("--secret", "tinker_api_key").secrets == [s]
+    with pytest.raises(SystemExit, match="--env"):  # an --env of the key's variable is ambiguous
+        spec("--secret", "tinker_api_key", "--env", "TINKER_API_KEY=x")
+    with pytest.raises(SystemExit, match=r"nope: .*nope is missing; put the key there with `hub-secret set nope`"):
+        spec("--secret", "nope")
+    (keys / "folder").mkdir()
+    for name, content in (("blank", ""), ("spaces", "\n  \n"), ("folder", None)):
+        if content is not None:
+            (keys / name).write_text(content)
+        with pytest.raises(SystemExit, match="not a file" if content is None else "is empty"):
+            spec("--secret", name)
+    with pytest.raises(SystemExit, match="missing"):  # before anything is priced or created
+        nj.main(["run", *_run_args(tmp_path, "--secret", "nope"), "--", "true"])
+    assert not FakeNebius.clouds
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    assert nj.main(["run", "--dry-run", *_run_args(tmp_path, "--secret", "nope"), "--", "true"]) == 0  # shown instead
+    assert "!! missing: a real run refuses it (hub-secret set nope)" in capsys.readouterr().out
+    assert nj.main(["up", "--dry-run", *_run_args(tmp_path, "--secret", "tinker_api_key")]) == 0
+    text = capsys.readouterr().out
+    assert "up runs no job, so --secret tinker_api_key is not sent" in text and "== keys: not sent" in text
+
+
+def test_no_key_reaches_the_dry_run_the_scripts_job_json_or_the_logs(tmp_path, monkeypatch, capsys, fake_cloud,
+                                                                     keys):
+    """The rollout job's whole launch, dry and (faked) real: the key is never printed, written or put in a script."""
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    upload = "data/runs/pre-rl-probe-v2=hf://buckets/probemaxxing/inkling-probes/inputs/pre-rl-probe-v2/{stamp}"
+    token = tmp_path / "hf_token"
+    token.write_text(SENTINEL)
+    argv = [*_run_args(tmp_path, *CPU, "--hours", "3", "--secret", "tinker_api_key", "--root-job", "--upload",
+                       upload, "--hf-token-file", str(token), "--fetch", "data/runs/pre-rl-probe-v2"), "--", *ROLLOUT]
+    assert nj.main(["run", "--dry-run", *argv]) == 0
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert KEY not in text and SENTINEL not in text
+    assert (f"{keys / 'tinker_api_key'} -> {nj.REMOTE_SECRETS}/tinker_api_key on the VM, the job's $TINKER_API_KEY"
+            in text)
+    assert nj.job_setup_script(nj.JobSpec(out=tmp_path, gpu=False, root_job=True)) in text
+    assert "; the command as root) ==" in text and "sudo -n -E -H env \"PATH=$PATH\" bash -c" in text
+    assert "--set '\"'\"'monitors=[]'\"'\"' seed=1000000" in text  # the command, quoted inside the root shell
+    scripts, removed = [], []
+
+    def remote_steps(remote, job, rec, check_vm=None):
+        scripts.append(nj.job_script(job.command, job.env, job.poweroff_minutes, secrets=job.secrets,
+                                     root=job.root_job))
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    monkeypatch.setattr(nj, "remove_secrets", lambda remote, secrets: removed.append([s.name for s in secrets]))
+    assert nj.main(["run", *argv]) == 0
+    assert removed == [["tinker_api_key"]]  # the launcher's own cleanup, before the VM is deleted
+    assert KEY not in scripts[0] and f'TINKER_API_KEY="$(cat {nj.REMOTE_SECRETS}/tinker_api_key)"' in scripts[0]
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert (rec["root_job"], rec["sandbox_python"], rec["secrets"]) == (True, "3.11.16",
+                                                                        {"tinker_api_key": "TINKER_API_KEY"})
+    assert rec["flags"]["secret"] == ["tinker_api_key"] and rec["flags"]["root_job"] is True
+    out = capsys.readouterr()
+    assert KEY not in out.out + out.err
+    for f in tmp_path.rglob("*"):  # job.json, known_hosts, …
+        if f.is_file() and f.parent != keys:
+            assert KEY not in f.read_text(errors="replace"), f
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_keys_travel_privately_reach_the_job_and_are_deleted_when_it_ends(tmp_path, keys, exit_code):
+    home, out = tmp_path / "home", tmp_path / "out"
+    (home / "md").mkdir(parents=True)
+    out.mkdir()
+    (keys / "wandb_api_key").write_text("wandb-" + KEY)
+    secrets = nj.job_secrets(["tinker_api_key", "wandb_api_key=WANDB_API_KEY"], set())
+    r = LocalRemote(home)
+    nj.send_secrets(r, secrets)
+    folder = Path(nj.REMOTE_SECRETS)
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert {f.name: stat.S_IMODE(f.stat().st_mode) for f in folder.iterdir()} == {"tinker_api_key": 0o600,
+                                                                                  "wandb_api_key": 0o600}
+    assert (folder / "tinker_api_key").read_text() == KEY  # byte for byte
+    command = (f'printf %s "$TINKER_API_KEY" | sha256sum; printf %s "$WANDB_API_KEY" | sha256sum; '
+               f'ls {shlex.quote(str(folder))}; exit {exit_code}')
+    script = nj.job_script(command, [], secrets=secrets)
+    assert KEY not in script
+    nj.start(r, "job", script, cwd="md")
+    assert nj.poll(r, "job", out, interval=0.1) == exit_code
+    log = (out / "job.log").read_text()
+    for value in (KEY, "wandb-" + KEY):
+        assert hashlib.sha256(value.encode()).hexdigest() in log  # the job had each key in its variable
+    assert "tinker_api_key" in log  # the files were there during the job …
+    assert not any(folder.iterdir())  # … and gone once it ended, whatever its exit code
+    assert KEY not in log and KEY not in (home / nj.REMOTE_LOGS / "job.log").read_text()
+    nj.start(r, "job", nj.job_script("echo command-ran", [], secrets=secrets), cwd="md")
+    assert nj.poll(r, "job", out, interval=0.1) == 1  # a key missing on the VM: the command never runs
+    assert "command-ran" not in (out / "job.log").read_text()
+
+
+def test_a_key_folder_that_is_a_link_is_refused(tmp_path, keys):
+    home, elsewhere = tmp_path / "home", tmp_path / "elsewhere"
+    home.mkdir()
+    elsewhere.mkdir()
+    Path(nj.REMOTE_SECRETS).parent.mkdir(parents=True)
+    Path(nj.REMOTE_SECRETS).symlink_to(elsewhere)
+    with pytest.raises(nj.InfraError) as err:
+        nj.send_secrets(LocalRemote(home), nj.job_secrets(["tinker_api_key"], set()))
+    assert not any(elsewhere.iterdir()) and KEY not in str(err.value)
+
+
+@pytest.mark.parametrize("ending", ["error", "ctrl-c"])
+def test_the_launcher_removes_the_keys_if_it_stops_before_the_job_step_does(tmp_path, monkeypatch, fake_cloud, keys,
+                                                                            ending):
+    """exec, and a kept VM (run --keep): the keys reached the box, then the launcher stopped before the job step
+    could delete them (an error, Ctrl-C). Its cleanup deletes them."""
+    home = tmp_path / "home"
+    (home / "md").mkdir(parents=True)
+    monkeypatch.setattr(nj, "Remote", lambda host, known_hosts, key=None: LocalRemote(home))
+    sent = []
+
+    def remote_steps(remote, job, rec, check_vm=None):
+        nj.send_secrets(remote, job.secrets)
+        sent.append(sorted(p.name for p in Path(nj.REMOTE_SECRETS).iterdir()))
+        raise RuntimeError("boom") if ending == "error" else KeyboardInterrupt()
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    expected = nj.EXIT_INFRA if ending == "error" else nj.EXIT_INTERRUPTED
+    code = nj.main(["exec", "--host", "md@h", "--out", str(tmp_path / "exec"), "--secret", "tinker_api_key",
+                    "--root-job", "--no-gpu", "--", "true"])
+    assert code == expected and sent == [["tinker_api_key"]] and not Path(nj.REMOTE_SECRETS).exists()
+    rec = json.loads((tmp_path / "exec" / "job.json").read_text())
+    assert rec["secrets"] == {"tinker_api_key": "TINKER_API_KEY"} and rec["root_job"] is True
+    code = nj.main(["run", "--keep", *_run_args(tmp_path, *CPU, "--secret", "tinker_api_key"), "--", "true"])
+    assert code == expected
+    assert FakeNebius.clouds["project-x"].alive and len(sent) == 2  # kept, and the keys …
+    assert not Path(nj.REMOTE_SECRETS).exists()  # … are gone from it
+
+
+def test_keys_reach_the_vm_right_before_the_job(tmp_path, monkeypatch, keys):
+    events = []
+
+    class Ok(nj.Remote):
+        def run(self, command, **kw):
+            return subprocess.CompletedProcess([], 0, b"", b"")
+
+    monkeypatch.setattr(nj, "repo_files", lambda: [])
+    monkeypatch.setattr(nj, "push_repo", lambda remote, files: None)
+    monkeypatch.setattr(nj, "start", lambda remote, step, script, cwd=None: events.append(("start", step, script)))
+    monkeypatch.setattr(nj, "poll", lambda remote, step, out, **kw: 0)
+    monkeypatch.setattr(nj, "send_token", lambda remote, token_file: events.append(("token",)))
+    monkeypatch.setattr(nj, "send_secrets", lambda remote, secrets: events.append(("keys", [s.name for s in secrets])))
+    monkeypatch.setattr(nj, "upload", lambda remote, job, rec, check_vm=None: events.append(("upload",)))
+    job = nj.JobSpec(out=tmp_path, command="python x.py", uploads=[("r", "hf://buckets/o/b/x")],
+                     hf_token_file=tmp_path / "t", secrets=nj.job_secrets(["tinker_api_key"], set()), gpu=False,
+                     root_job=True)
+    assert nj.remote_steps(Ok("md@h", tmp_path / "kh"), job, nj.Record(mode="run")) == 0
+    assert [e[:2] for e in events] == [("start", "setup"), ("token",), ("keys", ["tinker_api_key"]), ("start", "job"),
+                                       ("upload",)]
+    assert events[0][2] == nj.setup_script(False, gpu=False, sandbox_python="3.11.16")
+    assert nj.ROOT_SUDO in events[3][2] and f"$(cat {nj.REMOTE_SECRETS}/tinker_api_key)" in events[3][2]
+
+
+def test_the_root_job_setup_installs_the_python_makes_the_repo_private_and_checks_as_root():
+    text = nj.setup_script(False, gpu=False, sandbox_python="3.11.16")
+    lines = text.splitlines()
+
+    def at(s):
+        return next(i for i, line in enumerate(lines) if line.startswith(s))
+
+    assert (at("umask 022") < at('sudo -n install -d -m 755 -o "$(id -un)" /opt/uv-python')
+            < at("export UV_PYTHON_INSTALL_DIR=/opt/uv-python") < at("uv python install 3.11.16")
+            < at('case "$(readlink -f .venv/bin/python 2>/dev/null)" in /opt/uv-python/*) ;; *) rm -rf .venv')
+            < at("uv sync --locked --managed-python --python 3.11.16") < at('chmod 750 "$HOME"')
+            < at(f"{nj.ROOT_SUDO} .venv/bin/python -c "))
+    assert "torch" not in text and "uv sync --locked\n" not in text  # only the pinned sync
+    check = shlex.split(text[text.index(nj.ROOT_SUDO):])
+    assert check == [*shlex.split(nj.ROOT_SUDO), ".venv/bin/python", "-c", nj.ROOT_CHECK, "3.11.16",
+                     "$PWD/pyproject.toml"]
+    gpu = nj.setup_script(True, sandbox_python="3.12.9")
+    assert "uv sync --locked --extra gpu --managed-python --python 3.12.9" in gpu and "torch.cuda.is_available()" in gpu
+    assert gpu.index("torch.cuda") < gpu.index('chmod 750 "$HOME"')
+    p = nj.build_parser()
+
+    def spec(*extra):
+        return nj.job_spec(p.parse_args(["exec", "--host", "md@h", "--out", "/tmp/x", *extra]), ["true"], "exec")
+
+    assert (spec("--root-job").root_job, spec("--root-job").sandbox_python) == (True, "3.11.16")
+    assert spec("--root-job", "--sandbox-python", "3.12.9").sandbox_python == "3.12.9"
+    assert nj.job_fields(spec()) == {"root_job": False, "sandbox_python": None, "secrets": {}}
+    with pytest.raises(SystemExit, match="does not apply without --root-job"):
+        spec("--sandbox-python", "3.11.16")
+    with pytest.raises(SystemExit, match="exact CPython version"):
+        spec("--root-job", "--sandbox-python", "3.11")
+
+
+def test_the_root_check_wants_the_exact_python_and_a_private_repo(monkeypatch, capsys):
+    """ROOT_CHECK's own logic, run here with the env's sandbox check faked (the real one needs root)."""
+    fake = types.ModuleType("monitordecorrelation.envs.terminal_verifier")
+    fake.SANDBOX_USER = "nobody"
+    fake._sandbox_ids = lambda: (65534, 65534, "/opt/uv-python/cpython-3.11.16-linux-x86_64-gnu/bin/python3.11")
+    monkeypatch.setitem(sys.modules, "monitordecorrelation.envs.terminal_verifier", fake)
+    readable = []
+
+    def run(argv, **kw):  # the sandbox user's attempt to read the repo
+        assert (kw["user"], kw["group"], kw["extra_groups"], argv[0]) == (65534, 65534, [], fake._sandbox_ids()[2])
+        return subprocess.CompletedProcess(argv, 0 if readable else 1)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    here = sys.version.split()[0]
+
+    def check(version):
+        monkeypatch.setattr(sys, "argv", ["-c", version, "/home/md/md/pyproject.toml"])
+        exec(nj.ROOT_CHECK, {"__name__": "__main__"})
+
+    check(here)
+    assert "nobody cannot read the repo" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="not --sandbox-python 3.0.0"):
+        check("3.0.0")
+    readable.append(True)
+    with pytest.raises(SystemExit, match="nobody can read /home/md/md/pyproject.toml"):
+        check(here)
+    env_source = (nj.REPO / "src" / "monitordecorrelation" / "envs" / "terminal_verifier.py").read_text()
+    assert "\ndef _sandbox_ids() ->" in env_source and '\nSANDBOX_USER = "nobody"' in env_source  # what it imports
+
+
+def _fake_root_sudo(home: Path, root_home: Path, scheduled: Path) -> None:
+    """sudo in the step's PATH for a root job: ``cat`` reads ``scheduled``, ``shutdown`` is recorded, and anything else
+    (``-n -E -H env PATH=… bash -c BODY``) runs here (tests aren't root) with FAKE_SUDO_ROOT=1 and what real sudo does
+    to the environment with -E: PATH becomes its secure_path and PYTHONPATH is dropped (env_delete); -H sets
+    HOME=root_home. Without -E it refuses (real sudo would reset the whole environment). Every call is recorded."""
+    sudo = home / ".local" / "bin" / "sudo"
+    sudo.parent.mkdir(parents=True, exist_ok=True)
+    sudo.write_text(f"""#!/bin/bash
+echo "$*" >> "$HOME/sudo_calls.txt"
+opts=" "
+while [[ "$1" == -* ]]; do opts+="$1 "; shift; done
+case "$1" in
+  cat) exec cat {shlex.quote(str(scheduled))} ;;
+  shutdown) echo "$*" >> "$HOME/shutdowns.txt"; exit 0 ;;
+esac
+[[ "$opts" == *" -E "* ]] || {{ echo "fake sudo: wants -E"; exit 99; }}
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset PYTHONPATH
+[[ "$opts" == *" -H "* ]] && export HOME={shlex.quote(str(root_home))}
+export FAKE_SUDO_ROOT=1
+exec "$@"
+""")
+    sudo.chmod(0o755)
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_a_root_job_runs_its_command_through_sudo_with_the_jobs_environment(tmp_path, keys):
+    """The detached step stays the login user's (deadline, power-off, exit code); only the command goes through sudo,
+    with the step's PATH, the --env values, the key, NEBIUS_JOB_DEADLINE and UV_NO_SYNC=1, and root's HOME."""
+    home, root_home, out = tmp_path / "home", tmp_path / "root", tmp_path / "out"
+    (home / "md").mkdir(parents=True)
+    root_home.mkdir()
+    out.mkdir()
+    deadline = int(time.time()) + 7200
+    scheduled = tmp_path / "scheduled"
+    scheduled.write_text(f"USEC={deadline}000000\nMODE=poweroff\n")
+    _fake_root_sudo(home, root_home, scheduled)
+    secrets = nj.job_secrets(["tinker_api_key"], set())
+    r = LocalRemote(home)
+    nj.send_secrets(r, secrets)
+    command = ('echo "root=$FAKE_SUDO_ROOT home=$HOME pwd=$PWD a=$A pp=$PYTHONPATH uv=$UV_NO_SYNC '
+               'deadline=$NEBIUS_JOB_DEADLINE unbuffered=$PYTHONUNBUFFERED"; command -v sudo; '
+               'printf %s "$TINKER_API_KEY" | sha256sum; exit 7')
+    script = nj.job_script(command, [("A", "b c"), ("PYTHONPATH", "/x")], poweroff_minutes=15, secrets=secrets,
+                           root=True)
+    assert KEY not in script
+    nj.start(r, "job", script, cwd="md")
+    assert nj.poll(r, "job", out, interval=0.1) == 7  # the command's own exit code
+    log = (out / "job.log").read_text()
+    assert (f"root=1 home={root_home} pwd={home / 'md'} a=b c pp=/x uv=1 deadline={deadline} unbuffered=1"
+            in log)
+    assert str(home / ".local" / "bin" / "sudo") in log  # the step's PATH, not sudo's secure_path
+    assert hashlib.sha256(KEY.encode()).hexdigest() in log and KEY not in log
+    calls = (home / "sudo_calls.txt").read_text()
+    assert f"-n -E -H env PATH={home / '.local' / 'bin'}:" in calls and KEY not in calls
+    assert (home / "shutdowns.txt").read_text().split() == ["shutdown", "-h", "+15"]  # the step's power-off, as ever
+    assert (home / nj.REMOTE_LOGS / "deadline").read_text().strip() == str(deadline)  # in the login user's home
+    assert not any(Path(nj.REMOTE_SECRETS).iterdir())  # and the key is gone
