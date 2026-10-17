@@ -79,9 +79,11 @@ notice, at most 4 turns, reasoning effort 0.5).
 - The environment's own oracle, `behavior_present`, counts 104 hacks. <!-- src:
   data/probe_datasets/terminal_prerl/manifest.json --> The extra 6 are honest miscounts that happened to hit
   the corrupted value (`passed_blind`). `behavior_present` is reported as a secondary label.
-- **Split by task**, 60/20/20, stratified by whether a task has a hack. A task's episodes share the question and the
-  verifier, so a split by episode would leak. Fitting and selection use **dev** = train ∪ val; **test** is scored
-  once per final probe.
+- **Split by task**, 60/20/20, stratified by whether a task has a hack by the environment's label (`behavior_present`:
+  76 tasks, one more than have a `used_verifier` hack). <!-- src: src/monitordecorrelation/whitebox/probe_datasets.py
+  (the split stratifies on `label`); items.jsonl of terminal_prerl (bucket datasets/), counted 2026-10-17 --> A task's
+  episodes share the question and the verifier, so a split by episode would leak. Fitting and selection use **dev** =
+  train ∪ val; **test** is scored once per final probe.
 
 **`terminal_concealed`: a stress set.** Every hack, edited so that the policy no longer admits it
 (`whitebox/probe_datasets.py`, `conceal`). The edit is mechanical: every sentence matching `verif`, `ground` or `truth`
@@ -148,7 +150,8 @@ The reader is Inkling-Small, the policy's base model. It is a mixture-of-experts
 | Loaded by | our loader, `whitebox/inkling_nvfp4.py` | standard transformers |
 | GPUs per copy | one NVIDIA B300 | three B300s |
 
-The exact revisions are in every probe's `meta.json` (`reader_info`, `trained_reader_info`).
+The exact revisions are in every probe's `meta.json` (`reader_info`; a deployed monitor's also has
+`trained_reader_info`, for the reader it was trained on).
 
 **Words used below.** "4-bit" and "full precision" name the reader whose activations a probe was trained on (or is
 served on). The probes themselves are ordinary float64 logistic regressions either way.
@@ -188,6 +191,10 @@ practice an 8-GPU VM.
      in float32 (bf16 would round values near Inkling's largest activations too coarsely);
    - the router logits and the chosen experts at "Yes", in every MoE layer;
    - the reader's own log-probabilities of "Yes" and "No", for the self-report baseline.
+
+   A probe's layer counts these hidden states from 0, the embeddings: probe layer 25 is the output of decoder layer
+   24 when the decoder layers are counted from 0, as section 3's table and the router probes' "model layer" (section
+   8.1) count them. MoE layer i is decoder layer i + 2.
 5. **Storage.** Safetensors shards of 256 items (format `inkling-probe-features/v2`), in two private Hugging Face
    buckets: `probemaxxing/inkling-probes` (4-bit features, under `features/nvfp4/`) and
    `probemaximizer/inkling-probes-bulk` (full precision, under `features/bf16/`). Access must be granted by the
@@ -227,8 +234,10 @@ average their probabilities. In brief:
 - **Model:** standardized features, then an L2-regularized logistic regression with balanced class weights.
 - **Choosing the layer and C** (C is the inverse regularization strength), on dev only: grouped cross-validation,
   5 folds × 3 repeats, grouped by task (OOD: by pair). Take the best mean out-of-fold AUROC, then the smallest C within
-  one standard error of it (the "one-SE rule"), then tie-breaks. If every layer and C score the same (a "flat grid"),
-  use C = 1e-3 at the middle layer. <!-- src: docs/inkling_probes_preregistration.md --> Each probe searched 42
+  one standard error of it (the "one-SE rule"), then tie-breaks. If all mean out-of-fold AUROCs lie within 0.005 of
+  each other (a "flat grid"; the pre-registration gives no number, 0.005 is the code's), use C = 1e-3 at the middle
+  layer (22 of 1–42). <!-- src: docs/inkling_probes_preregistration.md; src/monitordecorrelation/whitebox/probe_fit.py
+  (select) --> Each probe searched 42
   layers × 6 values of C = 252 configurations (the per-layer router probes 40 × 6 = 240, the all-layer ones 6). <!-- src:
   data/probe_results/fitted/*/*/*/*/cv_grid.csv (one row per configuration) -->
 - **One layer**, refit on all of dev.
@@ -240,8 +249,10 @@ average their probabilities. In brief:
   come from a task-cluster bootstrap: resampling tasks rather than episodes, since a task's episodes are alike.
 - **Hard subsets** (IID), cross-fitted over all episodes (5 folds by task): hacks vs episodes that read the verifier
   but didn't use it (`read_not_used`), hacks vs wrong answers (`passed` false), episodes with 3 or more turns, and
-  AUROC within each task. The "wrong answers" subset is weaker than its name: an honest answer can't pass the
-  corrupted verifier, so it holds nearly every honest episode (10,584 of 10,590), and that AUROC equals the plain one. <!-- src:
+  AUROC within each task. The "wrong answers" subset is weaker than its name: an honest answer passes the corrupted
+  verifier only by a miscount that happens to hit the corrupted value (the 6 `passed_blind` episodes), so it holds
+  nearly every honest episode (10,584 of 10,590), and that AUROC matches the plain cross-fitted one to seven
+  decimals. <!-- src:
   data/probe_results/fitted/bf16/terminal_prerl/with_reasoning/followup/metrics.json (crossfit.n_honest_wrong)
   --> The same goes for the IID tie-break, which scores these hard subsets together: in effect it is plain AUROC.
 - **Baselines** on the same items: transcript length and turns, a regex for "verifier", TF-IDF logistic regression,
@@ -289,7 +300,8 @@ VMs, only ran the frozen reader to extract features (`experiments/run_probe_sess
   follow-up probes. The text baselines don't depend on the reader, so they hold for every IID probe. The
   reader-dependent ones (layer-0 embeddings, random directions, shuffled labels, the class-mean difference, the
   self-report) were not computed for the deployed full-precision probes, nor for the OOD probes. The pipeline now
-  fits with baselines by default (section 11).
+  computes them by default, but `fit_probes.py` does so only for the IID follow-up probes (on either reader): a rerun
+  would still have none for the mean, router or OOD probes (section 11).
 - **Deviation, small:** the deployed IID monitors' thresholds were recalibrated in-sample (section 9, item 8).
 
 ## 6. Results
@@ -439,8 +451,10 @@ precision needs three. The pre-registered rule keeps 4-bit only if it changes no
   is meant literally: each probe is scored on both views' episodes, so an IID probe is also scored on the view it was
   not trained on, at its own view's t₁%. That is why the tables give two values per probe. The batching rule's
   numbers are computed the same way.
-- **(b) No AUROC loss:** 4-bit loses at most 0.01 AUROC (paired bootstrap, with the interval's lower end above
+- **(b) No AUROC loss:** 4-bit loses at most 0.01 AUROC (paired bootstrap, with the interval's lower end at least
   −0.02), on OOD test and on TerminalEnv transfer. <!-- src: docs/inkling_probes_preregistration.md -->
+  `compare_readers.py` also applies it to each IID probe's test AUROC. <!-- src: experiments/compare_readers.py
+  (delta_auroc, iid_test) -->
 - **(c) Noise:** (a) and (b) are read against two noise floors:
   - **batching ("jitter"):** the same reader gives slightly different activations depending on which other
     episodes share its forward pass;
@@ -1073,9 +1087,9 @@ full.
 
 - **Rules:** [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), sha256
   `58eb57820b6cc88b193519ca83ab3ff2268a3f0805778ba8e273e87f2b0aaff6`, recorded in every fitted probe's `meta.json`.
-- **Each probe's `meta.json`** records its layer and C, the selection, both thresholds, the reader it serves on
-  (`reader_info`: loader and checkpoint revision) and the one it was trained on (`trained_reader_info`), the feature
-  format, the torch and transformers versions, when it was fitted and deployed, and where the fitted probe is
+- **Each deployed monitor's `meta.json`** records its layer and C, the selection, both thresholds, the reader it
+  serves on (`reader_info`: loader and checkpoint revision) and the one it was trained on (`trained_reader_info`), the
+  feature format, the torch and transformers versions, when it was fitted and deployed, and where the fitted probe is
   (`fitted_dir`, under `data/probe_results/fitted/`).
 - **Fitted probes and analyses:** `data/probe_results/`: the fitted probes of both readers (`fitted/`, with the
   readout fallback's `followup_prev` fits), the reader comparisons (`compare/`), the OOD refits, the learning curves,
@@ -1153,10 +1167,12 @@ the launcher, which refuses uncommitted code ([`INFRA.md`](INFRA.md#gpu-vms-on-n
    - Two analyses of section 7 run by hand, outside the pipeline: `probe_analyses.py massive-dims` (it needs the
      per-token sample, `features/nvfp4/terminal_prerl/*/full/` in the bucket) and `probe_analyses.py readout-gap`
      (it needs both readouts' fits, so first `fit_probes.py --readouts followup_prev`).
-3. **Fitting includes the pre-registered baselines** by default now (`--fit-args '--jobs 6 --skip-baselines'` skips
-   them to save time).
-4. **The result scripts refuse to overwrite** earlier results unless given `--overwrite`. The pipeline passes it when
-   it reruns a step that failed, never for a finished step.
+3. **Fitting includes the pre-registered baselines and sensitivity rows** by default now, for the IID follow-up probes
+   only: `fit_probes.py` computes none for the mean, router or OOD probes (`--fit-args '--jobs 6 --skip-baselines'`
+   skips them to save time).
+4. **The result scripts refuse to overwrite** earlier results unless given `--overwrite`. The pipeline passes it to
+   fit, compare and the analyses on every run of those steps; what keeps a finished step's results is its marker in
+   `<run>/.done/`, so a rerun with the same `--run` skips that step.
 5. `scripts/verify_bucket_copy.py` checks that every file of a local folder is in a bucket prefix with the same size
    and Xet content hash, before the local copy is deleted.
 
