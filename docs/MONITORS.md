@@ -282,7 +282,8 @@ caveats are in [`INKLING_PROBES.md`](INKLING_PROBES.md); the deployed monitors a
 (`meta["episode"]`) becomes a replay item through `whitebox/probe_datasets.episode_item`, the function that built
 the training data, with the run's env options (`replay_env_options`: the env's own values, its defaults included).
 The server renders it with `whitebox/inkling_replay.py`, the RL loop's TML renderer at the probe's effort, in the
-probe's view, then appends the follow-up turn. A live episode thus renders byte for byte as a training episode did.
+probe's view, then appends the follow-up turn. A live episode thus renders to the same tokens as a training episode
+did; at startup the golden check compares the sha256 of its golden episodes' rendered tokens with the stored ones.
 Only replay fields leave the run, never the oracle's labels.
 
 **Checks when the monitor is built:**
