@@ -624,24 +624,29 @@ in a few dimensions, and so says little about the episode. If it does, the token
 compared with it. The rule has two triggers, and neither fired.
 
 **Trigger 1, the norm ratio (above 5 in layers 10–35): not met.** "Yes"'s median norm is 1.09 times its context's on
-the diagnostics sample (the footer of the "Yes" comparison above), and between 1.09 and 1.22 times (median 1.14)
-across the 20 per-token files below. <!-- src: data/probe_results/compare/followup/decision.json (sink);
-data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.files, per_token.sink_check) -->
+the diagnostics sample (the footer of the "Yes" comparison above), and 1.14 times on the 20 per-token files below by
+the same statistic (each file alone: 1.09 to 1.22, median 1.12). <!-- src:
+data/probe_results/compare/followup/decision.json (sink);
+data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.sink_check; per_token.files,
+yes_ratio_to_context, median over layers 10–35) -->
 
 **Trigger 2, "the same ≤ 8 massive dimensions dominate its norm": not met.** It has no threshold, so it was measured
 twice.
 - **On "Yes" alone** (the 4-bit diagnostics; report only, in `compare/followup/report.md`): its 8 largest dimensions
-  carry 90–96% of its squared norm in layers 8–16, 62% at layer 20 and 44% in the median layer of 10–35, and they
-  are the same dimensions in 88% of the inputs. <!-- src: data/probe_results/compare/followup/decision.json
-  (massive_dims.nvfp4) --> Read alone, that could look like domination.
+  carry 90–96% of its squared norm in layers 8–16, 62% at layer 20 and 44% in the median layer of 10–35. They are
+  much the same dimensions from input to input: in the median layer of 10–35, 88% of an input's 8 are among the 8
+  that occur most often across the inputs. <!-- src: data/probe_results/compare/followup/decision.json
+  (massive_dims.nvfp4: top_share, consistency) --> Read alone, that could look like domination.
 - **At every token** (`probe_analyses.py massive-dims`): 25,949 tokens of the 10 episodes whose whole hidden states
   were stored, in both views, on the 4-bit reader. <!-- src:
-  data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token) -->
+  data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.roles: top_share, yes_overlap and
+  yes_dims_share, by band and by layer) -->
   - In layers 4–16 every kind of token (the policy's text, the prompt, the markers, "Yes", the token before it)
-    holds about 94% of its squared norm in its own top 8 dimensions, and those are essentially the same dimensions
-    as "Yes"'s.
-  - From layer 17 on, "Yes" is less concentrated than ordinary tokens: 44% in the median layer of 10–35, against
-    58–63% for the others.
+    holds about 94% of its squared norm in its own top 8 dimensions. Most of that sits in "Yes"'s 8: they hold 92–94%
+    of the other tokens' squared norm, although on average only 3.4 to 5 of a token's own 8 are among them.
+  - From layer 17 on, "Yes" is mostly less concentrated than the policy's text, the prompt and the markers: 44% in
+    the median layer of 10–35, against 58–63% for them (at layers 17, 18, 23, 39 and 41 it is above at least one of
+    them). The token before "Yes" is lower still, 40%.
   - The only sink-like token is the first one, at position 0: 99% of its squared norm in its top 8 dimensions, and a
     norm about 25 times the episode's median, in layers 4–16.
   - Over every stored episode, on full precision: "Yes" holds 43–45% in its top 8 (median layer of 10–35), the token
