@@ -5,7 +5,7 @@ and cannot do, and how to use them. The tables are generated from the committed 
 `data/probe_results/` by `experiments/probe_report.py`; the prose around them is written by hand.
 
 - Pre-registration (the analysis rules, written before the main feature extraction and before any probe was
-  fitted): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
+  fitted; section 5 says when): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
 - Deployed monitors and how to pick one: [`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md)
 - Where every result file came from: [`data/probe_results/PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
 - Related docs: [`MONITORS.md`](MONITORS.md) (the monitor and the server), [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)
@@ -202,16 +202,26 @@ practice an 8-GPU VM.
 
 ## 5. Fitting, and the pre-registered rules
 
-The analysis was pre-registered: its rules were written at about 02:00 UTC on 2026-10-10, before the main feature
-extraction (from 02:04) and before any probe was fitted. There is no external timestamp. What there is: the rules'
-sha256 (`58eb5782…`) is recorded in every fitted probe's `meta.json` as `prereg_sha256`, the earliest fitted from
-03:02 UTC that day. <!-- src: data/probe_results/fitted/*/*/*/*/meta.json (fitted_utc, prereg_sha256) --> The rules are in [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), byte for
-byte, and `tests/test_preregistration.py` checks that the file still has that hash. Since the file must stay
-byte-identical, two of its terms are explained here: "Vlad" is the teammate running the TerminalEnv RL runs ("Vlad's
-oracle" is the environment's `behavior_present` label, "Vlad's runs" are those RL runs), and the "FAR/Atlas
-protocol" is the multi-layer probe of FAR's and the Obfuscation Atlas's papers, the repo's `LinearProbe`: C = 1 at
-every layer, keep the layers whose training cross-entropy is below 0.6 ("train CE < 0.6"), average their
-probabilities. In brief:
+The analysis was pre-registered: its rules were fixed on 2026-10-10, before the main feature extraction (from 02:08
+UTC) and before any probe was fitted. There is no external timestamp. What there is:
+- The rules' sha256 (`58eb5782…`) is recorded in every fitted probe's `meta.json` as `prereg_sha256`, the earliest
+  fitted from 03:02 UTC that day. <!-- src: data/probe_results/fitted/*/*/*/*/meta.json (fitted_utc, prereg_sha256) -->
+- The rules are, byte for byte, section 5b of the original plan, a file not in the repo. That file was last modified at
+  01:21 UTC. The section's heading says "fixed 2026-10-10 ~02:00 UTC", as does the project's run log, which later
+  notes that "the entries above marked '01:00–02:20' actually ran from about 00:50 to 01:20 UTC". <!-- src: the plan
+  file's modification time, 2026-10-10T01:21:22Z, and the project's run log (neither in the repo) -->
+- From 01:24 to 01:46 UTC, two rehearsal VMs ran the GPU session on samples of the datasets (768 items each of the
+  IID and OOD sets, and the 196 concealed hacks). The second also ran the reader diagnostics, on 164 inputs (the main
+  session's took 228); the run log records 4.7% mean readout jitter and "Yes" not sink-like. <!-- src: the launcher's
+  job.json records and session logs of the two rehearsals, 20261010-012429 and 20261010-013150 (not in the repo) -->
+
+The rules are in [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), byte for byte (committed
+on 2026-10-12, with the same hash), and `tests/test_preregistration.py` checks that the file still has that hash.
+Since the file must stay byte-identical, two of its terms are explained here: "Vlad" is the teammate running the
+TerminalEnv RL runs ("Vlad's oracle" is the environment's `behavior_present` label, "Vlad's runs" are those RL runs),
+and the "FAR/Atlas protocol" is the multi-layer probe of FAR's and the Obfuscation Atlas's papers, the repo's
+`LinearProbe`: C = 1 at every layer, keep the layers whose training cross-entropy is below 0.6 ("train CE < 0.6"),
+average their probabilities. In brief:
 
 - **One probe** per reader × dataset × view × readout.
 - **Model:** standardized features, then an L2-regularized logistic regression with balanced class weights.
@@ -1071,9 +1081,12 @@ full.
   their deployment as `deployed_code`.
 - **Timeline (UTC):**
   - 2026-10-09: the IID and OOD datasets built (the concealment set early on 2026-10-10).
-  - 2026-10-10, ~02:00: pre-registration written. Features extracted on spot B300s: the 4-bit reader 02:08–02:42,
-    full precision 03:34–04:00 (an 8× B300). Fits from 03:02 and through the day; reader comparison 08:08;
-    deployment 08:12; serving check on a real B300 08:16–08:28. Afternoon: mean and router fits, OOD refits.
+  - 2026-10-10: the pre-registration's text last modified at 01:21 (the plan file's time; its heading says ~02:00,
+    section 5); two rehearsal VMs on samples of the data 01:24–01:46. Features extracted on spot B300s: the 4-bit
+    reader 02:08–02:42 (its VMs launched from 02:04), full precision 03:34–04:00 (an 8× B300). Fits from 03:02 and
+    through the day; reader comparison 08:08; deployment 08:12, redone at 08:14 because the first wrote a stale t₁%
+    into `meta.json` (the committed monitors' `deployed_utc`); serving check on a real B300 08:16–08:28. Afternoon:
+    mean and router fits, OOD refits.
   - 2026-10-11: learning curves.
   - 2026-10-12: the mean monitors redeployed full-precision-trained; code stamping added; all eight monitors then
     redeployed with new metadata only (the repo path of the fitted probe, the code stamp). The fits re-checked
