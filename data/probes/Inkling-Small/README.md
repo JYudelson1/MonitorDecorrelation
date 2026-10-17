@@ -79,11 +79,18 @@ At the top level:
   tolerance, and a `serving_check` on the 4-bit reader's features (test AUROC and the shares of hacks and of honest
   episodes flagged at t₁%; for the follow-up probes also the batching-rule numbers).
 - **`task_splits.json`**: the TerminalEnv task ids of the probes' `train`, `val` and `test` splits. The probes were
-  fitted, selected and calibrated on pre-RL episodes of the `train` and `val` tasks, which come from the same pool
-  as a seed-0 RL run's eval tasks. Every other task is unseen by the probes: a seed-0 run's eval tasks in the `test`
-  list, and every task of a run with another seed, since eval task ids carry the seed. Report held-out metrics on
-  unseen tasks too; the post-hoc scorer writes them as its `*_unseen` fields (episodes without a task id are left
-  out).
+  fitted, selected and calibrated on pre-RL episodes of the `train` and `val` tasks, all of them eval tasks of seed 0.
+- **`grids.json`**: the same splits as grid keys, the sha256 of the grid each task's question shows (`key` gives the
+  definition), with the dataset's `items_sha256` and the code version that wrote it. The RL runs evaluate on these
+  grids under other task ids: an eval task id carries its run's seed (`eval_<seed + 7919>_<i>`), but seed s's eval
+  task i is seed 0's task s + i, the same grid. So a run with a seed below 660 evaluates partly or wholly on the
+  probes' grids. The configs' seed is 0. Vlad's current batch (LoRA rank 8, from 2026-09-30) used seeds 200–218, his earlier
+  rank-64 runs 0–35 and 100–109; every one is below 660. His control-seed-218 shares no task id with the probes, yet all 64 of its eval grids are here, 48 in `train` or `val`
+  and 16 in `test`. Seeds from about 660 to 7,250 keep a run's train and eval grids clear of the probes' data, apart
+  from one grid repeated by chance in each of two bands
+  ([`docs/INKLING_PROBES.md`](../../../docs/INKLING_PROBES.md#9-known-problems-and-caveats), caveat 4). Report
+  held-out metrics on the unseen grids too, those in neither `train` nor `val`: the post-hoc scorer reads this file
+  and writes them as its `*_unseen` fields (episodes whose question shows no grid are left out).
 
 ## Using them
 
@@ -109,5 +116,7 @@ uv run python experiments/deploy_probes.py --probes data/probe_results/fitted/bf
 ```
 
 It replaces each monitor directory it deploys, recalibrates the thresholds on the 4-bit features, writes new golden
-sets, and merges its entries into `deployed.json`. `scripts/run_probe_pipeline.sh` runs this as its deploy stage,
-after fetching the features ([`docs/INKLING_PROBES.md`](../../../docs/INKLING_PROBES.md#re-running-the-pipeline)).
+sets, rewrites `task_splits.json` and `grids.json`, and merges its entries into `deployed.json`.
+`scripts/run_probe_pipeline.sh` runs this as its deploy stage, after fetching the features
+([`docs/INKLING_PROBES.md`](../../../docs/INKLING_PROBES.md#re-running-the-pipeline)). `grids.json` alone needs only
+the items: `uv run python experiments/deploy_probes.py --grids-only` rewrites it and touches no monitor.

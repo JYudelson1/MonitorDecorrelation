@@ -115,9 +115,14 @@ exactly as in training, scoring all the probes in one pass per view. It writes p
 recall and false-alarm rate at 0.5, class means and counts, and the same on the tasks no probe saw (`*_unseen`).
 `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids (not the suspiciousness-gap grid,
 which reads `eval_metrics.jsonl` only).
-- **Unseen tasks** are those in neither the `train` nor the `val` list of `--task-splits` (by default the deployed
-  probes' `task_splits.json`). For a seed-0 run those are its eval tasks in the `test` list; for any other seed,
-  every task, since eval task ids carry the seed. Episodes without a task id are left out of the `*_unseen` fields.
+- **Unseen tasks** are those whose grid is in neither the `train` nor the `val` list of `--grids` (by default the
+  deployed probes' `grids.json`). This goes by grid, not by task id: task ids carry the seed, but grids repeat across
+  seeds (seed s's eval task i is seed 0's task s + i), so with any seed below 660, the configs' 0 included, a run's
+  eval grids are partly or wholly the IID probe's own. Of control-seed-218's 64 eval grids, 48 are in the probe's
+  train or val split and 16 in test. Seeds from about 660 to 7,250 keep a run's train and eval grids clear of the
+  probe's data ([`INKLING_PROBES.md`](INKLING_PROBES.md#9-known-problems-and-caveats), caveat 4). Episodes whose
+  question shows no grid are left out of the `*_unseen` fields. The log gives each run's count of grids the probes
+  saw, of test grids and of new ones. (`--task-splits FILE`, the old option, reads the `grids.json` next to FILE.)
 - **Resuming:** per-episode scores are appended to `probe_scores_inkling.jsonl`, so an interrupted session goes on
   where it stopped. A stored score is reused only while its line in `eval_rollouts.jsonl` still holds the same
   episode, by the sha256 of the episode's replay item: `run_experiment.py --resume` cuts `eval_rollouts.jsonl` back

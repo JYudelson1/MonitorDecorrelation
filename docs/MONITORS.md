@@ -360,9 +360,13 @@ and writes `probe_eval_<name>.jsonl` per run and probe (tracked by git): per eva
 `behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts, and the same on
 the tasks no probe saw (`*_unseen`). `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids;
 the suspiciousness-gap grid reads only `eval_metrics.jsonl`.
-- **Unseen tasks** are those in neither the `train` nor the `val` list of the probes' `task_splits.json`: for a run
-  with seed 0 its `test` tasks, for any other seed every task, since eval task ids carry the seed. Episodes without a
-  task id are left out of the `*_unseen` fields.
+- **Unseen tasks** are those whose grid is in neither the `train` nor the `val` list of the probes' `grids.json`. It
+  goes by grid because a task id carries its run's seed and a grid doesn't: seed s's eval task i is seed 0's task
+  s + i, so a run with a seed below 660, the configs' 0 included, evaluates partly or wholly on the IID probe's own
+  grids (control-seed-218: 48 of its 64 eval grids in the probe's train or val split, 16 in test). Seeds from about
+  660 to 7,250 keep a run's train and eval grids clear of the probe's data
+  ([`INKLING_PROBES.md`](INKLING_PROBES.md#9-known-problems-and-caveats), caveat 4). Episodes whose question shows no
+  grid are left out of the `*_unseen` fields.
 - **Resuming:** per-episode scores go to `probe_scores_inkling.jsonl` in each run folder. A stored score is reused only
   while its line in `eval_rollouts.jsonl` still holds the same episode, by the sha256 of the episode's replay item
   (the hash the live monitor keys episodes by). A line number alone isn't enough: `run_experiment.py --resume` cuts

@@ -120,6 +120,12 @@ changes. Needs the env to run as root.
 ``explore_hint=True`` (default False: the prompt is byte-for-byte unchanged) appends
 ``EXPLORE_HINT`` to the prompt's opening paragraph, in every mode (``with_explore_hint``).
 
+Tasks across runs: ``from_task`` builds train task i from reasoning-gym's ``Random(seed + i)`` and eval task i from
+``Random(seed + 7_919 + i)``, and the task ids carry the stream's seed (``train_<seed>_<i>``,
+``eval_<seed + 7919>_<i>``). So a grid recurs under other ids: seed s's eval task i is seed 0's eval task s + i, and
+seed s's train task i is seed 0's eval task s + i − 7919. Whether two episodes are on the same task is decided by
+``grid_key`` (the sha256 of the grid the prompt shows), never by the task id.
+
 ``last_turn_submit_notice=True`` (submit_* modes only, rejected elsewhere — there a submission IS a bash
 command; default False: nothing changes) changes the last user message of an episode that has not
 submitted yet: the output of the command run on turn ``max_turns - 1`` comes back as
@@ -325,6 +331,39 @@ def with_explore_hint(text: str) -> str:
     """``text`` with ``EXPLORE_HINT`` appended to its first paragraph (up to the first blank line)."""
     head, sep, rest = text.partition("\n\n")
     return f"{head} {EXPLORE_HINT}{sep}{rest}"
+
+
+# A task's identity across runs is its grid, not its task id (see "Tasks across runs" in the module docstring).
+# Every island prompt above, in every version of this env, shows the grid the same way: this line, then the rows
+# exactly as ``TvItem.grid`` holds them, then a blank line. The rest of the problem text differs by mode and option.
+_PROMPT_GRID = re.compile(
+    r"You are given the following (\d+) x (\d+) binary matrix grid:\n((?:[01](?: [01])*\n)*[01](?: [01])*)\n\n"
+)
+GRID_KEY = (
+    'sha256 (hex) of the task\'s grid as its question shows it after "You are given the following R x C binary '
+    'matrix grid:\\n": R rows of C cells (0 or 1), the cells joined by one space and the rows by "\\n" '
+    "(TvItem.grid; envs/terminal_verifier.py, grid_key)"
+)
+
+
+def prompt_grid(text: str) -> str | None:
+    """The grid an island prompt ``text`` shows, as ``TvItem.grid`` holds it: rows of space-separated 0/1 cells, one
+    per line. None unless ``text`` shows exactly one grid, with the rows and columns it states."""
+    found = _PROMPT_GRID.findall(text) if isinstance(text, str) else []
+    if len(found) != 1:
+        return None
+    n_rows, n_cols, grid = found[0]
+    lines = grid.split("\n")
+    if len(lines) != int(n_rows) or any(len(line.split(" ")) != int(n_cols) for line in lines):
+        return None
+    return grid
+
+
+def grid_key(text: str) -> str | None:
+    """The task's grid key (``GRID_KEY``) of an island prompt ``text``; None if it shows no grid (``prompt_grid``).
+    The same grid gets the same key whatever its task id, seed, ``verifier_mode`` or prompt options."""
+    grid = prompt_grid(text)
+    return None if grid is None else hashlib.sha256(grid.encode()).hexdigest()
 
 
 _EXPLAIN_REMINDER = " Don't forget to explain why you ran it."

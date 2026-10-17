@@ -874,13 +874,32 @@ pre-registered and reported as such.
    rate of at least 78.2% (counting tasks) or 84.6% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
    least 95.2% or 96.3%. The printed bootstrap intervals of [1.0, 1.0] are degenerate (section 6.3). <!-- src: the
    test_set_bounds table, data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json -->
-4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes from the same pool of evaluation tasks that
-   seed-0 RL runs evaluate on. Report held-out metrics on the tasks no probe saw too: those in neither the `train`
-   nor the `val` list of [`task_splits.json`](../data/probes/Inkling-Small/task_splits.json). For a seed-0 run those
-   are its eval tasks in the `test` list; for any other seed, every task, because eval task ids carry the seed. The
-   post-hoc scorer writes these: its `*_unseen` fields (`auroc_unseen`, `recall_at_threshold_unseen`, …) are the same
-   metrics on unseen tasks only, leaving out episodes without a task id (section 10). Within-task AUROC says the
-   probes don't key on the task, but the clean number costs nothing.
+4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes of seed 0's evaluation tasks, and RL runs
+   evaluate on the same grids under other task ids. A task id carries its run's seed (`eval_<seed + 7919>_<i>`), but
+   reasoning-gym builds task i of a stream from `Random(stream seed + i)`, so seed s's eval task i is seed 0's task
+   s + i. The probes' 512 tasks are seed 0's eval tasks with indices 0 to 659 <!-- src:
+   data/probes/Inkling-Small/task_splits.json -->, so a run with a seed below 660 evaluates partly or wholly on them.
+   The configs' seed is 0. Vlad's current batch (LoRA rank 8, from 2026-09-30) used seeds 200–218, his earlier
+   rank-64 runs 0–35 and 100–109; every one is below 660. <!-- src: the run configs in the W&B project
+   jyudel-redwood-research/terminal-env-inkling-small, 2026-10-14 --> His control-seed-218
+   shares no task id with the probes' dataset, yet all 64 of its eval grids are in it: 48 in the train or val split,
+   16 in test. <!-- src: control-seed-218's eval_rollouts.jsonl (Vlad's control run of 2026-10-02, sha256
+   e085920a…, not in the repo or the buckets): its questions' grid keys against data/probes/Inkling-Small/grids.json,
+   2026-10-13 -->
+   - Report held-out metrics on the tasks no probe saw too: those whose grid is in neither the `train` nor the `val`
+     list of [`grids.json`](../data/probes/Inkling-Small/grids.json) (each task's grid key, the sha256 of the grid
+     its question shows). The post-hoc scorer writes these: its `*_unseen` fields (`auroc_unseen`,
+     `recall_at_threshold_unseen`, …) are the same metrics on unseen grids only, leaving out episodes whose question
+     shows no grid (section 10). Until 2026-10-13 it went by task id, which called every eval task of a run with
+     seed ≠ 0 unseen. Within-task AUROC says the probes don't key on the task, but the clean number costs nothing.
+   - **Seeds 660 to 7,255** keep a run's train and eval grids clear of the probes' data, with the configs' pools of
+     512 train and 256 eval tasks. A run with seed s draws its train grids from `Random(s)` to about
+     `Random(s + 660)` and its eval grids from `Random(s + 7919)` to about `Random(s + 8250)`, and the probes' grids
+     came from `Random(7919)` to `Random(8578)`. Seeds above 8,578 are clear too. Three sparse grids of the probes'
+     also come up by chance from another seed: seeds 1,384 to 2,042 train on one of their train grids
+     (`eval_7919_163`'s), and seeds 2,699 to 3,038 have one of their test grids (`eval_7919_91`'s) in the eval pool.
+     <!-- src: from_task and holdout simulated for every seed from 0 to 9,000 on reasoning-gym 0.1.25's generator,
+     and checked against the env itself for six of them, 2026-10-13 (not in the repo) -->
 5. **Serving is fragile.**
    - It needs one B300 for the 4-bit reader.
    - Spot VMs were preempted about 1.4 times per VM-hour in our runs, mostly in their first minutes. <!-- src:
@@ -1011,7 +1030,9 @@ uv run python experiments/eval_inkling_probes_on_runs.py --model /mnt/ram/Inklin
 It replays every valid eval episode exactly as in training, scoring all the probes in one pass per view, and writes
 `probe_eval_<name>.jsonl` per run (tracked by git, like `eval_metrics.jsonl`). Per eval step: AUROC against
 `behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts; and the same on
-the tasks no probe saw (`*_unseen`: tasks in neither the `train` nor the `val` list of `task_splits.json`).
+the tasks no probe saw (`*_unseen`: tasks whose grid is in neither the `train` nor the `val` list of `grids.json`;
+by grid, because grids repeat across seeds under other task ids, section 9, caveat 4). Its log gives each run's
+count of eval grids the probes saw, of test grids and of new ones.
 `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids of the degradation matrix. The
 suspiciousness-gap grid reads only `eval_metrics.jsonl`, so post-hoc probes are not in that grid, the matrix's
 headline read.
@@ -1059,7 +1080,8 @@ full.
     (05:26–07:05), the readout fallback fitted (07:02–09:26), both reader comparisons re-run with the final code
     (07:37–09:52); results collected into `data/probe_results/`.
   - 2026-10-13: the per-token massive-dimension and readout-gap analyses; the readout rule settled (keep "Yes"); the
-    buckets cleaned of everything git now holds.
+    buckets cleaned of everything git now holds. `grids.json` added next to the monitors, which are unchanged, and
+    the post-hoc scorer's unseen tasks decided by grid (section 9, caveat 4).
 - **Reader comparisons, re-run:** both were re-run on 2026-10-12 at `7cdf93d`. The follow-up comparison reproduces
   all 110 values of the 2026-10-10 run (agreement, refit floor, ΔAUROC, rules and decision); the re-run adds the
   report-only massive dimensions and the cross-reader fields. <!-- src: data/probe_results/PROVENANCE.md

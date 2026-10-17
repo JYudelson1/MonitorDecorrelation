@@ -101,6 +101,10 @@ anyway. `readout_fallback/DECISION_RULE.md` fixed how it would be decided at 06:
 
 All eight are served on the 4-bit reader with thresholds recalibrated on its features (`deploy_probes.py`).
 
+`grids.json` (2026-10-13): the probes' task splits as grid keys, which the post-hoc scorer reads to tell which of a
+run's eval tasks the probes saw. `deploy_probes.py --grids-only` wrote it from terminal_prerl's items; its `dataset`
+and `code` fields record their `items_sha256` and the commit. No monitor changed.
+
 ## Where the inputs and raw outputs live
 
 - **This folder and `data/probes/Inkling-Small/`:** every result above, and the deployed monitors.
