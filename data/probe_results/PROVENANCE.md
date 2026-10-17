@@ -2,8 +2,10 @@
 
 This file records what produced each result in this folder and each deployed monitor in
 [`data/probes/Inkling-Small/`](../probes/Inkling-Small/): which code, data and model, and what was checked afterwards.
-[`MANIFEST.json`](MANIFEST.json) maps every collected file to the run folder it came from, with both sha256s. Times
-are UTC; "4-bit" is the NVFP4 reader, "full precision" the bf16 one.
+[`MANIFEST.json`](MANIFEST.json) lists every collected file with its sha256 and the run folder it came from
+(`source`). Where `collect` rewrote machine paths in the copy (38 files), it also records the source's sha256
+(`source_sha256`); the 18 `hack_counts.json`, which it counted from the fits' per-episode scores, list those files
+instead (`derived_from`). Times are UTC; "4-bit" is the NVFP4 reader, "full precision" the bf16 one.
 
 **Code versions.** Code stamping (`src/monitordecorrelation/provenance.py`) arrived on 2026-10-12 between 04:52 and
 05:29 (`ca9a1a0` to `28eaff4`). Anything made since records `code: {commit, dirty, diff_sha256, source}`; the deployed

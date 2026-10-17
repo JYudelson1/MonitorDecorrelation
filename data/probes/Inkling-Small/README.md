@@ -29,7 +29,7 @@ Each directory is `<dataset>/<view>/<readout>/`:
 | `terminal_prerl/with_reasoning/mean` | `probe_iid_with_reasoning_mean` | secondary IID probe (mean pooling) |
 | `terminal_prerl/without_reasoning/mean` | `probe_iid_without_reasoning_mean` | secondary IID probe (mean pooling), output-only view |
 | `diverse_deception/with_reasoning/mean` | `probe_ood_with_reasoning_mean` | **report only:** inverted on TerminalEnv (scores hacks below honest episodes) |
-| `diverse_deception/without_reasoning/mean` | `probe_ood_without_reasoning_mean` | report only: near chance on TerminalEnv |
+| `diverse_deception/without_reasoning/mean` | `probe_ood_without_reasoning_mean` | report only: at or below chance on TerminalEnv |
 
 **Which to use.** `probe_iid` and `probe_ood` as above. Both read the with-reasoning view, but served live they
 still cost one forward pass each: every monitor sends its own requests to the server, and only probes within one

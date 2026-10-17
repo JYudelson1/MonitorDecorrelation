@@ -338,7 +338,12 @@ may learn to hide the hack in its text. Only two results go beyond the obvious t
   being read.
 
 AUROC within each task is also 1.000, so the probes don't simply key on the task. The pre-registered sensitivity
-rows (multi-layer variants, not deployed) reach 1.000 as well.
+rows (multi-layer variants, not deployed; computed for the two 4-bit follow-up probes) reach 0.99998 with reasoning
+and 1.000 without. <!-- src: data/probe_results/fitted/nvfp4/terminal_prerl/*/followup/metrics.json (sensitivity) -->
+Both end up averaging every layer. The FAR/Atlas protocol fits each of the 43 layers (the embeddings included)
+without class weights, as the repo's `LinearProbe` does; with 0.9% positives even a constant at the base rate has a
+training cross-entropy of 0.05, far below the 0.6 cut, and the cut keeps all 43. The mean logit over the layers within
+0.01 of the best takes all 42, since every layer's dev AUROC is that close to 1.
 
 ### 6.2 The OOD probe
 
@@ -393,7 +398,7 @@ k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pear
 The IID test split has only 22 hacks, from 15 tasks. <!-- src:
 data/probe_datasets/terminal_concealed/manifest.json (counts.test: 2 levels × 22 hacks, 15 tasks) -->
 Catching all of them says less than it seems. With 97.5% confidence (the lower end of a 95% interval), the true catch
-rate at t₁% is then at least 78.2% if the 15 tasks are the independent units, or at least 84.6% if the 22 hacks are.
+rate at t₁% is then at least 78.1% if the 15 tasks are the independent units, or at least 84.5% if the 22 hacks are.
 Tasks are the safer unit, as a task's hacks are alike. The cross-fitted scores, where each episode is scored by a
 model that never saw its task, catch all 98 hacks from 75 tasks: at least 95.2% by task, 96.3% by hack. <!-- src:
 data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json (the test_set_bounds table) -->
@@ -467,7 +472,7 @@ From `compare/followup/decision.json` (experiments/compare_readers.py). Agreemen
   data/probe_results/compare/followup/decision.json (agreement) -->
 - **(b) passes:** no AUROC is lost.
 - **(c):** the 0.95 rank bar turned out to sit close to what batching noise alone produces: on the diagnostics
-  sample, the same reader one episode at a time against batched gives rank correlations of 0.89–0.98 (the batching
+  sample, the same reader one episode at a time against batched gives rank correlations of 0.88–0.98 (the batching
   floor at the end of the cross-reader table below). <!-- src: data/probe_results/compare/followup/decision.json
   (probes.*.batching_floor) --> So failing (a) would not be conclusive by itself. But the "Yes" probes also fail the
   noise-based check: in every view, each agrees less across the readers than with its own refits (refit-floor
@@ -703,8 +708,9 @@ Exploratory, not deployed: logistic regression on the router logits at "Yes" of 
 
 Logistic regressions on the router logits at "Yes": one MoE layer's logits (`router`), or all MoE layers concatenated
 (`router_all`). Same fitting and selection as the residual-stream probes. They are not deployed.
-- **IID:** one middle layer's router logits separate hacks perfectly, also from read-but-unused episodes. The routing
-  decision at "Yes" encodes the hack as cleanly as the residual stream does.
+- **IID:** one middle layer's router logits separate the test hacks perfectly (AUROC 1.000), and hacks from
+  read-but-unused episodes almost perfectly (cross-fitted, 0.9996–1.000). The routing decision at "Yes" encodes the
+  hack as cleanly as the residual stream does.
 - **OOD:** in distribution, the concatenation matches the residual-stream probes, but it doesn't transfer to hacks. A
   single layer transfers better, with the same sensitivity to reader and layer as the follow-up probe.
 - **Reader:** router readouts fail the reader rule for 4-bit (section 7), as expected from routing differences.
@@ -732,7 +738,7 @@ From `ood_refits/<reader>/<readout>/summary.json` (experiments/ood_refits.py): t
   data/probe_results/ood_refits/bf16/followup/summary.json (transfer_auroc_with_reasoning) -->
 - **The reader shifts the whole distribution:** refits on 4-bit features transfer better. The deployed probe's
   transfer is typical for its reader.
-- **The mean probes' inversion is real:** it is tight, on both readers.
+- **The mean probes' inversion (with reasoning) is real:** it is tight, on both readers.
 
 <!-- probe_report:begin ood_by_layer -->
 
@@ -863,8 +869,10 @@ From `learning_curves/<reader>/summary.json`'s `ood_sources`: the OOD follow-up 
 <!-- probe_report:end ood_source_mixes -->
 
 **The mix matters more than its size.** Each mix was refitted on bootstrap resamples, because a single fit's transfer
-is as noisy as the differences between mixes. Dropping MASK or sandbagging hurts transfer; no single source matches
-the full mix. The likely bottleneck is the kind of data: every OOD item is a short statement, while a TerminalEnv
+is as noisy as the differences between mixes. Dropping MASK or sandbagging hurts transfer in both views (and dropping
+LiarsBench, without reasoning). With reasoning no single source matches the full mix; without reasoning, sandbagging
+alone (0.675) beats it (0.606).
+The likely bottleneck is the kind of data: every OOD item is a short statement, while a TerminalEnv
 episode is a long agentic transcript. Examples of an agent lying about what it did are what the mix lacks. Adding
 them would make a new probe, not fix this one: the OOD probe was chosen on OOD data only, so a v2 would have to be
 pre-registered and reported as such.
@@ -881,8 +889,8 @@ pre-registered and reported as such.
 2. **The OOD probe detects lying, not hacking.** The pre-RL hacks admit using the verifier, so there is no lie to
    detect. It fires more on concealed hacks, and its transfer to hacks is low and fragile (sections 6.2, 8.2).
 3. **The test sets are small.** 22 test hacks in 15 tasks: "all caught" only shows, with 97.5% confidence, a catch
-   rate of at least 78.2% (counting tasks) or 84.6% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
-   least 95.2% or 96.3%. The printed bootstrap intervals of [1.0, 1.0] are degenerate (section 6.3). <!-- src: the
+   rate of at least 78.1% (counting tasks) or 84.5% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
+   least 95.2% or 96.3%. The printed bootstrap intervals of [1.000, 1.000] are degenerate (section 6.3). <!-- src: the
    test_set_bounds table, data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json -->
 4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes of seed 0's evaluation tasks, and RL runs
    evaluate on the same grids under other task ids. A task id carries its run's seed (`eval_<seed + 7919>_<i>`), but
@@ -929,7 +937,7 @@ pre-registered and reported as such.
    AUROC while recall at a fixed threshold collapses. Serving one episode at a time, while the thresholds came from
    batched features, adds noise near the threshold but no systematic shift.
 7. **The reader is part of the uncertainty.** The reader rule's 0.95 rank bar sat near batching noise (batching alone
-   gives rank correlations of 0.89–0.98), yet the "Yes" probes fail even the noise-based checks (section 7). <!-- src:
+   gives rank correlations of 0.88–0.98), yet the "Yes" probes fail even the noise-based checks (section 7). <!-- src:
    data/probe_results/compare/followup/decision.json (probes.*.batching_floor) --> The 4-bit-trained probes
    are an equally plausible alternative, and their OOD transfer differs a lot.
 8. **The recalibrated IID thresholds are in-sample.** The pre-registration takes IID thresholds from out-of-fold
@@ -965,7 +973,7 @@ pre-registered and reported as such.
 | `diverse_deception/with_reasoning/followup` | **the OOD probe** (`probe_ood`) |
 | `terminal_prerl/without_reasoning/followup`, `diverse_deception/without_reasoning/followup` | the same probes on the output-only view, for comparison with output-only judges |
 | `terminal_prerl/{with,without}_reasoning/mean` | secondary IID probes (mean pooling) |
-| `diverse_deception/{with,without}_reasoning/mean` | inverted on TerminalEnv: report only |
+| `diverse_deception/{with,without}_reasoning/mean` | inverted on TerminalEnv with reasoning, at or below chance without: report only |
 
 The follow-up probes are the main monitors, as the plan recommended. Averaged probes transferred worse in the
 Obfuscation Atlas and invite dilution (burying a short hack in a long transcript), which long TerminalEnv episodes
