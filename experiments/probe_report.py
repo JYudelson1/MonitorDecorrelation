@@ -880,13 +880,25 @@ def verify_fits(r: Results) -> list[str]:
                                for k in ("weights", "thresholds", "metrics", "test_logits")),
                      str(p.get("verdict", "—"))])
     passed = sum(str(p.get("verdict", "")).startswith("pass") for p, _ in latest.values())
+
+    def compared(dataset: str) -> str:
+        """How many metrics.json numbers the newest checks of ``dataset``'s probes compared: "12 numbers ", or ""."""
+        n = sorted({((p.get("refit") or {}).get("metrics") or {}).get("compared") for name, (p, _) in latest.items()
+                    if f"/{dataset}/" in name} - {None})
+        return "" if not n else f"{n[0]}{f'–{n[-1]}' if len(n) > 1 else ''} numbers "
+
     return md_table(["probe", "run", "grid cells matched / checked", "selection",
                      "largest Δ: weights; t₁/t₅; metrics; test logits", "verdict"], rows) + [
         "", f"{passed} of {len(latest)} probes pass (each probe's newest check). Runs:", ""] + notes + legend(
         "From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code",
-        "of the day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to",
-        "cv_grid.csv's to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics",
-        "and test logits (0: bit for bit).")
+        "each run records (above) and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs",
+        "(mean and sd over the repeats) equal to cv_grid.csv's, which keeps 5 decimals. Δ: the largest absolute",
+        "difference from the saved weights and intercept, t₁% and t₅%, main metrics and test logits (0: identical,",
+        f"bit for bit). The main metrics: {compared('terminal_prerl')}per IID probe (test AUROC and its CI, AUROC",
+        "under behavior_present, TPR and FPR at t₁% and t₅%, the counts) and "
+        f"{compared('diverse_deception')}per OOD probe (test AUROC and its CI, per source, each TerminalEnv view's",
+        "transfer metrics). Not re-checked: the IID probes' cross-fitted hard subsets and concealment,",
+        "leave-one-source-out, the baselines and the sensitivity rows.")
 
 
 def verify_run(s: dict) -> str:

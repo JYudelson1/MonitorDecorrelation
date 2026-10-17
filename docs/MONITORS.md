@@ -282,7 +282,8 @@ caveats are in [`INKLING_PROBES.md`](INKLING_PROBES.md); the deployed monitors a
 (`meta["episode"]`) becomes a replay item through `whitebox/probe_datasets.episode_item`, the function that built
 the training data, with the run's env options (`replay_env_options`: the env's own values, its defaults included).
 The server renders it with `whitebox/inkling_replay.py`, the RL loop's TML renderer at the probe's effort, in the
-probe's view, then appends the follow-up turn. A live episode thus renders byte for byte as a training episode did.
+probe's view, then appends the follow-up turn. A live episode thus renders to the same tokens as a training episode
+did; at startup the golden check compares the sha256 of its golden episodes' rendered tokens with the stored ones.
 Only replay fields leave the run, never the oracle's labels.
 
 **Checks when the monitor is built:**
@@ -339,7 +340,9 @@ reader chose at "Yes".
   - The mean bound is for what the per-episode one can't see: every logit shifted a little, e.g. by another library
     version. A +0.3 shift already raises the false-alarm rate at t₁% from 1% to 1.2–1.7%. The bound catches a shift
     of 0.55 or more with ≥ 95% probability per probe, smaller ones less reliably. By its own calibration it also
-    refuses a correct setup about 1% of the time per probe (`GOLDEN_MEAN_TOLERANCE` in `whitebox/probe_server.py`).
+    refuses a correct setup: with probability at most about 1.2% per follow-up probe (the worst case of the measured
+    batching noise), and about 1% that any of the four follow-up probes fails it; the mean probes' golden noise is
+    several times smaller (`GOLDEN_MEAN_TOLERANCE` in `whitebox/probe_server.py`).
   - The check catches a wrong reader, layer or rendering, and drift in transformers or the kernels, before it can
     look like monitor degradation.
 - **GPU check:** `experiments/check_probe_server.py` runs the golden check of every deployed probe at both batchings,

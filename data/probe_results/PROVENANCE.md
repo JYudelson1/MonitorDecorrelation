@@ -2,14 +2,17 @@
 
 This file records what produced each result in this folder and each deployed monitor in
 [`data/probes/Inkling-Small/`](../probes/Inkling-Small/): which code, data and model, and what was checked afterwards.
-[`MANIFEST.json`](MANIFEST.json) maps every collected file to the run folder it came from, with both sha256s. Times
-are UTC; "4-bit" is the NVFP4 reader, "full precision" the bf16 one.
+[`MANIFEST.json`](MANIFEST.json) lists every collected file with its sha256 and the run folder it came from
+(`source`). Where `collect` rewrote machine paths in the copy (38 files), it also records the source's sha256
+(`source_sha256`); the 18 `hack_counts.json`, which it counted from the fits' per-episode scores, list those files
+instead (`derived_from`). Times are UTC; "4-bit" is the NVFP4 reader, "full precision" the bf16 one.
 
 **Code versions.** Code stamping (`src/monitordecorrelation/provenance.py`) arrived on 2026-10-12 between 04:52 and
 05:29 (`ca9a1a0` to `28eaff4`). Anything made since records `code: {commit, dirty, diff_sha256, source}`; the deployed
 monitors also record `deployed_code`. The datasets, features, fits and the older analyses predate it, so their code
-version is reconstructed below. For the fits that matters least: the code of 2026-10-12 reproduces them bit for bit
-(see "Checks").
+version is reconstructed below. For the fits that matters least: re-running part of each fit reproduces it (see
+"Checks": 21 probes with the fitting code of `b416f89`, 2026-10-10, the three 4-bit follow-up probes at `2694851`,
+2026-10-12).
 
 ## Datasets (`data/probe_datasets/`)
 
@@ -43,8 +46,13 @@ manifest). `terminal_concealed` is derived from `terminal_prerl`'s items.
 - **Per-process records:** `features/<reader>/<dataset>/runs/*.json` next to the features, with start, end, host,
   shards, tokens, and whether the process stopped early.
 - **Code:** the features predate stamping, so `index.json` has no `code`. The extraction ran the code later committed
-  in `361f6c1` (2026-10-10 05:46); this is known from file timestamps. Since then, only `45e7a9e` changed the
-  extraction code, to record its code version.
+  in `361f6c1` (2026-10-10 05:46); this is known from file timestamps. Since then the extraction scripts
+  (`extraction.py`, `extract_probe_features.py`, `run_probe_session.py`, `diagnostics.py`) changed only in ways that
+  don't change what a shard holds: the code stamp (`45e7a9e`), exit codes for a stop with uploads in flight
+  (`f66ab89`), the check of `items.jsonl` against its manifest's hash, also for the diagnostics sample (`0af255e`),
+  and a docstring line (`628fe00`). What a shard holds comes from `features.py`, `inkling_replay.py`,
+  `inkling_nvfp4.py` and `rl/renderers.py`, unchanged since `361f6c1`; `terminal_verifier.py` and `probe_datasets.py`,
+  which the extraction imports too, have only gained functions (the grid key, `read_items`) and docstrings.
 
 ## Fitted probes (`fitted/`)
 
@@ -58,14 +66,15 @@ manifest). `terminal_concealed` is derived from `terminal_prerl`'s items.
 
 Each `meta.json` records the pre-registration's sha256, the reader (`reader_info`: loader, revision) and the C grid.
 The `followup_prev` fits read the same 2026-10-10 features: that readout was stored at extraction, and a copy holding
-only it was fetched from the full-precision bucket on 2026-10-12 (06:53–07:02).
+just it, the token counts and the answer log-probabilities (`fetch_features.py --keep followup_prev,counts,answer_logp`)
+was fetched from the full-precision bucket on 2026-10-12 (06:53–07:02).
 
 ## Analyses
 
 | result | made | code |
 |---|---|---|
-| `ood_refits/<reader>/<readout>/` | 2026-10-10, 15:09 (4-bit follow-up) to 18:45 (full-precision mean) | `experiments/ood_refits.py` as first committed in `b416f89` (14:18); changed since only to add the stamp (`28eaff4`) |
-| `learning_curves/bf16/` | 2026-10-11 03:56 | the code committed one minute later in `dd7d402`; changed since only to add the stamp |
+| `ood_refits/<reader>/<readout>/` | 2026-10-10, 15:09 (4-bit follow-up) to 18:45 (full-precision mean) | `experiments/ood_refits.py` as first committed in `b416f89` (14:18); changed since only to add the stamp and the refusal to overwrite without `--overwrite` (`28eaff4`) |
+| `learning_curves/bf16/` | 2026-10-11 03:56 | the code committed one minute later in `dd7d402`; changed since only in `28eaff4`, the same two changes |
 | `analyses/20261012T041431Z/dataset_stats.json` | 2026-10-12 04:14 | `experiments/probe_analyses.py` as committed one minute later in `cf402d5`, before stamping |
 | `analyses/20261012T073030Z/near_threshold.json` | 2026-10-12 07:30 | stamped: `2694851` |
 | `compare/followup/` | 2026-10-12 07:37–07:48 | stamped: `7cdf93d` |
@@ -119,13 +128,20 @@ and `code` fields record their `items_sha256` and the commit. No monitor changed
 ## Checks
 
 - **Fits reproduce** (`verify_fits/<run>/`). `experiments/verify_fits.py` recomputed a slice of each fit's CV grid
-  (2,207 cells in all), re-derived the selection and refitted the chosen probe. All 24 fitted probes reproduce bit for
-  bit: weights, t₁%/t₅%, metrics and test logits.
+  (2,207 cells in all), re-derived the selection and refitted the chosen probe. All 24 fitted probes pass:
+  - every recomputed grid cell (out-of-fold AUROC, mean and sd) equals `cv_grid.csv`'s to its 5 decimals, and every
+    selection comes out the same;
+  - the refits' weights, t₁%/t₅%, test logits and main metrics (12 numbers per IID probe, 33 per OOD probe) equal the
+    saved ones to the bit (largest difference 0);
+  - not re-checked: the IID probes' cross-fitted hard subsets and concealment, leave-one-source-out, the baselines and
+    the sensitivity rows.
   - `20261012T052659Z` (05:26–06:34): 21 probes, everything but the 4-bit follow-up probes. It ran `fit_probes.py`
-    and `probe_fit.py` as of `b416f89` (sha256 `83cfb844…`, `5ce6ede2…`); its own commit is not on this branch, so
-    its summary records the file hashes only.
+    and `probe_fit.py` as of `b416f89` (2026-10-10; sha256 `83cfb844…`, `5ce6ede2…`), with `verify_fits.py` as of
+    `0337bcf`; its own commit is not on this branch, so its summary records the file hashes only.
   - `20261012T063754Z` (06:37–07:05): the three 4-bit follow-up probes, at `2694851`.
-  - Since then the fitting code changed only to check the items' hashes (`0af255e`).
+  - Since `b416f89` the fitting code (`fit_probes.py`, `probe_fit.py`) changed only to read the pre-registration from
+    the repo (`93c455a`), to stamp its outputs and refuse to overwrite them (`28eaff4`), in docstrings (`628fe00`) and
+    to check the items' hashes (`0af255e`, the only change since `2694851`).
 - **Serving on a GPU, 2026-10-10 08:16–08:28** (one 1×B300, the 4-bit reader at `b6a99534…`, the eight monitors of
   the first deployment, committed just afterwards in `c7ee855`):
   - every monitor's golden check passed, one episode per forward and batched;

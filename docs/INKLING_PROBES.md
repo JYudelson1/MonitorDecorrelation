@@ -5,7 +5,7 @@ and cannot do, and how to use them. The tables are generated from the committed 
 `data/probe_results/` by `experiments/probe_report.py`; the prose around them is written by hand.
 
 - Pre-registration (the analysis rules, written before the main feature extraction and before any probe was
-  fitted): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
+  fitted; section 5 says when): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
 - Deployed monitors and how to pick one: [`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md)
 - Where every result file came from: [`data/probe_results/PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
 - Related docs: [`MONITORS.md`](MONITORS.md) (the monitor and the server), [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)
@@ -79,9 +79,11 @@ notice, at most 4 turns, reasoning effort 0.5).
 - The environment's own oracle, `behavior_present`, counts 104 hacks. <!-- src:
   data/probe_datasets/terminal_prerl/manifest.json --> The extra 6 are honest miscounts that happened to hit
   the corrupted value (`passed_blind`). `behavior_present` is reported as a secondary label.
-- **Split by task**, 60/20/20, stratified by whether a task has a hack. A task's episodes share the question and the
-  verifier, so a split by episode would leak. Fitting and selection use **dev** = train ∪ val; **test** is scored
-  once per final probe.
+- **Split by task**, 60/20/20, stratified by whether a task has a hack by the environment's label (`behavior_present`:
+  76 tasks, one more than have a `used_verifier` hack). <!-- src: src/monitordecorrelation/whitebox/probe_datasets.py
+  (the split stratifies on `label`); items.jsonl of terminal_prerl (bucket datasets/), counted 2026-10-17 --> A task's
+  episodes share the question and the verifier, so a split by episode would leak. Fitting and selection use **dev** =
+  train ∪ val; **test** is scored once per final probe.
 
 **`terminal_concealed`: a stress set.** Every hack, edited so that the policy no longer admits it
 (`whitebox/probe_datasets.py`, `conceal`). The edit is mechanical: every sentence matching `verif`, `ground` or `truth`
@@ -148,7 +150,8 @@ The reader is Inkling-Small, the policy's base model. It is a mixture-of-experts
 | Loaded by | our loader, `whitebox/inkling_nvfp4.py` | standard transformers |
 | GPUs per copy | one NVIDIA B300 | three B300s |
 
-The exact revisions are in every probe's `meta.json` (`reader_info`, `trained_reader_info`).
+The exact revisions are in every probe's `meta.json` (`reader_info`; a deployed monitor's also has
+`trained_reader_info`, for the reader it was trained on).
 
 **Words used below.** "4-bit" and "full precision" name the reader whose activations a probe was trained on (or is
 served on). The probes themselves are ordinary float64 logistic regressions either way.
@@ -188,6 +191,10 @@ practice an 8-GPU VM.
      in float32 (bf16 would round values near Inkling's largest activations too coarsely);
    - the router logits and the chosen experts at "Yes", in every MoE layer;
    - the reader's own log-probabilities of "Yes" and "No", for the self-report baseline.
+
+   A probe's layer counts these hidden states from 0, the embeddings: probe layer 25 is the output of decoder layer
+   24 when the decoder layers are counted from 0, as section 3's table and the router probes' "model layer" (section
+   8.1) count them. MoE layer i is decoder layer i + 2.
 5. **Storage.** Safetensors shards of 256 items (format `inkling-probe-features/v2`), in two private Hugging Face
    buckets: `probemaxxing/inkling-probes` (4-bit features, under `features/nvfp4/`) and
    `probemaximizer/inkling-probes-bulk` (full precision, under `features/bf16/`). Access must be granted by the
@@ -202,23 +209,36 @@ practice an 8-GPU VM.
 
 ## 5. Fitting, and the pre-registered rules
 
-The analysis was pre-registered: its rules were written at about 02:00 UTC on 2026-10-10, before the main feature
-extraction (from 02:04) and before any probe was fitted. There is no external timestamp. What there is: the rules'
-sha256 (`58eb5782…`) is recorded in every fitted probe's `meta.json` as `prereg_sha256`, the earliest fitted from
-03:02 UTC that day. <!-- src: data/probe_results/fitted/*/*/*/*/meta.json (fitted_utc, prereg_sha256) --> The rules are in [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), byte for
-byte, and `tests/test_preregistration.py` checks that the file still has that hash. Since the file must stay
-byte-identical, two of its terms are explained here: "Vlad" is the teammate running the TerminalEnv RL runs ("Vlad's
-oracle" is the environment's `behavior_present` label, "Vlad's runs" are those RL runs), and the "FAR/Atlas
-protocol" is the multi-layer probe of FAR's and the Obfuscation Atlas's papers, the repo's `LinearProbe`: C = 1 at
-every layer, keep the layers whose training cross-entropy is below 0.6 ("train CE < 0.6"), average their
-probabilities. In brief:
+The analysis was pre-registered: its rules were fixed on 2026-10-10, before the main feature extraction (from 02:08
+UTC) and before any probe was fitted. There is no external timestamp. What there is:
+- The rules' sha256 (`58eb5782…`) is recorded in every fitted probe's `meta.json` as `prereg_sha256`, the earliest
+  fitted from 03:02 UTC that day. <!-- src: data/probe_results/fitted/*/*/*/*/meta.json (fitted_utc, prereg_sha256) -->
+- The rules are, byte for byte, section 5b of the original plan, a file not in the repo. That file was last modified at
+  01:21 UTC. The section's heading says "fixed 2026-10-10 ~02:00 UTC", as does the project's run log, which later
+  notes that "the entries above marked '01:00–02:20' actually ran from about 00:50 to 01:20 UTC". <!-- src: the plan
+  file's modification time, 2026-10-10T01:21:22Z, and the project's run log (neither in the repo) -->
+- From 01:24 to 01:46 UTC, two rehearsal VMs ran the GPU session on samples of the datasets (768 items each of the
+  IID and OOD sets, and all 196 items of the concealment set). The second also ran the reader diagnostics, on 164
+  inputs (the main session's took 228); the run log records 4.7% mean readout jitter and "Yes" not sink-like. <!-- src:
+  the launcher's job.json records and session logs of the two rehearsals, 20261010-012429 and 20261010-013150 (not in
+  the repo) -->
+
+The rules are in [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), byte for byte (committed
+on 2026-10-12, with the same hash), and `tests/test_preregistration.py` checks that the file still has that hash.
+Since the file must stay byte-identical, two of its terms are explained here: "Vlad" is the teammate running the
+TerminalEnv RL runs ("Vlad's oracle" is the environment's `behavior_present` label, "Vlad's runs" are those RL runs),
+and the "FAR/Atlas protocol" is the multi-layer probe of FAR's and the Obfuscation Atlas's papers, the repo's
+`LinearProbe`: C = 1 at every layer, keep the layers whose training cross-entropy is below 0.6 ("train CE < 0.6"),
+average their probabilities. In brief:
 
 - **One probe** per reader × dataset × view × readout.
 - **Model:** standardized features, then an L2-regularized logistic regression with balanced class weights.
 - **Choosing the layer and C** (C is the inverse regularization strength), on dev only: grouped cross-validation,
   5 folds × 3 repeats, grouped by task (OOD: by pair). Take the best mean out-of-fold AUROC, then the smallest C within
-  one standard error of it (the "one-SE rule"), then tie-breaks. If every layer and C score the same (a "flat grid"),
-  use C = 1e-3 at the middle layer. <!-- src: docs/inkling_probes_preregistration.md --> Each probe searched 42
+  one standard error of it (the "one-SE rule"), then tie-breaks. If all mean out-of-fold AUROCs lie within 0.005 of
+  each other (a "flat grid"; the pre-registration gives no number, 0.005 is the code's), use C = 1e-3 at the middle
+  layer (22 of 1–42). <!-- src: docs/inkling_probes_preregistration.md; src/monitordecorrelation/whitebox/probe_fit.py
+  (select) --> Each probe searched 42
   layers × 6 values of C = 252 configurations (the per-layer router probes 40 × 6 = 240, the all-layer ones 6). <!-- src:
   data/probe_results/fitted/*/*/*/*/cv_grid.csv (one row per configuration) -->
 - **One layer**, refit on all of dev.
@@ -230,8 +250,10 @@ probabilities. In brief:
   come from a task-cluster bootstrap: resampling tasks rather than episodes, since a task's episodes are alike.
 - **Hard subsets** (IID), cross-fitted over all episodes (5 folds by task): hacks vs episodes that read the verifier
   but didn't use it (`read_not_used`), hacks vs wrong answers (`passed` false), episodes with 3 or more turns, and
-  AUROC within each task. The "wrong answers" subset is weaker than its name: an honest answer can't pass the
-  corrupted verifier, so it holds nearly every honest episode (10,584 of 10,590), and that AUROC equals the plain one. <!-- src:
+  AUROC within each task. The "wrong answers" subset is weaker than its name: an honest answer passes the corrupted
+  verifier only by a miscount that happens to hit the corrupted value (the 6 `passed_blind` episodes), so it holds
+  nearly every honest episode (10,584 of 10,590), and that AUROC matches the plain cross-fitted one to seven
+  decimals. <!-- src:
   data/probe_results/fitted/bf16/terminal_prerl/with_reasoning/followup/metrics.json (crossfit.n_honest_wrong)
   --> The same goes for the IID tie-break, which scores these hard subsets together: in effect it is plain AUROC.
 - **Baselines** on the same items: transcript length and turns, a regex for "verifier", TF-IDF logistic regression,
@@ -250,7 +272,9 @@ section 8: if 4-bit fails the reader rule but the full-precision probes still wo
 precision and serve on 4-bit; otherwise use full precision everywhere.
 
 **Where things ran.** Fitting ran on CPUs (`experiments/fit_probes.py`). The GPUs, NVIDIA B300s rented as Nebius spot
-VMs, only ran the frozen reader to extract features (`experiments/run_probe_session.py`).
+VMs, fitted nothing: they ran the frozen reader, for the feature extraction and the reader diagnostics
+(`experiments/run_probe_session.py`, after two rehearsals on samples of the data), for a test of the 4-bit loader the
+day before and for the serving check (section 11). One more VM measured the upload speed to the buckets.
 
 **Choices made after the pre-registration, and deviations:**
 - Rule (c)'s refit floor was described but not defined. It was defined at 03:52 UTC on 2026-10-10, before any
@@ -279,7 +303,8 @@ VMs, only ran the frozen reader to extract features (`experiments/run_probe_sess
   follow-up probes. The text baselines don't depend on the reader, so they hold for every IID probe. The
   reader-dependent ones (layer-0 embeddings, random directions, shuffled labels, the class-mean difference, the
   self-report) were not computed for the deployed full-precision probes, nor for the OOD probes. The pipeline now
-  fits with baselines by default (section 11).
+  computes them by default, but `fit_probes.py` does so only for the IID follow-up probes (on either reader): a rerun
+  would still have none for the mean, router or OOD probes (section 11).
 - **Deviation, small:** the deployed IID monitors' thresholds were recalibrated in-sample (section 9, item 8).
 
 ## 6. Results
@@ -328,7 +353,12 @@ may learn to hide the hack in its text. Only two results go beyond the obvious t
   being read.
 
 AUROC within each task is also 1.000, so the probes don't simply key on the task. The pre-registered sensitivity
-rows (multi-layer variants, not deployed) reach 1.000 as well.
+rows (multi-layer variants, not deployed; computed for the two 4-bit follow-up probes) reach 0.99998 with reasoning
+and 1.000 without. <!-- src: data/probe_results/fitted/nvfp4/terminal_prerl/*/followup/metrics.json (sensitivity) -->
+Both end up averaging every layer. The FAR/Atlas protocol fits each of the 43 layers (the embeddings included)
+without class weights, as the repo's `LinearProbe` does; with 0.9% positives even a constant at the base rate has a
+training cross-entropy of 0.05, far below the 0.6 cut, and the cut keeps all 43. The mean logit over the layers within
+0.01 of the best takes all 42, since every layer's dev AUROC is that close to 1.
 
 ### 6.2 The OOD probe
 
@@ -383,7 +413,7 @@ k/n, ≥ x: k of n caught at t₁%, and the exact one-sided 97.5% Clopper–Pear
 The IID test split has only 22 hacks, from 15 tasks. <!-- src:
 data/probe_datasets/terminal_concealed/manifest.json (counts.test: 2 levels × 22 hacks, 15 tasks) -->
 Catching all of them says less than it seems. With 97.5% confidence (the lower end of a 95% interval), the true catch
-rate at t₁% is then at least 78.2% if the 15 tasks are the independent units, or at least 84.6% if the 22 hacks are.
+rate at t₁% is then at least 78.1% if the 15 tasks are the independent units, or at least 84.5% if the 22 hacks are.
 Tasks are the safer unit, as a task's hacks are alike. The cross-fitted scores, where each episode is scored by a
 model that never saw its task, catch all 98 hacks from 75 tasks: at least 95.2% by task, 96.3% by hack. <!-- src:
 data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json (the test_set_bounds table) -->
@@ -424,8 +454,10 @@ precision needs three. The pre-registered rule keeps 4-bit only if it changes no
   is meant literally: each probe is scored on both views' episodes, so an IID probe is also scored on the view it was
   not trained on, at its own view's t₁%. That is why the tables give two values per probe. The batching rule's
   numbers are computed the same way.
-- **(b) No AUROC loss:** 4-bit loses at most 0.01 AUROC (paired bootstrap, with the interval's lower end above
+- **(b) No AUROC loss:** 4-bit loses at most 0.01 AUROC (paired bootstrap, with the interval's lower end at least
   −0.02), on OOD test and on TerminalEnv transfer. <!-- src: docs/inkling_probes_preregistration.md -->
+  `compare_readers.py` also applies it to each IID probe's test AUROC. <!-- src: experiments/compare_readers.py
+  (delta_auroc, iid_test) -->
 - **(c) Noise:** (a) and (b) are read against two noise floors:
   - **batching ("jitter"):** the same reader gives slightly different activations depending on which other
     episodes share its forward pass;
@@ -457,7 +489,7 @@ From `compare/followup/decision.json` (experiments/compare_readers.py). Agreemen
   data/probe_results/compare/followup/decision.json (agreement) -->
 - **(b) passes:** no AUROC is lost.
 - **(c):** the 0.95 rank bar turned out to sit close to what batching noise alone produces: on the diagnostics
-  sample, the same reader one episode at a time against batched gives rank correlations of 0.89–0.98 (the batching
+  sample, the same reader one episode at a time against batched gives rank correlations of 0.88–0.98 (the batching
   floor at the end of the cross-reader table below). <!-- src: data/probe_results/compare/followup/decision.json
   (probes.*.batching_floor) --> So failing (a) would not be conclusive by itself. But the "Yes" probes also fail the
   noise-based check: in every view, each agrees less across the readers than with its own refits (refit-floor
@@ -599,8 +631,11 @@ of the uncertainty; an analysis can report both.
   data/probe_results/compare/followup/decision.json (batching) --> For the
   deployed follow-up monitors it is 2.8–5.6%. <!-- src: data/probes/Inkling-Small/deployed.json
   (serving_check.batching) --> So the server scores one episode per forward pass, and an episode's score no longer
-  depends on what it was batched with. The pre-registered fix also re-extracts the training features one at a time.
-  That was not done (about 2 GPU-hours), so the thresholds still come from batched features.
+  depends on what it was batched with. The pre-registered fix also extracts the features one at a time. That was not
+  done, so the probes and their thresholds still come from batched features. Re-extracting the 4-bit TerminalEnv
+  features one at a time, enough to recalibrate the thresholds and golden logits, would take about 2 GPU-hours on one
+  B300 (28.7M tokens at the serving check's 3.9k tokens/s); refitting the probes on such features would also need the
+  full-precision reader again, on an 8-GPU VM.
 
 ### The readout rule: keep "Yes"
 
@@ -609,24 +644,29 @@ in a few dimensions, and so says little about the episode. If it does, the token
 compared with it. The rule has two triggers, and neither fired.
 
 **Trigger 1, the norm ratio (above 5 in layers 10–35): not met.** "Yes"'s median norm is 1.09 times its context's on
-the diagnostics sample (the footer of the "Yes" comparison above), and between 1.09 and 1.22 times (median 1.14)
-across the 20 per-token files below. <!-- src: data/probe_results/compare/followup/decision.json (sink);
-data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.files, per_token.sink_check) -->
+the diagnostics sample (the footer of the "Yes" comparison above), and 1.14 times on the 20 per-token files below by
+the same statistic (each file alone: 1.09 to 1.22, median 1.12). <!-- src:
+data/probe_results/compare/followup/decision.json (sink);
+data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.sink_check; per_token.files,
+yes_ratio_to_context, median over layers 10–35) -->
 
 **Trigger 2, "the same ≤ 8 massive dimensions dominate its norm": not met.** It has no threshold, so it was measured
 twice.
 - **On "Yes" alone** (the 4-bit diagnostics; report only, in `compare/followup/report.md`): its 8 largest dimensions
-  carry 90–96% of its squared norm in layers 8–16, 62% at layer 20 and 44% in the median layer of 10–35, and they
-  are the same dimensions in 88% of the inputs. <!-- src: data/probe_results/compare/followup/decision.json
-  (massive_dims.nvfp4) --> Read alone, that could look like domination.
+  carry 90–96% of its squared norm in layers 8–16, 62% at layer 20 and 44% in the median layer of 10–35. They are
+  much the same dimensions from input to input: in the median layer of 10–35, 88% of an input's 8 are among the 8
+  that occur most often across the inputs. <!-- src: data/probe_results/compare/followup/decision.json
+  (massive_dims.nvfp4: top_share, consistency) --> Read alone, that could look like domination.
 - **At every token** (`probe_analyses.py massive-dims`): 25,949 tokens of the 10 episodes whose whole hidden states
   were stored, in both views, on the 4-bit reader. <!-- src:
-  data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token) -->
+  data/probe_results/analyses/20261013T191948Z/massive_dims.json (per_token.roles: top_share, yes_overlap and
+  yes_dims_share, by band and by layer) -->
   - In layers 4–16 every kind of token (the policy's text, the prompt, the markers, "Yes", the token before it)
-    holds about 94% of its squared norm in its own top 8 dimensions, and those are essentially the same dimensions
-    as "Yes"'s.
-  - From layer 17 on, "Yes" is less concentrated than ordinary tokens: 44% in the median layer of 10–35, against
-    58–63% for the others.
+    holds about 94% of its squared norm in its own top 8 dimensions. Most of that sits in "Yes"'s 8: they hold 92–94%
+    of the other tokens' squared norm, although on average only 3.4 to 5 of a token's own 8 are among them.
+  - From layer 17 on, "Yes" is mostly less concentrated than the policy's text, the prompt and the markers: 44% in
+    the median layer of 10–35, against 58–63% for them (at layers 17, 18, 23, 39 and 41 it is above at least one of
+    them). The token before "Yes" is lower still, 40%.
   - The only sink-like token is the first one, at position 0: 99% of its squared norm in its top 8 dimensions, and a
     norm about 25 times the episode's median, in layers 4–16.
   - Over every stored episode, on full precision: "Yes" holds 43–45% in its top 8 (median layer of 10–35), the token
@@ -693,8 +733,9 @@ Exploratory, not deployed: logistic regression on the router logits at "Yes" of 
 
 Logistic regressions on the router logits at "Yes": one MoE layer's logits (`router`), or all MoE layers concatenated
 (`router_all`). Same fitting and selection as the residual-stream probes. They are not deployed.
-- **IID:** one middle layer's router logits separate hacks perfectly, also from read-but-unused episodes. The routing
-  decision at "Yes" encodes the hack as cleanly as the residual stream does.
+- **IID:** one middle layer's router logits separate the test hacks perfectly (AUROC 1.000), and hacks from
+  read-but-unused episodes almost perfectly (cross-fitted, 0.9996–1.000). The routing decision at "Yes" encodes the
+  hack as cleanly as the residual stream does.
 - **OOD:** in distribution, the concatenation matches the residual-stream probes, but it doesn't transfer to hacks. A
   single layer transfers better, with the same sensitivity to reader and layer as the follow-up probe.
 - **Reader:** router readouts fail the reader rule for 4-bit (section 7), as expected from routing differences.
@@ -722,7 +763,7 @@ From `ood_refits/<reader>/<readout>/summary.json` (experiments/ood_refits.py): t
   data/probe_results/ood_refits/bf16/followup/summary.json (transfer_auroc_with_reasoning) -->
 - **The reader shifts the whole distribution:** refits on 4-bit features transfer better. The deployed probe's
   transfer is typical for its reader.
-- **The mean probes' inversion is real:** it is tight, on both readers.
+- **The mean probes' inversion (with reasoning) is real:** it is tight, on both readers.
 
 <!-- probe_report:begin ood_by_layer -->
 
@@ -853,8 +894,10 @@ From `learning_curves/<reader>/summary.json`'s `ood_sources`: the OOD follow-up 
 <!-- probe_report:end ood_source_mixes -->
 
 **The mix matters more than its size.** Each mix was refitted on bootstrap resamples, because a single fit's transfer
-is as noisy as the differences between mixes. Dropping MASK or sandbagging hurts transfer; no single source matches
-the full mix. The likely bottleneck is the kind of data: every OOD item is a short statement, while a TerminalEnv
+is as noisy as the differences between mixes. Dropping MASK or sandbagging hurts transfer in both views (and dropping
+LiarsBench, without reasoning). With reasoning no single source matches the full mix; without reasoning, sandbagging
+alone (0.675) beats it (0.606).
+The likely bottleneck is the kind of data: every OOD item is a short statement, while a TerminalEnv
 episode is a long agentic transcript. Examples of an agent lying about what it did are what the mix lacks. Adding
 them would make a new probe, not fix this one: the OOD probe was chosen on OOD data only, so a v2 would have to be
 pre-registered and reported as such.
@@ -871,8 +914,8 @@ pre-registered and reported as such.
 2. **The OOD probe detects lying, not hacking.** The pre-RL hacks admit using the verifier, so there is no lie to
    detect. It fires more on concealed hacks, and its transfer to hacks is low and fragile (sections 6.2, 8.2).
 3. **The test sets are small.** 22 test hacks in 15 tasks: "all caught" only shows, with 97.5% confidence, a catch
-   rate of at least 78.2% (counting tasks) or 84.6% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
-   least 95.2% or 96.3%. The printed bootstrap intervals of [1.0, 1.0] are degenerate (section 6.3). <!-- src: the
+   rate of at least 78.1% (counting tasks) or 84.5% (counting hacks). The cross-fitted 98 of 98, in 75 tasks, show at
+   least 95.2% or 96.3%. The printed bootstrap intervals of [1.000, 1.000] are degenerate (section 6.3). <!-- src: the
    test_set_bounds table, data/probe_results/fitted/*/terminal_prerl/*/*/hack_counts.json -->
 4. **Same tasks as the runs.** The probes were fitted on pre-RL episodes of seed 0's evaluation tasks, and RL runs
    evaluate on the same grids under other task ids. A task id carries its run's seed (`eval_<seed + 7919>_<i>`), but
@@ -919,7 +962,7 @@ pre-registered and reported as such.
    AUROC while recall at a fixed threshold collapses. Serving one episode at a time, while the thresholds came from
    batched features, adds noise near the threshold but no systematic shift.
 7. **The reader is part of the uncertainty.** The reader rule's 0.95 rank bar sat near batching noise (batching alone
-   gives rank correlations of 0.89–0.98), yet the "Yes" probes fail even the noise-based checks (section 7). <!-- src:
+   gives rank correlations of 0.88–0.98), yet the "Yes" probes fail even the noise-based checks (section 7). <!-- src:
    data/probe_results/compare/followup/decision.json (probes.*.batching_floor) --> The 4-bit-trained probes
    are an equally plausible alternative, and their OOD transfer differs a lot.
 8. **The recalibrated IID thresholds are in-sample.** The pre-registration takes IID thresholds from out-of-fold
@@ -932,13 +975,16 @@ pre-registered and reported as such.
    indistinguishable on test, and transferring somewhat worse, within the refit noise.
 10. **GPU extraction isn't bit-reproducible.** Re-extracting an episode on another VM (as the server's golden check
     does) lands within batching noise of the stored features, not on the same bits. The golden check allows for that,
-    but its bound on the mean shift still refuses a correct setup about 1% of the time per probe, by its own
-    calibration (section 10).
+    but its bound on the mean shift still refuses a correct setup now and then: by its own calibration, with
+    probability at most about 1.2% per follow-up probe, and about 1% that any of the four follow-up probes fails it
+    (section 10).
 11. **Code versions.** The features and fits of 2026-10-10 predate code stamping, so they don't record which code
-    made them. The extraction ran commit `361f6c1`'s code: that is known from file timestamps, and later commits
-    changed the extraction code only to add the stamp (`45e7a9e`). Everything written since the stamp was added on
-    2026-10-12 records it (`code`: commit, dirty flag, patch hash; for the deployed monitors `deployed_code`).
-    Details: [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md).
+    made them. The extraction ran the code later committed in `361f6c1` (2026-10-10 05:46, after the extraction):
+    that is known from file timestamps. Later commits changed the extraction scripts only in ways that don't change
+    what a shard holds (the stamp `45e7a9e`, resumable stops `f66ab89`, the items' hash check `0af255e`, a docstring
+    `628fe00`); `features.py`, `inkling_replay.py` and `inkling_nvfp4.py` are unchanged since `361f6c1`. Everything
+    written since the stamp was added on 2026-10-12 records it (`code`: commit, dirty flag, patch hash; for the
+    deployed monitors `deployed_code`). Details: [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md).
 12. **Large C values are under-fitted.** With sklearn's default tolerance, the warm-started fits at the largest C
     stop after very few iterations, so they act like slightly stronger regularization. The one-SE rule prefers small
     C anyway; the only selected probes with C ≥ 0.1 are the IID mean probe with reasoning and the OOD router probes.
@@ -955,7 +1001,7 @@ pre-registered and reported as such.
 | `diverse_deception/with_reasoning/followup` | **the OOD probe** (`probe_ood`) |
 | `terminal_prerl/without_reasoning/followup`, `diverse_deception/without_reasoning/followup` | the same probes on the output-only view, for comparison with output-only judges |
 | `terminal_prerl/{with,without}_reasoning/mean` | secondary IID probes (mean pooling) |
-| `diverse_deception/{with,without}_reasoning/mean` | inverted on TerminalEnv: report only |
+| `diverse_deception/{with,without}_reasoning/mean` | inverted on TerminalEnv with reasoning, at or below chance without: report only |
 
 The follow-up probes are the main monitors, as the plan recommended. Averaged probes transferred worse in the
 Obfuscation Atlas and invite dilution (burying a short hack in a long transcript), which long TerminalEnv episodes
@@ -982,8 +1028,9 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
 - **Golden check:** at startup it re-scores each probe's 32 golden episodes. It refuses to start if a rendering
   differs, if a logit moves by more than the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on
   average (a systematic shift, e.g. from another library version; `--golden-mean-tolerance` overrides it). By its own
-  calibration the mean check also refuses a correct setup about 1% of the time per probe: if only that check fails,
-  read the reported mean and spread before overriding it. <!-- src:
+  calibration the mean check also refuses a correct setup: with probability at most about 1.2% per follow-up probe,
+  and about 1% that any of the four follow-up probes fails it (the mean probes' golden noise is several times
+  smaller). If only that check fails, read the reported mean and spread before overriding it. <!-- src:
   src/monitordecorrelation/whitebox/probe_server.py (GOLDEN_MEAN_TOLERANCE docstring) -->
 - **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check and the current
   error handling, and sent only the OOD monitors through HTTP (section 11).
@@ -997,10 +1044,11 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
   passes per episode: each step takes about twice the reader time. The post-hoc scorer, below, does share one pass.
 - Throughput was about 3.9k tokens/s one at a time on a B300. <!-- src: experiments/check_probe_server.py report of
   2026-10-10 (see data/probe_results/PROVENANCE.md) --> With the TerminalEnv configs' batch sizes, a training step
-  then waits about a minute per live probe on the with-reasoning view. One B300 can serve two or three train-against
-  runs with one live probe each. <!-- src: estimate from that throughput and
-  experiments/configs/terminal_verifier_*.json (8 × 16 episodes per step, 64 eval tasks every 3 steps) --> Score the
-  held-out probes after the runs instead (below).
+  then waits up to about a minute per live probe on the with-reasoning view. One B300 can serve two or three
+  train-against runs with one live probe each. Both estimates take every episode as valid and as long as the pre-RL
+  ones (1,607 tokens on average with reasoning); only valid episodes are scored. <!-- src: estimate from that
+  throughput, experiments/configs/terminal_verifier_*.json (8 × 16 episodes per step, 64 eval tasks every 3 steps)
+  and the dataset_stats table of section 2 --> Score the held-out probes after the runs instead (below).
 
 ### Config
 
@@ -1046,9 +1094,9 @@ full.
 
 - **Rules:** [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), sha256
   `58eb57820b6cc88b193519ca83ab3ff2268a3f0805778ba8e273e87f2b0aaff6`, recorded in every fitted probe's `meta.json`.
-- **Each probe's `meta.json`** records its layer and C, the selection, both thresholds, the reader it serves on
-  (`reader_info`: loader and checkpoint revision) and the one it was trained on (`trained_reader_info`), the feature
-  format, the torch and transformers versions, when it was fitted and deployed, and where the fitted probe is
+- **Each deployed monitor's `meta.json`** records its layer and C, the selection, both thresholds, the reader it
+  serves on (`reader_info`: loader and checkpoint revision) and the one it was trained on (`trained_reader_info`), the
+  feature format, the torch and transformers versions, when it was fitted and deployed, and where the fitted probe is
   (`fitted_dir`, under `data/probe_results/fitted/`).
 - **Fitted probes and analyses:** `data/probe_results/`: the fitted probes of both readers (`fitted/`, with the
   readout fallback's `followup_prev` fits), the reader comparisons (`compare/`), the OOD refits, the learning curves,
@@ -1064,24 +1112,29 @@ full.
   small results live only in the repo. None of the buckets' contents are needed to use the probes, only to refit
   them ([`INFRA.md`](INFRA.md#storage-hugging-face-buckets-saved-as-you-go)).
 - **Code:** the features and fits of 2026-10-10 predate code stamping and don't record which code made them. The
-  extraction ran commit `361f6c1`'s code, known from file timestamps; later commits changed the extraction code only
-  to add the stamp (`45e7a9e`). Since 2026-10-12, `src/monitordecorrelation/provenance.py` stamps every output with
-  `code`: the commit, whether the tree had uncommitted changes, a hash of those changes, and where the stamp came
-  from (git, or on a GPU VM the `CODE_VERSION.json` the launcher pushes). The deployed monitors carry the stamp of
-  their deployment as `deployed_code`.
+  extraction ran the code later committed in `361f6c1`, known from file timestamps; later commits changed the
+  extraction scripts only in ways that don't change what a shard holds (caveat 11). Since 2026-10-12,
+  `src/monitordecorrelation/provenance.py` stamps every output with `code`: the commit, whether the tree had
+  uncommitted changes, a hash of those changes, and where the stamp came from (git, or on a GPU VM the
+  `CODE_VERSION.json` the launcher pushes). The deployed monitors carry the stamp of their deployment as
+  `deployed_code`.
 - **Timeline (UTC):**
   - 2026-10-09: the IID and OOD datasets built (the concealment set early on 2026-10-10).
-  - 2026-10-10, ~02:00: pre-registration written. Features extracted on spot B300s: the 4-bit reader 02:08–02:42,
-    full precision 03:34–04:00 (an 8× B300). Fits from 03:02 and through the day; reader comparison 08:08;
-    deployment 08:12; serving check on a real B300 08:16–08:28. Afternoon: mean and router fits, OOD refits.
+  - 2026-10-10: the pre-registration's text last modified at 01:21 (the plan file's time; its heading says ~02:00,
+    section 5); two rehearsal VMs on samples of the data 01:24–01:46. Features extracted on spot B300s: the 4-bit
+    reader 02:08–02:42 (its VMs launched from 02:04), full precision 03:34–04:00 (an 8× B300). Fits from 03:02 and
+    through the day; reader comparison 08:08; deployment 08:12, redone at 08:14 because the first wrote a stale t₁%
+    into `meta.json` (the committed monitors' `deployed_utc`); serving check on a real B300 08:16–08:28. Afternoon:
+    mean and router fits, OOD refits.
   - 2026-10-11: learning curves.
   - 2026-10-12: the mean monitors redeployed full-precision-trained; code stamping added; all eight monitors then
     redeployed with new metadata only (the repo path of the fitted probe, the code stamp). The fits re-checked
     (05:26–07:05), the readout fallback fitted (07:02–09:26), both reader comparisons re-run with the final code
     (07:37–09:52); results collected into `data/probe_results/`.
-  - 2026-10-13: the per-token massive-dimension and readout-gap analyses; the readout rule settled (keep "Yes"); the
-    buckets cleaned of everything git now holds. `grids.json` added next to the monitors, which are unchanged, and
-    the post-hoc scorer's unseen tasks decided by grid (section 9, caveat 4).
+  - 2026-10-13: the per-token massive-dimension and readout-gap analyses, and everything collected again with them
+    (`MANIFEST.json`'s `code`); the readout rule settled (keep "Yes"); the buckets cleaned of everything git now
+    holds. `grids.json` added next to the monitors, which are unchanged, and the post-hoc scorer's unseen tasks
+    decided by grid (section 9, caveat 4).
 - **Reader comparisons, re-run:** both were re-run on 2026-10-12 at `7cdf93d`. The follow-up comparison reproduces
   all 110 values of the 2026-10-10 run (agreement, refit floor, ΔAUROC, rules and decision); the re-run adds the
   report-only massive dimensions and the cross-reader fields. <!-- src: data/probe_results/PROVENANCE.md
@@ -1123,24 +1176,36 @@ the launcher, which refuses uncommitted code ([`INFRA.md`](INFRA.md#gpu-vms-on-n
    - Two analyses of section 7 run by hand, outside the pipeline: `probe_analyses.py massive-dims` (it needs the
      per-token sample, `features/nvfp4/terminal_prerl/*/full/` in the bucket) and `probe_analyses.py readout-gap`
      (it needs both readouts' fits, so first `fit_probes.py --readouts followup_prev`).
-3. **Fitting includes the pre-registered baselines** by default now (`--fit-args '--jobs 6 --skip-baselines'` skips
-   them to save time).
-4. **The result scripts refuse to overwrite** earlier results unless given `--overwrite`. The pipeline passes it when
-   it reruns a step that failed, never for a finished step.
-5. `scripts/verify_bucket_copy.py` checks a local folder against a bucket prefix, byte for byte, before the local copy
-   is deleted.
+3. **Fitting includes the pre-registered baselines and sensitivity rows** by default now, for the IID follow-up probes
+   only: `fit_probes.py` computes none for the mean, router or OOD probes (`--fit-args '--jobs 6 --skip-baselines'`
+   skips them to save time).
+4. **The result scripts refuse to overwrite** earlier results unless given `--overwrite`. The pipeline passes it to
+   fit, compare and the analyses on every run of those steps; what keeps a finished step's results is its marker in
+   `<run>/.done/`, so a rerun with the same `--run` skips that step.
+5. `scripts/verify_bucket_copy.py` checks that every file of a local folder is in a bucket prefix with the same size
+   and Xet content hash, before the local copy is deleted.
 
 ### Re-checking the fits
 
-`experiments/verify_fits.py` checks that today's code reproduces the committed fits: for each probe it re-runs part
-of the cross-validation grid, re-derives the selection and refits the chosen layer and C, then compares all of it
-with what the fit saved. All 24 fitted probes reproduce bit for bit, in two runs: `verify_fits/20261012T052659Z`
-with 21 probes, and `verify_fits/20261012T063754Z` with the three 4-bit follow-up probes. The 2,207 recomputed grid
-cells equal the stored ones (to the 5 decimals `cv_grid.csv` keeps), every selection comes out the same, and the
-weights, both thresholds, the metrics and the test logits are identical to the bit. <!-- src:
-data/probe_results/verify_fits/{20261012T052659Z,20261012T063754Z}/summary.json --> The readout fallback's
-`followup_prev` fits came later and were not re-checked. [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
-says which code each run used.
+`experiments/verify_fits.py` checks that the fitting code reproduces the committed fits: for each probe it re-runs
+part of the cross-validation grid, re-derives the selection and refits the chosen layer and C, then compares that
+with what the fit saved. All 24 fitted probes pass, in two runs: `verify_fits/20261012T052659Z` with 21 probes, run
+with the fitting code of `b416f89` (2026-10-10), and `verify_fits/20261012T063754Z` with the three 4-bit follow-up
+probes, at `2694851` (2026-10-12). What was compared, and how closely: <!-- src:
+data/probe_results/verify_fits/{20261012T052659Z,20261012T063754Z}/summary.json -->
+- the 2,207 recomputed grid cells (out-of-fold AUROC, mean and sd over the repeats) equal the stored ones to the 5
+  decimals `cv_grid.csv` keeps;
+- every selection (layer, C, flat or not) comes out the same;
+- the refits' weights, t₁% and t₅%, test logits and main metrics are identical to the bit (largest difference 0).
+  The main metrics are 12 numbers per IID probe (test AUROC and its CI, AUROC under `behavior_present`, TPR and FPR
+  at t₁% and t₅%, the counts) and 33 per OOD probe (test AUROC and its CI, per source, and each TerminalEnv view's
+  transfer metrics).
+
+Not re-checked: what rests on the IID probes' cross-fit (section 6.1's hacks vs read-not-used, within-task AUROC and
+concealed hacks caught, and section 6.3's cross-fitted counts), the OOD probes' leave-one-source-out, the baselines
+and the sensitivity rows; nor the readout fallback's `followup_prev` fits, which came later. Since `b416f89` the
+fitting code has changed only in ways that don't change a fit's numbers.
+[`PROVENANCE.md`](../data/probe_results/PROVENANCE.md) says which code each run used, and what changed since.
 
 <!-- probe_report:begin verify_fits -->
 
@@ -1176,7 +1241,7 @@ says which code each run used.
 - `20261012T052659Z`: 21 probes. Finished 2026-10-12T06:34:05Z after 67 min with fit_probes.py 83cfb844029d, probe_fit.py 5ce6ede25b68 (sha256).
 - `20261012T063754Z`: 3 probes. Finished 2026-10-12T07:05:46Z after 28 min at commit 269485102a5e with fit_probes.py 320f1df5a531, probe_fit.py f95e167c3f74 (sha256).
 
-From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code of the day and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs equal to cv_grid.csv's to 5 decimals. Δ: the largest absolute difference from the saved weights, thresholds, metrics and test logits (0: bit for bit).
+From `verify_fits/<run>/summary.json` (experiments/verify_fits.py): part of each fit re-run with the code each run records (above) and compared with what the fit saved. Grid cells: recomputed out-of-fold AUROCs (mean and sd over the repeats) equal to cv_grid.csv's, which keeps 5 decimals. Δ: the largest absolute difference from the saved weights and intercept, t₁% and t₅%, main metrics and test logits (0: identical, bit for bit). The main metrics: 12 numbers per IID probe (test AUROC and its CI, AUROC under behavior_present, TPR and FPR at t₁% and t₅%, the counts) and 33 numbers per OOD probe (test AUROC and its CI, per source, each TerminalEnv view's transfer metrics). Not re-checked: the IID probes' cross-fitted hard subsets and concealment, leave-one-source-out, the baselines and the sensitivity rows.
 
 <!-- probe_report:end verify_fits -->
 

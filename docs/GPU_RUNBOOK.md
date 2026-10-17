@@ -80,9 +80,10 @@ so that closing the terminal doesn't stop it.
    List every probe any run will ask for. `--max-batch-tokens 1`, the default, scores one episode per forward pass
    (the batching rule fired). The golden check refuses to start if a rendering differs, if a logit moves by more than
    the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on average (`--golden-mean-tolerance`).
-   That mean bound refuses a correct setup about 1% of the time per probe, by its own calibration: if only the mean
-   check fails, read the reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
-   this bound and the server's current error handling, so the server in its current form has not yet run on a GPU.
+   By its own calibration that mean bound also refuses a correct setup, with probability at most about 1.2% per
+   follow-up probe and about 1% that any of the four follow-up probes fails it: if only the mean check fails, read the
+   reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates this bound and the
+   server's current error handling, so the server in its current form has not yet run on a GPU.
 
 4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
 
@@ -92,8 +93,9 @@ so that closing the terminal doesn't stop it.
 
 **Capacity.** About 3.9k tokens/s one episode at a time on a B300. Every live monitor sends its own requests, so each
 costs its own forward pass per episode, even when two probes read the same view. With the TerminalEnv configs' batch
-sizes, a training step waits about a minute per live probe on the with-reasoning view, and one B300 can serve two or
-three train-against runs with one live probe each. Score held-out probes after the runs instead (below).
+sizes, a training step waits up to about a minute per live probe on the with-reasoning view, and one B300 can serve
+two or three train-against runs with one live probe each. These estimates take every episode as valid and as long as
+the pre-RL ones; only valid episodes are scored. Score held-out probes after the runs instead (below).
 
 **Preemption.** A spot VM can be stopped at 60 s notice; ours were, about 1.4 times per VM-hour, mostly in their first
 minutes. Nothing restarts a preempted server yet. Runs don't fail: their monitors retry until the server is back, so
@@ -151,8 +153,9 @@ python3 scripts/nebius_job.py run --hours 3 --out runs/{stamp}-{name} \
 
 The launcher brings them back to `<--out>/results/<run>/`; copy `probe_eval_*.jsonl` from there into the run's
 folder and commit them. **Cost:** a 90-step TerminalEnv run saves about 7,900 eval episodes. The two with-reasoning
-probes share one pass over them here: about one GPU-hour per run. Adding the without-reasoning probes adds about half
-of that again.
+probes share one pass over them here: about one GPU-hour per run if all of them are valid and as long as the pre-RL
+episodes; only valid episodes are scored. Adding the without-reasoning probes adds about two-thirds of that again:
+that view averages 1,077 tokens per episode, against 1,607 with reasoning.
 
 ## Legacy: the Qwen3.5-4B runbook (superseded)
 
