@@ -953,10 +953,12 @@ pre-registered and reported as such.
     but its bound on the mean shift still refuses a correct setup about 1% of the time per probe, by its own
     calibration (section 10).
 11. **Code versions.** The features and fits of 2026-10-10 predate code stamping, so they don't record which code
-    made them. The extraction ran commit `361f6c1`'s code: that is known from file timestamps, and later commits
-    changed the extraction code only to add the stamp (`45e7a9e`). Everything written since the stamp was added on
-    2026-10-12 records it (`code`: commit, dirty flag, patch hash; for the deployed monitors `deployed_code`).
-    Details: [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md).
+    made them. The extraction ran the code later committed in `361f6c1` (2026-10-10 05:46, after the extraction):
+    that is known from file timestamps. Later commits changed the extraction scripts only in ways that don't change
+    what a shard holds (the stamp `45e7a9e`, resumable stops `f66ab89`, the items' hash check `0af255e`, a docstring
+    `628fe00`); `features.py`, `inkling_replay.py` and `inkling_nvfp4.py` are unchanged since `361f6c1`. Everything
+    written since the stamp was added on 2026-10-12 records it (`code`: commit, dirty flag, patch hash; for the
+    deployed monitors `deployed_code`). Details: [`PROVENANCE.md`](../data/probe_results/PROVENANCE.md).
 12. **Large C values are under-fitted.** With sklearn's default tolerance, the warm-started fits at the largest C
     stop after very few iterations, so they act like slightly stronger regularization. The one-SE rule prefers small
     C anyway; the only selected probes with C ≥ 0.1 are the IID mean probe with reasoning and the OOD router probes.
@@ -1082,8 +1084,8 @@ full.
   small results live only in the repo. None of the buckets' contents are needed to use the probes, only to refit
   them ([`INFRA.md`](INFRA.md#storage-hugging-face-buckets-saved-as-you-go)).
 - **Code:** the features and fits of 2026-10-10 predate code stamping and don't record which code made them. The
-  extraction ran commit `361f6c1`'s code, known from file timestamps; later commits changed the extraction code only
-  to add the stamp (`45e7a9e`). Since 2026-10-12, `src/monitordecorrelation/provenance.py` stamps every output with
+  extraction ran the code later committed in `361f6c1`, known from file timestamps; later commits changed the
+  extraction scripts only in ways that don't change what a shard holds (caveat 11). Since 2026-10-12, `src/monitordecorrelation/provenance.py` stamps every output with
   `code`: the commit, whether the tree had uncommitted changes, a hash of those changes, and where the stamp came
   from (git, or on a GPU VM the `CODE_VERSION.json` the launcher pushes). The deployed monitors carry the stamp of
   their deployment as `deployed_code`.

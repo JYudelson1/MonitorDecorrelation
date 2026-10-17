@@ -46,8 +46,13 @@ manifest). `terminal_concealed` is derived from `terminal_prerl`'s items.
 - **Per-process records:** `features/<reader>/<dataset>/runs/*.json` next to the features, with start, end, host,
   shards, tokens, and whether the process stopped early.
 - **Code:** the features predate stamping, so `index.json` has no `code`. The extraction ran the code later committed
-  in `361f6c1` (2026-10-10 05:46); this is known from file timestamps. Since then, only `45e7a9e` changed the
-  extraction code, to record its code version.
+  in `361f6c1` (2026-10-10 05:46); this is known from file timestamps. Since then the extraction scripts
+  (`extraction.py`, `extract_probe_features.py`, `run_probe_session.py`, `diagnostics.py`) changed only in ways that
+  don't change what a shard holds: the code stamp (`45e7a9e`), exit codes for a stop with uploads in flight
+  (`f66ab89`), the check of `items.jsonl` against its manifest's hash, also for the diagnostics sample (`0af255e`),
+  and a docstring line (`628fe00`). What a shard holds comes from `features.py`, `inkling_replay.py`,
+  `inkling_nvfp4.py` and `rl/renderers.py`, unchanged since `361f6c1`; `terminal_verifier.py` and `probe_datasets.py`,
+  which the extraction imports too, have only gained functions (the grid key, `read_items`) and docstrings.
 
 ## Fitted probes (`fitted/`)
 
