@@ -93,8 +93,9 @@ so that closing the terminal doesn't stop it.
 
 **Capacity.** About 3.9k tokens/s one episode at a time on a B300. Every live monitor sends its own requests, so each
 costs its own forward pass per episode, even when two probes read the same view. With the TerminalEnv configs' batch
-sizes, a training step waits about a minute per live probe on the with-reasoning view, and one B300 can serve two or
-three train-against runs with one live probe each. Score held-out probes after the runs instead (below).
+sizes, a training step waits up to about a minute per live probe on the with-reasoning view, and one B300 can serve
+two or three train-against runs with one live probe each. These estimates take every episode as valid and as long as
+the pre-RL ones; only valid episodes are scored. Score held-out probes after the runs instead (below).
 
 **Preemption.** A spot VM can be stopped at 60 s notice; ours were, about 1.4 times per VM-hour, mostly in their first
 minutes. Nothing restarts a preempted server yet. Runs don't fail: their monitors retry until the server is back, so
@@ -152,8 +153,9 @@ python3 scripts/nebius_job.py run --hours 3 --out runs/{stamp}-{name} \
 
 The launcher brings them back to `<--out>/results/<run>/`; copy `probe_eval_*.jsonl` from there into the run's
 folder and commit them. **Cost:** a 90-step TerminalEnv run saves about 7,900 eval episodes. The two with-reasoning
-probes share one pass over them here: about one GPU-hour per run. Adding the without-reasoning probes adds about half
-of that again.
+probes share one pass over them here: about one GPU-hour per run if all of them are valid and as long as the pre-RL
+episodes; only valid episodes are scored. Adding the without-reasoning probes adds about two-thirds of that again:
+that view averages 1,077 tokens per episode, against 1,607 with reasoning.
 
 ## Legacy: the Qwen3.5-4B runbook (superseded)
 

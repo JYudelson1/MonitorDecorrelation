@@ -271,7 +271,9 @@ section 8: if 4-bit fails the reader rule but the full-precision probes still wo
 precision and serve on 4-bit; otherwise use full precision everywhere.
 
 **Where things ran.** Fitting ran on CPUs (`experiments/fit_probes.py`). The GPUs, NVIDIA B300s rented as Nebius spot
-VMs, only ran the frozen reader to extract features (`experiments/run_probe_session.py`).
+VMs, fitted nothing: they ran the frozen reader, for the feature extraction and the reader diagnostics
+(`experiments/run_probe_session.py`, after two rehearsals on samples of the data), for a test of the 4-bit loader the
+day before and for the serving check (section 11). One more VM measured the upload speed to the buckets.
 
 **Choices made after the pre-registration, and deviations:**
 - Rule (c)'s refit floor was described but not defined. It was defined at 03:52 UTC on 2026-10-10, before any
@@ -628,8 +630,11 @@ of the uncertainty; an analysis can report both.
   data/probe_results/compare/followup/decision.json (batching) --> For the
   deployed follow-up monitors it is 2.8–5.6%. <!-- src: data/probes/Inkling-Small/deployed.json
   (serving_check.batching) --> So the server scores one episode per forward pass, and an episode's score no longer
-  depends on what it was batched with. The pre-registered fix also re-extracts the training features one at a time.
-  That was not done (about 2 GPU-hours), so the thresholds still come from batched features.
+  depends on what it was batched with. The pre-registered fix also extracts the features one at a time. That was not
+  done, so the probes and their thresholds still come from batched features. Re-extracting the 4-bit TerminalEnv
+  features one at a time, enough to recalibrate the thresholds and golden logits, would take about 2 GPU-hours on one
+  B300 (28.7M tokens at the serving check's 3.9k tokens/s); refitting the probes on such features would also need the
+  full-precision reader again, on an 8-GPU VM.
 
 ### The readout rule: keep "Yes"
 
@@ -1038,10 +1043,11 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
   passes per episode: each step takes about twice the reader time. The post-hoc scorer, below, does share one pass.
 - Throughput was about 3.9k tokens/s one at a time on a B300. <!-- src: experiments/check_probe_server.py report of
   2026-10-10 (see data/probe_results/PROVENANCE.md) --> With the TerminalEnv configs' batch sizes, a training step
-  then waits about a minute per live probe on the with-reasoning view. One B300 can serve two or three train-against
-  runs with one live probe each. <!-- src: estimate from that throughput and
-  experiments/configs/terminal_verifier_*.json (8 × 16 episodes per step, 64 eval tasks every 3 steps) --> Score the
-  held-out probes after the runs instead (below).
+  then waits up to about a minute per live probe on the with-reasoning view. One B300 can serve two or three
+  train-against runs with one live probe each. Both estimates take every episode as valid and as long as the pre-RL
+  ones (1,607 tokens on average with reasoning); only valid episodes are scored. <!-- src: estimate from that
+  throughput, experiments/configs/terminal_verifier_*.json (8 × 16 episodes per step, 64 eval tasks every 3 steps)
+  and the dataset_stats table of section 2 --> Score the held-out probes after the runs instead (below).
 
 ### Config
 
