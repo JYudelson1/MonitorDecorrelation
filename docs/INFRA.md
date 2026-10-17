@@ -90,7 +90,8 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
 The policy trains on tinker, but some jobs need our own GPUs: extracting Inkling-Small probe features, serving the
 Inkling probes, and scoring finished runs with them ([`INKLING_PROBES.md`](INKLING_PROBES.md),
 [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)). `scripts/nebius_job.py` turns such a job into one command on a fresh Nebius VM
-(NVIDIA B300 by default), and always cleans up. It is stdlib-only Python, so plain `python3` runs it.
+(NVIDIA B300 by default, or a CPU-only VM: [below](#cpu-vms-keys-and-root-jobs)), and always cleans up. It is
+stdlib-only Python, so plain `python3` runs it.
 
 ```bash
 python3 scripts/nebius_job.py prices                    # every region's price and capacity now (read-only)
@@ -117,6 +118,7 @@ created.
 - **Optional spending guard:** a ledger file (`--budget-file` or `NEBIUS_BUDGET_FILE`, created as
   `{"limit_usd": N, "entries": []}`) and a spot bid per GPU-hour (`--max-gpu-price` or `NEBIUS_MAX_GPU_PRICE`).
 - **Optional HF token** with write access to the buckets (`--hf-token-file`), only for `--upload`.
+- **Optional keys for the job** (`--secret`, below), one file each in `~/.secrets` (on hub: `hub-secret set NAME`).
 
 **What `run` does.**
 1. Quote every region of the regions file with Nebius's cost calculator, read the capacity advice, and create the VM
@@ -153,6 +155,41 @@ was preempted, every region's quote, the price every 15 minutes while the VM exi
 **Exit status:** 0 on success; the job's own code if it failed; 2 for an infrastructure failure (a delete that failed
 included, whatever signal came); 3 if the VM stopped mid-run; 75 if the job stopped early and no attempt was left;
 130 on Ctrl-C, SIGTERM or SIGHUP, also when it arrived while the VM was being deleted.
+
+### CPU VMs, keys and root jobs
+
+Some jobs need no GPU. The pre-RL rollouts of the terminal env sample from tinker, so they need the tinker key, and
+they need root, because `read_only_verifier` runs the policy's commands as `nobody`.
+- **CPU VMs:** `--platform cpu-d3 --preset 32vcpu-128gb --on-demand --image-family ubuntu24.04-driverless` ($1.06/h on
+  demand; `16vcpu-64gb` is $0.53/h). CPU VMs run on-demand only. The capacity advice lists GPU presets only, so a CPU
+  preset is priced in every region with its capacity and quota unknown. `NEBIUS_MAX_GPU_PRICE`, a spot bid, is ignored
+  for `--on-demand` (`--max-gpu-price` with it is refused), and the budget reserves the on-demand price × `--hours`.
+  The setup runs `uv sync --locked` and prints the Python version, with no torch/CUDA check (`exec --no-gpu` does the
+  same on any box).
+- **Keys:** `--secret NAME[=ENV]` (repeatable) gives the job the key in `~/.secrets/NAME` on the launching machine as
+  `$ENV` (default: NAME upper-cased, e.g. `tinker_api_key` → `TINKER_API_KEY`). It travels like the HF token: over SSH
+  stdin into an owner-only file on the VM's RAM disk, right before the job. The job step reads it as it starts and
+  deletes it when it ends; the launcher deletes it again if it stops first. A missing or empty key is refused before
+  anything is created. Only key names reach the logs, `job.json` and the dry run.
+- **Root jobs:** `--root-job` runs the job as root, on a box like the RL runs' (Ubuntu 24.04 with glibc 2.39, dash as
+  `/bin/sh`, CPython 3.11.16, the repo private). The setup installs uv's CPython `--sandbox-python` (default 3.11.16)
+  into `/opt/uv-python`, where `nobody` can run it, syncs the venv on exactly that version and runs `chmod 750 $HOME`.
+  It then fails unless, as root, the env's sandbox check passes, the venv runs that version and `nobody` cannot read
+  the repo. The job runs through `sudo -n -E -H`, with its environment (`--env`, the keys, `NEBIUS_JOB_DEADLINE`) and
+  root's HOME. Call `.venv/bin/python …` or `uv run --no-sync …` in it: a syncing `uv run` as root would rewrite the
+  venv (the launcher sets `UV_NO_SYNC=1` as a guard). `job.json` records `root_job`, `sandbox_python` and the key
+  names.
+
+The pre-RL rollouts (512 prompts × 64 samples, about 1.5 h; pick the episode workers):
+
+```bash
+python3 scripts/nebius_job.py run --hours 3 --platform cpu-d3 --preset 32vcpu-128gb --on-demand \
+  --image-family ubuntu24.04-driverless --secret tinker_api_key --root-job --out runs/{stamp}-{name} \
+  --upload data/runs/pre-rl-probe-v2=hf://buckets/probemaxxing/inkling-probes/inputs/pre-rl-probe-v2/{stamp} \
+  --fetch data/runs/pre-rl-probe-v2 -- .venv/bin/python experiments/eval_terminal_monitors_baseline.py \
+  --config experiments/configs/terminal_verifier_control.json --n-prompts 512 --samples 64 --episode-workers N \
+  --run-name pre-rl-probe-v2 --set 'monitors=[]' seed=1000000
+```
 
 ### Spot VMs: how they behave
 

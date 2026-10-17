@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a job on a fresh Nebius GPU VM (or any SSH box) and always clean up.
+"""Run a job on a fresh Nebius VM (a GPU one by default, or CPU-only) or on any SSH box, and always clean up.
 
 This automates what we first did by hand on 2026-10-09 (the Inkling-Small-NVFP4 load test on one
 B300), so a GPU job is a single command:
@@ -30,18 +30,20 @@ Where the VM goes: ``--regions-file`` (env NEBIUS_REGIONS_FILE) lists the candid
 
 The job command is everything after ``--``. It runs in the pushed repo on the VM. If it is a single
 argument it is treated as a shell string (pipes etc. work); otherwise the arguments are shell-quoted.
-The job gets PYTHONUNBUFFERED=1, NEBIUS_JOB_RAM=/mnt/ram (where ``--hf`` puts weights) and each
-``--env K=V``. ``{stamp}`` and ``{name}`` in ``--out`` are expanded.
+The job gets PYTHONUNBUFFERED=1, NEBIUS_JOB_RAM=/mnt/ram (where ``--hf`` puts weights), each
+``--env K=V`` and each ``--secret`` (below). ``{stamp}`` and ``{name}`` in ``--out`` are expanded.
 
 What ``run`` does (``exec`` is the SSH part only, so a non-Nebius box works too):
 1. Pick the region (above). Create the VM there, wait for RUNNING with a public IP, then wait for SSH.
 2. Bootstrap: RAM disk, lingering, uv.
 3. Start the ``--hf`` downloads, detached.
 4. Push the repo, with its ``CODE_VERSION.json`` (below), and the ``--push`` inputs.
-5. ``uv sync --locked``. If torch can't see the GPU, fall back to scripts/setup_box.sh.
+5. ``uv sync --locked``. If torch can't see the GPU, fall back to scripts/setup_box.sh. (No GPU check on a CPU VM or
+   with ``exec --no-gpu``; ``--root-job`` adds its own steps, below.)
 6. Wait for the downloads, then run the job, detached and polled.
    - With ``--upload``, the HF token reaches the VM before the job, so the job can save its own progress as it goes
      (``extract_probe_features.py --store``). The token stays until the upload step ends.
+   - The ``--secret`` keys reach the VM right before the job and are deleted when the job step ends.
    - The job gets ``NEBIUS_JOB_DEADLINE``, the VM's scheduled shutdown in epoch seconds, so it can stop cleanly
      before ``--hours`` cuts it off.
    - When the job ends, the VM schedules its own power-off 15 minutes later, unless ``--hours`` comes sooner. If
@@ -56,6 +58,34 @@ a preemption.
   ``nohup`` SIGHUP stays ignored, so the launcher outlives its terminal.
 - None of them interrupts step 8: one that arrives then is held until the VM is deleted, and the launcher stops
   there (no further attempt). SIGTERM or SIGHUP during step 7's fetches skips the rest of them, to delete sooner.
+
+CPU VMs, keys and root jobs (2026-10-17, for the pre-RL terminal rollouts: they sample from tinker and need root):
+- ``--platform cpu-d3 --preset 32vcpu-128gb --on-demand --image-family ubuntu24.04-driverless`` is a CPU-only VM
+  ($1.06/h on demand; 16vcpu-64gb $0.53/h). CPU VMs run on-demand only. Capacity advice covers GPU presets only, so
+  a CPU preset it doesn't list is still priced in every region, its capacity and quota unknown. NEBIUS_MAX_GPU_PRICE
+  (a spot bid, which a wrapper may set by default) is ignored for ``--on-demand``; ``--max-gpu-price`` with it is
+  refused. The setup is ``uv sync --locked`` and the Python version, without the torch/CUDA check (``exec
+  --no-gpu`` does the same on any box).
+- ``--secret NAME[=ENV]`` (repeatable): the key in ~/.secrets/NAME on this machine (``hub-secret set NAME``) is the
+  job's $ENV (default: NAME upper-cased). Like the HF token it goes over SSH stdin into an owner-only file on the RAM
+  disk (/mnt/ram/secrets/NAME), right before the job. The job step reads it when it starts and deletes it when it
+  ends; the launcher deletes it too if it stops first. A missing or empty key is refused before anything is created.
+  No key reaches a command line, a log, ``job.json`` or the dry run: only names do.
+- ``--root-job`` runs the job as root, as the RL runs did: the terminal env's ``read_only_verifier`` runs the
+  policy's commands as ``nobody`` and refuses to start otherwise. The setup installs uv's CPython
+  ``--sandbox-python`` (default 3.11.16) into /opt/uv-python, where ``nobody`` can run it, syncs the venv on exactly
+  that version and makes $HOME (so the repo) private (``chmod 750``). It then fails unless, as root, the env's
+  sandbox check passes, the venv runs that version and ``nobody`` cannot read the repo. The job runs through
+  ``sudo -n -E -H``, with its environment (``--env``, the keys, NEBIUS_JOB_DEADLINE, …), root's HOME and
+  UV_NO_SYNC=1. Its command should call ``.venv/bin/python …`` (or ``uv run --no-sync …``): as root, a syncing
+  ``uv run`` would rewrite the venv. ``job.json`` records ``root_job`` and ``sandbox_python``. The pre-RL rollouts:
+
+    python3 scripts/nebius_job.py run --hours 3 --platform cpu-d3 --preset 32vcpu-128gb --on-demand \\
+        --image-family ubuntu24.04-driverless --secret tinker_api_key --root-job --out runs/{stamp}-{name} \\
+        --upload data/runs/pre-rl-probe-v2=hf://buckets/probemaxxing/inkling-probes/inputs/pre-rl-probe-v2/{stamp} \\
+        --fetch data/runs/pre-rl-probe-v2 -- .venv/bin/python experiments/eval_terminal_monitors_baseline.py \\
+        --config experiments/configs/terminal_verifier_control.json --n-prompts 512 --samples 64 \\
+        --episode-workers N --run-name pre-rl-probe-v2 --set 'monitors=[]' seed=1000000
 
 Relaunching (``run --attempts N``, default 3): after a spot preemption, or a job that exits 75 (it stopped early,
 e.g. at its deadline, and can resume), a fresh VM runs the job again, in whichever region is cheapest then. That
@@ -98,8 +128,9 @@ Lessons from the manual session, built in here:
   ``--recovery-policy FAIL`` makes the in-VM auto-shutdown (``--hours``, the spending cap) stop the
   VM; under RECOVER a guest shutdown restarts it and billing continues.
 - Each run gets its own known_hosts in ``--out``, because public IPs are reused across VMs.
-- No secrets go to the VM. Only public HF repos are downloaded (no HF_TOKEN), and the repo is pushed
-  as ``git ls-files`` plus untracked-but-not-ignored files, so .env*, .venv and .git never travel.
+- No secrets go to the VM but the HF token (``--upload``) and the ``--secret`` keys, each over SSH stdin into an
+  owner-only file on the RAM disk, deleted after use. Only public HF repos are downloaded (no HF_TOKEN), and the repo
+  is pushed as ``git ls-files`` plus untracked-but-not-ignored files, so .env*, .venv and .git never travel.
 
 Exit status: 0 on success; the job's own exit code if it failed; 2 for an infrastructure failure;
 3 if the VM stopped mid-run (spot preemption or the --hours cap); 75 if the job stopped early to resume
@@ -506,21 +537,154 @@ def download_script(hf: list[tuple[str, str | None, str]]) -> str:
     return "\n".join(lines)
 
 
-def setup_script(extra_gpu: bool) -> str:
-    extra = " --extra gpu" if extra_gpu else ""
-    return f"""set -euo pipefail
-export PATH="$HOME/.local/bin:$PATH"
-uv sync --locked{extra}
-if ! uv run --no-sync python -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)'; then
-  echo "torch cannot see the GPU with the locked wheel: retargeting via scripts/setup_box.sh"
-  bash scripts/setup_box.sh{extra}
-fi
-uv run --no-sync python -c 'import torch as t; print("torch", t.__version__, t.version.cuda, t.cuda.get_device_name(0))'
+def is_cpu_platform(platform: str) -> bool:
+    """Nebius's CPU-only platforms (``cpu-d3``, ``cpu-e2``): no GPU, and no capacity advice for their presets."""
+    return platform.startswith("cpu-")
+
+
+SECRETS_DIR = "~/.secrets"  # this machine's keys, a file each: hub's store (`hub-secret set NAME` writes NAME there)
+SECRET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")  # hub-secret's names
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+LAUNCHER_ENV = {"PATH", "HOME", "PYTHONUNBUFFERED", "NEBIUS_JOB_RAM", "NEBIUS_JOB_DEADLINE", "HF_XET_HIGH_PERFORMANCE",
+                "HF_TOKEN_PATH", "UV_NO_SYNC"}  # set by the job script itself
+
+
+@dataclass(frozen=True)
+class Secret:
+    """One ``--secret NAME[=ENV]``: the key in ``SECRETS_DIR``/NAME becomes the job's $ENV. Holds where the key is,
+    never the key."""
+    name: str
+    env: str
+    path: Path
+
+
+def parse_secret(spec: str) -> Secret:
+    """``NAME[=ENV]`` -> Secret; ENV defaults to NAME upper-cased. A bad ENV is not echoed: it may be a key typed by
+    mistake (``--secret NAME=VALUE``, as for ``--env``)."""
+    name, sep, env = spec.partition("=")
+    if not SECRET_NAME.fullmatch(name):
+        raise ValueError(f"--secret wants NAME[=ENV], NAME a file in {SECRETS_DIR} (letters, digits and . _ -, as "
+                         f"hub-secret names them), got the name {name!r}")
+    env = env if sep else name.upper()
+    if not ENV_NAME.fullmatch(env):
+        raise ValueError(f"--secret {name}: " + (
+            "after = comes the name of the job's environment variable (letters, digits and _), not a key: the key "
+            "is read from the file" if sep else
+            f"{env!r} is not an environment variable name; name one: --secret {name}=ENV"))
+    return Secret(name, env, Path(SECRETS_DIR).expanduser() / name)
+
+
+def job_secrets(specs: list[str], taken: set[str]) -> list[Secret]:
+    """The ``--secret`` flags: each NAME and each ENV once, and no ENV that ``--env`` (``taken``) or the launcher
+    already sets."""
+    out: list[Secret] = []
+    for spec in specs:
+        s = parse_secret(spec)
+        if any(o.name == s.name for o in out):
+            raise ValueError(f"--secret {s.name} is given twice")
+        if s.env in taken or s.env in LAUNCHER_ENV or any(o.env == s.env for o in out):
+            raise ValueError(f"--secret {s.name}: ${s.env} is already set (by --env, another --secret or the launcher)")
+        out.append(s)
+    return out
+
+
+def secret_problem(path: Path) -> str | None:
+    """Why the key file ``path`` can't be sent (None: it can). It is read to tell an empty one, and never shown."""
+    try:
+        if not path.is_file():
+            return "missing" if not path.exists() else "not a file"
+        return None if path.read_bytes().strip() else "empty"
+    except OSError as e:
+        return f"unreadable ({e.strerror})"
+
+
+REMOTE_SECRETS = f"{RAM_DIR}/secrets"  # tmpfs, 0700: each key's file, from right before the job to its end
+
+
+def remote_secret(name: str) -> str:
+    return f"{REMOTE_SECRETS}/{name}"
+
+
+def secret_reads(secrets: list[Secret]) -> str:
+    """Shell lines that read each key from its file on the VM into its variable, exported for the job. A missing file
+    fails the job before its command runs."""
+    return "".join(f'{s.env}="$(cat {shlex.quote(remote_secret(s.name))})" || exit 1\nexport {s.env}\n'
+                   for s in secrets)
+
+
+UV_PYTHON_DIR = "/opt/uv-python"  # --root-job: uv's Python (UV_PYTHON_INSTALL_DIR), where every user can run it
+DEFAULT_SANDBOX_PYTHON = "3.11.16"  # the RL runs' CPython
+# How a root job runs: as root, with the calling step's environment (-E; sudo still drops a few names, e.g. PYTHONPATH
+# and LD_*), root's HOME (-H: what root writes stays out of the login user's home), and the step's PATH (sudo would
+# put its secure_path in its place). sudo keeps the working directory.
+ROOT_SUDO = 'sudo -n -E -H env "PATH=$PATH"'
+# --root-job's setup check, run the way the job runs (ROOT_SUDO, the venv's python, in the repo); argv: the version and
+# a file of the repo. The env's own sandbox check (root, and an interpreter its sandbox user can run), the exact
+# Python, and that the sandbox user cannot read the repo.
+ROOT_CHECK = """\
+import os, subprocess, sys
+from monitordecorrelation.envs.terminal_verifier import SANDBOX_USER, _sandbox_ids
+version, repo_file, here = sys.argv[1], sys.argv[2], sys.version.split()[0]
+uid, gid, python = _sandbox_ids()  # raises unless root, and unless the sandbox user can run this interpreter
+print(f"root job: euid {os.geteuid()}, venv Python {here}; the env runs commands as {SANDBOX_USER} ({uid}:{gid}) "
+      f"with {python}")
+if here != version:
+    sys.exit(f"root job: the venv runs Python {here}, not --sandbox-python {version}")
+peek = subprocess.run([python, "-c", "import sys; open(sys.argv[1]).close()", repo_file], user=uid, group=gid,
+                      extra_groups=[], cwd="/", capture_output=True)
+if peek.returncode == 0:
+    sys.exit(f"root job: {SANDBOX_USER} can read {repo_file}: the repo must be private to its owner")
+print(f"root job: {SANDBOX_USER} cannot read the repo")
 """
 
 
+def root_command(body: str) -> str:
+    """A shell line that runs ``body`` as root (``ROOT_SUDO``) in the current directory."""
+    return f"{ROOT_SUDO} bash -c {shlex.quote(body)}"
+
+
+def setup_script(extra_gpu: bool, gpu: bool = True, sandbox_python: str | None = None) -> str:
+    """The setup step, in the pushed repo: ``uv sync --locked``, then
+    - with a GPU: check that torch sees it (else retarget torch with scripts/setup_box.sh), and show it;
+    - without one (``cpu-*`` platforms, ``exec --no-gpu``): show the Python version;
+    - with ``sandbox_python`` (``--root-job``): the sync runs on uv's CPython of exactly that version, installed into
+      ``UV_PYTHON_DIR``, where every user can run it (the env's sandbox user runs the policy's commands with it).
+      Then $HOME, and so the repo, is made private, and the step fails unless ``ROOT_CHECK`` passes run as the job
+      will be (``ROOT_SUDO``)."""
+    extra = " --extra gpu" if extra_gpu else ""
+    lines = ["set -euo pipefail", 'export PATH="$HOME/.local/bin:$PATH"']
+    if sandbox_python is None:
+        lines.append(f"uv sync --locked{extra}")
+    else:
+        v = sandbox_python
+        lines += ["umask 022  # uv's Python must be readable and runnable by every user",
+                  f'sudo -n install -d -m 755 -o "$(id -un)" {UV_PYTHON_DIR}',
+                  f"export UV_PYTHON_INSTALL_DIR={UV_PYTHON_DIR}",
+                  f"uv python install {v}",
+                  f'case "$(readlink -f .venv/bin/python 2>/dev/null)" in {UV_PYTHON_DIR}/*) ;; *) rm -rf .venv ;; '
+                  "esac  # a venv on another interpreter is rebuilt",
+                  f"uv sync --locked{extra} --managed-python --python {v}"]
+    if gpu:
+        lines += ["if ! uv run --no-sync python -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)'"
+                  "; then",
+                  '  echo "torch cannot see the GPU with the locked wheel: retargeting via scripts/setup_box.sh"',
+                  f"  bash scripts/setup_box.sh{extra}",
+                  "fi",
+                  "uv run --no-sync python -c 'import torch as t; print(\"torch\", t.__version__, t.version.cuda, "
+                  "t.cuda.get_device_name(0))'"]
+    elif sandbox_python is None:
+        lines.append("uv run --no-sync python -c 'import sys; print(\"python\", sys.version.split()[0], "
+                     "\"(no GPU: no torch/CUDA check)\")'")
+    if sandbox_python is not None:
+        lines += ['chmod 750 "$HOME"  # the repo private: the policy\'s commands run as another user',
+                  'echo "root job: $(. /etc/os-release && echo "$PRETTY_NAME"), $(getconf GNU_LIBC_VERSION), '
+                  '/bin/sh -> $(readlink -f /bin/sh)"',
+                  f'{ROOT_SUDO} .venv/bin/python -c {shlex.quote(ROOT_CHECK)} {v} "$PWD/pyproject.toml"']
+    return "\n".join(lines) + "\n"
+
+
 def job_script(command: str, env: list[tuple[str, str]], poweroff_minutes: int | None = None,
-               deadline_fallback: int | None = None) -> str:
+               deadline_fallback: int | None = None, *, secrets: list[Secret] = (), root: bool = False) -> str:
     """The job step.
 
     - It exports ``NEBIUS_JOB_DEADLINE``, the VM's scheduled shutdown (the ``--hours`` cap) in epoch seconds, and
@@ -529,20 +693,30 @@ def job_script(command: str, env: list[tuple[str, str]], poweroff_minutes: int |
       estimate, VM creation + ``--hours``, a little before the real shutdown.
     - With ``poweroff_minutes``, the VM powers itself off that long after the job ends, unless a sooner shutdown is
       already scheduled. So if the launcher has died, the VM stops on its own instead of running until ``--hours``.
+    - ``secrets`` (``--secret``): each key is read from its file on the RAM disk as the job starts (``secret_reads``:
+      the script holds paths, never a key), and the files are deleted when the step ends, however it ends (EXIT trap).
+    - ``root`` (``--root-job``): the command runs as root (``ROOT_SUDO``) with the step's environment, the ``--env``
+      values again (sudo drops a few names even with -E), the keys (read by root) and UV_NO_SYNC=1, so a ``uv run``
+      in it cannot re-sync the venv as root. The deadline, the power-off and the exit code stay this step's.
     """
     exports = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env)
     head = (f'export PATH="$HOME/.local/bin:$PATH" PYTHONUNBUFFERED=1 NEBIUS_JOB_RAM={RAM_DIR} '
             f'HF_XET_HIGH_PERFORMANCE=1 HF_TOKEN_PATH="{REMOTE_HF_TOKEN}"\n{exports}'
-            f'usec=$(sudo -n cat {SCHEDULED_SHUTDOWN} 2>/dev/null | sed -n "s/^USEC=//p")\n'
+            + (f"trap {shlex.quote(shlex.join(['rm', '-f', '--', *(remote_secret(s.name) for s in secrets)]))} EXIT\n"
+               if secrets else "")
+            + f'usec=$(sudo -n cat {SCHEDULED_SHUTDOWN} 2>/dev/null | sed -n "s/^USEC=//p")\n'
             + (f'[ -n "$usec" ] || usec={int(deadline_fallback)}000000\n' if deadline_fallback else "")
             + 'if [ -n "$usec" ]; then\n'
             '  export NEBIUS_JOB_DEADLINE=$((usec / 1000000))\n'
             f'  echo "$NEBIUS_JOB_DEADLINE" > "$HOME/{REMOTE_LOGS}/deadline"\n'
             'fi\n')
+    body = secret_reads(secrets) + command
+    if root:
+        body = root_command(f"export UV_NO_SYNC=1\n{exports}{body}")
     if poweroff_minutes is None:
-        return head + command
+        return head + body
     m = int(poweroff_minutes)
-    return (f"{head}(\n{command}\n)\nrc=$?\n"
+    return (f"{head}(\n{body}\n)\nrc=$?\n"
             f"want=$(( $(date +%s) + {m} * 60 ))\n"
             f'cur=$(sudo -n cat {SCHEDULED_SHUTDOWN} 2>/dev/null | sed -n "s/^USEC=//p")\n'
             'if [ -z "$cur" ] || [ $((cur / 1000000)) -gt "$want" ]; then\n'
@@ -732,7 +906,10 @@ def capacity_of(items: list[dict], region: str, platform: str, preset: str, spot
 
 def survey(nebius: str, regions: list[Region], tenant: str | None, platform: str, preset: str,
            spot: bool) -> list[Offer]:
-    """Price and capacity of the VM in every region. Read-only: the cost calculator and capacity advice."""
+    """Price and capacity of the VM in every region. Read-only: the cost calculator and capacity advice.
+
+    The advice covers GPU presets only: a CPU preset it doesn't list is still priced, its capacity and quota left
+    unknown (a region without the platform fails the calculator or the creation, and is skipped)."""
     capacity = None
     if tenant:
         try:
@@ -744,7 +921,7 @@ def survey(nebius: str, regions: list[Region], tenant: str | None, platform: str
         offer = Offer(region.name)
         if capacity is not None:
             offered, offer.level, offer.available = capacity_of(capacity, region.name, platform, preset, spot)
-            if not offered:
+            if not offered and not is_cpu_platform(platform):
                 offer.note = f"{platform}/{preset} not offered here"
                 offers.append(offer)
                 continue
@@ -776,6 +953,13 @@ def offer_table(offers: list[Offer], max_price: float | None, chosen: str | None
 def gpu_count(preset: str) -> int:
     m = re.match(r"(\d+)gpu", preset)
     return int(m.group(1)) if m else 1
+
+
+def machine_label(spec: VmSpec) -> str:
+    """The VM in the ledger and logs: GPUs × platform, or a CPU VM's platform/preset (it has no GPU to count)."""
+    if is_cpu_platform(spec.platform):
+        return f"{spec.platform}/{spec.preset}"
+    return f"{gpu_count(spec.preset)}× {spec.platform}"
 
 
 def policy_name(platform: str, max_gpu_price: float) -> str:
@@ -1075,6 +1259,21 @@ class JobSpec:
     poll_interval: float = 15.0
     poweroff_minutes: int | None = None  # the VM powers itself off this long after the job (run, not kept)
     allow_dirty: bool = False  # push uncommitted changes (their patch is saved in ``out``)
+    secrets: list[Secret] = field(default_factory=list)  # --secret: on the VM from right before the job to its end
+    gpu: bool = True  # the setup checks that torch sees the GPU (not on cpu-* platforms, nor with exec --no-gpu)
+    root_job: bool = False  # --root-job: the job runs as root, on uv's CPython ``sandbox_python`` (see setup_script)
+    sandbox_python: str = DEFAULT_SANDBOX_PYTHON
+
+
+def job_setup_script(job: JobSpec) -> str:
+    return setup_script(job.extra_gpu, gpu=job.gpu, sandbox_python=job.sandbox_python if job.root_job else None)
+
+
+def job_fields(job: JobSpec) -> dict:
+    """What job.json records of the job beyond its flags: whether it runs as root, on which Python, and the key names
+    (never a key)."""
+    return {"root_job": job.root_job, "sandbox_python": job.sandbox_python if job.root_job else None,
+            "secrets": {s.name: s.env for s in job.secrets}}
 
 
 @dataclass
@@ -1107,6 +1306,9 @@ class Record:
     creates: list = field(default_factory=list)  # every creation tried: region, price, start, minutes, error
     retries: list = field(default_factory=list)  # on attempt 1: the --out dirs of the later attempts
     code: dict | None = None  # the code version pushed, as written to the VM's CODE_VERSION.json
+    root_job: bool = False  # --root-job: the job ran as root
+    sandbox_python: str | None = None  # --root-job: the exact CPython of the venv (and of the env's sandbox)
+    secrets: dict = field(default_factory=dict)  # --secret: key name -> the job's variable (names only, never a key)
 
     def save(self, out: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
@@ -1283,9 +1485,10 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
     for local, dest in job.pushes:
         log(f"pushing {local} -> {remote_path(dest)}")
         push_path(remote, local, dest)
-    start(remote, "setup", setup_script(job.extra_gpu), cwd=REMOTE_REPO)
+    start(remote, "setup", job_setup_script(job), cwd=REMOTE_REPO)
     if (code := poll(remote, "setup", job.out, interval=10, timeout=3600, check_vm=check_vm)) != 0:
-        raise InfraError(f"setup (uv sync / CUDA check) failed with {code}; see setup.log")
+        checks = ["uv sync", *(["CUDA check"] if job.gpu else []), *(["root-job check"] if job.root_job else [])]
+        raise InfraError(f"setup ({' / '.join(checks)}) failed with {code}; see setup.log")
     rec.times["setup_done"] = utc()
     if job.hf:
         if (code := poll(remote, "download", job.out, interval=10, timeout=7200, check_vm=check_vm)) != 0:
@@ -1297,11 +1500,16 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
     if job.uploads:  # before the job, so it can save its progress as it goes; removed when the upload step ends
         send_token(remote, job.hf_token_file)
         log(f"HF token on the VM (mode 600) for the job and the upload: {REMOTE_HF_TOKEN}")
-    log(f"job: {job.command}")
+    if job.secrets:  # read by the job step as it starts, deleted when it ends
+        send_secrets(remote, job.secrets)
+        log(f"keys on the VM (owner-only, in {REMOTE_SECRETS}) for the job: "
+            + ", ".join(f"{s.name} as ${s.env}" for s in job.secrets))
+    log(f"job{' (as root)' if job.root_job else ''}: {job.command}")
     fallback = None  # if the VM's own record of its shutdown can't be read: creation + --hours, slightly early
     if rec.hours and rec.times.get("create_start"):
         fallback = int(_seconds(rec.times["create_start"]) + rec.hours * 3600)
-    start(remote, "job", job_script(job.command, job.env, job.poweroff_minutes, fallback), cwd=REMOTE_REPO)
+    start(remote, "job", job_script(job.command, job.env, job.poweroff_minutes, fallback, secrets=job.secrets,
+                                    root=job.root_job), cwd=REMOTE_REPO)
     rec.times["job_start"] = utc()
     rec.save(job.out)
     cap = vm_deadline(rec)  # past the cap + 10 min the VM can only be gone or wedged: stop waiting
@@ -1323,6 +1531,30 @@ def send_token(remote: Remote, token_file: Path) -> None:
     with token_file.open("rb") as fh:
         remote.run(f'umask 077 && mkdir -p "$(dirname "{REMOTE_HF_TOKEN}")" && cat > "{REMOTE_HF_TOKEN}"', stdin=fh,
                    timeout=60)
+
+
+def send_secrets(remote: Remote, secrets: list[Secret]) -> None:
+    """Each key goes to the VM like the HF token: over SSH stdin into a new owner-only file (umask 077), in a 0700
+    folder of the login user's own on the RAM disk (not a link, not someone else's). Never on a command line or in a
+    log; an error shows the remote shell's message, never the key."""
+    folder = shlex.quote(REMOTE_SECRETS)
+    for s in secrets:
+        target = shlex.quote(remote_secret(s.name))
+        with s.path.open("rb") as fh:
+            remote.run(f"umask 077 && mkdir -p {folder} && [ ! -L {folder} ] && [ -O {folder} ] && chmod 700 {folder} "
+                       f"&& rm -f -- {target} && cat > {target}", stdin=fh, timeout=60)
+
+
+def remove_secrets(remote: Remote, secrets: list[Secret]) -> None:
+    """Best effort: the key files off the VM, in case the job step's own EXIT trap didn't run (the launcher stopped
+    before or during the job; a kept VM keeps its RAM disk). Errors are swallowed; a signal still propagates, so
+    SIGTERM/SIGHUP can cut the collection short as before."""
+    if not secrets:
+        return
+    files = shlex.join([remote_secret(s.name) for s in secrets])
+    with contextlib.suppress(Exception):
+        remote.run(f"rm -f -- {files}; rmdir {shlex.quote(REMOTE_SECRETS)} 2>/dev/null; exit 0", timeout=60,
+                   check=False)
 
 
 def upload(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> None:
@@ -1383,9 +1615,31 @@ def vm_spec(args) -> VmSpec:
     """The VM, minus where it goes (``in_region`` fills that in)."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", args.name):
         raise SystemExit(f"--name must be lowercase letters, digits and dashes, got {args.name!r}")
+    if is_cpu_platform(args.platform) and not args.on_demand:
+        raise SystemExit(f"{args.platform} is a CPU platform: CPU VMs run --on-demand here (the spot bid, "
+                         "--max-gpu-price, is per GPU-hour)")
     return VmSpec(name=f"{args.name}-{secrets.token_hex(3)}", project_id="", subnet_id="",
                   platform=args.platform, preset=args.preset, spot=not args.on_demand, disk_gib=args.disk_gib,
                   image_family=args.image_family, image_project="", hours=args.hours, user=args.user)
+
+
+def spot_bid(args) -> float | None:
+    """The spot bid per GPU-hour: ``--max-gpu-price``, else NEBIUS_MAX_GPU_PRICE. An on-demand VM has a fixed price:
+    a bid given on the command line is refused there, and the environment's (a wrapper's default) ignored."""
+    if args.max_gpu_price is not None:
+        if args.on_demand:
+            raise SystemExit("--max-gpu-price is a spot bid; it does not apply to --on-demand")
+        return args.max_gpu_price
+    env = os.environ.get("NEBIUS_MAX_GPU_PRICE", "").strip()
+    if not env:
+        return None
+    if args.on_demand:
+        log(f"--on-demand: ignoring NEBIUS_MAX_GPU_PRICE={env}, a spot bid (an on-demand VM has a fixed price)")
+        return None
+    try:
+        return float(env)
+    except ValueError:
+        raise SystemExit(f"NEBIUS_MAX_GPU_PRICE={env!r} is not a number (USD per GPU-hour)") from None
 
 
 def in_region(spec: VmSpec, region: Region) -> VmSpec:
@@ -1432,9 +1686,30 @@ def job_spec(args, cmd: list[str], name: str) -> JobSpec:
         token_file = Path(args.hf_token_file).expanduser()
         if not (token_file.is_file() and token_file.stat().st_size > 0) and not getattr(args, "dry_run", False):
             raise SystemExit(f"--upload needs a Hugging Face token in {token_file} (--hf-token-file)")
+    try:
+        keys = job_secrets(args.secret, {k for k, _ in env})
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
+    for s in keys:  # before anything is priced or created; a dry run shows the problem instead
+        problem = secret_problem(s.path)
+        if problem and not getattr(args, "dry_run", False):
+            raise SystemExit(f"--secret {s.name}: {s.path} is {problem}; put the key there with `hub-secret set "
+                             f"{s.name}`")
+    if keys and getattr(args, "cmd", None) == "up":
+        log(f"up runs no job, so --secret {', '.join(s.name for s in keys)} is not sent: give it to exec")
+    gpu = not getattr(args, "no_gpu", False) and not is_cpu_platform(getattr(args, "platform", "") or "")
+    if args.extra_gpu and not gpu:
+        raise SystemExit("--extra-gpu needs a GPU (not a cpu-* platform, nor exec --no-gpu)")
+    if args.sandbox_python is not None and not args.root_job:
+        raise SystemExit("--sandbox-python is the Python of a --root-job; it does not apply without --root-job")
+    sandbox_python = args.sandbox_python or DEFAULT_SANDBOX_PYTHON
+    if not re.fullmatch(r"\d+\.\d+\.\d+", sandbox_python):
+        raise SystemExit(f"--sandbox-python wants an exact CPython version like {DEFAULT_SANDBOX_PYTHON}, "
+                         f"got {sandbox_python!r}")
     return JobSpec(out=expand_out(args.out, name, stamp), command=job_command(cmd) if cmd else None,
                    pushes=pushes, hf=hf, fetches=list(args.fetch), uploads=uploads, hf_token_file=token_file,
-                   env=env, extra_gpu=args.extra_gpu, poll_interval=args.poll_interval, allow_dirty=args.allow_dirty)
+                   env=env, extra_gpu=args.extra_gpu, poll_interval=args.poll_interval, allow_dirty=args.allow_dirty,
+                   secrets=keys, gpu=gpu, root_job=args.root_job, sandbox_python=sandbox_python)
 
 
 def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) -> int:
@@ -1460,10 +1735,20 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
     print(f"== bootstrap (over ssh) ==\n{bootstrap_script()}")
     if job.hf:
         print(f"== downloads (detached, started right after bootstrap) ==\n{download_script(job.hf)}\n")
-    print(f"== setup (detached, in ~/{REMOTE_REPO}) ==\n{setup_script(job.extra_gpu)}")
+    print(f"== setup (detached, in ~/{REMOTE_REPO}) ==\n{job_setup_script(job)}")
+    if job.secrets and job.command is None:
+        print("== keys: not sent (up runs no job; give --secret to exec) ==")
+    elif job.secrets:
+        print("== keys (names only: a key is never shown) ==")
+        for s in job.secrets:
+            problem = secret_problem(s.path)
+            print(f"{s.path} -> {remote_secret(s.name)} on the VM, the job's ${s.env}"
+                  + (f"  !! {problem}: a real run refuses it (hub-secret set {s.name})" if problem else ""))
+        print("each over ssh stdin into an owner-only file (umask 077) right before the job; the job step reads it as "
+              "it starts and deletes it when it ends (EXIT trap), the launcher again if it stops first")
     if job.command is not None:
-        script = job_script(job.command, job.env, job.poweroff_minutes)
-        print(f"== job (detached, in ~/{REMOTE_REPO}) ==\n{script}\n")
+        script = job_script(job.command, job.env, job.poweroff_minutes, secrets=job.secrets, root=job.root_job)
+        print(f"== job (detached, in ~/{REMOTE_REPO}{'; the command as root' if job.root_job else ''}) ==\n{script}\n")
         print(f"== how a detached step is launched (the job, verbatim) ==\n{detached(script, 'job', REMOTE_REPO)}\n")
     if job.uploads:
         print("== upload (detached, after the job, whatever its exit code) ==")
@@ -1641,6 +1926,7 @@ def cmd_vm(args, cmd: list[str]) -> int:
 def vm_attempts(args, cmd: list[str]) -> int:
     """``cmd_vm`` inside its signal handlers."""
     base = vm_spec(args)
+    args.max_gpu_price = spot_bid(args)  # the flag, else the environment's (spot only); job.json records this one
     first_job = job_spec(args, cmd, base.name)
     check_code(first_job.allow_dirty)  # before anything is priced, reaped or created
     if args.cmd == "run" and not args.keep:
@@ -1725,7 +2011,7 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         worst_hourly = bid * gpu_count(spec.preset) if bid else \
             Nebius(args.nebius, by_name[order[0].region].project).estimate_hourly(spec.platform, spec.preset, False)
     worst = worst_hourly * spec.hours if worst_hourly is not None else None
-    what = f"{spec.name} ({gpu_count(spec.preset)}× {spec.platform}, ≤{spec.hours:g} h)"
+    what = f"{spec.name} ({machine_label(spec)}, ≤{spec.hours:g} h)"
     if budget is not None:
         log(budget.summary() + (f"; this job's worst case ${worst:.2f}" if worst is not None else ""))
     if args.dry_run:
@@ -1741,6 +2027,8 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         if bid:
             print(f"== pricing: spot with a max bid of ${bid:g}/GPU-h (policy {policy_name(spec.platform, bid)}, "
                   f"reused or created in the chosen region) ==")
+        elif not spec.spot:
+            print(f"== pricing: on-demand, ${order[0].price:.2f}/h in {order[0].region} (a fixed price: no bid) ==")
         pubkey = pub.read_text() if pub.is_file() else f"<missing {pub}>"
         return dry_run(args.nebius, in_region(spec, by_name[order[0].region]), job, pubkey,
                        keep=args.cmd == "up" or args.keep), None
@@ -1749,7 +2037,7 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
     keep_always = args.cmd == "run" and args.keep
     rec = Record(mode=args.cmd, name=spec.name, spot=spec.spot, hours=spec.hours, command=job.command,
                  flags={k: v for k, v in vars(args).items() if k not in ("func",)},
-                 max_price=cap, offers=[asdict(o) for o in offers], attempt=attempt)
+                 max_price=cap, offers=[asdict(o) for o in offers], attempt=attempt, **job_fields(job))
     if not order:
         rec.errors.append("no region qualifies (cap, capacity, quota or price); nothing created")
         rec.save(job.out)
@@ -1843,6 +2131,7 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                 try:
                     held.cut_collection = True  # SIGTERM/SIGHUP skip the rest of this best-effort step
                     try:
+                        remove_secrets(remote, job.secrets)  # if the job step's trap didn't (a kept VM keeps its RAM)
                         collect(remote, job, rec)
                     finally:
                         held.cut_collection = False
@@ -1882,7 +2171,8 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                 if rec.teardown_verified is False:  # still reserved at the worst case until reap deletes it
                     budget.annotate(spec.name, teardown_failed=True)
                 elif settle_usd is not None:
-                    budget.settle(spec.name, settle_usd, "conservative estimate from the sampled spot prices")
+                    budget.settle(spec.name, settle_usd, f"conservative estimate from the sampled "
+                                                         f"{'spot' if spec.spot else 'on-demand'} prices")
                 elif inst is None:
                     budget.settle(spec.name, 0.0, "no VM was created")
                 else:  # created but no price samples: keep the worst case
@@ -1890,7 +2180,8 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                 log(budget.summary())
             if rec.estimated_cost_usd is not None:
                 log(f"estimated cost ${rec.estimated_cost_usd:.2f} in {rec.region} "
-                    f"({'so far; the VM is still running' if rec.kept else 'from the sampled spot prices'})")
+                    "(" + ("so far; the VM is still running" if rec.kept else
+                           f"from the sampled {'spot' if spec.spot else 'on-demand'} prices") + ")")
             rec.save(job.out)
             log(f"record: {job.out / 'job.json'}")
         if held.signum is not None:  # acted on now that the VM is deleted: no further attempt
@@ -1920,13 +2211,13 @@ def vm_stopped(rec: Record, state: str, created: float, hours: float) -> int:
 
 
 def cmd_exec(args, cmd: list[str]) -> int:
-    """The SSH part only, on an existing box (an ``up`` VM or any CUDA machine)."""
+    """The SSH part only, on an existing box (an ``up`` VM, any CUDA machine, or any box with ``--no-gpu``)."""
     job = job_spec(args, cmd, args.name)
     if job.command is None:
         raise SystemExit("exec needs a job command after --")
     check_code(job.allow_dirty)
     rec = Record(mode="exec", host=args.host, command=job.command,
-                 flags={k: v for k, v in vars(args).items() if k not in ("func",)})
+                 flags={k: v for k, v in vars(args).items() if k not in ("func",)}, **job_fields(job))
     remote = Remote(args.host, job.out / "known_hosts", str(Path(args.ssh_key).expanduser()) if args.ssh_key else None)
     code = EXIT_INFRA
     try:
@@ -1943,6 +2234,7 @@ def cmd_exec(args, cmd: list[str]) -> int:
         if job.uploads:  # the upload step removes it, but not if we stopped before that
             with contextlib.suppress(Exception):
                 remote.run(f'rm -f "{REMOTE_HF_TOKEN}"', timeout=60, check=False)
+        remove_secrets(remote, job.secrets)  # the job step's trap removes them, but not if we stopped before it
         collect(remote, job, rec)
         rec.save(job.out)
         log(f"record: {job.out / 'job.json'}")
@@ -2040,8 +2332,10 @@ def build_parser() -> argparse.ArgumentParser:
     nebius.add_argument("--nebius", default=os.environ.get("NEBIUS_BIN", "nebius"), help="CLI binary (env NEBIUS_BIN)")
 
     machine = argparse.ArgumentParser(add_help=False)
-    machine.add_argument("--platform", default="gpu-b300-sxm")
-    machine.add_argument("--preset", default="1gpu-24vcpu-346gb")
+    machine.add_argument("--platform", default="gpu-b300-sxm",
+                         help="gpu-b300-sxm (default), or a CPU-only one, e.g. cpu-d3 (with --on-demand)")
+    machine.add_argument("--preset", default="1gpu-24vcpu-346gb",
+                         help="1gpu-24vcpu-346gb (default); cpu-d3: e.g. 16vcpu-64gb, 32vcpu-128gb")
     pricing = machine.add_mutually_exclusive_group()
     pricing.add_argument("--spot", action="store_true", help="preemptible at the current spot price (default)")
     pricing.add_argument("--on-demand", action="store_true", help="regular, non-preemptible VM")
@@ -2065,7 +2359,21 @@ def build_parser() -> argparse.ArgumentParser:
     remote.add_argument("--fetch", action="append", default=[], metavar="REMOTE_PATH",
                         help="file or dir to bring back into --out (relative to the remote repo unless absolute or ~/)")
     remote.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
-                        help="exported for the job (no secrets)")
+                        help="exported for the job (no secrets: --secret)")
+    remote.add_argument("--secret", action="append", default=[], metavar="NAME[=ENV]",
+                        help=f"the key in {SECRETS_DIR}/NAME on this machine (`hub-secret set NAME` puts it there) is "
+                             "the job's $ENV (default: NAME upper-cased). It goes over ssh stdin into an owner-only "
+                             f"file in {REMOTE_SECRETS} right before the job, which deletes it when it ends; never on "
+                             "a command line, in a log or in job.json (names only). Refused if missing or empty")
+    remote.add_argument("--root-job", action="store_true",
+                        help="run the job as root, like the RL runs (the terminal env's read_only_verifier needs it). "
+                             f"The setup installs uv's CPython --sandbox-python into {UV_PYTHON_DIR} (where the env's "
+                             "sandbox user, nobody, can run it), syncs the venv on it, makes $HOME private (chmod "
+                             "750) and checks all that as root. The job runs via sudo -E -H with its environment; "
+                             "call .venv/bin/python (or uv run --no-sync) in it")
+    remote.add_argument("--sandbox-python", default=None, metavar="VERSION",
+                        help=f"with --root-job: the exact CPython of the venv and the sandbox (default "
+                             f"{DEFAULT_SANDBOX_PYTHON}, the RL runs')")
     remote.add_argument("--extra-gpu", action="store_true", help="uv sync --extra gpu (flash-attn, causal-conv1d, …)")
     remote.add_argument("--poll-interval", type=float, default=15.0, help="seconds between job log polls")
     remote.add_argument("--allow-dirty", action="store_true",
@@ -2081,14 +2389,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="private key; KEY.pub goes into cloud-init (env NEBIUS_SSH_KEY)")
     vm.add_argument("--name", default="md-job", help="VM name prefix (a random suffix is added)")
     vm.add_argument("--user", default="md", help="login user created on the VM")
-    vm.add_argument("--max-gpu-price", type=float, default=(float(os.environ["NEBIUS_MAX_GPU_PRICE"])
-                                                             if os.environ.get("NEBIUS_MAX_GPU_PRICE") else None),
+    vm.add_argument("--max-gpu-price", type=float, default=None,  # else NEBIUS_MAX_GPU_PRICE, for spot: spot_bid
                     metavar="USD", help="spot bid per GPU-hour through a Nebius pricing policy: never charged more; "
-                                        "the VM doesn't run while the market is above it (env NEBIUS_MAX_GPU_PRICE)")
+                                        "the VM doesn't run while the market is above it (env NEBIUS_MAX_GPU_PRICE, "
+                                        "which --on-demand ignores; the flag with --on-demand is refused)")
     vm.add_argument("--budget-file", default=os.environ.get("NEBIUS_BUDGET_FILE"),
                     help="spending ledger; refuse a VM whose worst case would exceed its limit (env NEBIUS_BUDGET_FILE)")
     vm.add_argument("--disk-gib", type=int, default=200, help="boot disk (network SSD; weights go to RAM, not here)")
-    vm.add_argument("--image-family", default="ubuntu24.04-cuda13.0")
+    vm.add_argument("--image-family", default="ubuntu24.04-cuda13.0",
+                    help="ubuntu24.04-cuda13.0 (default); for a CPU VM, ubuntu24.04-driverless")
     vm.add_argument("--image-project", default="project-e03public-images",
                     help="with --project-id only: the region's public-image project (default: uk-south1's)")
     vm.add_argument("--wait-hours", type=float, default=2.0,
@@ -2108,6 +2417,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_vm, keep=True, attempts=1)
     p = sub.add_parser("exec", parents=[remote], help="set up + job + fetch on an existing SSH box")
     p.add_argument("--host", required=True, help="USER@HOST")
+    p.add_argument("--no-gpu", action="store_true",
+                   help="a box without a GPU: the setup runs uv sync and shows the Python version, no torch/CUDA check")
     p.add_argument("--ssh-key", default=os.environ.get("NEBIUS_SSH_KEY"))
     p.add_argument("--name", default="exec", help="only used for {name} in --out")
     p.set_defaults(func=cmd_exec)
