@@ -54,6 +54,16 @@ PLAN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "inkling_probes_preregistration.md")
 
 
+def amendment_sha() -> str | None:
+    """sha256 of docs/inkling_probes_amendment_1.md, which the IID probe v2 is fitted under (it changes only where the
+    IID episodes come from); recorded next to ``prereg_sha256`` by every probe not fitted on terminal_prerl."""
+    path = os.path.join(os.path.dirname(PLAN), "inkling_probes_amendment_1.md")
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def prereg_sha() -> str | None:
     """sha256 of the pre-registration's whole file, the rules this script follows. The file is section 5b of the
     original plan, byte for byte, so this is the hash every fitted probe's meta.json records."""
@@ -240,7 +250,7 @@ def router_layer(readout: str, layer: int) -> dict:
 
 
 def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
-    src = LayerSource(os.path.join(args.features, "terminal_prerl"), view, readout)
+    src = LayerSource(os.path.join(args.features, args.iid_dataset), view, readout)
     keep = src.keep
     its = [items[i] for i in src.ids]
     y_all = np.array([int(bool((it.get("diagnostics") or {}).get("used_verifier"))) for it in its])
@@ -314,7 +324,7 @@ def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
         log("  baselines")
         base = text_baselines([its[i] for i in dev], [its[i] for i in test], y_all[dev], yt, gt, view,
                               src.counts[dev], src.counts[test])
-        msrc = LayerSource(os.path.join(args.features, "terminal_prerl"), view, "mean")
+        msrc = LayerSource(os.path.join(args.features, args.iid_dataset), view, "mean")
         assert msrc.ids == src.ids
         both = msrc.keep[dev].all() and msrc.keep[test].all()
         base.update(activation_baselines(x_sel, dev, test, y_all[dev], yt, sel.layer, sel.C,
@@ -324,14 +334,14 @@ def fit_iid(args, items, concealed_items, view, readout, provenance) -> dict:
         if not args.skip_sensitivity:
             log("  sensitivity rows")
             metrics["sensitivity"] = sensitivity_rows(src, dev, test, y_all[dev], yt, sel, list(range(n_layers)))
-    meta = {**provenance, "dataset": "terminal_prerl", "view": view, "readout": readout, "label": "used_verifier",
+    meta = {**provenance, "dataset": args.iid_dataset, "view": view, "readout": readout, "label": "used_verifier",
             "C": sel.C, "selection": metrics["selection"], "n_layers": n_layers, **router_layer(readout, sel.layer)}
     rows = [{"id": src.ids[i], "split": split[i], "used_verifier": int(y_all[i]), "behavior_present": int(bp_all[i]),
              "task_id": groups_all[i], "crossfit_logit": float(c)} for i, c in zip(everything, cf)]
     test_logit = dict(zip(test.tolist(), t_logit.tolist()))
     for r, i in zip(rows, everything):
         r["test_logit"] = test_logit.get(int(i))
-    out = os.path.join(args.out, "terminal_prerl", view, readout)
+    out = os.path.join(args.out, args.iid_dataset, view, readout)
     save_probe(out, probe, sel, meta, metrics, rows)
     log(f"  test AUROC {metrics['test_auroc']:.4f} {metrics['test_auroc_ci']}; within-task "
         f"{metrics['crossfit']['within_task']:.3f}; hacks vs read-not-used {metrics['crossfit']['hacks_vs_read_not_used']:.3f}")
@@ -382,7 +392,7 @@ def fit_ood(args, ood_items, items, concealed_items, readout, provenance) -> dic
     # transfer to TerminalEnv: thresholds from honest dev episodes, metrics over every episode
     transfer, per_view_t = {}, {}
     for tview in ("with_reasoning", "without_reasoning"):
-        tsrc = LayerSource(os.path.join(args.features, "terminal_prerl"), tview, readout)
+        tsrc = LayerSource(os.path.join(args.features, args.iid_dataset), tview, readout)
         tkeep = tsrc.keep
         titems = [items[i] for i in tsrc.ids]
         ty = np.array([int(bool((it.get("diagnostics") or {}).get("used_verifier"))) for it in titems])
@@ -430,6 +440,9 @@ def main() -> int:
     ap.add_argument("--reader", required=True, help="a name for the record, e.g. nvfp4 or bf16")
     ap.add_argument("--features", required=True, help="the reader's features: <dataset>/<view>/shard_*")
     ap.add_argument("--datasets", default="data/probe_datasets", help="folder with the dataset folders")
+    ap.add_argument("--iid-dataset", default="terminal_prerl",
+                    help="the IID dataset (TerminalEnv episodes) under --datasets and --features: terminal_prerl, or "
+                         "terminal_prerl_v2 (docs/inkling_probes_amendment_1.md, whose sha256 its probes record)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--readouts", default="followup,mean",
                     help="comma-list of followup, followup_prev, mean, and the exploratory router readouts: router "
@@ -444,7 +457,7 @@ def main() -> int:
                     help="rewrite probe folders that already exist in --out (else the run refuses to start)")
     args = ap.parse_args()
     readouts = [r for r in args.readouts.split(",") if r]
-    targets = [os.path.join(args.out, "terminal_prerl", view, r) for view in ("with_reasoning", "without_reasoning")
+    targets = [os.path.join(args.out, args.iid_dataset, view, r) for view in ("with_reasoning", "without_reasoning")
                for r in readouts if "iid" in args.probes]
     targets += [os.path.join(args.out, "diverse_deception", "without_reasoning", r) for r in readouts
                 if "ood" in args.probes]
@@ -454,14 +467,16 @@ def main() -> int:
                  "--overwrite rewrites them")
     code = code_version()
 
-    items = dataset_items(args, "terminal_prerl")
+    items = dataset_items(args, args.iid_dataset)
     concealed = dataset_items(args, "terminal_concealed") \
         if os.path.isdir(os.path.join(args.datasets, "terminal_concealed")) else None
-    index = features_index(args, "terminal_prerl")
+    index = features_index(args, args.iid_dataset)
     provenance = {"reader": args.reader, "reader_info": index.get("reader"), "feature_format": index.get("feature_format"),
                   "versions": index.get("versions"), "prereg_sha256": prereg_sha(), "fitted_utc": time.strftime(
                       "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats,
                   "code": code, "features_code": index.get("code")}
+    if args.iid_dataset != "terminal_prerl":
+        provenance["amendment_sha256"] = amendment_sha()
     summary = {}
     if "iid" in args.probes:
         for view in ("with_reasoning", "without_reasoning"):

@@ -549,3 +549,27 @@ def test_learning_curves_run_on_synthetic_probes(tmp_path):
     with pytest.raises(SystemExit):  # an earlier run's outputs are there; --overwrite would replace them
         mod.main(["--probes", str(out), "--features", str(feats), "--datasets", str(data),
                   "--out", str(tmp_path / "curves")])
+
+
+def test_an_iid_dataset_other_than_terminal_prerl_fits_under_the_amendment(tmp_path):
+    """--iid-dataset terminal_prerl_v2 reads and writes that dataset only, and its probes record the amendment."""
+    import hashlib
+    import shutil
+
+    data, feats = make_world(tmp_path)
+    for root in (data, feats):
+        shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    out = tmp_path / "probes"
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1",
+                         "--jobs", "2", "--readouts", "followup", "--probes", "iid", "--skip-sensitivity",
+                         "--iid-dataset", "terminal_prerl_v2"],
+                        capture_output=True, text=True, cwd=REPO, timeout=1800)
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    assert not (out / "terminal_prerl").exists()
+    with open(os.path.join(REPO, "docs", "inkling_probes_amendment_1.md"), "rb") as fh:
+        amendment = hashlib.sha256(fh.read()).hexdigest()
+    for view in ("with_reasoning", "without_reasoning"):
+        meta = json.loads((out / "terminal_prerl_v2" / view / "followup" / "meta.json").read_text())
+        assert meta["dataset"] == "terminal_prerl_v2" and meta["amendment_sha256"] == amendment
+        assert "prereg_sha256" in meta
