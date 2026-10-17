@@ -7,6 +7,12 @@ item is and how the splits are made.
         --rollouts <run>/eval_rollouts.jsonl --run-info <run>/baseline.json \
         --out data/probe_datasets/terminal_prerl
 
+    # IID v2 (docs/inkling_probes_amendment_1.md): the seed-1,000,000 pre-RL run, minus the excluded puzzles
+    uv run python experiments/build_probe_datasets.py terminal \
+        --rollouts <run>/eval_rollouts.jsonl --run-info <run>/baseline.json \
+        --exclude-grids data/probe_datasets/terminal_prerl_v2/excluded_grids.json \
+        --out data/probe_datasets/terminal_prerl_v2
+
     # Stress: the IID hacks with the policy's own mentions of the verifier removed (levels A and B)
     uv run python experiments/build_probe_datasets.py concealed --source data/probe_datasets/terminal_prerl \
         --out data/probe_datasets/terminal_concealed
@@ -47,6 +53,9 @@ def main() -> None:
     t.add_argument("--run-info", required=True, help="the run's baseline.json / run_info.json (env_options, effort)")
     t.add_argument("--fractions", default="0.6,0.2,0.2", help="train,val,test fractions of TASKS")
     t.add_argument("--max-negatives-per-split", type=int, default=None, help="seeded cap; hacks are all kept")
+    t.add_argument("--exclude-grids", default=None, metavar="FILE",
+                   help="drop every episode on these puzzles first: a JSON with the grid keys under 'excluded' "
+                        "(experiments/probe_v2_exclusions.py writes one)")
 
     c = sub.add_parser("contrastive", help="OOD: contrastive QA pairs from whitebox/datasets")
     c.add_argument("--preset", default=None)
@@ -75,15 +84,26 @@ def main() -> None:
     elif args.kind == "terminal":
         run_info = json.load(open(args.run_info))
         fractions = tuple(float(x) for x in args.fractions.split(","))
+        exclude = None
+        if args.exclude_grids:
+            from monitordecorrelation.envs.terminal_verifier import GRID_KEY
+
+            spec = json.load(open(args.exclude_grids))
+            if spec.get("key") != GRID_KEY:
+                raise SystemExit(f"{args.exclude_grids} doesn't key its grids as this code does ({GRID_KEY})")
+            exclude = {e["grid_key"] for e in spec["excluded"]}
         items, stats = terminal_items(args.rollouts, run_info["env_options"], fractions=fractions, seed=args.seed,
-                                      max_negatives_per_split=args.max_negatives_per_split)
+                                      max_negatives_per_split=args.max_negatives_per_split,
+                                      exclude_grid_keys=exclude)
         manifest = {
             "kind": "terminal",
             "args": {"fractions": list(fractions), "seed": args.seed,
                      "max_negatives_per_split": args.max_negatives_per_split},
             "sources": {"rollouts": file_source(args.rollouts),
                         "run_info": {**file_source(args.run_info), "policy": run_info.get("policy"),
-                                     "effort": run_info.get("effort"), "env_options": run_info["env_options"]}},
+                                     "effort": run_info.get("effort"), "env_options": run_info["env_options"]},
+                        **({"excluded_grids": {**file_source(args.exclude_grids), "n_grids": len(exclude)}}
+                           if exclude is not None else {})},
             "effort": run_info.get("effort"),
             "build": stats,
             "counts": counts(items, "task_id"),

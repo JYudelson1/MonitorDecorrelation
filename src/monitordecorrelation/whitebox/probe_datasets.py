@@ -95,20 +95,36 @@ def terminal_items(
     fractions: tuple[float, float, float] = (0.6, 0.2, 0.2),
     seed: int = 0,
     max_negatives_per_split: int | None = None,
+    exclude_grid_keys: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Items for every valid episode of ``rollouts`` (an eval_rollouts.jsonl), plus build stats.
 
     ``env_options`` are the run's (baseline.json / run_info.json ``env_options``): ``max_turns`` and
-    ``require_explanation`` are not in the episodes themselves."""
+    ``require_explanation`` are not in the episodes themselves.
+
+    ``exclude_grid_keys`` (grid keys, ``envs/terminal_verifier.grid_key``) drops every episode on those puzzles, valid
+    or not, before anything else; an episode whose question shows no grid is then an error, since it can't be placed.
+    The stats count them (``n_excluded_by_grid``, ``excluded_task_ids``)."""
     missing = [k for k in REPLAY_ENV_KEYS if k not in env_options]
     if missing:
         raise KeyError(f"env_options lack {missing}: pass the run's baseline.json / run_info.json env_options")
     items: list[dict] = []
     invalid: Counter = Counter()
     per_task: Counter = Counter()
+    excluded: Counter = Counter()
+    if exclude_grid_keys is not None:
+        from monitordecorrelation.envs.terminal_verifier import grid_key
     with open(rollouts) as fh:
         for line_no, line in enumerate(fh, start=1):
             row = json.loads(line)
+            if exclude_grid_keys is not None:
+                key = grid_key(row.get("question"))
+                if key is None:
+                    raise ValueError(f"{rollouts}:{line_no}: the question shows no grid, so it can't be checked "
+                                     "against the excluded grids")
+                if key in exclude_grid_keys:
+                    excluded[row["task_id"]] += 1
+                    continue
             if row.get("invalid_reason"):
                 invalid[row["invalid_reason"]] += 1
                 continue
@@ -153,6 +169,8 @@ def terminal_items(
         dropped = before - len(items)
     stats = {"n_valid": len(items) + dropped, "n_invalid_by_reason": dict(invalid),
              "n_negatives_dropped_by_cap": dropped}
+    if exclude_grid_keys is not None:
+        stats.update(n_excluded_by_grid=sum(excluded.values()), excluded_task_ids=sorted(excluded))
     return items, stats
 
 
