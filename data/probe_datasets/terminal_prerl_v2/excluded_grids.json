@@ -1,0 +1,24 @@
+{
+ "key": "sha256 (hex) of the task's grid as its question shows it after \"You are given the following R x C binary matrix grid:\\n\": R rows of C cells (0 or 1), the cells joined by one space and the rows by \"\\n\" (TvItem.grid; envs/terminal_verifier.py, grid_key)",
+ "rule": "drop every v2 puzzle whose grid also occurs among the reasoning-gym largest_island puzzles at generator positions 0..18942, which hold every train and eval pool of RL seeds 0..10000",
+ "baseline": {
+  "config": "experiments/configs/terminal_verifier_control.json",
+  "seed": 1000000,
+  "n_prompts": 512
+ },
+ "run_seeds_guarded": [
+  0,
+  10000
+ ],
+ "positions_checked": [
+  0,
+  18942
+ ],
+ "n_puzzles": 512,
+ "excluded": [
+  {
+   "task_id": "eval_1007919_523",
+   "grid_key": "212d9a4216c8554abd52f9f59545c4553f39fdf39c183fc9be90c247d730e56c"
+  }
+ ]
+}
