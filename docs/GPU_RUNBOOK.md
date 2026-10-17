@@ -82,8 +82,8 @@ so that closing the terminal doesn't stop it.
    the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on average (`--golden-mean-tolerance`).
    By its own calibration that mean bound also refuses a correct setup, with probability at most about 1.2% per
    follow-up probe and about 1% that any of the four follow-up probes fails it: if only the mean check fails, read the
-   reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
-   this bound and the server's current error handling, so the server in its current form has not yet run on a GPU.
+   reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates this bound and the
+   server's current error handling, so the server in its current form has not yet run on a GPU.
 
 4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
 

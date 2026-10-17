@@ -218,9 +218,10 @@ UTC) and before any probe was fitted. There is no external timestamp. What there
   notes that "the entries above marked '01:00–02:20' actually ran from about 00:50 to 01:20 UTC". <!-- src: the plan
   file's modification time, 2026-10-10T01:21:22Z, and the project's run log (neither in the repo) -->
 - From 01:24 to 01:46 UTC, two rehearsal VMs ran the GPU session on samples of the datasets (768 items each of the
-  IID and OOD sets, and the 196 concealed hacks). The second also ran the reader diagnostics, on 164 inputs (the main
-  session's took 228); the run log records 4.7% mean readout jitter and "Yes" not sink-like. <!-- src: the launcher's
-  job.json records and session logs of the two rehearsals, 20261010-012429 and 20261010-013150 (not in the repo) -->
+  IID and OOD sets, and all 196 items of the concealment set). The second also ran the reader diagnostics, on 164
+  inputs (the main session's took 228); the run log records 4.7% mean readout jitter and "Yes" not sink-like. <!-- src:
+  the launcher's job.json records and session logs of the two rehearsals, 20261010-012429 and 20261010-013150 (not in
+  the repo) -->
 
 The rules are in [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md), byte for byte (committed
 on 2026-10-12, with the same hash), and `tests/test_preregistration.py` checks that the file still has that hash.
@@ -1112,10 +1113,11 @@ full.
   them ([`INFRA.md`](INFRA.md#storage-hugging-face-buckets-saved-as-you-go)).
 - **Code:** the features and fits of 2026-10-10 predate code stamping and don't record which code made them. The
   extraction ran the code later committed in `361f6c1`, known from file timestamps; later commits changed the
-  extraction scripts only in ways that don't change what a shard holds (caveat 11). Since 2026-10-12, `src/monitordecorrelation/provenance.py` stamps every output with
-  `code`: the commit, whether the tree had uncommitted changes, a hash of those changes, and where the stamp came
-  from (git, or on a GPU VM the `CODE_VERSION.json` the launcher pushes). The deployed monitors carry the stamp of
-  their deployment as `deployed_code`.
+  extraction scripts only in ways that don't change what a shard holds (caveat 11). Since 2026-10-12,
+  `src/monitordecorrelation/provenance.py` stamps every output with `code`: the commit, whether the tree had
+  uncommitted changes, a hash of those changes, and where the stamp came from (git, or on a GPU VM the
+  `CODE_VERSION.json` the launcher pushes). The deployed monitors carry the stamp of their deployment as
+  `deployed_code`.
 - **Timeline (UTC):**
   - 2026-10-09: the IID and OOD datasets built (the concealment set early on 2026-10-10).
   - 2026-10-10: the pre-registration's text last modified at 01:21 (the plan file's time; its heading says ~02:00,
