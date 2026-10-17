@@ -71,8 +71,9 @@ In each monitor directory:
   differs, if a logit moves by more than `golden_tolerance`, or if the logits moved by more than 0.3 on average (a
   systematic shift; the server's `--golden-mean-tolerance`). That catches a wrong reader, layer or rendering, and
   drift in the libraries, before it can look like monitor degradation. By its own calibration the mean bound also
-  refuses a correct setup about 1% of the time per probe. The real-B300 check of 2026-10-10 predates that bound, so
-  the server in its current form has not yet run on a GPU.
+  refuses a correct setup: with probability at most about 1.2% per follow-up probe, and about 1% that any of the four
+  follow-up probes fails it (less for the mean probes). The real-B300 check of 2026-10-10 predates that bound, so the
+  server in its current form has not yet run on a GPU.
 
 At the top level:
 - **`deployed.json`**: one entry per monitor: its directory, layer, readers, `threshold_1`, golden-set size and

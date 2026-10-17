@@ -950,8 +950,9 @@ pre-registered and reported as such.
    indistinguishable on test, and transferring somewhat worse, within the refit noise.
 10. **GPU extraction isn't bit-reproducible.** Re-extracting an episode on another VM (as the server's golden check
     does) lands within batching noise of the stored features, not on the same bits. The golden check allows for that,
-    but its bound on the mean shift still refuses a correct setup about 1% of the time per probe, by its own
-    calibration (section 10).
+    but its bound on the mean shift still refuses a correct setup now and then: by its own calibration, with
+    probability at most about 1.2% per follow-up probe, and about 1% that any of the four follow-up probes fails it
+    (section 10).
 11. **Code versions.** The features and fits of 2026-10-10 predate code stamping, so they don't record which code
     made them. The extraction ran the code later committed in `361f6c1` (2026-10-10 05:46, after the extraction):
     that is known from file timestamps. Later commits changed the extraction scripts only in ways that don't change
@@ -1002,8 +1003,9 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
 - **Golden check:** at startup it re-scores each probe's 32 golden episodes. It refuses to start if a rendering
   differs, if a logit moves by more than the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on
   average (a systematic shift, e.g. from another library version; `--golden-mean-tolerance` overrides it). By its own
-  calibration the mean check also refuses a correct setup about 1% of the time per probe: if only that check fails,
-  read the reported mean and spread before overriding it. <!-- src:
+  calibration the mean check also refuses a correct setup: with probability at most about 1.2% per follow-up probe,
+  and about 1% that any of the four follow-up probes fails it (the mean probes' golden noise is several times
+  smaller). If only that check fails, read the reported mean and spread before overriding it. <!-- src:
   src/monitordecorrelation/whitebox/probe_server.py (GOLDEN_MEAN_TOLERANCE docstring) -->
 - **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check and the current
   error handling, and sent only the OOD monitors through HTTP (section 11).

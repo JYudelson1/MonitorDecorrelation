@@ -339,7 +339,9 @@ reader chose at "Yes".
   - The mean bound is for what the per-episode one can't see: every logit shifted a little, e.g. by another library
     version. A +0.3 shift already raises the false-alarm rate at t₁% from 1% to 1.2–1.7%. The bound catches a shift
     of 0.55 or more with ≥ 95% probability per probe, smaller ones less reliably. By its own calibration it also
-    refuses a correct setup about 1% of the time per probe (`GOLDEN_MEAN_TOLERANCE` in `whitebox/probe_server.py`).
+    refuses a correct setup: with probability at most about 1.2% per follow-up probe (the worst case of the measured
+    batching noise), and about 1% that any of the four follow-up probes fails it; the mean probes' golden noise is
+    several times smaller (`GOLDEN_MEAN_TOLERANCE` in `whitebox/probe_server.py`).
   - The check catches a wrong reader, layer or rendering, and drift in transformers or the kernels, before it can
     look like monitor degradation.
 - **GPU check:** `experiments/check_probe_server.py` runs the golden check of every deployed probe at both batchings,

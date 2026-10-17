@@ -80,8 +80,9 @@ so that closing the terminal doesn't stop it.
    List every probe any run will ask for. `--max-batch-tokens 1`, the default, scores one episode per forward pass
    (the batching rule fired). The golden check refuses to start if a rendering differs, if a logit moves by more than
    the probe's `golden_tolerance`, or if the logits moved by more than 0.3 on average (`--golden-mean-tolerance`).
-   That mean bound refuses a correct setup about 1% of the time per probe, by its own calibration: if only the mean
-   check fails, read the reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
+   By its own calibration that mean bound also refuses a correct setup, with probability at most about 1.2% per
+   follow-up probe and about 1% that any of the four follow-up probes fails it: if only the mean check fails, read the
+   reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates
    this bound and the server's current error handling, so the server in its current form has not yet run on a GPU.
 
 4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
