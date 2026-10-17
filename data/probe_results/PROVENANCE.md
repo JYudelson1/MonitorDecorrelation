@@ -66,14 +66,15 @@ manifest). `terminal_concealed` is derived from `terminal_prerl`'s items.
 
 Each `meta.json` records the pre-registration's sha256, the reader (`reader_info`: loader, revision) and the C grid.
 The `followup_prev` fits read the same 2026-10-10 features: that readout was stored at extraction, and a copy holding
-only it was fetched from the full-precision bucket on 2026-10-12 (06:53–07:02).
+just it, the token counts and the answer log-probabilities (`fetch_features.py --keep followup_prev,counts,answer_logp`)
+was fetched from the full-precision bucket on 2026-10-12 (06:53–07:02).
 
 ## Analyses
 
 | result | made | code |
 |---|---|---|
-| `ood_refits/<reader>/<readout>/` | 2026-10-10, 15:09 (4-bit follow-up) to 18:45 (full-precision mean) | `experiments/ood_refits.py` as first committed in `b416f89` (14:18); changed since only to add the stamp (`28eaff4`) |
-| `learning_curves/bf16/` | 2026-10-11 03:56 | the code committed one minute later in `dd7d402`; changed since only to add the stamp |
+| `ood_refits/<reader>/<readout>/` | 2026-10-10, 15:09 (4-bit follow-up) to 18:45 (full-precision mean) | `experiments/ood_refits.py` as first committed in `b416f89` (14:18); changed since only to add the stamp and the refusal to overwrite without `--overwrite` (`28eaff4`) |
+| `learning_curves/bf16/` | 2026-10-11 03:56 | the code committed one minute later in `dd7d402`; changed since only in `28eaff4`, the same two changes |
 | `analyses/20261012T041431Z/dataset_stats.json` | 2026-10-12 04:14 | `experiments/probe_analyses.py` as committed one minute later in `cf402d5`, before stamping |
 | `analyses/20261012T073030Z/near_threshold.json` | 2026-10-12 07:30 | stamped: `2694851` |
 | `compare/followup/` | 2026-10-12 07:37–07:48 | stamped: `7cdf93d` |

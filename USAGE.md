@@ -23,7 +23,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `scripts/verify_runs.py` | **Post-launch check.** Does each run actually train against the monitor its name claims? Also checks judge reasoning settings, a shared monitor battery + hyperparameters across the batch, and backend queue pauses. Exits 1 on any problem. | stdout |
 | `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
 | `experiments/build_probe_datasets.py` | **Inkling probe datasets** (CPU, no model). `terminal`: a TerminalEnv run's valid episodes, split train/val/test by task. `contrastive`: the diverse-deception pairs, split by pair as `train_probe.py` splits them. | `data/probe_datasets/<name>/{items.jsonl,manifest.json}` |
-| `experiments/extract_probe_features.py` | **Inkling probe features** for a probe dataset, on the GPU box. Per item and view: the follow-up readout and the means over thinking / text tokens, at every layer, as bf16 shards. `--store hf://buckets/...` saves each shard as it finishes, and a run on any VM resumes from it. Stops before `NEBIUS_JOB_DEADLINE` or on SIGTERM with exit 75. | `<out>/<view>/shard_*.{safetensors,jsonl}` + `index.json` (and the same in the store) |
+| `experiments/extract_probe_features.py` | **Inkling probe features** for a probe dataset, on the GPU box. Per item and view: the follow-up readout and the means over thinking / text tokens, at every layer, as safetensors shards (the readouts in bf16, the means in float32). `--store hf://buckets/...` saves each shard as it finishes, and a run on any VM resumes from it. Stops before `NEBIUS_JOB_DEADLINE` or on SIGTERM with exit 75. | `<out>/<view>/shard_*.{safetensors,jsonl}` + `index.json` (and the same in the store) |
 | `experiments/check_inkling_nvfp4.py` | **GPU acceptance check** for the NVFP4 Inkling reader: load, greedy sanity, real episodes, the BF16 comparison, decode, throughput. Exits 1 on a failed check. | a JSON report |
 | `scripts/bucket_speed_test.py` | **Upload speed to an HF bucket** from the machine it runs on, through `whitebox/store.py`. Random 0.5 GB files with one uploader, then several in parallel, plus a download. It deletes what it uploaded. Run it on a GPU VM with `nebius_job.py run --upload …`. | JSON summary (`--out`) |
 | `experiments/run_probe_session.py` | **The GPU session** for Inkling probe features, from a JSON plan (`experiments/session_plans/`): several readers and copies on one VM (`CUDA_VISIBLE_DEVICES` per worker), every dataset, then the reader diagnostics. Each worker saves shards to its store; `part_offset`/`parts_total` split a reader across VMs. Exits 75 if unfinished (the launcher relaunches and it resumes). | the stores in the plan; `status.json` in its status store |
@@ -472,8 +472,9 @@ Features go straight to the HF bucket as each shard finishes (`--store`), instea
   skips the shards already in the store.
 - **Deadline:** near the VM's `--hours` cap, the extraction stops cleanly and exits 75, and the next VM finishes.
 
-Store features as bfloat16, which the extraction script does. Inkling's mid-layer activations reach ~5e4
-at the readout, too close to float16's 65504.
+The extraction stores the readouts as bfloat16, not float16: Inkling's mid-layer activations reach ~5e4 at the
+readout, too close to float16's 65504. The means are float32, since bfloat16 would round values near 5e4 in steps
+of 256.
 
 **The whole pipeline** (results, caveats and design: `docs/INKLING_PROBES.md`). `scripts/run_probe_pipeline.sh` runs
 the CPU-side steps 2–7 in order (`--dry-run` prints the commands); SCRATCH below is any folder with room for the features.

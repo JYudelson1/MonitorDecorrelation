@@ -1129,9 +1129,10 @@ full.
     redeployed with new metadata only (the repo path of the fitted probe, the code stamp). The fits re-checked
     (05:26–07:05), the readout fallback fitted (07:02–09:26), both reader comparisons re-run with the final code
     (07:37–09:52); results collected into `data/probe_results/`.
-  - 2026-10-13: the per-token massive-dimension and readout-gap analyses; the readout rule settled (keep "Yes"); the
-    buckets cleaned of everything git now holds. `grids.json` added next to the monitors, which are unchanged, and
-    the post-hoc scorer's unseen tasks decided by grid (section 9, caveat 4).
+  - 2026-10-13: the per-token massive-dimension and readout-gap analyses, and everything collected again with them
+    (`MANIFEST.json`'s `code`); the readout rule settled (keep "Yes"); the buckets cleaned of everything git now
+    holds. `grids.json` added next to the monitors, which are unchanged, and the post-hoc scorer's unseen tasks
+    decided by grid (section 9, caveat 4).
 - **Reader comparisons, re-run:** both were re-run on 2026-10-12 at `7cdf93d`. The follow-up comparison reproduces
   all 110 values of the 2026-10-10 run (agreement, refit floor, ΔAUROC, rules and decision); the re-run adds the
   report-only massive dimensions and the cross-reader fields. <!-- src: data/probe_results/PROVENANCE.md
