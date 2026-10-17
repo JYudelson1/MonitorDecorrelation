@@ -73,8 +73,9 @@ from monitordecorrelation.whitebox.probe_fit import (
     make_folds, thresholds)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROBES = (("terminal_prerl", "with_reasoning"), ("terminal_prerl", "without_reasoning"),
-          ("diverse_deception", "without_reasoning"))
+IID_DATASETS = ("terminal_prerl", "terminal_prerl_v2")  # v2: docs/inkling_probes_amendment_1.md
+PROBES = tuple((d, v) for d in IID_DATASETS for v in ("with_reasoning", "without_reasoning")) + (
+    ("diverse_deception", "without_reasoning"),)
 VIEWS = ("with_reasoning", "without_reasoning")
 ROUNDING = 5e-6 + 1e-12  # cv_grid.csv's cells are rounded to 5 decimals
 
@@ -255,7 +256,7 @@ class Probe:
 
     @property
     def iid(self) -> bool:
-        return self.meta["dataset"] == "terminal_prerl"
+        return self.meta["dataset"] in IID_DATASETS
 
 
 def load_probe(path: str, name: str, features: str, data: dict, seed: int, fit_jobs: int) -> Probe:
@@ -264,7 +265,7 @@ def load_probe(path: str, name: str, features: str, data: dict, seed: int, fit_j
     with open(os.path.join(path, "cv_grid.csv")) as fh:
         stored = {(int(r["layer"]), float(r["C"])): (r["cv_auroc"], r["cv_auroc_sd"]) for r in csv.DictReader(fh)}
     src = LayerSource(os.path.join(features, meta["dataset"]), meta["view"], meta["readout"])
-    make = iid_inputs if meta["dataset"] == "terminal_prerl" else ood_inputs
+    make = iid_inputs if meta["dataset"] in IID_DATASETS else ood_inputs
     inputs = make(src, data[meta["dataset"]], int(meta["repeats"]), seed)
     layers = list(range(src.first_layer, src.n_layers))
     threads = max(1, fit_jobs // len(layers)) if 0 < len(layers) < fit_jobs else 1  # as cv_grid_source
@@ -630,8 +631,8 @@ def main(argv: list[str] | None = None) -> int:
     from threadpoolctl import threadpool_limits
 
     limit = (lambda: threadpool_limits(args.refit_threads)) if args.refit_threads else contextlib.nullcontext
-    data = {"terminal_prerl": load_items(os.path.join(args.datasets, "terminal_prerl")),
-            "diverse_deception": load_items(os.path.join(args.datasets, "diverse_deception"))}
+    data = {name: load_items(os.path.join(args.datasets, name)) for name in (*IID_DATASETS, "diverse_deception")
+            if name in ("terminal_prerl", "diverse_deception") or os.path.isdir(os.path.join(args.datasets, name))}
     conc_dir = os.path.join(args.datasets, "terminal_concealed")
     concealed = load_items(conc_dir) if os.path.isdir(conc_dir) else None
     only = [s for s in args.only.split(",") if s]

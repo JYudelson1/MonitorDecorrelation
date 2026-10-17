@@ -150,3 +150,28 @@ def test_an_existing_run_folder_is_refused_without_overwrite(tmp_path, monkeypat
     with pytest.raises(SystemExit) as e:
         vf.main(["--probes", str(tmp_path), "--check", f"x/followup={tmp_path}", "--out", str(tmp_path / "verify")])
     assert e.value.code == 2 and "--overwrite" in capsys.readouterr().err
+
+
+def test_verify_fits_checks_iid_probes_of_the_v2_dataset(tmp_path):
+    """Probes fitted with --iid-dataset terminal_prerl_v2 (docs/inkling_probes_amendment_1.md) are found and checked."""
+    import shutil
+
+    data, feats = make_world(tmp_path)
+    for root in (data, feats):
+        shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    os.makedirs(data / "terminal_prerl")  # v1's items, which verify_fits always loads: here an empty dataset
+    shutil.copy(data / "terminal_prerl_v2" / "items.jsonl", data / "terminal_prerl" / "items.jsonl")
+    probes = tmp_path / "probes"
+    cp = _run([os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic", "--features", str(feats),
+               "--datasets", str(data), "--out", str(probes / "synthetic"), "--repeats", "2", "--jobs", "2",
+               "--readouts", "followup", "--probes", "iid", "--skip-baselines", "--iid-dataset", "terminal_prerl_v2"])
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    out = tmp_path / "verify_v2"
+    cp = _run([os.path.join(REPO, "experiments", "verify_fits.py"), "--probes", str(probes), "--datasets", str(data),
+               "--check", f"synthetic/followup={feats}", "--out", str(out), "--jobs", "2", "--fit-jobs", "2"])
+    runs = glob.glob(str(out / "*" / "summary.json"))
+    assert cp.returncode == 0 and len(runs) == 1, cp.stdout[-3000:] + cp.stderr[-3000:]
+    summary = json.loads(open(runs[0]).read())
+    assert set(summary["probes"]) == {f"synthetic/terminal_prerl_v2/{v}/followup"
+                                      for v in ("with_reasoning", "without_reasoning")}
+    assert all(r["verdict"] == "pass" for r in summary["probes"].values()), summary["probes"]
