@@ -13,8 +13,28 @@
 # vLLM: uses `vllm` on PATH if present; otherwise installs into a dedicated
 # `.venv-vllm/` (kept out of the project env so it doesn't fight setup_box.sh's torch).
 # Then exports CUDA_HOME at a toolkit matching vllm's torch (see ensure_cuda_toolkit).
+# Options, all from the environment and off by default (then nothing changes):
+# - VLLM_VERSION=X.Y.Z installs exactly that release and refuses any other vllm it finds; unset, the newest is
+#   installed and whatever is found is used. Either way the version is printed and the vLLM env's packages are written
+#   to logs/vllm/freeze.txt.
+# - VLLM_HOST=127.0.0.1: every server, the load balancer too, listens on that address only (vllm serve --host; the
+#   balancer's --listen-host). Unset: vllm's default, every interface, and the balancer's own default.
+# - VLLM_RESTART=1: a server that dies is restarted, the others keep serving: its process group (with any engine
+#   process that outlived it) is killed, its log kept as <name>.log.<n>, and it starts again, at most
+#   VLLM_RESTART_MAX times (default 10) each. Unset: the first death stops everything.
+# The v2 probe rows' batch runs VLLM_VERSION=0.32.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 (scripts/rl_batch.py,
+# docs/GPU_RUNBOOK.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+VLLM_VERSION="${VLLM_VERSION:-}"
+[[ -z "$VLLM_VERSION" || "$VLLM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-z0-9.+-]*)$ ]] \
+  || { echo "VLLM_VERSION=$VLLM_VERSION is not a release number like 0.32.0" >&2; exit 1; }
+VLLM_HOST="${VLLM_HOST:-}"
+VLLM_RESTART="${VLLM_RESTART:-}"
+VLLM_RESTART_MAX="${VLLM_RESTART_MAX:-10}"
+[[ "$VLLM_RESTART_MAX" =~ ^[0-9]+$ ]] || { echo "VLLM_RESTART_MAX=$VLLM_RESTART_MAX is not a count" >&2; exit 1; }
+# each server in a process group of its own, so what is left of a dead one can be killed before it restarts
+[[ -z "$VLLM_RESTART" ]] || set -m
 
 # Floor for non-H200 cards: FP8 weights are ~30–35 GB, but max-num-seqs 256–512 +
 # speculative decoding needs H100-80-class headroom. nvidia-smi reports MiB.
@@ -43,9 +63,9 @@ ensure_vllm() {
       || echo "WARNING: $VLLM_VENV has unsatisfied requirements (uv pip check --no-config --python $VLLM_VENV); consider rm -rf $VLLM_VENV and rerunning" >&2
     return
   fi
-  echo "vllm not found; installing into $VLLM_VENV/ (python 3.12, --torch-backend=auto)"
+  echo "vllm not found; installing vllm${VLLM_VERSION:+==$VLLM_VERSION} into $VLLM_VENV/ (python 3.12, --torch-backend=auto)"
   uv venv --no-config --python 3.12 --seed "$VLLM_VENV"
-  uv pip install --no-config --python "$VLLM_VENV" vllm --torch-backend=auto
+  uv pip install --no-config --python "$VLLM_VENV" "vllm${VLLM_VERSION:+==$VLLM_VERSION}" --torch-backend=auto
   # now that torch has pinned cuda-toolkit, add the matching compiler pieces
   ctk=$("$VLLM_VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("cuda-toolkit"))' 2>/dev/null || true)
   [[ -z "$ctk" ]] || uv pip install --no-config --python "$VLLM_VENV" "cuda-toolkit[$CTK_EXTRAS]==$ctk"
@@ -59,6 +79,16 @@ ensure_vllm
 VLLM_PY="$(dirname "$VLLM")/python"
 [[ -x "$VLLM_PY" ]] || VLLM_PY=$(head -1 "$VLLM" | sed 's/^#!//')
 "$VLLM_PY" -c 'import vllm' 2>/dev/null || { echo "can't find the python behind $VLLM (tried $VLLM_PY)"; exit 1; }
+VLLM_HAVE=$("$VLLM_PY" -c 'import importlib.metadata as m; print(m.version("vllm"))')
+echo "vllm $VLLM_HAVE ($VLLM_PY)"
+if [[ -n "$VLLM_VERSION" && "$VLLM_HAVE" != "$VLLM_VERSION" ]]; then
+  echo "vllm $VLLM_HAVE is not VLLM_VERSION=$VLLM_VERSION: rm -rf $VLLM_VENV (or take $VLLM off PATH) and run again" >&2
+  exit 1
+fi
+mkdir -p logs/vllm
+uv pip freeze --no-config --python "$VLLM_PY" > logs/vllm/freeze.txt 2>/dev/null \
+  || "$VLLM_PY" -m pip freeze > logs/vllm/freeze.txt 2>/dev/null || true
+echo "the vLLM environment's packages: logs/vllm/freeze.txt ($(wc -l < logs/vllm/freeze.txt) lines)"
 
 # vLLM JIT-compiles kernels at runtime (DeepGEMM for the FP8 block-scaled linears, FlashInfer for
 # Qwen3.5's GDN prefill) with the nvcc under $CUDA_HOME — NOT the CUDA that torch ships with. Two ways
@@ -219,38 +249,55 @@ for port in "${PORTS[@]}"; do
   fi
 done
 PIDS=()
-declare -A NAME_OF PORT_OF LOG_OF READY
+declare -A NAME_OF PORT_OF LOG_OF READY LAUNCH_OF RESTARTS
 cleanup() {
   local pid
   for pid in "${PIDS[@]+"${PIDS[@]}"}"; do
-    kill "$pid" 2>/dev/null || true
+    if [[ -n "$VLLM_RESTART" ]]; then kill -- "-$pid" 2>/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
   done
   wait 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+if [[ -n "$VLLM_RESTART" ]]; then
+  # stop for good on a signal: carrying on would take every server it just stopped for dead, and start them again
+  trap cleanup EXIT
+  trap 'cleanup; trap - EXIT; exit 143' TERM
+  trap 'cleanup; trap - EXIT; exit 130' INT
+else
+  trap cleanup EXIT INT TERM
+fi
 
-# launch <name> <port> <cmd...>: run cmd in the background with all output → $LOG_DIR/<name>.log
+# launch <name> <port> <cmd...>: run cmd in the background with all output → $LOG_DIR/<name>.log. $RELAUNCH, set by the
+# serve_* function calling it, is how to start that server again (VLLM_RESTART).
+RELAUNCH=""
 launch() {
   local name=$1 port=$2 pid; shift 2
   "$@" >"$LOG_DIR/$name.log" 2>&1 &
   pid=$!
   PIDS+=("$pid"); NAME_OF[$pid]=$name; PORT_OF[$pid]=$port; LOG_OF[$pid]=$LOG_DIR/$name.log
+  LAUNCH_OF[$pid]=$RELAUNCH
   echo "$name → :$port (pid $pid, log $LOG_DIR/$name.log)"
 }
 
+HOST_ARGS=()
+[[ -z "$VLLM_HOST" ]] || HOST_ARGS=(--host "$VLLM_HOST")
+
 # Qwen3-30B always on GPU 0 → :8001 (clients hardcode this).
-launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
-  --port 8001 \
-  --reasoning-parser qwen3 \
-  --scheduling-policy priority \
-  --max-num-seqs 512 \
-  --kv-cache-dtype fp8 \
-  --gpu-memory-utilization 0.92 \
-  --speculative-config '{"method": "eagle3", "model": "AngelSlim/Qwen3-a3B_eagle3", "num_speculative_tokens": 2}' \
-  --disable-uvicorn-access-log
+serve_q3() {
+  RELAUNCH=serve_q3
+  launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
+    --port 8001 \
+    --reasoning-parser qwen3 \
+    --scheduling-policy priority \
+    --max-num-seqs 512 \
+    --kv-cache-dtype fp8 \
+    --gpu-memory-utilization 0.92 \
+    --speculative-config '{"method": "eagle3", "model": "AngelSlim/Qwen3-a3B_eagle3", "num_speculative_tokens": 2}' \
+    --disable-uvicorn-access-log ${HOST_ARGS[@]+"${HOST_ARGS[@]}"}
+}
 
 serve_q35() {
   local gpu=$1 port=$2
+  RELAUNCH="serve_q35 $gpu $port"
   launch "qwen3.5-35b-$port" "$port" env CUDA_VISIBLE_DEVICES="$gpu" "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
     --port "$port" \
     --reasoning-parser qwen3 \
@@ -260,29 +307,63 @@ serve_q35() {
     --gpu-memory-utilization 0.9 \
     --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
     --compilation-config '{"max_cudagraph_capture_size": 1024}' \
-    --disable-uvicorn-access-log
+    --disable-uvicorn-access-log ${HOST_ARGS[@]+"${HOST_ARGS[@]}"}
 }
 
+# TCP passthrough, so :8002/health answers once a backend does
+serve_lb() {
+  RELAUNCH=serve_lb
+  launch lb-8002 8002 uv run python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 8005 \
+    ${VLLM_HOST:+--listen-host "$VLLM_HOST"}
+}
+
+serve_q3
 if [[ "$NGPU" -eq 2 ]]; then
   serve_q35 1 8002
 else
   serve_q35 1 8003
   serve_q35 2 8004
   serve_q35 3 8005
-  # TCP passthrough, so :8002/health answers once a backend does
-  launch lb-8002 8002 uv run python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 8005
+  serve_lb
 fi
 
-echo "starting (a first start JIT-compiles kernels: a few minutes); Ctrl-C stops everything"
+# restart_dead <pid> <n>: VLLM_RESTART's <n>th restart of the server <pid>, which died: kill what is left of its process
+# group, keep its log as <log>.<n>, and start it again the way it was started.
+restart_dead() {
+  local pid=$1 n=$2 name=${NAME_OF[$1]} relaunch=${LAUNCH_OF[$1]} log=${LOG_OF[$1]} p keep=()
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 1; done
+  mv -f "$log" "$log.$n"
+  for p in "${PIDS[@]}"; do [[ "$p" == "$pid" ]] || keep+=("$p"); done
+  PIDS=(${keep[@]+"${keep[@]}"})
+  unset "NAME_OF[$pid]" "PORT_OF[$pid]" "LOG_OF[$pid]" "LAUNCH_OF[$pid]" "READY[$pid]"
+  echo "restarting $name ($n of at most $VLLM_RESTART_MAX; the log of the one that died: $log.$n)"
+  $relaunch
+}
+
+if [[ -n "$VLLM_RESTART" ]]; then
+  echo "starting (a first start JIT-compiles kernels: a few minutes); a server that dies is started again (VLLM_RESTART)"
+else
+  echo "starting (a first start JIT-compiles kernels: a few minutes); Ctrl-C stops everything"
+fi
 # Watch: announce each server once /health answers; if any process dies, show its log tail and stop
-# everything (a dead judge would break the run anyway).
+# everything (a dead judge would break the run anyway), or with VLLM_RESTART start that one again.
 while :; do
   for pid in "${PIDS[@]}"; do
     if ! kill -0 "$pid" 2>/dev/null; then
       rc=0; wait "$pid" || rc=$?
       echo "!! ${NAME_OF[$pid]} exited (code $rc) — last lines of ${LOG_OF[$pid]}:" >&2
       tail -n 40 "${LOG_OF[$pid]}" >&2
-      exit 1
+      [[ -n "$VLLM_RESTART" ]] || exit 1
+      name=${NAME_OF[$pid]}
+      n=$(( ${RESTARTS[$name]:-0} + 1 ))
+      RESTARTS[$name]=$n
+      if (( n > VLLM_RESTART_MAX )); then
+        echo "!! $name died $n times (VLLM_RESTART_MAX=$VLLM_RESTART_MAX): stopping everything" >&2
+        exit 1
+      fi
+      restart_dead "$pid" "$n"
+      continue
     fi
     if [[ -z "${READY[$pid]:-}" ]] && curl -sf -o /dev/null --max-time 2 "http://localhost:${PORT_OF[$pid]}/health"; then
       READY[$pid]=1
