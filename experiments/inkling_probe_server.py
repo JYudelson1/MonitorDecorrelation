@@ -32,8 +32,10 @@ for a second copy), and set each run's probe server URL to ``http://127.0.0.1:81
   one episode by more than ``--golden-tolerance``, or all of them by more than ``--golden-mean-tolerance`` on average
   (a systematic shift; the default is calibrated in whitebox/probe_server.py).
 
-**Memory:** an episode whose dense attention doesn't fit is retried with its attention in query chunks; one that
-doesn't fit even so is answered 413 (whitebox/probe_server.py), which the client doesn't retry.
+**Memory:** PyTorch's allocator runs with expandable segments (``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``)
+unless the environment sets ``PYTORCH_ALLOC_CONF`` or ``PYTORCH_CUDA_ALLOC_CONF`` itself. An episode whose dense
+attention doesn't fit is retried with its attention in query chunks; one that doesn't fit even so is answered 413
+(whitebox/probe_server.py), which the client doesn't retry.
 """
 
 from __future__ import annotations
@@ -44,9 +46,10 @@ import sys
 import time
 
 
-def main() -> int:
-    from monitordecorrelation.whitebox.probe_server import GOLDEN_MEAN_TOLERANCE
+def main(argv: list[str] | None = None) -> int:
+    from monitordecorrelation.whitebox.probe_server import GOLDEN_MEAN_TOLERANCE, default_allocator_conf
 
+    default_allocator_conf()  # before anything uses CUDA: the allocator reads its settings once
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="the reader checkpoint (local dir): NVFP4 or BF16 Inkling-Small")
     ap.add_argument("--probes", required=True, help="comma-list of probe directories (probe.npz + meta.json), all for "
@@ -65,7 +68,7 @@ def main() -> int:
     ap.add_argument("--golden-mean-tolerance", type=float, default=GOLDEN_MEAN_TOLERANCE,
                     help="max |mean Δlogit| over each probe's golden episodes: a systematic shift (default "
                          f"{GOLDEN_MEAN_TOLERANCE}, probe_server.GOLDEN_MEAN_TOLERANCE; inf turns the check off)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     from monitordecorrelation.whitebox.extraction import reader_info
     from monitordecorrelation.whitebox.inkling_nvfp4 import is_nvfp4_checkpoint, load_inkling_nvfp4

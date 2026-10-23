@@ -242,8 +242,9 @@ def test_the_probe_server_starts_only_with_the_pinned_probes(tmp_path):
     (d / "meta.json").write_text("{}")
     sha = rb.probe_sha(d)
     cmd = rb.probe_server_command({IID: sha}, rehearsal=False)
-    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True exec .venv/bin/python experiments/inkling_probe_server.py" \
-           in cmd and "--max-batch-tokens 1" in cmd and f"--probes {IID}" in cmd
+    assert "\nexec .venv/bin/python experiments/inkling_probe_server.py" in cmd and "--max-batch-tokens 1" in cmd \
+           and f"--probes {IID}" in cmd
+    assert "ALLOC_CONF" not in cmd  # the server's own default (probe_server.default_allocator_conf), not set twice
     head = cmd.split("\nmkdir -p results")[0]
     ok = subprocess.run(["bash", "-c", head + "\necho reached"], cwd=tmp_path / "md", capture_output=True, text=True)
     assert ok.returncode == 0 and "the pinned one" in ok.stdout and "reached" in ok.stdout

@@ -59,6 +59,10 @@ import numpy as np
 
 PROTOCOL = 2  # 2 (2026-10-23): the 413 for an unscorable episode, which a protocol-1 client would retry forever
 
+ALLOC_CONF = "expandable_segments:True"
+"""PyTorch's allocator setting for the reader's processes (``default_allocator_conf``): long episodes allocate large
+attention tensors of ever-changing sizes, which fragment the cache less with expandable segments."""
+
 KEEP_S = 600.0
 """Seconds a finished job's result stays in the server's job table, for a client whose answer got lost on the way."""
 
@@ -117,6 +121,17 @@ class UnscorableEpisodeError(RuntimeError):
     def __init__(self, message: str, episodes: list[dict]):
         super().__init__(message)
         self.episodes = episodes
+
+
+def default_allocator_conf(environ=os.environ) -> str | None:
+    """Set ``PYTORCH_CUDA_ALLOC_CONF`` to ``ALLOC_CONF`` in ``environ`` unless PyTorch's allocator is configured there
+    already (``PYTORCH_ALLOC_CONF``, or the older ``PYTORCH_CUDA_ALLOC_CONF``, even empty): an override always wins.
+    Returns what it set, or None. Call it before anything touches CUDA: the allocator reads its settings once, at its
+    first use."""
+    if "PYTORCH_ALLOC_CONF" in environ or "PYTORCH_CUDA_ALLOC_CONF" in environ:
+        return None
+    environ["PYTORCH_CUDA_ALLOC_CONF"] = ALLOC_CONF
+    return ALLOC_CONF
 
 
 REPLAY_ERRORS = (ValueError, KeyError, IndexError, TypeError, AttributeError, NotImplementedError, RuntimeError)

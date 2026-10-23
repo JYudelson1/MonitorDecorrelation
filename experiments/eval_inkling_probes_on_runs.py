@@ -200,6 +200,9 @@ def reusable(rec: dict | None, sha: str, shas: dict[str, str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from monitordecorrelation.whitebox.probe_server import default_allocator_conf
+
+    default_allocator_conf()  # PyTorch's expandable segments, as the server (unless set): before anything uses CUDA
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="+", help="run folders with eval_rollouts.jsonl and run_info.json")
     ap.add_argument("--model", required=True, help="the reader the probes are served on (NVFP4 or BF16 dir)")

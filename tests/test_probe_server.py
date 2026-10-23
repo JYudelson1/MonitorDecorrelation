@@ -16,7 +16,7 @@ Checks:
 - Long episodes (the real scorer, out of memory simulated): one whose dense attention doesn't fit scores exactly its
   dense score, from query chunks; one that doesn't fit even so answers 413, which the client raises at once and the RL
   loop's unscored-monitor check turns into an abort; the post-hoc scorer counts it (``n_unscorable``), goes on, and
-  tries it again on a rerun.
+  tries it again on a rerun. The reader processes default to PyTorch's expandable segments unless told otherwise.
 - The GPU check script checks one IID and one OOD monitor through HTTP, and only its own root's monitors.
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
   splits, whatever the task id: grids recur across seeds under other ids), and its resume after
@@ -56,13 +56,21 @@ from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, t
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, UnscorableEpisodeError,
-    item_sha, probe_sha, reader_mismatch)
+    ALLOC_CONF, GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server,
+    UnscorableEpisodeError, default_allocator_conf, item_sha, probe_sha, reader_mismatch)
 
 VIEW = "with_reasoning"
 V2_INDEX = {"reader": {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"},
             "max_batch_tokens": 1}
 """What docs/inkling_probes_amendment_2.md requires of v2 features' index.json (fit_probes.py refuses others)."""
+
+
+@pytest.fixture(autouse=True)
+def allocator_env(monkeypatch):
+    """The CLIs' mains set PyTorch's allocator default in os.environ (``default_allocator_conf``): undone after each
+    test, and no setting of the test session's own reaches them."""
+    for name in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def load_script(name: str):
@@ -615,6 +623,38 @@ class _AnyTiming:
 
 
 ANY_TIMING = _AnyTiming()
+
+
+def test_the_reader_processes_default_to_expandable_segments(toy_probe, tmp_path, monkeypatch):
+    """``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` unless the environment configures PyTorch's allocator
+    itself (``PYTORCH_ALLOC_CONF`` or ``PYTORCH_CUDA_ALLOC_CONF``, even empty). The server and the post-hoc scorer set
+    it first thing, before they load the reader; scripts/rl_batch.py no longer does (tests/test_rl_batch.py)."""
+    env: dict = {}
+    assert default_allocator_conf(env) == ALLOC_CONF == "expandable_segments:True"
+    assert env == {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+    for preset in ({"PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync"}, {"PYTORCH_CUDA_ALLOC_CONF": ""}):
+        env = dict(preset)
+        assert default_allocator_conf(env) is None and env == preset
+    import monitordecorrelation.whitebox.inkling_nvfp4 as inkling_nvfp4
+
+    seen = []
+
+    def loading(model_name):  # the first thing either script asks of the reader
+        seen.append(os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
+        raise RuntimeError("no reader in this test")
+
+    monkeypatch.setattr(inkling_nvfp4, "is_nvfp4_checkpoint", loading)
+    for script, argv in (("inkling_probe_server", ["--model", "m", "--probes", toy_probe]),
+                         ("eval_inkling_probes_on_runs", [str(tmp_path), "--model", "m", "--probes", toy_probe,
+                                                          "--grids", str(tmp_path / "absent.json")])):
+        for preset in (None, "backend:native"):
+            if preset is None:
+                monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+            else:
+                monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", preset)
+            with pytest.raises(RuntimeError, match="no reader in this test"):
+                load_script(script).main(argv)
+            assert seen.pop() == (preset or "expandable_segments:True"), script
 
 
 def test_finished_jobs_are_kept_a_while_then_dropped(toy_probe, monkeypatch):

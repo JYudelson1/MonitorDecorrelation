@@ -515,8 +515,8 @@ def launch(args: list[str], logfile: Path, wait: bool = True):
 
 def probe_server_command(probes: dict, rehearsal: bool) -> str:
     """The probe server's step: refuse a probe folder that isn't the pinned one, then (rehearsal) the GPU check on the
-    serving GPUs, then the server: every probe, one episode per forward, PyTorch's expandable segments (a long
-    episode's attention bias fragments the memory less; the arithmetic is the same)."""
+    serving GPUs, then the server: every probe, one episode per forward. PyTorch's expandable segments are the
+    server's own default (experiments/inkling_probe_server.py), so they aren't set here."""
     lines = ['check() { have=$(cat "$1/probe.npz" "$1/meta.json" | sha256sum | cut -d" " -f1); '
              'if [ "$have" = "$2" ]; then echo "probe $1: $2, the pinned one"; else '
              'echo "probe $1: sha256 $have, NOT the pinned $2: refusing to serve it"; exit 1; fi; }']
@@ -526,9 +526,8 @@ def probe_server_command(probes: dict, rehearsal: bool) -> str:
         lines.append(f".venv/bin/python experiments/check_probe_server.py --model {READER_DIR} --probes-root "
                      "data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json "
                      '> results/check_probe_server_v2.log 2>&1; echo "check_probe_server.py exited $?"')
-    lines.append(f"PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True exec .venv/bin/python "
-                 f"experiments/inkling_probe_server.py --model {READER_DIR} --port {PROBE_PORT} --max-batch-tokens 1 "
-                 f"--probes {shlex.quote(','.join(probes))}")
+    lines.append(f"exec .venv/bin/python experiments/inkling_probe_server.py --model {READER_DIR} --port {PROBE_PORT} "
+                 f"--max-batch-tokens 1 --probes {shlex.quote(','.join(probes))}")
     return "\n".join(lines)
 
 
