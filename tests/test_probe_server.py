@@ -742,8 +742,10 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
         mod.main([*argv, "--grids", grids, "--task-splits", str(deployed / "task_splits.json")])
     capsys.readouterr()
     assert mod.main([*argv, "--grids", grids]) == 0
+    out = capsys.readouterr().out
     assert ("terminal_run_s0: eval grids: 5; seen by the probes (train/val): 3, in their test split: 2, new to them: 0"
-            in capsys.readouterr().out)
+            in out)
+    assert f"golden check {world['probe_dir']}:" in out  # amendment 2: post hoc too, before any run is scored
     scored = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
     assert sorted(r["line"] for r in scored) == list(range(1, 11))
     row_of = {i: n for n, i in enumerate(world["vf"].ids)}
@@ -840,6 +842,25 @@ def test_posthoc_metrics_on_unseen_grids(tmp_path):
     assert mod.grid_counts([e["grid_key"] for e in episodes], grids) == (
         "eval grids: 5; seen by the probes (train/val): 3, in their test split: 1, new to them: 1; episodes showing no "
         "grid, left out of *_unseen: 1")
+
+
+def test_posthoc_scoring_stops_on_a_failed_golden_check(world, tmp_path):
+    """A probe whose golden logits moved (here: shifted by 5) stops the post-hoc session before any run is scored."""
+    import shutil
+
+    mod = load_script("eval_inkling_probes_on_runs")
+    probe = tmp_path / "probe"
+    shutil.copytree(world["probe_dir"], probe)
+    golden = [json.loads(line) for line in (probe / "golden.jsonl").read_text().splitlines()]
+    (probe / "golden.jsonl").write_text("".join(json.dumps({**g, "logit": g["logit"] + 5}) + "\n" for g in golden))
+    run = tmp_path / "terminal_run_s0"
+    run.mkdir()
+    (run / "eval_rollouts.jsonl").write_text("".join(json.dumps({**r, "step": 0}) + "\n" for r in rows()))
+    (run / "run_info.json").write_text(json.dumps({"config": {"env_options": RUN_ENV, "thinking_effort": 0.5}}))
+    with pytest.raises(GoldenCheckError):
+        mod.main([str(run), "--model", world["nvfp4_dir"], "--probes", str(probe), "--names", "probe_iid",
+                  "--device", "cpu", "--grids", str(tmp_path / "absent.json")])
+    assert not (run / "probe_scores_inkling.jsonl").exists()
 
 
 def test_posthoc_grids_default_to_the_probes_own_deployment(tmp_path):

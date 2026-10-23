@@ -17,6 +17,10 @@ for post-hoc probes (eval/degradation.py). Train-against runs still need the liv
 - The run's ``thinking_effort`` must equal the probes'. The model must be the reader the probes are served on (the
   loader and revision in their meta's ``reader_info``): ``ProbeScorer`` refuses any other, as the server does
   (whitebox/probe_server.reader_mismatch).
+- Before any run is scored, each probe's golden episodes are re-scored, as the server does at its start
+  (``ProbeScorer.golden_check``, with the same ``--golden-tolerance`` / ``--golden-mean-tolerance``): a rendering or a
+  logit that moved stops the session. docs/inkling_probes_amendment_2.md requires this of every machine that scores a
+  v2 monitor, post hoc too.
 
 **Resumable:** per-episode scores are appended to ``<run>/probe_scores_inkling.jsonl`` chunk by chunk; a rerun scores
 only what's missing. ``--out-dir DIR`` writes to ``DIR/<run name>/`` instead of into the run folders.
@@ -194,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", help="write DIR/<run name>/ instead of into the run folders")
     ap.add_argument("--max-batch-tokens", type=int, default=1, help="1 = one episode per forward, as served")
     ap.add_argument("--chunk", type=int, default=64, help="episodes per scoring call (and per resume point)")
+    ap.add_argument("--golden-tolerance", type=float, default=None,
+                    help="max |Δlogit| on the golden episodes (default: each probe's own, else 1.0), as the server")
+    ap.add_argument("--golden-mean-tolerance", type=float, default=None,
+                    help="max |mean Δlogit| over each probe's golden episodes (default: the server's, "
+                         "probe_server.GOLDEN_MEAN_TOLERANCE; inf turns the check off)")
     ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
     ap.add_argument("--grids", help="the probes' grids.json (default: the one at the root of the probes' deployment, "
                                     "e.g. data/probes/Inkling-Small/grids.json): the episodes on a grid in neither "
@@ -234,6 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     scorer = ProbeScorer(model, dirs, max_batch_tokens=args.max_batch_tokens, reader_info=info)
     shas = {name: probe_sha(d) for name, d in zip(names, dirs)}
     log(f"loaded {args.model}; {len(dirs)} probes: {', '.join(names)}")
+    from monitordecorrelation.whitebox.probe_server import GOLDEN_MEAN_TOLERANCE
+
+    mean_tol = GOLDEN_MEAN_TOLERANCE if args.golden_mean_tolerance is None else args.golden_mean_tolerance
+    for d, m in zip(dirs, metas):  # each probe at its own max tolerance, as the server checks them
+        tol = args.golden_tolerance if args.golden_tolerance is not None else m.get("golden_tolerance", 1.0)
+        log(f"golden check {d}: {json.dumps(scorer.golden_check([d], tol, mean_tolerance=mean_tol))}")
 
     failed = 0
     for run in args.runs:
