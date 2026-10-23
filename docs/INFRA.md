@@ -97,7 +97,7 @@ runs it.
 ```bash
 python3 scripts/nebius_job.py prices                    # every region's price and capacity now (read-only)
 python3 scripts/nebius_job.py run --hours 2 --out runs/{stamp}-{name} --hf ORG/REPO[@REV] --fetch results -- '<job>'
-python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --hours 5 --out runs/{stamp}-{name} -- '<job>'
+python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --hours 5 --name dennis-job --out runs/x -- '<job>'
 python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}    # keep the VM; prints the ssh line
 python3 scripts/nebius_job.py exec --host user@ip --out runs/x -- '<job>'   # any SSH box, no Nebius
 python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify (--budget-file:
@@ -123,6 +123,8 @@ created.
 - **Optional keys for the job** (`--secret`, below), one file each in `~/.secrets` (on hub: `hub-secret set NAME`).
 - **vast.ai** instead needs none of these, only hub's `hub-gpu` and rsync on the launching machine
   ([below](#vastai-instances-run---provider-vast)).
+- **Optional name prefix:** with `NEBIUS_JOB_NAME_PREFIX` set (e.g. `dennis-`), a `--name` that doesn't start with it is
+  refused, for Nebius VMs and vast.ai instances alike, so they can be told apart in a shared console.
 
 **What `run` does.**
 1. Quote every region of the regions file with Nebius's cost calculator, read the capacity advice, and create the VM
@@ -206,7 +208,7 @@ start. The fetch needs rsync on the launching machine (on hub: `rsync` in `.hub/
 
 ```bash
 python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib 800 --hours 5 --max-cost 160 \
-    --purpose "what it is for" --out runs/{stamp}-{name} --hf ORG/REPO@REV --fetch results -- '<job>'
+    --name dennis-job --purpose "what it is for" --out runs/{stamp}-{name} --hf ORG/REPO@REV --fetch results -- '<job>'
 python3 scripts/nebius_job.py run --provider vast --dry-run …   # the offers, the limits, the start call, the scripts
 hub-gpu list; hub-gpu end NAME                                    # by hand, if ever needed
 ```
@@ -224,9 +226,10 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   its price × the time from its start to its verified end. It does not count against `limit_usd`, which is Nebius's
   cap: vast.ai is billed to another account, under hub's limits, which the launcher checks instead. `budget` lists
   such entries apart, and `reap` leaves them alone.
-- **The instance** is named `--name` plus a random suffix (lowercase letters, digits and `-`, at most 24 characters),
-  with a purpose line (`--purpose`, by default the job command) and tags (`--tag`, plus `launcher=nebius-job` and
-  `commit=…`). The owner sees all three.
+- **The instance** is named `--name` plus a random suffix (lowercase letters, digits and `-`, at most 24 characters,
+  so `--name` has at most 17; e.g. `dennis-probes-v2`), with a purpose line (`--purpose`, by default the job command)
+  and tags (`--tag`, plus `launcher=nebius-job` and `commit=…`). The owner sees all three, in hub and in the account's
+  vast.ai console.
 - **Then as on Nebius,** over SSH as root: the same push (refused with uncommitted changes, `CODE_VERSION.json`,
   `--push`), `uv sync --locked` and the CUDA check, the unauthenticated `--hf` downloads to `/mnt/ram/<name>`, the job
   detached and polled, and `job.json` (`provider`, and a `vast` part: limits, offer, start answer, last list row).
@@ -241,12 +244,13 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   - **Deadline:** the job's `NEBIUS_JOB_DEADLINE` is the instance's end less `--reserve-minutes` (default 30, at most a
     quarter of `--hours`), kept for the fetch. The launcher stops waiting for the job halfway into that reserve,
     fetches what is there and ends the instance. There is no power-off after the job.
-  - **Fetch:** rsync over SSH, uncompressed and resumable (tar over SSH if the instance has no rsync). Through
-    vast.ai's SSH proxy, the only address the smoke tests' hosts had, it ran at 12 MB/s (2 GB in 170 s). So while the
-    job runs the `--fetch` paths are rsynced every 10 minutes, leaving out files still being written (`*.part`,
-    `*.tmp`); what the job saved is then here before the instance's end, and the final fetch after the job has little
-    left. Then `hub-gpu end`, verified in `hub-gpu list`. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on
-    Nebius.
+  - **Fetch:** rsync over SSH, uncompressed and resumable (tar over SSH if the instance has no rsync). vast.ai's SSH
+    proxy, the only address the test hosts had, limits each connection: one rsync ran at 4–12 MB/s, eight at once at
+    37 MB/s (2026-10-23). So a directory with more than 64 MB left to copy goes in up to 8 rsyncs at once, split by
+    size. And while the job runs, the `--fetch` paths are rsynced every 10 minutes, leaving out files still being
+    written (`*.part`, `*.tmp`): what the job saved is here before the instance's end, and the final fetch after the
+    job has little left. Then `hub-gpu end`, verified in `hub-gpu list`. Errors, Ctrl-C, SIGTERM and SIGHUP end it too,
+    held as on Nebius.
   - **An instance that goes away mid-job** (ended, gone from the list, exited) is reported in the log and `job.json`
     (exit 3). Nothing relaunches it: no `--attempts`, and no `--keep` or `up` either. To resume, run again with the
     fetched results pushed back (`--push <out>/results:results`).
@@ -261,8 +265,10 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   torch 2.14.1+cu130, CUDA seen on the compute-capability-7.5 GPU), the job in 4 s (nvidia-smi, a CUDA matmul,
   `NEBIUS_JOB_DEADLINE` = the end less 7.5 minutes), the rsync fetch, and `hub-gpu end` verified 40 s later: 10
   minutes, $0.01. A first instance on another host was still loading after the SSH wait's 15 minutes then; the
-  launcher ended it, verified ($0.01), and now waits through loading. `hub-gpu limits` counted $0.03 for both. (Starts
-  before 08:07 UTC were refused by a hub bug.)
+  launcher ended it, verified ($0.01), and now waits through loading. Four more runs that morning checked the fetch: a
+  host with the image cached had SSH within a minute; the rounds while a 13-minute job ran brought back what it had
+  saved; eight rsyncs at once fetched 32 files (1.6 GB, sha256-checked) at 37 MB/s. `hub-gpu limits` counted $0.08 for
+  all six instances. (Starts before 08:07 UTC were refused by a hub bug.)
 
 ### Spot VMs: how they behave
 

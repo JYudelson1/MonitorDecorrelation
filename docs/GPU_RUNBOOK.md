@@ -214,7 +214,8 @@ backed up; the features are ~51 GB):
 
 ```bash
 python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib 800 --hours 5 --reserve-minutes 60 \
-    --max-cost 160 --name md-v2-bf16 --purpose "Inkling-Small probes v2: full-precision features of terminal_prerl_v2" \
+    --max-cost 160 --name dennis-probes-v2 \
+    --purpose "Inkling-Small probes v2: full-precision features of terminal_prerl_v2" \
     --out /srv/agents/projects/monitor-correlation-probes/scratch/gpu_jobs/{stamp}-{name} \
     --hf thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a \
     --push data/probe_datasets/terminal_prerl_v2/items.jsonl:data/probe_datasets/terminal_prerl_v2/items.jsonl \
@@ -241,9 +242,10 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
   800 GiB leaves about 150 GiB spare. The image doesn't count against it.
 - **Copy-back:** `--fetch results` rsyncs `results/` (the features, `diagnostics-v2/bf16/`, `status/`, `session.log`)
   into `<out>/results/`, resumable, every 10 minutes while the session runs and once more after it. Through vast.ai's
-  SSH proxy rsync ran at 12 MB/s (2026-10-23): the ~51 GB would take 70 minutes after the session, but they come back
-  as they are extracted, at 5–9 MB/s, so the last fetch has only the last shards and the diagnostics left. If the host
-  fails, only what came after the last fetch is lost. The features keep the store's layout
+  SSH proxy one rsync ran at 4–12 MB/s and the launcher's eight at once at 37 MB/s (2026-10-23), so the ~51 GB would
+  take about 25 minutes. They come back as they are extracted, at 5–9 MB/s, so the last fetch has only the last shards
+  and the diagnostics left. If the host fails, only what came after the last fetch is lost. The features keep the
+  store's layout
   (`<out>/results/features/bf16/terminal_prerl_v2/<view>/shard_*`), which step 2 reads as it is. To put them in the
   bulk bucket too, upload them from hub, where the token stays:
 

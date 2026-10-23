@@ -39,8 +39,10 @@ REAL_REMOTE_STEPS, REAL_COLLECT = nj.remote_steps, nj.collect
 
 @pytest.fixture(autouse=True)
 def committed_code(monkeypatch):
-    """Every test pushes a clean, committed tree unless it says otherwise: the real checkout may be anything."""
+    """Every test pushes a clean, committed tree unless it says otherwise: the real checkout may be anything. And no
+    NEBIUS_JOB_NAME_PREFIX from the environment: the tests name their machines md-job."""
     monkeypatch.setattr(nj, "code_version", lambda repo: dict(CLEAN))
+    monkeypatch.delenv("NEBIUS_JOB_NAME_PREFIX", raising=False)
 
 # Trimmed from the real `nebius compute instance create --format json` output of 2026-10-09.
 CREATED = {
@@ -2662,6 +2664,21 @@ def test_fetch_rsync_splits_a_directory_between_rsyncs(tmp_path, monkeypatch):
     assert (out / "results" / "index.json").read_bytes() == b'{"more": 1}' and "2 files" in logs[-1]
     assert (out / "results" / "status" / "status.json.tmp").exists() and nj.remote_todo(r, "md/results", out) == []
     assert nj.remote_todo(r, "md/results/index.json", out) is None  # a file: one rsync
+
+
+def test_a_name_prefix_from_the_environment_is_required(tmp_path, monkeypatch, fake_cloud, fake_hub):
+    """NEBIUS_JOB_NAME_PREFIX (the owner's dennis-, so his machines stand out in a shared console): a --name without it
+    is refused before anything is asked of a cloud, on Nebius and on vast.ai alike."""
+    monkeypatch.setenv("NEBIUS_JOB_NAME_PREFIX", "dennis-")
+    for argv in (["run", *_run_args(tmp_path), "--", "true"], ["up", *_run_args(tmp_path)],
+                 ["run", *_vast_args(tmp_path), "--", "true"]):  # the default --name, md-job
+        with pytest.raises(SystemExit, match="must start with 'dennis-'"):
+            nj.main(argv)
+    assert not FakeNebius.clouds and FakeHubGpu.calls == []
+    assert nj.main(["run", *_run_args(tmp_path, "--name", "dennis-job"), "--", "true"]) == 0
+    assert _flag(FakeNebius.clouds["project-x"].create_argv, "--name").startswith("dennis-job-")
+    assert nj.main(["run", *_vast_args(tmp_path, "--name", "dennis-smoke"), "--", "true"]) == 0
+    assert FakeHubGpu.started[-1]["name"].startswith("dennis-smoke-")
 
 
 def test_vast_ledger_entries_are_recorded_but_not_counted(tmp_path, capsys, regions_file):

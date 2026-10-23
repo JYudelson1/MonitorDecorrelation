@@ -102,7 +102,8 @@ flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it
   hours, and under ``--max-cost``; ``--hours`` must be within its timed runs' limit (72 h), the GPUs within its count.
 - The start is timed (``hub-gpu start --hours``): vast.ai destroys the instance at its end, with what is on it. Its name
   is ``--name`` plus a random suffix (lowercase letters, digits and -, at most 24 characters, new among the project's
-  instances), its purpose line ``--purpose`` (default: the job), its tags ``--tag`` plus launcher= and commit=.
+  instances), its purpose line ``--purpose`` (default: the job), its tags ``--tag`` plus launcher= and commit=. With
+  ``NEBIUS_JOB_NAME_PREFIX`` set (e.g. ``dennis-``), a ``--name`` that doesn't start with it is refused, on Nebius too.
 - Then as on Nebius, over SSH as root with hub-gpu's key (~/.ssh/hub-gpu): bootstrap, downloads, push, setup, job. SSH
   is waited for while the instance pulls its image (listed as loading; at most 40 minutes, and not past the job's
   deadline). The bootstrap mounts a tmpfs at /mnt/ram if the container may, else /mnt/ram is a plain directory on the
@@ -2262,10 +2263,19 @@ def _require(value: str | None, flag: str, env: str) -> str:
     return value
 
 
+def check_name_prefix(name: str) -> None:
+    """``NEBIUS_JOB_NAME_PREFIX``, if set: every VM or instance name must start with it (e.g. ``dennis-``, so the
+    owner's machines are told apart in a shared console). SystemExit otherwise."""
+    prefix = os.environ.get("NEBIUS_JOB_NAME_PREFIX", "").strip()
+    if prefix and not name.startswith(prefix):
+        raise SystemExit(f"--name {name!r} must start with {prefix!r} (NEBIUS_JOB_NAME_PREFIX)")
+
+
 def vm_spec(args) -> VmSpec:
     """The VM, minus where it goes (``in_region`` fills that in)."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", args.name):
         raise SystemExit(f"--name must be lowercase letters, digits and dashes, got {args.name!r}")
+    check_name_prefix(args.name)
     if is_cpu_platform(args.platform) and not args.on_demand:
         raise SystemExit(f"{args.platform} is a CPU platform: CPU VMs run --on-demand here (the spot bid, "
                          "--max-gpu-price, is per GPU-hour)")
@@ -2916,6 +2926,7 @@ def vast_run(args, cmd: list[str]) -> int:
     if os.environ.get("NEBIUS_MAX_GPU_PRICE", "").strip():
         log(f"--provider vast: ignoring NEBIUS_MAX_GPU_PRICE={os.environ['NEBIUS_MAX_GPU_PRICE'].strip()}, a Nebius "
             "spot bid (vast.ai: --max-price caps the instance's price)")
+    check_name_prefix(args.name)
     name = vast_name(args.name)
     job = job_spec(args, cmd, name)
     keys = [f"--env {k} (it looks like a key)" for k, v in job.env if secret_env(k, v)]
@@ -3383,7 +3394,8 @@ def build_parser() -> argparse.ArgumentParser:
     vm.add_argument("--ssh-key", default=os.environ.get("NEBIUS_SSH_KEY"),
                     help="private key; KEY.pub goes into cloud-init (env NEBIUS_SSH_KEY)")
     vm.add_argument("--name", default="md-job",
-                    help="VM name prefix (a random suffix is added); vast.ai: at most 17 characters")
+                    help="VM name prefix (a random suffix is added); vast.ai: at most 17 characters. With "
+                         "NEBIUS_JOB_NAME_PREFIX set, it must start with that")
     vm.add_argument("--user", default="md", help="login user created on the VM")
     vm.add_argument("--max-gpu-price", type=float, default=None,  # else NEBIUS_MAX_GPU_PRICE, for spot: spot_bid
                     metavar="USD", help="spot bid per GPU-hour through a Nebius pricing policy: never charged more; "
