@@ -1,5 +1,5 @@
 """The Inkling scoring path end to end on CPU with the tiny model: extraction → probe → golden set → server →
-``InklingProbeMonitor``.
+``InklingProbeMonitor``, on the 4-bit reader (v1) and on the full-precision one (v2).
 
 Checks:
 - Served scores of RL-style rollouts equal the probe applied to the training features.
@@ -8,6 +8,8 @@ Checks:
 - A server refuses, at construction, the probes for another reader: the committed v1 monitors on the full-precision one.
 - A client that starts before the server waits for it.
 - Identical concurrent requests share one forward pass.
+- The full-precision reader, loaded as the server loads it, end to end; the server, the client and the post-hoc
+  scorer refuse a probe for the other reader.
 - Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
@@ -74,36 +76,63 @@ def rows():
             for t in range(5) for k in range(2)]
 
 
-@pytest.fixture(scope="module")
-def world(tmp_path_factory):
-    from monitordecorrelation.whitebox.inkling_nvfp4 import load_inkling_nvfp4
-
-    tmp = tmp_path_factory.mktemp("server")
-    _, nvfp4_dir, _, _ = write_tiny_checkpoints(tmp, vocab_size=201024)
+def reader_world(tmp, model, model_dir, layer: int, max_batch_tokens: int = 65536) -> dict:
+    """``rows()`` as a tiny TerminalEnv dataset, extracted by ``model`` (the reader loaded from ``model_dir``) with
+    ``max_batch_tokens``, and a toy probe at ``layer`` fitted on its with-reasoning follow-up readout, saved with the
+    reader's ``reader_info`` and a golden set of 4 episodes."""
     rollouts = tmp / "eval_rollouts.jsonl"
     rollouts.write_text("".join(json.dumps(r) + "\n" for r in rows()))
     items, _ = terminal_items(str(rollouts), RUN_ENV, seed=0)
     dataset = tmp / "terminal_tiny"
     write_dataset(str(dataset), items, {"kind": "terminal", "effort": 0.5, "counts": counts(items, "task_id")})
-    model = load_inkling_nvfp4(str(nvfp4_dir), device="cpu").eval()
     feats = tmp / "features"
-    extract(model, prepare(Job(dataset=str(dataset), out=str(feats), model=str(nvfp4_dir), shard_size=4)),
-            log=lambda m: None)
+    extract(model, prepare(Job(dataset=str(dataset), out=str(feats), model=str(model_dir), shard_size=4,
+                               max_batch_tokens=max_batch_tokens)), log=lambda m: None)
     vf = load_view(str(feats), VIEW)
     x, _ = feature_matrix(vf, "followup", VIEW)
     by_id = load_items(str(dataset))
     y = np.array([by_id[i]["label"] for i in vf.ids])
     y[1] = 1  # a second positive so the toy probe has something to fit
-    probe = SelectedProbe.fit(layer_array(x, 2), y, 1.0, 2)
-    logits = probe.logit(layer_array(x, 2))
+    probe = SelectedProbe.fit(layer_array(x, layer), y, 1.0, layer)
+    logits = probe.logit(layer_array(x, layer))
     probe.threshold_1, probe.threshold_5 = float(np.percentile(logits, 90)), float(np.percentile(logits, 50))
     probe.meta = {"name": "probe_iid", "dataset": "terminal_tiny", "view": VIEW, "readout": "followup", "effort": 0.5,
-                  "reader_info": reader_info(model, str(nvfp4_dir))}
+                  "reader_info": reader_info(model, str(model_dir))}
     probe_dir = tmp / "probe"
     probe.save(str(probe_dir))
     assert write_golden(str(probe_dir), probe, vf, by_id, "followup", VIEW, vf.ids[:4]) == 4
-    return {"model": model, "probe_dir": str(probe_dir), "probe": probe, "vf": vf, "x": x,
-            "nvfp4_dir": str(nvfp4_dir), "items": by_id, "features": str(feats), "dataset": str(dataset)}
+    return {"model": model, "model_dir": str(model_dir), "probe_dir": str(probe_dir), "probe": probe, "vf": vf,
+            "x": x, "items": by_id, "features": str(feats), "dataset": str(dataset)}
+
+
+@pytest.fixture(scope="module")
+def checkpoints(tmp_path_factory) -> tuple:
+    """(bf16_dir, nvfp4_dir): the tiny Inkling in the hub layout and its NVFP4 twin (tests/inkling_tiny.py)."""
+    return write_tiny_checkpoints(tmp_path_factory.mktemp("checkpoints"), vocab_size=201024)[:2]
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory, checkpoints):
+    """The 4-bit reader as v1 serves it: the tiny NVFP4 checkpoint on our loader, extracted in batches."""
+    from monitordecorrelation.whitebox.inkling_nvfp4 import load_inkling_nvfp4
+
+    nvfp4_dir = checkpoints[1]
+    model = load_inkling_nvfp4(str(nvfp4_dir), device="cpu").eval()
+    return {**reader_world(tmp_path_factory.mktemp("server"), model, nvfp4_dir, layer=2), "nvfp4_dir": str(nvfp4_dir)}
+
+
+@pytest.fixture(scope="module")
+def bf16_world(tmp_path_factory, checkpoints):
+    """The full-precision reader as v2 fits and serves it: the tiny BF16 checkpoint loaded as the server loads one that
+    isn't NVFP4 (``load_inkling_text``: BF16 across the visible GPUs, float32 on a CPU), extracted one episode per
+    forward. Its toy probe reads layer 4, the output of the tiny model's one global attention layer: layers 1-3 attend
+    within a sliding window and every episode ends in the same turns, so up to layer 3 every episode's readout is the
+    same (the 4-bit world's probe, at layer 2, scores every episode alike)."""
+    from monitordecorrelation.whitebox.model import load_inkling_text
+
+    bf16_dir = checkpoints[0]
+    return reader_world(tmp_path_factory.mktemp("bf16"), load_inkling_text(str(bf16_dir)), bf16_dir, layer=4,
+                        max_batch_tokens=1)
 
 
 @pytest.fixture
@@ -236,6 +265,67 @@ def test_a_client_waits_for_a_late_server_and_requests_are_shared(world):
     srv.stop()
     assert len(out) == 3 and len({o[0].score for o in out}) == 1
     assert calls == [1]  # three identical requests, one forward pass
+
+
+def test_bf16_serving_end_to_end(bf16_world, world, tmp_path):
+    """The full-precision reader as v2 fits and serves it (``bf16_world``), extraction → probe → golden set → server →
+    ``InklingProbeMonitor``, one episode per forward throughout.
+    - Its ``reader_info`` names the transformers loader: in the features, the probe and the server's /v1/meta.
+    - The golden check passes; the monitor accepts the probe, and its scores of RL-style rollouts equal the probe on
+      the training features (the same forward passes, so to rounding).
+    - The readers refuse each other's probes. A BF16-fitted probe on the 4-bit server: the server refuses it at
+      construction, and the client at the handshake with a server that didn't check (one from before that check). A
+      4-bit-served probe on the BF16 server: the server refuses it, and so does the post-hoc scorer."""
+    w = bf16_world
+    info = reader_info(w["model"], w["model_dir"])
+    index = json.load(open(os.path.join(w["features"], "index.json")))
+    assert info["loader"] == "transformers" and index["reader"] == info == w["probe"].meta["reader_info"]
+    assert index["max_batch_tokens"] == 1
+    scorer = ProbeScorer(w["model"], [w["probe_dir"]], max_batch_tokens=1, reader_info=info)
+    golden = scorer.golden_check([w["probe_dir"]], tolerance=1e-6)[probe_sha(w["probe_dir"])]
+    assert golden["n"] == 4 and golden["max_dlogit"] < 1e-6
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        with urllib.request.urlopen(url + "/v1/meta", timeout=60) as resp:
+            assert json.loads(resp.read())["reader"]["loader"] == "transformers"
+        mon = InklingProbeMonitor("probe_iid", w["probe_dir"], url, env_options=RUN_ENV, run_effort=0.5,
+                                  log=lambda m: None)
+        results = mon.score_batch([rollout(r) for r in rows()])
+    finally:
+        srv.stop()
+    ids = [f"t{t}/{k}" for t in range(5) for k in range(2)]  # terminal_items' ids, in row order
+    row_of = {i: n for n, i in enumerate(w["vf"].ids)}
+    x = layer_array(w["x"], w["probe"].layer, np.array([row_of[i] for i in ids]))
+    assert np.ptp(w["probe"].logit(x)) > 1  # the tasks score differently, so agreeing means something
+    np.testing.assert_allclose([r.meta["logit"] for r in results], w["probe"].logit(x), rtol=0, atol=1e-6)
+    np.testing.assert_allclose([r.score for r in results], w["probe"].score(x), rtol=0, atol=1e-6)
+    # a BF16-fitted probe on the 4-bit server
+    nvfp4 = reader_info(world["model"], world["nvfp4_dir"])
+    assert nvfp4["loader"] == "nvfp4"
+    with pytest.raises(ValueError, match=r"another reader than this one: \S+/bf16\d*/probe \(loader 'transformers' "
+                                         r"for the probe, 'nvfp4' for the reader\)\. Serve"):
+        ProbeScorer(world["model"], [world["probe_dir"], w["probe_dir"]], reader_info=nvfp4)
+    unchecked = ProbeScorer(world["model"], [w["probe_dir"]])  # no reader given: nothing checked
+    unchecked.reader_info = nvfp4  # what its /v1/meta reports
+    srv = Server(unchecked, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        with pytest.raises(FatalProbeError, match="runs another reader than the probe is for: loader 'transformers' "
+                                                  "for the probe, 'nvfp4' for the reader"):
+            InklingProbeMonitor("probe_iid", w["probe_dir"], f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                run_effort=0.5, log=lambda m: None)
+    finally:
+        srv.stop()
+    # a 4-bit-served probe on the BF16 server, and in the post-hoc scorer on the BF16 reader
+    with pytest.raises(ValueError, match="another reader than this one: .*loader 'nvfp4' for the probe, "
+                                         "'transformers' for the reader"):
+        ProbeScorer(w["model"], [w["probe_dir"], world["probe_dir"]], max_batch_tokens=1, reader_info=info)
+    posthoc = load_script("eval_inkling_probes_on_runs")
+    with pytest.raises(ValueError, match="loader 'nvfp4' for the probe, 'transformers' for the reader"):
+        posthoc.main([str(tmp_path), "--model", w["model_dir"], "--probes", world["probe_dir"], "--grids",
+                      str(tmp_path / "absent.json")])
 
 
 # --------------------------------------------------------------------------------- failures, retries, the job table
