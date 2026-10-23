@@ -2386,8 +2386,8 @@ def _fake_bin(home: Path, name: str, body: str) -> None:
 
 @pytest.mark.parametrize("mounts", [False, True])
 def test_the_vast_bootstrap_falls_back_to_a_plain_directory(tmp_path, monkeypatch, mounts):
-    """In a container that may not mount a tmpfs (vast.ai's usually), /mnt/ram is a plain directory and the log says
-    so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
+    """In a container that may not mount a tmpfs (likely for a vast.ai instance, a docker container), /mnt/ram is a plain
+    directory and the log says so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(nj, "RAM_DIR", str(tmp_path / "ram"))

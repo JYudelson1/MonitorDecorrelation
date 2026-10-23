@@ -9,7 +9,7 @@
 >
 > **Current (2026-10-12):** the first section below, on serving the Inkling-Small probes and scoring finished runs
 > with them, is up to date. **2026-10-23:** the second, on the IID probe v2 on the full-precision reader, is the plan
-> for v2 (not yet run). Everything after them is the superseded Qwen3.5-4B runbook.
+> for v2 (not yet run), on Nebius or on vast.ai. Everything after them is the superseded Qwen3.5-4B runbook.
 
 ## Inkling-Small probes: serving on one B300, and post-hoc scoring
 
@@ -165,7 +165,7 @@ full-precision reader alone, one episode per forward pass ([amendment 2](inkling
 is `thinkingmachines/Inkling-Small` @ `8cc5877b44d343f88b92086aa1fb72897950f06a` (BF16, ~496 GiB). One copy needs three
 or four B300s (four B200s), so an 8-GPU VM holds two. The v1 monitors and the section above are unchanged.
 
-### 1. The extraction session (8× B200 or 8× B300, GPU)
+### 1. The extraction session (8× B200 or 8× B300 on Nebius, or 4× B200 on vast.ai; GPU)
 
 The plan is `experiments/session_plans/probe_session_v2_bf16.json`:
 - two copies of the reader, on GPUs 0–3 and 4–7, each extracting half of `terminal_prerl_v2` one episode per
@@ -205,6 +205,50 @@ python3 scripts/nebius_job.py run --platform gpu-b200-sxm --preset 8gpu-160vcpu-
   - If the budget can't hold that reservation, a shorter `--hours` works too: the session is resumable, and a relaunch
     extracts only what's missing.
 
+**On vast.ai, one 4× B200** (when Nebius has no capacity, as on 2026-10-23;
+[`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)).
+`experiments/session_plans/probe_session_v2_bf16_vast.json` is the same session with one copy of the reader on GPUs
+0–3 and every store a local directory under `results/` (features, diagnostics-v2, status): a vast.ai instance gets no
+HF token, so everything comes back with `--fetch results`. From the main checkout, with `--out` in `scratch/` (not
+backed up; the features are ~51 GB):
+
+```bash
+python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib 800 --hours 5 --reserve-minutes 60 \
+    --max-cost 160 --name md-v2-bf16 --purpose "Inkling-Small probes v2: full-precision features of terminal_prerl_v2" \
+    --out /srv/agents/projects/monitor-correlation-probes/scratch/gpu_jobs/{stamp}-{name} \
+    --hf thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a \
+    --push data/probe_datasets/terminal_prerl_v2/items.jsonl:data/probe_datasets/terminal_prerl_v2/items.jsonl \
+    --push data/probe_datasets/diverse_deception/items.jsonl:data/probe_datasets/diverse_deception/items.jsonl \
+    --fetch results \
+    -- 'mkdir -p results && uv run python experiments/run_probe_session.py --plan experiments/session_plans/probe_session_v2_bf16_vast.json 2>&1 | tee results/session.log; exit ${PIPESTATUS[0]}'
+```
+
+- **Untried on a real instance:** on 2026-10-23 hub-gpu refused every start
+  ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)). Run the command with `--dry-run` first, and a cheap
+  job (`--max-price 0.6 --hours 0.5`) before this one.
+- **Cost:** $30.22/h in Oregon on 2026-10-23, the 859 GB of disk included. One copy extracts the ~32M tokens in about
+  1.5–3 h at 3–6k tokens/s; with the setup and the copy-back, 2–4 h: $60–120. The worst case, $151 for 5 h, is
+  checked against `hub-gpu limits` ($500 a day) and `--max-cost`; the ledger records it as a vast.ai entry, not counted
+  against the Nebius limit.
+- **Deadline:** the session's `NEBIUS_JOB_DEADLINE` is the instance's end less the hour kept for the copy-back
+  (`--reserve-minutes 60`). It starts no shard that wouldn't be done by then, and exits 75 if that stopped it. The
+  launcher then fetches what is done and ends the instance. To resume, run the same command with
+  `--push <out>/results:results` added: the session skips the shards already in its stores.
+- **Disk:** if the container may not mount a tmpfs (likely for a docker container; bootstrap.log says which),
+  `/mnt/ram` is a plain directory. The weights (496 GiB), the session's copy of the features in `/mnt/ram/session`,
+  the stores' copy in `results/` (~51 GB each) and the venv (~10 GB) then share the instance's disk: 800 GiB leaves
+  about 150 GiB spare.
+- **Copy-back:** `--fetch results` rsyncs `results/` (the features, `diagnostics-v2/bf16/`, `status/`, `session.log`)
+  into `<out>/results/`, resumable. This pod downloads at about 100 MB/s (2026-10-23), so ~51 GB takes about 10
+  minutes, more from a slow host. The features keep the store's layout
+  (`<out>/results/features/bf16/terminal_prerl_v2/<view>/shard_*`), which step 2 reads as it is. To put them in the
+  bulk bucket too, upload them from hub, where the token stays:
+
+  ```bash
+  uv run hf buckets sync <out>/results/features/bf16/terminal_prerl_v2 \
+      hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16/terminal_prerl_v2
+  ```
+
 ### 2. Fit, check, deploy (CPU)
 
 ```bash
@@ -217,6 +261,9 @@ uv run python experiments/compare_readers.py --probes PROBES --features FEATURES
     --diagnostics DIAGNOSTICS-v2 --out OUT/compare_v2        # the full-precision jitter and the batching rule's numbers
 ```
 
+- After the vast.ai session the features and diagnostics are already here, in the layout this step expects, so link
+  them in instead of fetching them: `ln -s <out>/results/features/bf16/terminal_prerl_v2 FEATURES/bf16/` and
+  `ln -s <out>/results/diagnostics-v2/bf16 DIAGNOSTICS-v2/` (each folder made first).
 - `fit_probes.py` refuses v2 features that aren't full precision at that revision with `max_batch_tokens` 1, and the
   v2 probes record both amendments' sha256s.
 - The OOD probe keeps its v1 full-precision fit (`data/probe_results/fitted/bf16/diverse_deception/`). The deployment

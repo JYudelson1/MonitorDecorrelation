@@ -90,12 +90,14 @@ to monitor or obfuscate). On tinker that means a small **Qwen3 with thinking on*
 The policy trains on tinker, but some jobs need our own GPUs: extracting Inkling-Small probe features, serving the
 Inkling probes, and scoring finished runs with them ([`INKLING_PROBES.md`](INKLING_PROBES.md),
 [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)). `scripts/nebius_job.py` turns such a job into one command on a fresh Nebius VM
-(NVIDIA B300 by default, or a CPU-only VM: [below](#cpu-vms-keys-and-root-jobs)), and always cleans up. It is
-stdlib-only Python, so plain `python3` runs it.
+(NVIDIA B300 by default, or a CPU-only VM: [below](#cpu-vms-keys-and-root-jobs)), or on a vast.ai instance
+([below](#vastai-instances-run---provider-vast)), and always cleans up. It is stdlib-only Python, so plain `python3`
+runs it.
 
 ```bash
 python3 scripts/nebius_job.py prices                    # every region's price and capacity now (read-only)
 python3 scripts/nebius_job.py run --hours 2 --out runs/{stamp}-{name} --hf ORG/REPO[@REV] --fetch results -- '<job>'
+python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --hours 5 --out runs/{stamp}-{name} -- '<job>'
 python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}    # keep the VM; prints the ssh line
 python3 scripts/nebius_job.py exec --host user@ip --out runs/x -- '<job>'   # any SSH box, no Nebius
 python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify (--budget-file:
@@ -119,6 +121,8 @@ created.
   `{"limit_usd": N, "entries": []}`) and a spot bid per GPU-hour (`--max-gpu-price` or `NEBIUS_MAX_GPU_PRICE`).
 - **Optional HF token** with write access to the buckets (`--hf-token-file`), only for `--upload`.
 - **Optional keys for the job** (`--secret`, below), one file each in `~/.secrets` (on hub: `hub-secret set NAME`).
+- **vast.ai** instead needs none of these, only hub's `hub-gpu` and rsync on the launching machine
+  ([below](#vastai-instances-run---provider-vast)).
 
 **What `run` does.**
 1. Quote every region of the regions file with Nebius's cost calculator, read the capacity advice, and create the VM
@@ -190,6 +194,63 @@ python3 scripts/nebius_job.py run --hours 3 --platform cpu-d3 --preset 32vcpu-12
   --config experiments/configs/terminal_verifier_control.json --n-prompts 512 --samples 64 --episode-workers N \
   --run-name pre-rl-probe-v2 --set 'monitors=[]' seed=1000000
 ```
+
+### vast.ai instances (`run --provider vast`)
+
+When Nebius has no capacity (2026-10-23: no B200 or B300 anywhere), `run --provider vast` runs the job on a vast.ai
+instance through hub's `hub-gpu` CLI. It is billed to the account the owner bills this project to (aether), within the
+limits the owner sets for the project (`hub-gpu limits`: $500 a day, 8 GPUs at once, timed runs of at most 72 h).
+Nothing to set up: hub holds the vast.ai key, and `hub-gpu` makes the project's SSH key (`~/.ssh/hub-gpu`) at its first
+start. The fetch needs rsync on the launching machine (on hub: `rsync` in `.hub/apt-packages`; or `--rsync`,
+`RSYNC_BIN`).
+
+```bash
+python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib 800 --hours 5 --max-cost 160 \
+    --purpose "what it is for" --out runs/{stamp}-{name} --hf ORG/REPO@REV --fetch results -- '<job>'
+python3 scripts/nebius_job.py run --provider vast --dry-run …   # the offers, the limits, the start call, the scripts
+hub-gpu list; hub-gpu end NAME                                    # by hand, if ever needed
+```
+
+- **The offer:** the cheapest of `hub-gpu offers` for `--gpu` × `--gpus` (default: one GPU of any model) with
+  `--disk-gib` of disk, whose driver runs CUDA `--min-cuda` (default 13.0, for the locked cu130 torch), under
+  `--max-price` (USD/h for the whole instance); or `--offer ID`, among the 50 cheapest of those. A GPU older than Turing
+  is skipped for CUDA 13: its driver may run CUDA 13.0 (a GTX 1080 was the cheapest such offer), but CUDA 13 builds
+  have no kernels for it. hub-gpu lists offers that its start then refuses as no longer rentable, so after a refusal
+  the launcher lists them again and starts the cheapest one not tried, 8 tries in all.
+- **Spending:** before the start, the worst case (price × `--hours`) must fit in what `hub-gpu limits` leaves of the
+  project's 24 hours, and under `--max-cost` if given. The instance is timed: vast.ai destroys it at its end, whatever
+  runs on it. The disk is in the price (`--disk-gib`, passed in GB); bandwidth, which some hosts charge, is not.
+- **The ledger** (`--budget-file`) records the instance as a vast.ai entry, reserved at its worst case and settled at
+  its price × the time from its start to its verified end. It does not count against `limit_usd`, which is Nebius's
+  cap: vast.ai is billed to another account, under hub's limits, which the launcher checks instead. `budget` lists
+  such entries apart, and `reap` leaves them alone.
+- **The instance** is named `--name` plus a random suffix (lowercase letters, digits and `-`, at most 24 characters),
+  with a purpose line (`--purpose`, by default the job command) and tags (`--tag`, plus `launcher=nebius-job` and
+  `commit=…`). The owner sees all three.
+- **Then as on Nebius,** over SSH as root: the same push (refused with uncommitted changes, `CODE_VERSION.json`,
+  `--push`), `uv sync --locked` and the CUDA check, the unauthenticated `--hf` downloads to `/mnt/ram/<name>`, the job
+  detached and polled, and `job.json` (`provider`, and a `vast` part: limits, offer, start answer, last list row).
+  - **RAM disk:** the bootstrap mounts a tmpfs at `/mnt/ram` if the container may (80% of its memory limit). If it may
+    not, `/mnt/ram` is a plain directory on the instance's disk, and bootstrap.log says so. Size `--disk-gib` for the
+    weights, what the job writes and the venv (~10 GB). The bootstrap also installs rsync and a C compiler if they are
+    missing, and makes uv use its own Python only.
+  - **Deadline:** the job's `NEBIUS_JOB_DEADLINE` is the instance's end less `--reserve-minutes` (default 30, at most a
+    quarter of `--hours`), kept for the fetch. The launcher stops waiting for the job halfway into that reserve,
+    fetches what is there and ends the instance. There is no power-off after the job.
+  - **Fetch:** rsync over SSH, uncompressed and resumable (tar over SSH if the instance has no rsync), then
+    `hub-gpu end`, verified in `hub-gpu list`. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on Nebius.
+  - **An instance that goes away mid-job** (ended, gone from the list, exited) is reported in the log and `job.json`
+    (exit 3). Nothing relaunches it: no `--attempts`, and no `--keep` or `up` either. To resume, run again with the
+    fetched results pushed back (`--push <out>/results:results`).
+- **No secrets on the instance**, someone else's machine: `--secret`, `--hf-token-file` and `--upload` (an HF bucket
+  needs a token) are refused, as are an `--env` that looks like a key and a `--push` from a key folder or with a `.env`
+  file. Results come back only through `--fetch`; to put them in a bucket, upload them from the launching machine.
+- **Nebius's flags** (`--platform`, `--max-gpu-price`, `--regions`, `--keep`, `--root-job`, …) are refused with
+  `--provider vast`, and the vast.ai ones without it. `NEBIUS_MAX_GPU_PRICE` (set by hub's `bin/gpu-job`) is ignored.
+- **Not yet run on a real instance.** The first smoke test (2026-10-23, 07:55–08:06 UTC) never got one: hub-gpu refused
+  all 37 starts, on consumer and datacenter offers from $0.06 to $0.50/h, as `offer N is not rentable any more`, and so
+  did a plain `hub-gpu start` with its defaults. Nothing was created or billed; each refusal was checked to leave
+  nothing behind, and the ledger settled each try at $0.
 
 ### Spot VMs: how they behave
 
