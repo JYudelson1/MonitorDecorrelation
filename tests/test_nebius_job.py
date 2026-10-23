@@ -2073,7 +2073,7 @@ def fake_hub(monkeypatch):
     monkeypatch.setattr(FakeHubGpu, "started", [])
     monkeypatch.setattr(nj, "HubGpu", FakeHubGpu)
     monkeypatch.setattr(nj, "collect", lambda remote, job, rec: None)
-    monkeypatch.setattr(nj, "vast_wait_ssh", lambda hub, remote, instance, check_vm, attached, timeout=900: None)
+    monkeypatch.setattr(nj, "vast_wait_ssh", lambda hub, remote, instance, attached, until=None, timeout=900: None)
     monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
     monkeypatch.setattr(nj.time, "sleep", lambda s: None)
     monkeypatch.delenv("NEBIUS_MAX_GPU_PRICE", raising=False)
@@ -2246,26 +2246,66 @@ def test_vast_run_fetches_ends_verifies_and_records(tmp_path, monkeypatch, fake_
 
 
 def test_vast_falls_back_to_the_next_offer_and_takes_a_given_one(tmp_path, fake_hub):
-    """hub-gpu lists offers that its start then refuses (2026-10-23: the three cheapest, in a row). After a refusal the
-    offers are listed again, and the cheapest one not tried yet is started."""
+    """An offer taken between the listing and the start is refused: the cheapest of a fresh listing is started
+    instead, once."""
     FakeHubGpu.FAIL_START = {103}
     assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == 0
     assert [s["offer"] for s in FakeHubGpu.started] == [103, 101]
-    assert FakeHubGpu.calls.count("offers") == 2  # looked again after the refusal
+    assert FakeHubGpu.calls.count("offers") == 2  # listed again after the refusal
     rec = _vast_record(tmp_path)
     assert [c["offer"] for c in rec["creates"]] == [103, 101] and "no longer available" in rec["creates"][0]["error"]
     assert all(r["ended"] for r in FakeHubGpu.rows.values())
-    FakeHubGpu.FAIL_START = {101, 103, 104}  # every qualifying offer refused: each tried once, nothing left behind
+    FakeHubGpu.FAIL_START = {101, 103, 104}  # refused again: no third try, and nothing left behind
     assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_INFRA
-    assert [s["offer"] for s in FakeHubGpu.started[2:]] == [103, 101, 104] and len(FakeHubGpu.rows) == 1
-    assert "3 offer(s) refused, the last with: " in _vast_record(tmp_path)["errors"][-1]
+    assert [s["offer"] for s in FakeHubGpu.started[2:]] == [103, 101] and len(FakeHubGpu.rows) == 1
+    assert "2 offer(s) refused, the last with: " in _vast_record(tmp_path)["errors"][-1]
     FakeHubGpu.FAIL_START = set()
     assert nj.main(["run", *_vast_args(tmp_path, "--offer", "104"), "--", "true"]) == 0
     assert FakeHubGpu.started[-1]["offer"] == 104
     for offer, why in (("999", "not among the 50 cheapest"), ("102", "CUDA 12.2"), ("105", "older than Turing")):
         with pytest.raises(SystemExit, match=why):
             nj.main(["run", *_vast_args(tmp_path, "--offer", offer), "--", "true"])
-    assert len(FakeHubGpu.started) == 6
+    assert len(FakeHubGpu.started) == 5
+
+
+def test_vast_waits_for_ssh_while_the_image_loads(tmp_path, monkeypatch):
+    """The first real instance (2026-10-23) was listed as running at once, then as loading (pulling its image) for over
+    15 minutes. The SSH timeout counts from when it is running; loading may take VAST_LOADING_MINUTES; the job's
+    deadline ends the wait; an instance that goes away raises VmStopped."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(nj.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(nj.time, "sleep", lambda s: clock.update(t=clock["t"] + s))
+
+    class Hub:
+        def __init__(self, state):
+            self.state = state
+
+        def instances(self):
+            state = self.state(clock["t"])
+            return [] if state is None else [{"instance": 7, "name": "md-x-1", "state": state, "ended": None}]
+
+        def attach_key(self, instance):
+            pass
+
+    class Ssh(nj.Remote):
+        def __init__(self, works_at):
+            super().__init__("root@h", tmp_path / "kh", port=40022)
+            self.works_at = works_at
+
+        def run(self, command, **kw):
+            return subprocess.CompletedProcess([], 0 if clock["t"] >= self.works_at else nj.SSH_DOWN, b"", b"")
+
+    nj.vast_wait_ssh(Hub(lambda t: "loading" if t < 1200 else "running"), Ssh(1250), 7, True)
+    assert 1250 <= clock["t"] < 1300  # 20 min loading: past the 15-min SSH timeout, which counts from running
+    for state, why in ((lambda t: "loading", "still loading"), (lambda t: "running", "900s after it was running")):
+        clock["t"] = 0.0
+        with pytest.raises(nj.InfraError, match=why):
+            nj.vast_wait_ssh(Hub(state), Ssh(float("inf")), 7, True)
+    clock["t"] = 0.0
+    with pytest.raises(nj.InfraError, match="before the job's deadline"):
+        nj.vast_wait_ssh(Hub(lambda t: "loading"), Ssh(float("inf")), 7, True, until=600)
+    with pytest.raises(nj.VmStopped, match="gone from hub-gpu list"):
+        nj.vast_wait_ssh(Hub(lambda t: None), Ssh(float("inf")), 7, True)
 
 
 @pytest.mark.parametrize("sig", SIGNALS)
@@ -2388,7 +2428,8 @@ def _fake_bin(home: Path, name: str, body: str) -> None:
 @pytest.mark.parametrize("mounts", [False, True])
 def test_the_vast_bootstrap_falls_back_to_a_plain_directory(tmp_path, monkeypatch, mounts):
     """In a container that may not mount a tmpfs (likely for a vast.ai instance, a docker container), /mnt/ram is a
-    plain directory and the log says so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
+    plain directory and the log says so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins
+    here."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(nj, "RAM_DIR", str(tmp_path / "ram"))

@@ -95,17 +95,19 @@ flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it
 ``--offer``, …) without it.
 - The offer: the cheapest of ``hub-gpu offers`` for ``--gpu`` × ``--gpus`` with ``--disk-gib`` of disk whose driver runs
   CUDA ``--min-cuda`` (default 13.0: the locked torch is a CUDA 13.0 build, which also rules out GPUs older than
-  Turing), under ``--max-price`` (USD/h for the whole instance); or ``--offer ID``. hub-gpu lists offers that its start
-  then refuses as no longer rentable: after a refusal the offers are listed again and the cheapest one not yet tried is
-  started, 8 tries in all. While none qualifies, the offers are checked again every 15 minutes for ``--wait-hours``.
+  Turing), under ``--max-price`` (USD/h for the whole instance); or ``--offer ID``. If the start is refused (the offer
+  was taken meanwhile), the cheapest of a fresh listing is started instead, once. While none qualifies, the offers are
+  checked again every 15 minutes for ``--wait-hours``.
 - Before the start: its worst case, price × ``--hours``, must fit in what ``hub-gpu limits`` leaves of the project's 24
   hours, and under ``--max-cost``; ``--hours`` must be within its timed runs' limit (72 h), the GPUs within its count.
 - The start is timed (``hub-gpu start --hours``): vast.ai destroys the instance at its end, with what is on it. Its name
   is ``--name`` plus a random suffix (lowercase letters, digits and -, at most 24 characters, new among the project's
   instances), its purpose line ``--purpose`` (default: the job), its tags ``--tag`` plus launcher= and commit=.
-- Then as on Nebius, over SSH as root with hub-gpu's key (~/.ssh/hub-gpu): bootstrap, downloads, push, setup, job. The
-  bootstrap mounts a tmpfs at /mnt/ram if the container may, else /mnt/ram is a plain directory on the instance's disk
-  (said so in bootstrap.log); it installs rsync and a C compiler if missing, and uv with only uv's own Python.
+- Then as on Nebius, over SSH as root with hub-gpu's key (~/.ssh/hub-gpu): bootstrap, downloads, push, setup, job. SSH
+  is waited for while the instance pulls its image (listed as loading; at most 40 minutes, and not past the job's
+  deadline). The bootstrap mounts a tmpfs at /mnt/ram if the container may, else /mnt/ram is a plain directory on the
+  instance's disk (said so in bootstrap.log); it installs rsync and a C compiler if missing, and uv with only uv's own
+  Python.
 - The job's ``NEBIUS_JOB_DEADLINE`` is the instance's end less ``--reserve-minutes`` (default 30, at most a quarter of
   ``--hours``), kept for the fetch; the launcher stops waiting for the job halfway into that reserve. There is no
   power-off after the job: the launcher ends the instance, and vast.ai destroys it at its end anyway.
@@ -1743,7 +1745,8 @@ VAST_NAME = re.compile(r"[a-z0-9-]{1,24}")  # hub-gpu's names: lowercase letters
 VAST_MAX_TAGS = 8  # hub-gpu's, of which the launcher takes two (launcher=, commit=)
 VAST_MIN_CUDA = 13.0  # the locked torch is a CUDA 13.0 build: a driver with an older CUDA can't run it
 VAST_RESERVE_MINUTES = 30.0  # before the instance's end, for the fetch (at most a quarter of --hours)
-VAST_STARTS = 8  # offers tried in turn when a start is refused: hub-gpu lists offers it then calls not rentable
+VAST_STARTS = 2  # a refused start (the offer was taken meanwhile) is tried once more, on a fresh listing's cheapest
+VAST_LOADING_MINUTES = 40.0  # an instance may stay "loading" (pulling its image) this long before it is given up
 VAST_DEAD = {"exited", "stopped", "offline", "error", "failed", "destroyed", "deleted", "ended", "inactive"}
 # GPUs before Turing (compute capability < 7.5: Maxwell, Pascal, Volta), by hub-gpu's names. Their drivers may run CUDA
 # 13.0, but CUDA 13 builds such as the locked torch have no kernels for them (2026-10-23: a GTX 1080 was the cheapest
@@ -1972,25 +1975,54 @@ def vast_wait_running(hub: HubGpu, instance, timeout: float = 1800) -> dict:
         time.sleep(10)
 
 
-def vast_wait_ssh(hub: HubGpu, remote: Remote, instance, check_vm, attached: bool, timeout: float = 900) -> None:
-    """``wait_ssh`` for a vast.ai instance: its key is attached again (``hub-gpu ssh``) if its start says it did not
+def vast_state(hub: HubGpu, instance) -> str | None:
+    """The instance's state in ``hub-gpu list`` (None: the listing failed); VmStopped if it can't run a job."""
+    try:
+        row = vast_row(hub, instance)
+    except InfraError as e:
+        log(f"could not read the instance's state: {e}")
+        return None
+    if why := vast_gone(row):
+        raise VmStopped(why)
+    return str(row.get("state") or "?")
+
+
+def vast_wait_ssh(hub: HubGpu, remote: Remote, instance, attached: bool, until: float | None = None,
+                  timeout: float = 900) -> None:
+    """``wait_ssh`` for a vast.ai instance. hub-gpu may list it as running at once, then as loading while its image is
+    pulled (2026-10-23: a GTX 1650 host was still loading after 15 minutes). So ``timeout`` counts from when it is
+    listed as running; while it is loading it may take ``VAST_LOADING_MINUTES``; and never past ``until`` (the job's
+    deadline). VmStopped if it goes away. Its key is attached again (``hub-gpu ssh``) if its start says it did not
     attach, and after every 6 failed tries."""
     if not attached:
         log("the start says the SSH key did not attach: attaching it again (hub-gpu ssh)")
         hub.attach_key(instance)
-    deadline, tries = time.time() + timeout, 0
+    t0, ran, tries, said = time.time(), None, 0, 0.0
     while True:
         try:
             if remote.run("true", timeout=40, check=False).returncode == 0:
+                log(f"ssh works after {time.time() - t0:.0f}s")
                 return
         except subprocess.TimeoutExpired:
             pass
         tries += 1
-        check_vm()
+        state, now = vast_state(hub, instance), time.time()
+        if state is not None and state.lower() == "loading":
+            ran = None
+            if now - t0 > VAST_LOADING_MINUTES * 60:
+                raise InfraError(f"instance {instance} still loading (pulling its image) after "
+                                 f"{VAST_LOADING_MINUTES:g} min")
+        elif ran is None:
+            ran = now
+        if ran is not None and now - ran > timeout:
+            raise InfraError(f"no SSH to {remote.host} (port {remote.port}) {timeout:.0f}s after it was {state}")
+        if until is not None and now > until:
+            raise InfraError(f"no SSH to {remote.host} before the job's deadline (the instance is {state})")
+        if now - said > 120:
+            log(f"waiting for ssh: the instance is {state} ({now - t0:.0f}s)")
+            said = now
         if tries % 6 == 0:
             hub.attach_key(instance)
-        if time.time() > deadline:
-            raise InfraError(f"no SSH to {remote.host} (port {remote.port}) after {timeout:.0f}s")
         time.sleep(10)
 
 
@@ -2861,20 +2893,13 @@ def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, 
     t0 = time.time()
 
     def check_vm() -> None:
-        if instance is None:
-            return
-        try:
-            row = vast_row(hub, instance)
-        except InfraError as e:
-            log(f"could not read the instance's state: {e}")
-            return
-        if why := vast_gone(row):
-            raise VmStopped(why)
+        if instance is not None:
+            vast_state(hub, instance)  # VmStopped if it went away
 
     tried: set = set()
     try:
         while started is None and len(tried) < VAST_STARTS:
-            if tried:  # refused: the listing goes stale fast, so look again (without the refused offers)
+            if tried:  # refused (taken meanwhile): once more, with the cheapest of a fresh listing
                 if args.offer is not None:
                     break
                 offers, order = vast_survey(hub, args, disk, tried)
@@ -2926,8 +2951,8 @@ def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, 
         rec.host, rec.ip, rec.times["running"] = target, target.rpartition("@")[2], utc()
         rec.vast["ssh"] = {"host": target, "port": port, "state": row.get("state")}
         rec.save(job.out)
-        log(f"instance {instance} running ({time.time() - t0:.0f}s): ssh -p {port} {target}")
-        vast_wait_ssh(hub, remote, instance, check_vm, bool(started.get("ssh_key_attached", True)))
+        log(f"instance {instance} is {row.get('state')} ({time.time() - t0:.0f}s), SSH at ssh -p {port} {target}")
+        vast_wait_ssh(hub, remote, instance, bool(started.get("ssh_key_attached", True)), until=ends - job.reserve)
         job_code = remote_steps(remote, job, rec, check_vm)
         code = 0 if job_code in (None, 0) else job_code
         if code:
