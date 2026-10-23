@@ -389,6 +389,35 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
         (tmp_path / "rerendered_old_mean" / "report.md").read_text()
 
 
+def test_incomplete_features_are_refused(tmp_path):
+    """Amendment 1's extraction gate (fit_probes.shard_problems): every shard the features' index.json lists, none cut
+    off mid-copy, with exactly the dataset's items. Features whose index lists no shards (synthetic) aren't checked."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("fit_probes_mod", os.path.join(REPO, "experiments", "fit_probes.py"))
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    data, feats = make_world(tmp_path)
+    folder = feats / "terminal_prerl"
+    ids = [json.loads(line)["id"] for line in open(data / "terminal_prerl" / "items.jsonl")]
+    index = {"shards": {"with_reasoning": 8, "without_reasoning": 8}}  # 480 items, 64 a shard
+    assert fp.shard_problems(str(folder), index, ids) == [] and fp.shard_problems(str(folder), {}, ids) == []
+    assert fp.shard_problems(str(folder), index, ids + ["t99/0"]) == [
+        f"{v}: 1 items without features, 0 features of no item, 0 duplicate ids"
+        for v in ("with_reasoning", "without_reasoning")]
+    data_file = folder / "with_reasoning" / "shard_00003.safetensors"
+    raw = data_file.read_bytes()
+    data_file.write_bytes(raw[:-100])  # a copy cut off mid-file: the marker is there, the data short
+    problems = fp.shard_problems(str(folder), index, ids)
+    assert len(problems) == 2 and "shard_00003.safetensors" in problems[0] and "header needs" in problems[0]
+    assert problems[1].startswith("with_reasoning: 64 items without features")
+    data_file.write_bytes(raw)
+    (folder / "without_reasoning" / "shard_00007.safetensors").unlink()
+    assert fp.shard_problems(str(folder), index, ids) == [
+        "without_reasoning/shard_00007: marker or data file missing",
+        "without_reasoning: 32 items without features, 0 features of no item, 0 duplicate ids"]
+
+
 def test_compare_readers_on_the_full_precision_reader_alone_for_v2(tmp_path):
     """docs/inkling_probes_amendment_2.md: v2 has only the full-precision reader, so ``--iid-dataset
     terminal_prerl_v2`` compares no probes, and the batching rule's numbers come from the v2 probe on the v2 features

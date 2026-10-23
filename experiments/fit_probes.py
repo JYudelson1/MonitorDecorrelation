@@ -35,6 +35,9 @@ it as ``code``; meta.json also records the features' (their index.json's ``code`
 
 **Same items:** each dataset's ``items.jsonl`` must match the ``items_sha256`` of its manifest and of the features'
 index.json (what they were extracted from); otherwise the run refuses to start, before any fitting.
+
+**Complete features:** the IID dataset's features must hold every shard their index.json lists, none cut off, with
+exactly the dataset's items in each view (``shard_problems``); otherwise the run refuses to start, before any fitting.
 """
 
 from __future__ import annotations
@@ -101,6 +104,51 @@ def features_index(args, dataset: str) -> dict:
     """The features' index.json for ``dataset`` ({} if there is none, e.g. synthetic features)."""
     path = os.path.join(args.features, dataset, "index.json")
     return json.load(open(path)) if os.path.exists(path) else {}
+
+
+def shard_problems(features_dir: str, index: dict, item_ids) -> list[str]:
+    """Why the features in ``features_dir`` (one dataset's, with its index.json ``index``) aren't complete (empty if
+    they are): amendment 1's extraction gate, "every shard complete, with the item ids of the dataset's manifest".
+
+    Per view of ``index["shards"]``, every shard ``k`` needs its marker (``shard_k.jsonl``) and its data file, the data
+    file as long as its own safetensors header says (a copy cut off mid-file is caught here, not by LayerSource, which
+    skips a marker without data), as many rows as the marker, and the shards' ids together exactly ``item_ids``.
+    Features without ``shards`` in their index (synthetic ones) are not checked."""
+    problems = []
+    for view, n in sorted((index.get("shards") or {}).items()):
+        ids = []
+        for k in range(int(n)):
+            base = os.path.join(features_dir, view, f"shard_{k:05d}")
+            if not (os.path.exists(base + ".jsonl") and os.path.exists(base + ".safetensors")):
+                problems.append(f"{view}/shard_{k:05d}: marker or data file missing")
+                continue
+            with open(base + ".safetensors", "rb") as fh:
+                head = fh.read(8)
+                n_header = int.from_bytes(head, "little") if len(head) == 8 else -1
+                try:
+                    header = json.loads(fh.read(n_header)) if n_header > 0 else None
+                except (ValueError, UnicodeDecodeError):
+                    header = None
+            if header is None:
+                problems.append(f"{view}/shard_{k:05d}.safetensors: no readable header")
+                continue
+            tensors = {name: t for name, t in header.items() if name != "__metadata__"}
+            want = 8 + n_header + max((t["data_offsets"][1] for t in tensors.values()), default=0)
+            if os.path.getsize(base + ".safetensors") != want:
+                problems.append(f"{view}/shard_{k:05d}.safetensors: {os.path.getsize(base + '.safetensors')} bytes, "
+                                f"its header needs {want}")
+                continue
+            with open(base + ".jsonl") as fh:
+                recs = [json.loads(line) for line in fh if line.strip()]
+            rows = (tensors.get("counts") or {}).get("shape", [None])[0]
+            if rows != len(recs):
+                problems.append(f"{view}/shard_{k:05d}: {len(recs)} marker rows, {rows} data rows")
+            ids += [r["id"] for r in recs]
+        missing, extra = set(item_ids) - set(ids), set(ids) - set(item_ids)
+        if missing or extra or len(ids) != len(set(ids)):
+            problems.append(f"{view}: {len(missing)} items without features, {len(extra)} features of no item, "
+                            f"{len(ids) - len(set(ids))} duplicate ids")
+    return problems
 
 
 def dataset_items(args, dataset: str) -> dict[str, dict]:
@@ -470,7 +518,9 @@ def main() -> int:
                          "(per MoE layer; its layer index i is model layer i + 2), router_all (every MoE layer)")
     ap.add_argument("--probes", default="iid,ood")
     ap.add_argument("--repeats", type=int, default=3)
-    ap.add_argument("--jobs", type=int, default=-1)
+    ap.add_argument("--jobs", type=int, default=6,
+                    help="parallel fits, each holding about 2 GB (-1: one per CPU the machine reports, which on hub "
+                         "is more than its memory limit allows)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-baselines", action="store_true")
     ap.add_argument("--skip-sensitivity", action="store_true")
@@ -495,6 +545,10 @@ def main() -> int:
     if args.iid_dataset != "terminal_prerl" and amendment_2_problems(index):
         ap.error(f"{args.iid_dataset}'s features aren't the ones docs/inkling_probes_amendment_2.md fixes: "
                  f"{'; '.join(amendment_2_problems(index))} (their index.json)")
+    incomplete = shard_problems(os.path.join(args.features, args.iid_dataset), index, items)
+    if incomplete:
+        ap.error(f"{args.iid_dataset}'s features are incomplete ({len(incomplete)} problems): "
+                 + "; ".join(incomplete[:10]))
     provenance = {"reader": args.reader, "reader_info": index.get("reader"), "feature_format": index.get("feature_format"),
                   "versions": index.get("versions"), "prereg_sha256": prereg_sha(), "fitted_utc": time.strftime(
                       "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats,
