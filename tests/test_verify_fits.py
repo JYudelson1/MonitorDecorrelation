@@ -153,12 +153,16 @@ def test_an_existing_run_folder_is_refused_without_overwrite(tmp_path, monkeypat
 
 
 def test_verify_fits_checks_iid_probes_of_the_v2_dataset(tmp_path):
-    """Probes fitted with --iid-dataset terminal_prerl_v2 (docs/inkling_probes_amendment_1.md) are found and checked."""
+    """Probes fitted with --iid-dataset terminal_prerl_v2 (docs/inkling_probes_amendment_1.md) are found and checked.
+    The features' index.json is what amendment 2 requires of v2 (full precision, one episode per forward)."""
     import shutil
 
     data, feats = make_world(tmp_path)
     for root in (data, feats):
         shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    (feats / "terminal_prerl_v2" / "index.json").write_text(json.dumps(
+        {"reader": {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"},
+         "max_batch_tokens": 1}))
     os.makedirs(data / "terminal_prerl")  # v1's items, which verify_fits always loads: here an empty dataset
     shutil.copy(data / "terminal_prerl_v2" / "items.jsonl", data / "terminal_prerl" / "items.jsonl")
     probes = tmp_path / "probes"

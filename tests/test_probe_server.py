@@ -54,6 +54,9 @@ from monitordecorrelation.whitebox.probe_server import (
     reader_mismatch)
 
 VIEW = "with_reasoning"
+V2_INDEX = {"reader": {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"},
+            "max_batch_tokens": 1}
+"""What docs/inkling_probes_amendment_2.md requires of v2 features' index.json (fit_probes.py refuses others)."""
 
 
 def load_script(name: str):
@@ -136,6 +139,36 @@ def bf16_world(tmp_path_factory, checkpoints):
     bf16_dir = checkpoints[0]
     return reader_world(tmp_path_factory.mktemp("bf16"), load_inkling_text(str(bf16_dir)), bf16_dir, layer=4,
                         max_batch_tokens=1)
+
+
+def test_a_full_precision_reader_the_gpus_cant_hold_is_refused(checkpoints, monkeypatch):
+    """On GPUs, load_inkling_text refuses a reader that device_map="auto" put partly on the CPU or disk: it would run,
+    far too slowly to extract or serve. Without GPUs (this test machine) nothing is checked: everything is on the CPU.
+    The loaded model is faked here, with the device map transformers records."""
+    import types
+
+    from monitordecorrelation.whitebox import model as wm
+
+    def fake(device_map):
+        m = types.SimpleNamespace(hf_device_map=device_map)
+        m.eval = lambda: m
+        return m
+
+    bf16_dir = str(checkpoints[0])
+    on_gpus = {"model.embed_tokens": 0, "model.layers.0": 1}
+    spilled = {"model.embed_tokens": 0, "model.layers.40": "cpu", "lm_head": "disk"}
+    assert wm.offloaded(fake(on_gpus)) == [] and wm.offloaded(fake(spilled)) == ["cpu", "disk"]
+    assert wm.offloaded(types.SimpleNamespace()) == []  # loaded without a device map
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    for device_map in (on_gpus, spilled):
+        monkeypatch.setattr(wm, "_load_inkling_text_tower", lambda *a, dm=device_map: fake(dm))
+        if device_map is spilled:
+            with pytest.raises(RuntimeError, match="visible GPUs: device_map='auto' put part of it on cpu, disk"):
+                wm.load_inkling_text(bf16_dir)
+            assert wm.load_inkling_text(bf16_dir, allow_offload=True).hf_device_map == spilled
+        else:
+            assert wm.load_inkling_text(bf16_dir).hf_device_map == on_gpus
 
 
 @pytest.fixture
@@ -1010,6 +1043,7 @@ def test_recalibrating_on_the_fits_own_dataset_and_reader_gives_its_ood_threshol
     data, feats = make_world(tmp_path)
     for root in (data, feats):
         shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    (feats / "terminal_prerl_v2" / "index.json").write_text(json.dumps(V2_INDEX))  # what fit_probes.py requires of v2
     out = tmp_path / "probes"
     repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     cp = subprocess.run([sys.executable, os.path.join(repo, "experiments", "fit_probes.py"), "--reader", "synthetic",

@@ -490,11 +490,20 @@ class WhiteBoxModel:
         return int(self._text_config.hidden_size)
 
 
-def load_inkling_text(model_name: str, dtype=None):
+def offloaded(model) -> list[str]:
+    """Where ``device_map="auto"`` put part of ``model`` other than a GPU (``cpu``, ``disk``) because the visible GPUs
+    couldn't hold it; [] if it is all on GPUs, or wasn't loaded with a device map."""
+    return sorted({str(d) for d in (getattr(model, "hf_device_map", None) or {}).values()} & {"cpu", "disk", "meta"})
+
+
+def load_inkling_text(model_name: str, dtype=None, *, allow_offload: bool = False):
     """The Inkling text tower (BF16 on GPUs, across the visible ones; float32 on CPU), with no tokenizer.
 
     Probe features need no tokenizer: whitebox/inkling_replay.py renders with the TML renderer. It uses the same
-    conversions and guards as ``WhiteBoxModel``. The NVFP4 release has its own loader (whitebox/inkling_nvfp4.py)."""
+    conversions and guards as ``WhiteBoxModel``. The NVFP4 release has its own loader (whitebox/inkling_nvfp4.py).
+
+    With GPUs, a model they can't hold is refused (RuntimeError) unless ``allow_offload``: ``device_map="auto"`` would
+    put the rest on the CPU or disk (``offloaded``), which runs, but far too slowly to extract features or serve."""
     import torch
     from transformers import AutoConfig, InklingForCausalLM
 
@@ -502,7 +511,12 @@ def load_inkling_text(model_name: str, dtype=None):
     text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
     _register_inkling_text_conversions()
     dtype = dtype or (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-    return _load_inkling_text_tower(InklingForCausalLM, model_name, text_config, dtype).eval()
+    model = _load_inkling_text_tower(InklingForCausalLM, model_name, text_config, dtype).eval()
+    if torch.cuda.is_available() and not allow_offload and offloaded(model):
+        raise RuntimeError(f"{model_name} doesn't fit on the {torch.cuda.device_count()} visible GPUs: "
+                           f"device_map='auto' put part of it on {', '.join(offloaded(model))}. Give it more GPUs "
+                           "(CUDA_VISIBLE_DEVICES): Inkling-Small in BF16 needs 3-4 B300s or 4 B200s")
+    return model
 
 
 def _load_inkling_text_tower(model_cls, model_name: str, text_config, dtype):
