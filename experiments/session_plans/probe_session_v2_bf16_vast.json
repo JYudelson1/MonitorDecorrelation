@@ -1,0 +1,33 @@
+{
+ "name": "probe-session-v2-bf16-vast",
+ "out": "/mnt/ram/session",
+ "shard_size": 256,
+ "max_batch_tokens": 1,
+ "readers": {
+  "bf16": {
+   "model": "/mnt/ram/Inkling-Small",
+   "gpus": [
+    [
+     0,
+     1,
+     2,
+     3
+    ]
+   ],
+   "required": true,
+   "store": "results/features/bf16"
+  }
+ },
+ "datasets": [
+  "data/probe_datasets/terminal_prerl_v2"
+ ],
+ "diagnostics": {
+  "store": "results/diagnostics-v2",
+  "terminal": "data/probe_datasets/terminal_prerl_v2",
+  "contrastive": "data/probe_datasets/diverse_deception",
+  "n_iid": 64,
+  "n_ood": 100,
+  "max_batch_tokens": 65536
+ },
+ "status_store": "results/status"
+}

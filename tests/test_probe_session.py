@@ -8,6 +8,7 @@ Checks:
 - A worker stopped by the deadline or SIGTERM with uploads still in flight exits 75 (resumable), not 1 (failed).
 - A plan that extracts one episode per forward records it, and its diagnostics still batch (their own setting); a plan
   whose diagnostics would read one at a time twice is refused.
+- Relative local stores (the vast.ai plan's results/…) are the repo's, wherever the driver was started.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -131,6 +133,35 @@ def test_one_episode_per_forward_and_diagnostics_that_still_batch(setup):
         assert json.loads((stores / "bf16" / name / "index.json").read_text())["max_batch_tokens"] == 1
     diag = json.loads((stores / "diagnostics" / "bf16" / "done.json").read_text())
     assert diag["max_batch_tokens_batched"] == 65536 and diag["n_inputs"] == 3 * 2 + 4
+
+
+def test_relative_local_stores_are_the_repos_wherever_the_driver_starts(setup):
+    """The vast.ai plan's stores, results/features/bf16, results/diagnostics-v2 and results/status, are relative: they
+    are the repo's (as datasets are) for the driver, started here from another folder with a relative plan path, and
+    for its workers, which run in the repo. On a launcher VM that is ~/md/results, what --fetch results brings back.
+    The repo is a copy of the script with the real src/, so the stores land in a temp folder."""
+    tmp_path, plan, stores = setup
+    repo, elsewhere = tmp_path / "repo", tmp_path / "elsewhere"
+    (repo / "experiments").mkdir(parents=True)
+    elsewhere.mkdir()
+    shutil.copy(SCRIPT, repo / "experiments")
+    (repo / "src").symlink_to(os.path.join(REPO, "src"))
+    plan["readers"].pop("nvfp4")
+    plan["readers"]["bf16"].update(required=True, store="results/features/bf16")
+    plan["datasets"] = plan["datasets"][:2]
+    plan.update(max_batch_tokens=1, status_store="results/status")
+    plan["diagnostics"].update(store="results/diagnostics-v2", max_batch_tokens=65536)
+    (elsewhere / "plan.json").write_text(json.dumps(plan))
+    cp = subprocess.run([sys.executable, str(repo / "experiments" / "run_probe_session.py"), "--plan", "plan.json"],
+                        capture_output=True, text=True, cwd=elsewhere, timeout=1500, env=os.environ)
+    assert cp.returncode == 0, cp.stdout[-4000:] + cp.stderr[-2000:]
+    results = repo / "results"
+    assert shards(results / "features" / "bf16") == (
+        {f"terminal_tiny/{v}/shard_{k:05d}" for v in ("with_reasoning", "without_reasoning") for k in range(3)}
+        | {f"toy_contrastive/without_reasoning/shard_{k:05d}" for k in range(3)})
+    assert (results / "diagnostics-v2" / "bf16" / "done.json").exists()
+    assert json.loads((results / "status" / "status.json").read_text())["readers"]["bf16"]["state"] == "done"
+    assert not (elsewhere / "results").exists() and not stores.exists()
 
 
 def test_no_time_for_a_shard_ends_with_76_and_a_second_run_finishes(setup):

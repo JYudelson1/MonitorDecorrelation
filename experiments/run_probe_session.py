@@ -42,6 +42,10 @@ code:
 - A failed optional reader (e.g. full precision that won't load) is recorded in ``status.json`` in the status store.
 - It is not retried on a relaunch unless ``--retry-failed`` is given.
 
+**Paths.** A relative path in the plan (a dataset, a local store, ``out``) is the repo's, so the driver, wherever it was
+started, and its workers, which run in the repo, use the same folders. On a launcher VM the repo is ~/md: stores under
+``results/`` come back with ``--fetch results`` (probe_session_v2_bf16_vast.json, whose instance has no HF token).
+
 **Code version.** ``status.json`` records each attempt's code version (``code``, provenance.code_version: on a VM, the
 CODE_VERSION.json that scripts/nebius_job.py pushed), as do the extraction's index and run records and the
 diagnostics' ``done.json``.
@@ -75,6 +79,23 @@ def log(msg: str) -> None:
 
 def dataset_name(path: str) -> str:
     return os.path.basename(path.rstrip("/"))
+
+
+def resolve(plan: dict) -> dict:
+    """The plan with ``out`` and its local stores as absolute paths: a relative one is the repo's, as a dataset is.
+    Bucket stores stay as they are."""
+    plan = json.loads(json.dumps(plan))
+
+    def local(path):
+        return path if not path or "://" in path or os.path.isabs(path) else os.path.join(REPO, path)
+
+    plan["out"] = local(plan["out"])
+    for spec in plan["readers"].values():
+        spec["store"] = local(spec.get("store"))
+    if plan.get("diagnostics"):
+        plan["diagnostics"]["store"] = local(plan["diagnostics"].get("store"))
+    plan["status_store"] = local(plan.get("status_store"))
+    return plan
 
 
 def diagnostics_batch(plan: dict) -> int:
@@ -241,8 +262,8 @@ def driver(plan: dict, plan_path: str, retry_failed: bool) -> int:
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(map(str, spec["gpus"][copy])), "PYTHONUNBUFFERED": "1",
                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                "OMP_NUM_THREADS": str(plan.get("omp_threads", 16))}
-        proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--plan", plan_path, "--worker",
-                                 "--reader", reader, "--copy", str(copy)], env=env, stdout=subprocess.PIPE,
+        proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--plan", os.path.abspath(plan_path),
+                                 "--worker", "--reader", reader, "--copy", str(copy)], env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, cwd=REPO)
         threading.Thread(target=pump, args=(proc, f"{reader}.{copy}"), daemon=True).start()
         procs[(reader, copy)] = proc
@@ -297,7 +318,7 @@ def main() -> int:
     ap.add_argument("--copy", type=int, default=0)
     ap.add_argument("--retry-failed", action="store_true", help="retry optional readers that failed before")
     args = ap.parse_args()
-    plan = json.load(open(args.plan))
+    plan = resolve(json.load(open(args.plan)))
     if plan.get("diagnostics") and diagnostics_batch(plan) <= 1:
         ap.error("the diagnostics' batched read would be one episode per forward too: give the plan's diagnostics a "
                  "max_batch_tokens (the extraction's batching was 65536)")
