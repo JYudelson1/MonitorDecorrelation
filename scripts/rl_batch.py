@@ -419,6 +419,7 @@ class Settings:
     replace: bool = True
     max_attempts: int = 8
     vm_dead_minutes: float = 30.0
+    stall_minutes: float = 45.0
     rsync: str = "rsync"
     budget_file: str | None = None
     hub_gpu: str = "hub-gpu"
@@ -993,6 +994,9 @@ def run_start_mode(run_dir: Path) -> str:
 
 
 WANDB_URL = re.compile(r"https://wandb\.ai/([^/\s]+)/([^/\s]+)/runs/([A-Za-z0-9]+)")
+# The clients' retry warnings (monitors/inkling_probe_monitor.py every 3 minutes; monitors/openrouter.post_chat, which
+# the vLLM judges use, after 6 attempts): what a waiting run waits for.
+RETRY_WARNING = re.compile(r"no answer from the probe server for \d+s|: attempt \d+ failed \(.*\); retrying")
 
 
 def wandb_check(log_text: str, entity: str, project: str) -> tuple[str | None, str | None]:
@@ -1278,6 +1282,18 @@ class Supervisor:
         self.write_status()
         return all(rs.state in ("done", "failed", "stopped") for rs in self.runs)
 
+    def last_warning(self, rs: RunState) -> str | None:
+        """The run's latest retry warning in its run.log: the probe client's (no answer from the probe server for Ns)
+        or a judge call's (attempt N failed; retrying). A run that waits shows why."""
+        try:
+            with open(self.run_dir(rs) / "run.log", "rb") as fh:
+                fh.seek(max(0, os.fstat(fh.fileno()).st_size - 100_000))
+                lines = fh.read().decode(errors="replace").splitlines()
+        except OSError:
+            return None
+        hit = [line for line in lines if RETRY_WARNING.search(line)]
+        return hit[-1][-300:] if hit else None
+
     def step_times(self, rs: RunState) -> dict:
         rows = []
         with contextlib.suppress(OSError):
@@ -1302,7 +1318,9 @@ class Supervisor:
                   "servers_down": self.down, "probe_connections": self.queue[-1][1] if self.queue else None,
                   "probe_queue": self.queue[-240:],
                   "runs": {rs.name: {**{k: v for k, v in dataclasses.asdict(rs).items() if k != "argv"},
-                                     **self.step_times(rs)} for rs in self.runs}}
+                                     **self.step_times(rs),
+                                     "last_warning": self.last_warning(rs) if rs.state == "running" else None}
+                           for rs in self.runs}}
         tmp = self.state / "status.json.tmp"
         tmp.write_text(json.dumps(status, indent=1) + "\n")
         tmp.replace(self.state / "status.json")
@@ -1652,6 +1670,8 @@ def watch_round(batch: Batch, ops: Ops, plan: Plan, last: dict) -> str | None:
     else:
         bad_since.pop("rl", None)
         batch.data["vm_status"] = status
+    if status and status.get("phase") == "running":
+        stalled(batch, status, now)
     if exit_code is not None:
         batch.data.setdefault("job", {})["exit"] = exit_code
         phase = (status or {}).get("phase")
@@ -1681,6 +1701,27 @@ def watch_round(batch: Batch, ops: Ops, plan: Plan, last: dict) -> str | None:
         log(status_line(status))
     batch.save()
     return None
+
+
+def stalled(batch: Batch, status: dict, now: float) -> bool:
+    """Whether no run has finished a step or an eval for ``stall_minutes``, said loudly once per such stretch with each
+    running run's last retry warning. Health checks can't see every stall: a probe server whose GPU worker is wedged,
+    or an episode that fails on every attempt (an out of memory: 503, retried forever), still answers /v1/meta."""
+    runs = status.get("runs") or {}
+    progress = sum(int(r.get("steps") or 0) + int(r.get("evals") or 0) for r in runs.values())
+    st = batch.data.setdefault("stall", {"progress": progress, "since": now, "warned": 0.0})
+    if progress != st["progress"]:
+        st.update(progress=progress, since=now, warned=0.0)
+        return False
+    limit = batch.settings.stall_minutes * 60
+    if now - st["since"] < limit:
+        return False
+    if now - st["warned"] >= limit:
+        st["warned"] = now
+        batch.event(f"!!! no run has finished a step or an eval for {(now - st['since']) / 60:.0f} min: a stall the "
+                    "health checks don't see? Each run's last retry warning follows",
+                    waiting={n: r.get("last_warning") for n, r in runs.items() if r.get("state") == "running"})
+    return True
 
 
 def health_round(batch: Batch, ops: Ops, plan: Plan, roles: list[str], bad_since: dict) -> None:
@@ -2076,6 +2117,11 @@ def cmd_status(args) -> int:
     status = status or batch.data.get("vm_status")
     if status:
         print(f"  runs ({status.get('at')}): " + status_line(status))
+        for name, r in (status.get("runs") or {}).items():
+            print(f"    {name:30} {r.get('state'):8} steps {r.get('steps', 0):3} evals {r.get('evals', 0):3} "
+                  f"attempts {r.get('attempts', 0)} restarts {r.get('restarts', 0)}  {r.get('wandb') or ''}")
+            if r.get("last_warning"):
+                print(f"      last retry warning: {r['last_warning']}")
     print(f"  last sync: {(batch.data.get('last_sync') or {}).get('at')}; events: {len(batch.data.get('events', []))} "
           f"(last: {(batch.data.get('events') or [{}])[-1].get('what')})")
     return 0
@@ -2308,6 +2354,8 @@ def add_settings(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-attempts", type=int, help=f"failed attempts per run (default {d.max_attempts})")
     p.add_argument("--vm-dead-minutes", type=float,
                    help=f"the RL machine unreachable this long ends the batch (default {d.vm_dead_minutes:g})")
+    p.add_argument("--stall-minutes", type=float,
+                   help=f"no run finishing a step or an eval this long is reported (default {d.stall_minutes:g})")
     p.add_argument("--rsync", default=os.environ.get("RSYNC_BIN"), help="this machine's rsync (env RSYNC_BIN)")
     p.add_argument("--budget-file", help="the spending ledger (default $NEBIUS_BUDGET_FILE)")
     p.add_argument("--hub-gpu", default=os.environ.get("HUB_GPU_BIN"), help="the hub-gpu CLI (env HUB_GPU_BIN)")

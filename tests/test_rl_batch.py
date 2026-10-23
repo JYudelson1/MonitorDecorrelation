@@ -865,6 +865,38 @@ def test_the_watch_gives_up_on_an_rl_machine_it_cannot_reach(repo, tmp_path, mon
     assert any("unreachable for 30 min" in e["what"] for e in batch.data["events"])
 
 
+def test_a_stall_the_health_checks_cannot_see_is_reported_once_per_stretch(repo, tmp_path):
+    """No run finishing a step or an eval for stall_minutes (45) is said once, with what each running run waits for;
+    progress starts the clock again."""
+    batch, plan = _batch(tmp_path, repo)
+    wait = "[probe_iid] no answer from the probe server for 180s (HTTP 503: OutOfMemoryError); still retrying"
+
+    def runs(a_steps):
+        return {"phase": "running", "runs": {"a": {"state": "running", "steps": a_steps, "evals": 1, "last_warning": wait},
+                                             "b": {"state": "done", "steps": 90, "evals": 31}}}
+
+    assert not rb.stalled(batch, runs(3), 0.0) and not rb.stalled(batch, runs(3), 44 * 60.0)
+    assert rb.stalled(batch, runs(3), 46 * 60.0) and rb.stalled(batch, runs(3), 50 * 60.0)
+    said = [e for e in batch.data["events"] if "no run has finished a step" in e["what"]]
+    assert len(said) == 1 and said[0]["waiting"] == {"a": wait}
+    assert not rb.stalled(batch, runs(4), 51 * 60.0)  # a step: the clock starts again
+    assert not rb.stalled(batch, runs(4), 95 * 60.0) and rb.stalled(batch, runs(4), 97 * 60.0)
+    assert len([e for e in batch.data["events"] if "no run has finished a step" in e["what"]]) == 2
+
+
+def test_the_supervisor_shows_what_a_waiting_run_waits_for(sup_env):
+    repo, script, behave = sup_env
+    sup = _sup(repo, script, ["a"])
+    d = repo / "data" / "runs" / "a"
+    d.mkdir()
+    (d / "run.log").write_text("step 3: sampling\n[12:00:01] ⚠️  q35_cot: attempt 7 failed (ConnectError: refused); "
+                               "retrying\n[probe_iid] no answer from the probe server for 360s (URLError: refused); "
+                               "still retrying\nother line\n")
+    assert sup.last_warning(rb.RunState("a", [])).startswith("[probe_iid] no answer from the probe server for 360s")
+    (d / "run.log").write_text("all fine\n")
+    assert sup.last_warning(rb.RunState("a", [])) is None
+
+
 def test_a_manual_request_waits_for_the_driver_that_holds_the_batch(repo, tmp_path):
     batch, plan = _batch(tmp_path, repo)
     args = type("A", (), {"out": str(batch.out)})()
