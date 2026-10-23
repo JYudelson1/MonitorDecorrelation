@@ -2257,10 +2257,11 @@ def test_vast_falls_back_to_the_next_offer_and_takes_a_given_one(tmp_path, fake_
     FakeHubGpu.FAIL_START = {101, 103, 104}  # every qualifying offer refused: each tried once, nothing left behind
     assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_INFRA
     assert [s["offer"] for s in FakeHubGpu.started[2:]] == [103, 101, 104] and len(FakeHubGpu.rows) == 1
+    assert "3 offer(s) refused, the last with: " in _vast_record(tmp_path)["errors"][-1]
     FakeHubGpu.FAIL_START = set()
     assert nj.main(["run", *_vast_args(tmp_path, "--offer", "104"), "--", "true"]) == 0
     assert FakeHubGpu.started[-1]["offer"] == 104
-    for offer, why in (("999", "not among the current offers"), ("102", "CUDA 12.2"), ("105", "older than Turing")):
+    for offer, why in (("999", "not among the 50 cheapest"), ("102", "CUDA 12.2"), ("105", "older than Turing")):
         with pytest.raises(SystemExit, match=why):
             nj.main(["run", *_vast_args(tmp_path, "--offer", offer), "--", "true"])
     assert len(FakeHubGpu.started) == 6

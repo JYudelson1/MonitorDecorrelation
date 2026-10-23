@@ -2791,10 +2791,11 @@ def vast_survey(hub: HubGpu, args, disk: int, tried: set = frozenset()) -> tuple
         return offers, [o for o in vast_candidates(offers, args.min_cuda, args.max_price) if o["offer"] not in tried]
     mine = next((o for o in offers if o["offer"] == args.offer), None)
     if mine is None:
-        raise SystemExit(f"--offer {args.offer} is not among the current offers for {args.gpus}× "
+        raise SystemExit(f"--offer {args.offer} is not among the 50 cheapest offers now for {args.gpus}× "
                          f"{args.gpu or 'any GPU'} with {disk} GB of disk" + (f" under ${args.max_price:g}/h" if
                                                                              args.max_price is not None else "")
-                         + ": give the --gpu and --gpus it has (hub-gpu offers), or another one")
+                         + ": give the --gpu and --gpus it has (hub-gpu offers), or another one (offers come and go "
+                           "within minutes)")
     if why := offer_skip(mine, args.min_cuda, args.max_price):
         raise SystemExit(f"--offer {args.offer}: {why} (--min-cuda, --max-price)")
     return offers, [mine]
@@ -2903,7 +2904,8 @@ def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, 
                 rec.creates[-1].update(error=str(e)[-600:], minutes=round((time.time() - t) / 60, 2))
                 vast_teardown(hub, name)  # if the start did make an instance after all, end it before the next
         if started is None:
-            raise InfraError("could not start an instance from any qualifying offer")
+            raise InfraError(f"could not start an instance: {len(tried)} offer(s) refused"
+                             + (f", the last with: {rec.creates[-1].get('error')}" if rec.creates else ""))
         instance = started["instance"]
         price = float(started.get("usd_per_hour") or price)
         ends = float(started.get("deadline") or _seconds(rec.times["create_start"]) + args.hours * 3600)
