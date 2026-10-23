@@ -5,18 +5,21 @@ each with the golden set the probe server checks at startup.
         --diagnostics DIAGNOSTICS/nvfp4 --out data/probes/Inkling-Small
     uv run python experiments/deploy_probes.py --grids-only    # only grids.json (below), from the dataset's items
 
-**v2** (docs/inkling_probes_amendment_1.md), fitted and served on the full-precision reader, in a root of its own:
+**v2** (docs/inkling_probes_amendment_1.md and _2.md), fitted and served on the full-precision reader, in a root of
+its own:
 
     uv run python experiments/deploy_probes.py --iid-dataset terminal_prerl_v2 --probes PROBES/bf16 \
-        --features FEATURES/bf16 --serving-reader bf16 --out data/probes/Inkling-Small/v2
+        --features FEATURES/bf16 --diagnostics DIAGNOSTICS-v2/bf16 --serving-reader bf16 \
+        --out data/probes/Inkling-Small/v2
 
 - **Inputs:** ``--probes`` holds the IID probe v2 (``terminal_prerl_v2/``, from fit_probes.py ``--iid-dataset
   terminal_prerl_v2``) next to v1's full-precision OOD fit (``diverse_deception/``; the collected copy is in
   ``data/probe_results/fitted/bf16``). ``--features`` is the full-precision reader's, with ``terminal_prerl_v2/``.
 - **Same reader:** nothing is re-pointed, so the IID monitors keep their fit's thresholds and no ``trained_reader``
   fields appear. The OOD monitors' thresholds are terminal_prerl_v2's (below), not their v1 fit's.
-- **Diagnostics:** add ``--diagnostics`` if the full-precision reader's exist (v1's never ran). Without them, each
-  follow-up monitor's golden tolerance is the mean probes' 3, and deployed.json has no batching numbers.
+- **Diagnostics:** the full-precision reader's, from the v2 session (``diagnostics-v2/bf16/`` in the bucket; v1's
+  never ran). Without ``--diagnostics``, each follow-up monitor's golden tolerance is the mean probes' 3, and
+  deployed.json has no batching numbers.
 - **Its own root** holds its monitors, deployed.json, task_splits.json and grids.json. The v1 root's tooling reads
   only ``<root>/<dataset>/<view>/<readout>`` and the files at the root (this script, check_probe_server.py,
   probe_report.py ``--deployed``), so the nested ``v2/`` never mixes in. To use v2, give each tool the v2 root, and

@@ -34,8 +34,12 @@ only what's missing. ``--out-dir DIR`` writes to ``DIR/<run name>/`` instead of 
 - ``recall_at_threshold`` / ``fpr_at_threshold``: score ≥ 0.5, the probe's 1%-FPR point on pre-RL honest episodes.
 - **The same on the tasks no probe saw:** ``n_unseen``, ``n_pos_unseen``, ``auroc_unseen``,
   ``auroc_used_verifier_unseen``, ``recall_at_threshold_unseen``, ``fpr_at_threshold_unseen``.
-  - Unseen means on a grid in neither the ``train`` nor the ``val`` list of ``--grids`` (the deployed probes'
-    grids.json), whose pre-RL episodes fitted, selected and calibrated the probes. So the ``test`` grids are unseen.
+  - Unseen means on a grid in neither the ``train`` nor the ``val`` list of ``--grids``, whose pre-RL episodes
+    fitted, selected and calibrated the probes. So the ``test`` grids are unseen. By default that is the grids.json
+    at the root of the deployment the probes are from (``<root>/<dataset>/<view>/<readout>``: v1's
+    data/probes/Inkling-Small, v2's data/probes/Inkling-Small/v2), which experiments/deploy_probes.py wrote for the
+    IID dataset it deployed them with. Probes of two deployments saw different grids: score them separately, or give
+    ``--grids``.
   - Decided by grid, not by task id. A task id carries its run's seed (``eval_<seed + 7919>_<i>``), but its grid
     recurs across seeds: reasoning-gym builds task i of a stream from ``Random(stream seed + i)``, so seed s's eval
     task i is seed 0's eval task s + i. The probes' 512 tasks are seed 0's eval tasks up to index 659, so the eval
@@ -86,10 +90,19 @@ def run_replay_options(run_info: dict) -> tuple[dict, float | None]:
     return {k: opts.get(k, defaults.get(k)) for k in REPLAY_ENV_KEYS}, effort
 
 
-DEFAULT_GRIDS = "data/probes/Inkling-Small/grids.json"
 UNSEEN_FIELDS = {"n": "n_unseen", "n_pos": "n_pos_unseen", "auroc": "auroc_unseen",
                  "auroc_used_verifier": "auroc_used_verifier_unseen",
                  "recall_at_threshold": "recall_at_threshold_unseen", "fpr_at_threshold": "fpr_at_threshold_unseen"}
+
+
+def default_grids(dirs: list[str]) -> str:
+    """The grids.json of the deployment the probes ``dirs`` are from: ``<root>/grids.json`` for monitors at
+    ``<root>/<dataset>/<view>/<readout>``. SystemExit if they are from more than one root."""
+    roots = sorted({os.path.normpath(os.path.join(d, os.pardir, os.pardir, os.pardir)) for d in dirs})
+    if len(roots) != 1:
+        raise SystemExit(f"the probes are from {len(roots)} deployments ({', '.join(roots)}), which saw different "
+                         "grids: score each one's probes separately, or give --grids")
+    return os.path.join(roots[0], "grids.json")
 
 
 def probe_grids(path: str | None, log) -> dict[str, set[str]] | None:
@@ -182,20 +195,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-batch-tokens", type=int, default=1, help="1 = one episode per forward, as served")
     ap.add_argument("--chunk", type=int, default=64, help="episodes per scoring call (and per resume point)")
     ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
-    ap.add_argument("--grids", help=f"the probes' grids.json (default: {DEFAULT_GRIDS}): the episodes on a grid in "
-                                    "neither its 'train' nor its 'val' list, which no probe saw, get their own "
-                                    "per-step metrics (*_unseen; left out with a warning if the file is absent)")
+    ap.add_argument("--grids", help="the probes' grids.json (default: the one at the root of the probes' deployment, "
+                                    "e.g. data/probes/Inkling-Small/grids.json): the episodes on a grid in neither "
+                                    "its 'train' nor its 'val' list, which no probe saw, get their own per-step "
+                                    "metrics (*_unseen; left out with a warning if the file is absent)")
     ap.add_argument("--task-splits", metavar="FILE",
                     help="the old option (unseen was decided by task id, which misses grids repeated across seeds): "
                          "reads the grids.json next to FILE instead")
     args = ap.parse_args(argv)
     log = lambda m: print(f"[posthoc {time.strftime('%H:%M:%S')}] {m}", flush=True)  # noqa: E731
-    grids_path = args.grids or DEFAULT_GRIDS
+    dirs = [d for d in args.probes.split(",") if d]
+    grids_path = args.grids
     if args.task_splits is not None:
         if args.grids is not None:
             ap.error("give --grids or --task-splits, not both")
         grids_path = os.path.join(os.path.dirname(args.task_splits), "grids.json")
         log(f"--task-splits {args.task_splits}: unseen is decided by grid now, so reading {grids_path}")
+    grids_path = grids_path or default_grids(dirs)
     grids = probe_grids(grids_path, log)
     seen = None if grids is None else grids["train"] | grids["val"]
     if seen is not None:
@@ -208,7 +224,6 @@ def main(argv: list[str] | None = None) -> int:
     from monitordecorrelation.whitebox.probe_datasets import episode_item
     from monitordecorrelation.whitebox.probe_server import ProbeScorer, item_sha, probe_sha
 
-    dirs = [d for d in args.probes.split(",") if d]
     metas = [json.load(open(os.path.join(d, "meta.json"))) for d in dirs]
     names = args.names.split(",") if args.names else [m.get("name") or os.path.basename(d) for d, m in zip(dirs, metas)]
     if len(names) != len(dirs) or len(set(names)) != len(names):

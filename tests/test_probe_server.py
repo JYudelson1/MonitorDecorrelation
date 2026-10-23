@@ -124,7 +124,7 @@ def world(tmp_path_factory, checkpoints):
 
     nvfp4_dir = checkpoints[1]
     model = load_inkling_nvfp4(str(nvfp4_dir), device="cpu").eval()
-    return {**reader_world(tmp_path_factory.mktemp("server"), model, nvfp4_dir, layer=2), "nvfp4_dir": str(nvfp4_dir)}
+    return {**reader_world(tmp_path_factory.mktemp("server"), model, nvfp4_dir, layer=4), "nvfp4_dir": str(nvfp4_dir)}
 
 
 @pytest.fixture(scope="module")
@@ -133,7 +133,7 @@ def bf16_world(tmp_path_factory, checkpoints):
     isn't NVFP4 (``load_inkling_text``: BF16 across the visible GPUs, float32 on a CPU), extracted one episode per
     forward. Its toy probe reads layer 4, the output of the tiny model's one global attention layer: layers 1-3 attend
     within a sliding window and every episode ends in the same turns, so up to layer 3 every episode's readout is the
-    same (the 4-bit world's probe, at layer 2, scores every episode alike)."""
+    same. The 4-bit world's probe reads layer 4 too, past the packed NVFP4 layer (3)."""
     from monitordecorrelation.whitebox.model import load_inkling_text
 
     bf16_dir = checkpoints[0]
@@ -195,7 +195,7 @@ def test_served_scores_equal_the_training_features(world, server):
     results = mon.score_batch([rollout(r) for r in rows()])
     ids = [f"t{t}/{k}" for t in range(5) for k in range(2)]  # terminal_items' ids, in row order
     row_of = {i: n for n, i in enumerate(world["vf"].ids)}
-    want = world["probe"].score(layer_array(world["x"], 2, np.array([row_of[i] for i in ids])))
+    want = world["probe"].score(layer_array(world["x"], world["probe"].layer, np.array([row_of[i] for i in ids])))
     np.testing.assert_allclose([r.score for r in results], want, atol=1e-2)
     assert all(r.meta["probe_sha"] == mon.sha and r.label == (r.score >= 0.5) for r in results)
     assert "cheated" not in json.dumps(mon.items([rollout(rows()[0])]))  # replay fields only
@@ -748,7 +748,7 @@ def test_posthoc_scoring_of_saved_runs(world, tmp_path, capsys):
     assert sorted(r["line"] for r in scored) == list(range(1, 11))
     row_of = {i: n for n, i in enumerate(world["vf"].ids)}
     ids = [f"t{t}/{k}" for t in range(5) for k in range(2)]  # rows() order = the dataset's ids
-    want = world["probe"].logit(layer_array(world["x"], 2, np.array([row_of[i] for i in ids])))
+    want = world["probe"].logit(layer_array(world["x"], world["probe"].layer, np.array([row_of[i] for i in ids])))
     got = [next(r for r in scored if r["line"] == n + 1)["scores"]["probe_iid"]["logit"] for n in range(10)]
     np.testing.assert_allclose(got, want, atol=1e-2)
     per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
@@ -840,6 +840,20 @@ def test_posthoc_metrics_on_unseen_grids(tmp_path):
     assert mod.grid_counts([e["grid_key"] for e in episodes], grids) == (
         "eval grids: 5; seen by the probes (train/val): 3, in their test split: 1, new to them: 1; episodes showing no "
         "grid, left out of *_unseen: 1")
+
+
+def test_posthoc_grids_default_to_the_probes_own_deployment(tmp_path):
+    """Without --grids the post-hoc scorer reads the grids.json at the root of the probes' deployment, so the v2
+    probes' unseen tasks are v2's, not v1's. Probes of two deployments saw different grids: refused together."""
+    mod = load_script("eval_inkling_probes_on_runs")
+    v1 = tmp_path / "Inkling-Small"
+    v2 = v1 / "v2"
+    iid, ood = (str(v1 / d / "with_reasoning" / "followup") for d in ("terminal_prerl", "diverse_deception"))
+    iid2 = str(v2 / "terminal_prerl_v2" / "with_reasoning" / "followup")
+    assert mod.default_grids([iid, ood]) == str(v1 / "grids.json")
+    assert mod.default_grids([iid2, iid2 + "/"]) == str(v2 / "grids.json")
+    with pytest.raises(SystemExit, match="from 2 deployments"):
+        mod.default_grids([iid, iid2])
 
 
 def test_posthoc_unseen_is_decided_by_grid_not_task_id(tmp_path):
