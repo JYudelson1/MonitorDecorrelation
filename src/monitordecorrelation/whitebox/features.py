@@ -20,6 +20,14 @@ Batches are right-padded and sorted by length. Right padding cannot change a rea
 attention, the short convolutions and the MoE routing are all causal or per-token.
 tests/test_features.py checks batched == one-by-one.
 
+**GPU memory.** transformers builds Inkling's attention bias densely, ~340 B per (query, key) pair, so a forward's
+transient memory grows with rows × width² (``MAX_BATCH_ATTENTION``, ``batches``). What runs out of memory:
+- a batch is split in two and retried;
+- an input alone is retried once with its attention in query chunks (whitebox/inkling_attention.py): its attention's
+  transients are then bounded, and what is left grows linearly in its length;
+- if that runs out of memory too, nothing is left to split: ``UnscorableInput``.
+Only that retry uses the chunks, so whatever fits is computed exactly as before.
+
 Dtypes in the safetensors shards:
 - **Readouts:** stored as bfloat16, which is exactly what the model computed. Inkling's mid-layer activations reach
   ~5e4 at the readout, too close to float16's 65504.
@@ -33,12 +41,15 @@ With ``device_map`` the layers can sit on several GPUs, so per-layer reads happe
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
 import os
 from typing import Iterable, Sequence
 
 import torch
 
+from monitordecorrelation.whitebox.inkling_attention import CHUNK_CELLS, QueryChunks
 from monitordecorrelation.whitebox.inkling_replay import ProbeInput
 
 FEATURE_KEYS = ("followup", "followup_prev", "mean_reasoning", "mean_action")
@@ -139,13 +150,25 @@ def role_masks(tokens: Sequence[int], n_conversation_tokens: int, sp: dict[str, 
 MAX_BATCH_ATTENTION = 10**8  # rows × width²: Inkling's attention builds dense [B, heads, T, T] biases, ~340 B each
 
 
+class UnscorableInput(RuntimeError):
+    """An input that ran out of GPU memory in a forward of its own twice: with transformers' dense attention, then with
+    its attention in query chunks. Nothing is left to split. ``index``: its position in the inputs; ``n_tokens``: its
+    length; ``reason``: the last out-of-memory error."""
+
+    def __init__(self, index: int, n_tokens: int, reason: str) -> None:
+        super().__init__(f"input {index} ({n_tokens} tokens) ran out of GPU memory in a forward of its own, with its "
+                         f"attention in query chunks too: {reason}")
+        self.index, self.n_tokens, self.reason = index, n_tokens, reason
+
+
 def batches(lengths: Sequence[int], max_batch_tokens: int, max_batch_attention: int = MAX_BATCH_ATTENTION
             ) -> list[list[int]]:
     """Indices grouped into right-padded batches, longest first, so each batch pads to similar lengths.
 
     A batch holds at most ``max_batch_tokens`` padded tokens and at most ``max_batch_attention`` rows × width².
     The second cap keeps long episodes from exhausting GPU memory: their transient attention biases grow with T²
-    (~110 GB for 11 rows of 5.6k tokens)."""
+    (~110 GB for 11 rows of 5.6k tokens). An input beyond it is a batch of its own; ``extract_features`` retries it in
+    query chunks if its dense attention runs out of memory."""
     order = sorted(range(len(lengths)), key=lambda i: -lengths[i])
     out: list[list[int]] = []
     for i in order:
@@ -161,7 +184,7 @@ def batches(lengths: Sequence[int], max_batch_tokens: int, max_batch_attention: 
 @torch.inference_mode()
 def extract_features(model, inputs: Sequence[ProbeInput], sp: dict[str, int], *, max_batch_tokens: int = 65536,
                      full: Iterable[int] = (), max_batch_attention: int = MAX_BATCH_ATTENTION,
-                     answers: tuple[int, int] | None = None) -> dict:
+                     answers: tuple[int, int] | None = None, chunk_attention: int = CHUNK_CELLS) -> dict:
     """Features for ``inputs`` in input order, as CPU tensors.
 
     Returns:
@@ -176,7 +199,11 @@ def extract_features(model, inputs: Sequence[ProbeInput], sp: dict[str, int], *,
       answer (just before it).
 
     ``full`` lists input indices whose whole hidden states [T, L, d] (bf16) are also returned, under ``"full"``.
-    A batch that runs out of GPU memory is split in two and retried."""
+
+    **Out of GPU memory:** a batch is split in two and retried. An input alone is retried once, after the allocator's
+    cache is released, with its attention in query chunks of at most ``chunk_attention`` query rows × keys
+    (whitebox/inkling_attention.py; one chunk, i.e. a plain retry, for an input too short to split). If that runs out of
+    memory too: ``UnscorableInput``. Every forward that fits runs transformers' own attention, as before."""
     device = next(model.parameters()).device  # the embeddings' device: where the inputs go
     full = set(full)
     n = len(inputs)
@@ -186,17 +213,23 @@ def extract_features(model, inputs: Sequence[ProbeInput], sp: dict[str, int], *,
     tap = RouterTap(model)
     head = _answer_head(model, answers)
     try:
-        todo = batches([len(p.tokens) for p in inputs], max_batch_tokens, max_batch_attention)
+        todo = [(b, False) for b in batches([len(p.tokens) for p in inputs], max_batch_tokens, max_batch_attention)]
         while todo:
-            batch = todo.pop(0)
+            batch, chunked = todo.pop(0)
             try:
-                _run_batch(model, inputs, masks, device, batch, full, tap, head, results, out)
-            except torch.cuda.OutOfMemoryError:
+                with QueryChunks(model, chunk_attention) if chunked else contextlib.nullcontext():
+                    _run_batch(model, inputs, masks, device, batch, full, tap, head, results, out)
+                continue
+            except torch.cuda.OutOfMemoryError as e:
                 tap.stop()
-                if len(batch) == 1:
-                    raise
-                torch.cuda.empty_cache()
-                todo[:0] = [batch[: len(batch) // 2], batch[len(batch) // 2:]]  # same rows, half the memory
+                reason = f"{type(e).__name__}: {e}"[:400]
+            _release_memory()  # out here: the except block's traceback held the failed forward's tensors
+            if len(batch) > 1:
+                todo[:0] = [(batch[: len(batch) // 2], False), (batch[len(batch) // 2:], False)]  # half the memory
+            elif not chunked:
+                todo.insert(0, (batch, True))
+            else:
+                raise UnscorableInput(batch[0], len(inputs[batch[0]].tokens), reason)
     finally:
         tap.remove()
     for k in FEATURE_KEYS:
@@ -207,6 +240,14 @@ def extract_features(model, inputs: Sequence[ProbeInput], sp: dict[str, int], *,
     if head is not None and n:
         out["answer_logp"] = torch.stack(results["answer_logp"])
     return out
+
+
+def _release_memory() -> None:
+    """After a forward ran out of memory: its tensors (a reference cycle may still hold them), then the allocator's
+    cached blocks, back to the device, so the retry starts from unfragmented memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _answer_head(model, answers):

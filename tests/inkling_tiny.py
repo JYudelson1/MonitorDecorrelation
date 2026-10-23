@@ -19,8 +19,9 @@ PACKED_LAYER = 3  # like the release: the dense layers and the first MoE layer (
 E2M1 = torch.tensor(E2M1_VALUES)
 
 
-def tiny_config(vocab_size: int = 512) -> dict:
-    """Inkling-Small's config.json, shrunk: same keys and the same layer structure (2 dense, then MoE)."""
+def tiny_config(vocab_size: int = 512, **text_overrides) -> dict:
+    """Inkling-Small's config.json, shrunk: same keys and the same layer structure (2 dense, then MoE).
+    ``text_overrides`` replace text-config values (e.g. a ``log_scaling_n_floor`` that long inputs pass)."""
     text = {
         "torch_dtype": "bfloat16", "hidden_size": 64, "num_hidden_layers": 4, "vocab_size": vocab_size,
         "unpadded_vocab_size": vocab_size - 12, "num_attention_heads": 4, "num_key_value_heads": 2,
@@ -33,6 +34,7 @@ def tiny_config(vocab_size: int = 512) -> dict:
         "dense_intermediate_size": 128, "intermediate_size": 32, "route_scale": 8.0, "use_gate_bias": True,
         "gate_activation": "sigmoid", "norm_after_topk": True, "use_global_scale": True,
     }
+    text.update(text_overrides)
     return {
         "architectures": ["InklingForConditionalGeneration"], "model_type": "inkling_mm_model", "eos_token_id": 1,
         "text_config": text,
@@ -70,13 +72,14 @@ def dequantize_reference(codes, scale, scale2) -> torch.Tensor:
     return (w * (scale.float() * scale2.view(-1, 1, 1)).unsqueeze(-1)).view(n_exp, rows, cols)
 
 
-def write_tiny_checkpoints(root: Path, vocab_size: int = 512) -> tuple[Path, Path, dict, dict]:
-    """(bf16_dir, nvfp4_dir, codes, scales). ``codes``/``scales`` are the packed layer's, per tensor name."""
+def write_tiny_checkpoints(root: Path, vocab_size: int = 512, **text_overrides) -> tuple[Path, Path, dict, dict]:
+    """(bf16_dir, nvfp4_dir, codes, scales). ``codes``/``scales`` are the packed layer's, per tensor name.
+    ``text_overrides``: as for ``tiny_config``."""
     from transformers import AutoConfig, InklingForCausalLM
 
     from monitordecorrelation.whitebox.model import _patch_inkling_moe_intermediate, _register_inkling_text_conversions
 
-    config_json = json.dumps(tiny_config(vocab_size))
+    config_json = json.dumps(tiny_config(vocab_size, **text_overrides))
     bf16_dir, nvfp4_dir = root / "bf16", root / "nvfp4"
     bf16_dir.mkdir()
     (bf16_dir / "config.json").write_text(config_json)
