@@ -69,6 +69,13 @@ vLLM judge sends its configured thinking settings)."""
     import json
 
     cfg_monitors = json.loads(cfg.read_text())["monitors"]
+    if any(m.get("kind") == "inkling_probe" for m in cfg_monitors):
+        # the probe rows (terminal_verifier_probe_*): the script scores judges only, and says so rather than skip one
+        monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(cfg),
+                                          "--out", str(tmp_path / "b.json")])
+        with pytest.raises(SystemExit, match="evaluates CoT/output judges only"):
+            mod.main()
+        return
 
     def sent(*sets):
         monkeypatch.setattr(sys, "argv", ["eval_terminal_monitors_baseline.py", "--config", str(cfg),
