@@ -1,0 +1,40 @@
+{
+ "name": "probe-session-v2-bf16",
+ "out": "/mnt/ram/session",
+ "shard_size": 256,
+ "max_batch_tokens": 1,
+ "readers": {
+  "bf16": {
+   "model": "/mnt/ram/Inkling-Small",
+   "gpus": [
+    [
+     0,
+     1,
+     2,
+     3
+    ],
+    [
+     4,
+     5,
+     6,
+     7
+    ]
+   ],
+   "required": true,
+   "stagger": false,
+   "store": "hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16"
+  }
+ },
+ "datasets": [
+  "data/probe_datasets/terminal_prerl_v2"
+ ],
+ "diagnostics": {
+  "store": "hf://buckets/probemaxxing/inkling-probes/diagnostics-v2",
+  "terminal": "data/probe_datasets/terminal_prerl_v2",
+  "contrastive": "data/probe_datasets/diverse_deception",
+  "n_iid": 64,
+  "n_ood": 100,
+  "max_batch_tokens": 65536
+ },
+ "status_store": "hf://buckets/probemaxxing/inkling-probes/sessions/probe-session-v2-bf16"
+}

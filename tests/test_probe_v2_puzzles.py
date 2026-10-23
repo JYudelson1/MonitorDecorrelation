@@ -1,9 +1,12 @@
-"""The IID probe v2's puzzles are clear of every RL pool (docs/inkling_probes_amendment_1.md).
+"""The IID probe v2's puzzles are clear of every RL pool (docs/inkling_probes_amendment_1.md), and its features come
+from the full-precision reader alone, one episode per forward (docs/inkling_probes_amendment_2.md).
 
-- The amendment is the one the v2 probes are fitted under: its sha256 is pinned here.
-- The committed exclusion list is exactly what the amendment's rule gives, so the v2 puzzles left after it share no
+- The amendments are the ones the v2 probes are fitted under: their sha256s are pinned here.
+- The committed exclusion list is exactly what amendment 1's rule gives, so the v2 puzzles left after it share no
   grid with any training or evaluation pool of RL seeds 0..10,000.
 - The same check flags every puzzle of the v1 dataset, which is seed 0's evaluation pool: it would have caught v1.
+- The committed v2 session plan is amendment 2's: the full-precision reader extracting terminal_prerl_v2 alone, one
+  episode per forward, with diagnostics that compare batched against one at a time.
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 AMENDMENT = REPO / "docs" / "inkling_probes_amendment_1.md"
 AMENDMENT_SHA256 = "84a8d0a4a6cfb96e151478cdfa207b3b58c796d2be36535f43303cd0197a6e95"
+AMENDMENT_2 = REPO / "docs" / "inkling_probes_amendment_2.md"
+AMENDMENT_2_SHA256 = "9a5cefb36c05b4b186b5684453528cfb9b38fe38310ff40c8c8fe76ebb3839e6"
+SESSION_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16.json"
 EXCLUDED = REPO / "data" / "probe_datasets" / "terminal_prerl_v2" / "excluded_grids.json"
 CONFIG = "experiments/configs/terminal_verifier_control.json"
 
@@ -27,8 +33,20 @@ ex = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ex)
 
 
-def test_amendment_file_has_the_recorded_hash():
+def test_amendment_files_have_the_recorded_hashes():
     assert hashlib.sha256(AMENDMENT.read_bytes()).hexdigest() == AMENDMENT_SHA256
+    assert hashlib.sha256(AMENDMENT_2.read_bytes()).hexdigest() == AMENDMENT_2_SHA256
+
+
+def test_the_v2_session_plan_is_amendment_2s():
+    plan = json.loads(SESSION_PLAN.read_text())
+    assert list(plan["readers"]) == ["bf16"] and plan["readers"]["bf16"]["model"] == "/mnt/ram/Inkling-Small"
+    assert plan["datasets"] == ["data/probe_datasets/terminal_prerl_v2"] and plan["max_batch_tokens"] == 1
+    diag = plan["diagnostics"]
+    assert diag["max_batch_tokens"] == 65_536 and (diag["n_iid"], diag["n_ood"]) == (64, 100)
+    assert (diag["terminal"], diag["contrastive"]) == ("data/probe_datasets/terminal_prerl_v2",
+                                                       "data/probe_datasets/diverse_deception")
+    assert diag["store"].rstrip("/").endswith("/diagnostics-v2")  # not the v1 sample's diagnostics/<reader>/
 
 
 def test_committed_exclusions_are_what_the_rule_gives(monkeypatch):
