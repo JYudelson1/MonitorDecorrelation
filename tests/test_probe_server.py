@@ -19,6 +19,8 @@ Checks:
   ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
 - The deployment's grids.json, which the scorer reads: written by a deployment and by ``--grids-only``; the committed
   one matches the committed task splits.
+- A deployment as v2's (another IID dataset, its own reader, its own root): the IID monitors as fitted, the OOD
+  monitors' thresholds from that dataset; recalibrating on an OOD fit's own dataset and reader gives its thresholds.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import pytest
 import torch
 from inkling_tiny import write_tiny_checkpoints
 from test_extract_probe_features import RUN_ENV, TURNS
+from test_fit_probes import make_world
 
 from monitordecorrelation.monitors.inkling_probe_monitor import FatalProbeError, InklingProbeMonitor
 from monitordecorrelation.types import Prompt, Rollout
@@ -616,12 +619,14 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
     before = (p.threshold_1, p.threshold_5)
     same = {**world["probe"].meta["reader_info"], "path": "Inkling-Small-NVFP4"}  # the same reader, elsewhere
     dp.serve_on(p, {"reader": "same", "reader_info": same}, items, str(root), VIEW, "followup")
-    assert (p.threshold_1, p.threshold_5) == before and "trained_reader" not in p.meta
+    assert (p.threshold_1, p.threshold_5) == before and not {"trained_reader", "thresholds_from"} & set(p.meta)
     dp.serve_on(p, {"reader": "other", "reader_info": {"loader": "x"}}, items, str(root), VIEW, "followup")
     src = dp.LayerSource(str(root / "terminal_prerl"), VIEW, "followup")
     neg = [r for r, i in enumerate(src.ids) if not (items[i].get("diagnostics") or {}).get("used_verifier")]
     want = np.percentile(p.logit(src.layer(p.layer))[neg], [99, 95])
     np.testing.assert_allclose([p.threshold_1, p.threshold_5], want)
+    assert p.meta["thresholds_from"] == ("honest terminal_prerl dev episodes (train + val) on the other reader's "
+                                         "features")
     p.threshold_1 = 123.0  # the toy probe's logits are constant, so mark the threshold instead
     p.save(str(tmp_path / "moved"))  # meta.json shows the probe's thresholds, not those of the meta it loaded
     assert json.load(open(tmp_path / "moved" / "meta.json"))["threshold_1"] == 123.0 != p.meta["threshold_1"]
@@ -878,6 +883,11 @@ def test_deployments_write_the_probes_grids(world, tmp_path):
     assert dp.main(["--grids-only", "--datasets", str(datasets), "--out", str(out)]) == 0
     assert os.listdir(out) == ["grids.json"]
     check(out / "grids.json")
+    os.symlink(datasets / "terminal_prerl", datasets / "terminal_prerl_v2")  # the same items, as another IID dataset
+    assert dp.main(["--grids-only", "--iid-dataset", "terminal_prerl_v2", "--datasets", str(datasets), "--out",
+                    str(tmp_path / "v2")]) == 0
+    v2 = json.loads((tmp_path / "v2" / "grids.json").read_text())
+    assert v2["dataset"] == {**json.loads((out / "grids.json").read_text())["dataset"], "name": "terminal_prerl_v2"}
     for argv in (["--grids-only", "--probes", "x"], ["--features", "x"]):  # unused options; a deployment's missing
         with pytest.raises(SystemExit) as err:
             dp.main([*argv, "--datasets", str(datasets), "--out", str(out)])
@@ -894,6 +904,125 @@ def test_deployments_write_the_probes_grids(world, tmp_path):
     check(deployed / "grids.json")
     with pytest.raises(SystemExit, match="shows no grid"):
         dp.grid_splits({"a/0": {"id": "a/0", "task_id": "a", "split": "train", "question": "Solve 0."}}, {})
+
+
+FAR_OFF = 1e6  # the toy OOD fit's own thresholds: no logit of the tiny reader comes near
+
+
+def deployment_inputs(w: dict, root, iid: str) -> list[str]:
+    """experiments/deploy_probes.py's inputs under ``root`` for the BF16 world ``w``, as fit_probes.py would leave
+    them for reader ``bf16``: the tiny dataset and its features as the IID dataset ``iid``, the world's probe as that
+    dataset's with-reasoning IID fit, and a toy OOD fit (the IID probe's weights turned around) whose
+    ``thresholds_by_terminal_view`` are ``FAR_OFF``, as if of another IID dataset. Returns the arguments naming them."""
+    for kind, src in (("datasets", w["dataset"]), ("features", w["features"])):
+        os.makedirs(root / kind, exist_ok=True)
+        if not os.path.exists(root / kind / iid):
+            os.symlink(src, root / kind / iid)
+    fit = SelectedProbe.load(w["probe_dir"])
+    fit.meta = {**fit.meta, "reader": "bf16"}
+    fit.save(str(root / "probes" / iid / VIEW / "followup"))
+    SelectedProbe(fit.layer, -fit.coef, -fit.intercept, FAR_OFF, FAR_OFF, {
+        "dataset": "diverse_deception", "view": "without_reasoning", "readout": "followup", "label": "deceptive",
+        "effort": 0.5, "reader": "bf16", "reader_info": fit.meta["reader_info"],
+        "thresholds_by_terminal_view": {v: [FAR_OFF, FAR_OFF] for v in ("with_reasoning", "without_reasoning")},
+    }).save(str(root / "probes" / "diverse_deception" / "without_reasoning" / "followup"))
+    return ["--iid-dataset", iid, "--probes", str(root / "probes"), "--features", str(root / "features"),
+            "--datasets", str(root / "datasets"), "--readouts", "followup"]
+
+
+def test_a_deployment_of_another_iid_dataset_on_its_own_reader(bf16_world, tmp_path):
+    """experiments/deploy_probes.py as v2 runs it: ``--iid-dataset`` not terminal_prerl (the tiny one), probes fitted
+    and served on the BF16 reader, into a root of its own (``<root>/v2``).
+    - That dataset supplies everything: the IID monitors' folder, the golden sets, the task splits, grids.json.
+    - On its own reader the IID monitor is its fit as it is: the fit's thresholds, no ``trained_reader`` fields.
+    - The OOD monitors' thresholds are those of each view's honest dev episodes of that dataset, on the serving
+      reader's features, not their fit's ``thresholds_by_terminal_view``; ``thresholds_from`` says so.
+    - The BF16 server takes the deployment (reader and golden checks), and check_probe_server.py finds its monitors
+      at ``--probes-root <root>/v2``.
+    - A v1 deployment into ``<root>`` afterwards leaves ``<root>/v2`` as it was, and neither sees the other's
+      monitors."""
+    dp, check = load_script("deploy_probes"), load_script("check_probe_server")
+    w, v1, v2 = bf16_world, tmp_path / "deployed", tmp_path / "deployed" / "v2"
+    assert dp.main([*deployment_inputs(w, tmp_path, "terminal_tiny"), "--serving-reader", "bf16", "--out",
+                    str(v2)]) == 0
+    assert sorted(os.listdir(v2)) == ["deployed.json", "diverse_deception", "grids.json", "task_splits.json",
+                                      "terminal_tiny"]
+    iid = SelectedProbe.load(str(v2 / "terminal_tiny" / VIEW / "followup"))
+    assert (iid.threshold_1, iid.threshold_5) == (w["probe"].threshold_1, w["probe"].threshold_5)
+    assert not {"trained_reader", "trained_reader_info", "thresholds_from"} & set(iid.meta)
+    assert iid.meta["reader_info"] == w["probe"].meta["reader_info"] and iid.meta["dataset"] == "terminal_tiny"
+    fit = SelectedProbe.load(str(tmp_path / "probes" / "diverse_deception" / "without_reasoning" / "followup"))
+    for view in ("with_reasoning", "without_reasoning"):
+        ood = SelectedProbe.load(str(v2 / "diverse_deception" / view / "followup"))
+        vf = load_view(w["features"], view)
+        x, _ = feature_matrix(vf, "followup", view)
+        honest_dev = [r for r, i in enumerate(vf.ids) if w["items"][i]["split"] in ("train", "val")
+                      and not (w["items"][i].get("diagnostics") or {}).get("used_verifier")]
+        want = np.percentile(fit.logit(layer_array(x, fit.layer, np.array(honest_dev))), [99, 95])
+        assert len(honest_dev) == 8 and np.ptp(fit.logit(layer_array(x, fit.layer))) > 1 and np.abs(want).max() < 100
+        np.testing.assert_allclose([ood.threshold_1, ood.threshold_5], want, rtol=1e-12)
+        assert (ood.threshold_1, ood.threshold_5) == dp.recalibrate(fit, w["items"], str(tmp_path / "features"), view,
+                                                                    "followup", "terminal_tiny")
+        assert ood.meta["thresholds_from"] == ("honest terminal_tiny dev episodes (train + val) on the bf16 reader's "
+                                               "features")
+        assert ood.meta["thresholds_by_terminal_view"][view] == [FAR_OFF, FAR_OFF]  # the fit's, for the record
+        assert ood.meta["view"] == view and not {"trained_reader", "trained_reader_info"} & set(ood.meta)
+    manifest = json.load(open(os.path.join(w["dataset"], "manifest.json")))
+    grids = json.loads((v2 / "grids.json").read_text())
+    assert grids["dataset"]["name"] == "terminal_tiny" and grids["dataset"]["items_sha256"] == manifest["items_sha256"]
+    splits = json.loads((v2 / "task_splits.json").read_text())
+    assert splits == {s: sorted({it["task_id"] for it in w["items"].values() if it["split"] == s})
+                      for s in ("test", "train", "val")}
+    ood_dirs = [os.path.join("diverse_deception", view, "followup") for view in ("with_reasoning", "without_reasoning")]
+    dirs = check.deployed_dirs(str(v2))
+    assert dirs == [str(v2 / d) for d in [*ood_dirs, os.path.join("terminal_tiny", VIEW, "followup")]]
+    deployed = json.loads((v2 / "deployed.json").read_text())
+    assert [d["dir"] for d in deployed] == dirs and all(d["reader"] == d["trained_reader"] == "bf16" for d in deployed)
+    scorer = ProbeScorer(w["model"], dirs, max_batch_tokens=1, reader_info=reader_info(w["model"], w["model_dir"]))
+    for d in dirs:  # the server's startup check, at each monitor's tolerance
+        golden = scorer.golden_check([d], json.load(open(os.path.join(d, "meta.json")))["golden_tolerance"])
+        assert golden[probe_sha(d)]["n"] == 2 and golden[probe_sha(d)]["max_dlogit"] < 1e-6  # the test split's
+    assert check.end_to_end_dirs(dirs, str(v2)) == [dirs[0], dirs[2]]
+    # v1 into the root above it: v2 stays as it was, and each root lists its own monitors only. --serving-reader is
+    # left at nvfp4: on the probes' own reader it names nothing, and the record keeps the fit's name
+    before = {p: p.read_bytes() for p in v2.rglob("*") if p.is_file()}
+    assert dp.main([*deployment_inputs(w, tmp_path, "terminal_prerl"), "--out", str(v1)]) == 0
+    assert {p: p.read_bytes() for p in v2.rglob("*") if p.is_file()} == before
+    assert json.load(open(v1 / ood_dirs[0] / "meta.json"))["thresholds_from"] == (
+        "honest terminal_prerl dev episodes (train + val) on the bf16 reader's features")
+    assert sorted(os.listdir(v1)) == ["deployed.json", "diverse_deception", "grids.json", "task_splits.json",
+                                      "terminal_prerl", "v2"]
+    assert [d["dir"] for d in json.loads((v1 / "deployed.json").read_text())] == check.deployed_dirs(str(v1)) == [
+        str(v1 / d) for d in [*ood_dirs, os.path.join("terminal_prerl", VIEW, "followup")]]
+    assert check.deployed_dirs(str(v2)) == dirs
+
+
+def test_recalibrating_on_the_fits_own_dataset_and_reader_gives_its_ood_thresholds(tmp_path):
+    """deploy_probes.recalibrate, on the IID dataset and reader an OOD probe was fitted with, gives exactly the fit's
+    ``thresholds_by_terminal_view``: fit_probes.py's ``fit_ood`` computes them the same way. So deploying the OOD
+    monitors with recalibrated thresholds always changes nothing where the fit's were right (v1). Here on synthetic
+    features (test_fit_probes.make_world), with an IID dataset named as v2's."""
+    import shutil
+    import subprocess
+    import sys
+
+    dp = load_script("deploy_probes")
+    data, feats = make_world(tmp_path)
+    for root in (data, feats):
+        shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    out = tmp_path / "probes"
+    repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    cp = subprocess.run([sys.executable, os.path.join(repo, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1",
+                         "--jobs", "2", "--readouts", "followup", "--probes", "ood", "--skip-baselines",
+                         "--iid-dataset", "terminal_prerl_v2"], capture_output=True, text=True, cwd=repo, timeout=1800)
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    probe = SelectedProbe.load(str(out / "diverse_deception" / "without_reasoning" / "followup"))
+    items, fitted = load_items(str(data / "terminal_prerl_v2")), probe.meta["thresholds_by_terminal_view"]
+    for view in ("with_reasoning", "without_reasoning"):
+        got = dp.recalibrate(probe, items, str(feats), view, "followup", "terminal_prerl_v2")
+        np.testing.assert_allclose(got, fitted[view], rtol=1e-12, atol=0)
+    assert fitted["with_reasoning"] != fitted["without_reasoning"]  # one per view, so the view is checked too
 
 
 def test_the_deployed_grids_match_the_deployed_task_splits():
