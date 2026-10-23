@@ -1545,12 +1545,17 @@ def fetch_path(remote: Remote, path: str, dest: Path) -> str:
 RSYNC_VANISHED = 24  # rsync: some source files vanished during the copy (a job still writing); the rest came
 
 
+RSYNC_STREAMS = 8  # rsyncs at once: vast.ai's SSH proxy limits each connection (1: 5.6 MB/s, 4: 17, 8: 24; 2026-10-23)
+RSYNC_STREAM_BYTES = 64 * 2**20  # less than this to copy goes in one rsync
+
+
 def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", timeout: float = 3600,
-                exclude: tuple[str, ...] = ()) -> str:
+                exclude: tuple[str, ...] = (), streams: int = RSYNC_STREAMS) -> str:
     """``fetch_path`` with rsync over the remote's ssh (vast.ai): uncompressed (tar's gzip would be the bottleneck for
     tens of GB of tensors) and resumable: ``--partial``, and a broken copy is tried twice more, going on where it
-    stopped. Only what changed travels, so it can run again as the job goes on (``exclude``: patterns left out). Tar
-    over ssh if the remote has no rsync. Returns "ok" or "missing"; InfraError if it fails or isn't done within
+    stopped. Only what changed travels, so it can run again as the job goes on (``exclude``: patterns left out). A
+    directory with more to copy than ``RSYNC_STREAM_BYTES`` goes in ``streams`` rsyncs at once (``rsync_streams``).
+    Tar over ssh if the remote has no rsync. Returns "ok" or "missing"; InfraError if it fails or isn't done within
     ``timeout`` seconds."""
     full = remote_path(path.rstrip("/"))
     rc = remote.run(f"test -e {shlex.quote(full)} || exit 3; command -v rsync >/dev/null || exit 4", check=False,
@@ -1565,6 +1570,12 @@ def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", tim
     if rc != 0:
         raise InfraError(f"fetch {path}: the remote check failed ({rc})")
     dest.mkdir(parents=True, exist_ok=True)
+    todo = remote_todo(remote, full, dest, exclude) if streams > 1 else None
+    if todo == []:
+        log(f"rsync of {path}: nothing new")
+        return "ok"
+    if todo and len(todo) > 1 and sum(size for _, size in todo) >= RSYNC_STREAM_BYTES:
+        return rsync_streams(remote, path, os.path.dirname(full), dest, todo, rsync, timeout, streams)
     argv = [rsync, "-a", "--partial", "--timeout=300", "--stats", *(f"--exclude={p}" for p in exclude), "-e",
             remote.rsh(), f"{remote.host}:{full}", f"{dest}/"]
     t0, tries = time.time(), 0
@@ -1587,6 +1598,84 @@ def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", tim
             raise InfraError(f"rsync of {path} failed ({cp.returncode}): {err}")
         log(f"rsync of {path} failed ({cp.returncode}), trying again: {err[-300:]}")
         time.sleep(10)
+
+
+def remote_todo(remote: Remote, full: str, dest: Path, exclude: tuple[str, ...] = ()) -> list[tuple[str, int]] | None:
+    """The files of the remote directory ``full`` (paths from its parent, sizes) that ``dest`` lacks, or has with
+    another size or modification time: rsync's own check. None if ``full`` is not a directory, or the listing failed."""
+    base, name = os.path.split(full)
+    skip = "".join(f" ! -name {shlex.quote(p)}" for p in exclude)
+    cp = remote.run(f"cd {shlex.quote(base or '.')} && test -d {shlex.quote(name)} && "
+                    f"find {shlex.quote(name)} -type f{skip} -printf '%s %T@ %p\\0'", check=False, timeout=300)
+    if cp.returncode != 0:
+        return None
+    todo = []
+    for entry in cp.stdout.split(b"\0"):
+        if not entry.strip():
+            continue
+        size, mtime, rel = entry.decode(errors="surrogateescape").split(" ", 2)
+        try:
+            here = (dest / rel).stat()
+            if here.st_size == int(size) and abs(here.st_mtime - float(mtime)) < 1:
+                continue
+        except OSError:
+            pass
+        todo.append((rel, int(size)))
+    return todo
+
+
+def rsync_streams(remote: Remote, path: str, base: str, dest: Path, todo: list[tuple[str, int]], rsync: str,
+                  timeout: float, streams: int) -> str:
+    """``todo`` (paths from the remote ``base``, sizes) into ``dest`` with up to ``streams`` rsyncs at once
+    (``--files-from``), split by size; a failed one is tried twice more. Returns "ok"; InfraError otherwise."""
+    shares: list[list[str]] = [[] for _ in range(min(streams, len(todo)))]
+    sizes = [0] * len(shares)
+    for rel, size in sorted(todo, key=lambda t: -t[1]):
+        k = sizes.index(min(sizes))
+        shares[k].append(rel)
+        sizes[k] += size
+    t0, tries, left, procs, errs = time.time(), [0] * len(shares), set(range(len(shares))), {}, {}
+    with tempfile.TemporaryDirectory() as tmp:
+        lists = [Path(tmp) / f"files{k}" for k in range(len(shares))]
+        for k, share in enumerate(shares):
+            lists[k].write_bytes(b"".join(rel.encode(errors="surrogateescape") + b"\0" for rel in share))
+        try:
+            while left:
+                errs = {k: open(Path(tmp) / f"err{k}", "w+b") for k in left}  # noqa: SIM115 — closed below
+                procs = {k: subprocess.Popen([rsync, "-a", "--partial", "--timeout=300", "--from0",
+                                              f"--files-from={lists[k]}", "-e", remote.rsh(),
+                                              f"{remote.host}:{base or '.'}/", f"{dest}/"],
+                                             stdout=subprocess.DEVNULL, stderr=errs[k], stdin=subprocess.DEVNULL)
+                         for k in left}
+                for k, proc in procs.items():
+                    try:
+                        proc.wait(timeout=max(30.0, t0 + timeout - time.time()))
+                    except subprocess.TimeoutExpired:
+                        raise InfraError(f"rsync of {path} not done after {timeout:.0f}s") from None
+                    tries[k] += 1
+                    errs[k].seek(0)
+                    err = errs[k].read().decode(errors="replace").strip()[-1500:]
+                    if proc.returncode in (0, RSYNC_VANISHED):
+                        left.discard(k)
+                    elif tries[k] >= 3 or time.time() - t0 > timeout - 60:
+                        raise InfraError(f"rsync of {path} failed ({proc.returncode}): {err}")
+                    else:
+                        log(f"rsync of {path}, stream {k + 1}: failed ({proc.returncode}), trying again: {err[-300:]}")
+                for fh in errs.values():
+                    fh.close()
+                if left:
+                    time.sleep(10)
+        finally:
+            for proc in procs.values():
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            for fh in errs.values():
+                fh.close()
+    n, dt = sum(sizes), time.time() - t0
+    log(f"rsync of {path}: {len(todo)} files, {n / 1e9:.2f} GB in {dt:.0f}s ({n / 1e6 / max(dt, 1e-9):.0f} MB/s, "
+        f"{len(shares)} rsyncs at once)")
+    return "ok"
 
 
 VAST_FETCH_EVERY = 600.0  # seconds between the rsyncs of the --fetch paths while a vast.ai job runs

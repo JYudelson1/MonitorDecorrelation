@@ -2636,6 +2636,34 @@ def test_vast_end_to_end_through_a_local_shell(tmp_path, monkeypatch, fake_hub):
     assert row["ended"] and FakeHubGpu.calls.count(("end", 9001)) == 1
 
 
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="needs rsync")
+def test_fetch_rsync_splits_a_directory_between_rsyncs(tmp_path, monkeypatch):
+    """vast.ai's SSH proxy limits each connection (2026-10-23: 5.6 MB/s with one rsync, 24 with eight at once), so a
+    directory with enough left to copy goes in several rsyncs at once, each a share of the files by size; only what is
+    new or changed travels."""
+    monkeypatch.setattr(nj, "RSYNC_STREAM_BYTES", 0)
+    home, out = tmp_path / "home", tmp_path / "out"
+    files = {f"results/features/bf16/ds/with_reasoning/shard_{k:05d}.safetensors": os.urandom(1000 * (k + 1))
+             for k in range(7)}
+    files.update({"results/index.json": b"{}", "results/status/status.json.tmp": b"half"})
+    for rel, data in files.items():
+        (home / "md" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / "md" / rel).write_bytes(data)
+    r, rsync, logs = RsyncRemote(home), shutil.which("rsync"), []
+    monkeypatch.setattr(nj, "log", logs.append)
+    assert nj.fetch_rsync(r, "results", out, rsync, exclude=nj.IN_PROGRESS, streams=3) == "ok"
+    assert "8 files" in logs[-1] and "3 rsyncs at once" in logs[-1]
+    for rel, data in files.items():
+        assert (out / rel).read_bytes() == data if not rel.endswith(".tmp") else not (out / rel).exists(), rel
+    assert nj.fetch_rsync(r, "results", out, rsync, exclude=nj.IN_PROGRESS, streams=3) == "ok"
+    assert logs[-1] == "rsync of results: nothing new"
+    (home / "md" / "results" / "index.json").write_bytes(b'{"more": 1}')  # changed: it travels again
+    assert nj.fetch_rsync(r, "results", out, rsync, streams=3) == "ok"  # the last fetch: in-progress files too
+    assert (out / "results" / "index.json").read_bytes() == b'{"more": 1}' and "2 files" in logs[-1]
+    assert (out / "results" / "status" / "status.json.tmp").exists() and nj.remote_todo(r, "md/results", out) == []
+    assert nj.remote_todo(r, "md/results/index.json", out) is None  # a file: one rsync
+
+
 def test_vast_ledger_entries_are_recorded_but_not_counted(tmp_path, capsys, regions_file):
     ledger = _ledger(tmp_path, 45.0)  # $5 of the $50 left for Nebius
     b = nj.Budget(ledger)
