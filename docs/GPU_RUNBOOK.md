@@ -9,7 +9,9 @@
 >
 > **Current (2026-10-12):** the first section below, on serving the Inkling-Small probes and scoring finished runs
 > with them, is up to date. **2026-10-23:** the second, on the IID probe v2 on the full-precision reader, is the plan
-> for v2 (not yet run), on Nebius or on vast.ai. Everything after them is the superseded Qwen3.5-4B runbook.
+> for v2 (not yet run), on Nebius or on vast.ai. The third, "v2 probe rows: the RL batch", runs the v2 probes' RL
+> rows (2026-10-23: built; its plumbing tested, the batch not yet run). Everything after them is the superseded
+> Qwen3.5-4B runbook.
 
 ## Inkling-Small probes: serving on one B300, and post-hoc scoring
 
@@ -305,6 +307,190 @@ ssh -N -L 8178:127.0.0.1:8178 -L 8179:127.0.0.1:8179 <user>@<vm>
   - A probe run's step adds the server's time for its 128 episodes, about 0.6–1.2 minutes at 3–6k tokens/s.
 - **Cost:** 8× B300 costs $26–76/h (2026-10-10 vs 2026-10-23 prices) and 8× B200 $20.80/h spot or $68/h on demand
   (2026-10-23), against $1–9.5/h for the one-B300 4-bit server of v1.
+
+## v2 probe rows: the RL batch
+
+The probe rows of the TerminalEnv degradation matrix: runs that train against `probe_iid` (v2) or `probe_ood`, with
+Vlad's four Qwen judges held out and scored live, as in his rows (seeds 200–218), and the other probe held out too but
+scored after the runs (`experiments/eval_inkling_probes_on_runs.py`). `scripts/rl_batch.py` runs a whole batch from a
+roster as one command; its docstring has every detail.
+
+**The roster** (`experiments/rl_batches/`) states every run: its config, seed (0 to 10,000, the range the v2 exclusion
+covers), run name and early stop, plus `n_steps` and the W&B entity and project for all.
+- `probe_rows_v2.json`: `probe_iid` on seeds 219–221, `probe_ood` on 222–224 (`probe-iid-seed-219`, …).
+- `probe_rows_v2_seeds216.json`: both probes on Vlad's control seeds 216–218, plus two new controls on 216 and 217
+  (`control-rerun-seed-216`, …).
+- The configs: `experiments/configs/terminal_verifier_probe_{iid,ood}.json`, Vlad's q3_cot row with the train-against
+  judge replaced by the v2 probe at `http://127.0.0.1:8178`; the four judges held out spec for spec;
+  `stop_after_zero_behavior_steps` null (as his judge rows of c30c466; the roster states it per run); `save_every` 9.
+  `terminal_verifier_control_resumable.json` is his control with `save_every` 9.
+- `n_steps`: 90 as his rows, or `--n-steps 360`: in his batch only the 360-step strong-cot-seed-207 shows its
+  trained-against judge falling (q35_cot on hacks down to 0.76).
+
+**The machines** (names start with `dennis-`; tags `owner=dennis`, `experiment=probes-v2-rl`, `step=…`):
+
+| role | what | where | $/h (2026-10-23) |
+|---|---|---|---|
+| rl | every run, one process each, as root (the read-only verifier) | Nebius cpu-d3 32vcpu-128gb, on demand | 1.06 |
+| probe | `inkling_probe_server.py`, both v2 probes, one episode per forward, 127.0.0.1:8178 | vast.ai 4× B200 (one BF16 copy) | 42.04 |
+| judges | Vlad's four vLLM engines: Qwen3-30B-A3B-FP8 on GPU 0 at :8001, three Qwen3.5-35B-A3B-FP8 at :8003–8005 behind `load_balancer.py` at :8002 | vast.ai 4× H200 (`--judge-gpu`: H200, else H200 NVL) | 16.08 (H200 NVL; no 4× H200 was offered) |
+
+- **Tunnels:** the runs reach the servers at 127.0.0.1:8178 and :8001/:8002, as the configs say, through one
+  `scripts/tunnel.sh` loop per server machine on the RL machine: `ssh -N -L` with ExitOnForwardFailure and keepalives
+  (10 s × 3), reconnecting forever (2 s, doubling to 30 s). A dead link ends its ssh within ~30 s, which closes the
+  forwarded connections; the probe client and the judge client both retry forever, so the runs wait, then go on.
+- **Keys:** the tunnel key is made for the batch on the RL machine, in its RAM disk; only its public key reaches the
+  vast.ai instances, appended to root's authorized_keys as `restrict,port-forwarding,permitopen="127.0.0.1:<port>",
+  command="/bin/false"`: it opens the server's ports and nothing else. hub-gpu's key stays on this machine. The runs'
+  keys (`tinker_api_key`, `wandb_api_key` in `~/.secrets`) go to the RL machine only, over SSH into its RAM disk, read
+  by the supervisor's root shell as it starts and deleted at once; nothing ever goes to a vast.ai instance.
+- **Pinned probes:** the v2 monitor folders must be committed. Their sha256 (probe.npz + meta.json, the server's own
+  identity of a probe: a server without it answers 409, fatal to a run) is taken from the committed files, checked on
+  the probe instance before the server starts (also before every restart), on the RL machine before the runs start,
+  and in the server's `/v1/meta` at every health check.
+- **vLLM:** 0.32.0, the newest release (2026-10-18), installed by `scripts/setup_vllm.sh` into `.venv-vllm/`
+  (`VLLM_VERSION=0.32.0`; the env's packages in `logs/vllm/freeze.txt`). Its source accepts every flag of Vlad's
+  commands (`--reasoning-parser qwen3`, `--scheduling-policy priority`, `--kv-cache-dtype fp8`, eagle3 and mtp
+  `--speculative-config`, `max_cudagraph_capture_size`) and `thinking_token_budget` in requests; his version is
+  unknown (before 0.31.0, 2026-10-05). Every engine on 127.0.0.1 (`VLLM_HOST`), and a dead one is started again alone,
+  its log kept (`VLLM_RESTART`). The judges' Hugging Face revisions (main on 2026-10-23, unchanged since before his
+  batch) are in `rl_batch.JUDGE_REVISIONS`.
+
+**Before a batch:**
+1. The v2 monitors deployed and committed at `data/probes/Inkling-Small/v2/{terminal_prerl_v2,diverse_deception}/
+   with_reasoning/followup` (`plan` refuses otherwise), this branch merged, a clean tree.
+2. The keys: `hub-secret set tinker_api_key`, `hub-secret set wandb_api_key` (the owner, in this project's terminal).
+   W&B: the key's default entity is `denizhan`, so the runs get `WANDB_ENTITY=jyudel-redwood-research` and
+   `WANDB_MODE=online`; the supervisor refuses to start a run without the key or with another entity, and stops a run
+   whose W&B URL names another entity or project.
+3. hub-gpu: 8 GPUs free at once (4× B200 + 4× H200 is exactly the project's 8: the v2 extraction instance must have
+   ended), and the daily limit raised for the batch (below); the driver shortens the leases to the room left, never
+   under 2 h.
+4. Nebius: bin/gpu-job's settings in the environment.
+
+```bash
+cd /srv/agents/projects/monitor-correlation-probes/MonitorDecorrelation
+export NEBIUS_REGIONS_FILE=../bin/nebius-regions.json NEBIUS_BIN=~/.local/bin/nebius NEBIUS_SSH_KEY=~/.ssh/nebius_vm \
+    NEBIUS_BUDGET_FILE=../output/gpu_jobs/budget.json NEBIUS_JOB_NAME_PREFIX=dennis- RSYNC_BIN=~/.local/bin/rsync
+python3 scripts/rl_batch.py plan --roster experiments/rl_batches/probe_rows_v2.json     # pins, estimate, prices
+# the rehearsal: the same batch, 2 steps with an eval at each, and the checklist (~1.6 h of machines, ~$100)
+nohup python3 scripts/rl_batch.py start --rehearsal --roster experiments/rl_batches/probe_rows_v2.json \
+    --out ../output/gpu_jobs/{stamp}-{name} --compare-runs ../scratch/vlad-batch-oct1/runs/* > rehearsal.out 2>&1 &
+# the batch (90 steps; --n-steps 360 for the long one)
+nohup python3 scripts/rl_batch.py start --roster experiments/rl_batches/probe_rows_v2.json \
+    --out ../output/gpu_jobs/{stamp}-{name} > batch.out 2>&1 &
+python3 scripts/rl_batch.py status --out DIR          # machines, leases, runs (steps, s/step), the probe queue
+```
+
+**What `start` does:** the three `up`s at once (the probe instance downloads the reader, ~3 min, and starts the
+server after the sha check; the judges install vLLM and start the engines, ~15 min); the tunnels; the supervisor on the
+RL machine, which starts each run once every server answers through them; then the watch, every minute: syncs of the
+run folders into `DIR/runs/` every 10 minutes (the boot disk goes with the VM), health on each instance and through each
+tunnel every 5, the leases every 10. At the end, or on a fatal start, Ctrl-C or the RL machine gone for 30 min: a last
+sync, then every machine ended and verified gone. Everything is in `DIR`: `batch.json`, `driver.log`, `launch/*.log`
+(each launcher's own log), `runs/`, `vm/` (the supervisor's status and log), `rehearsal.json`.
+
+**Costs and hours** (`plan` prints them for the roster; 2026-10-23 prices; the probe server one episode per forward,
+~0.36 s per episode on 4× B200, measured on the v2 extraction):
+
+| batch | probe server busy | machines up | cost |
+|---|---|---|---|
+| 6 probe rows, 90 steps | 11.3 h | ~12.3 h | $730–780 |
+| 6 probe rows, 360 steps | 44.8 h | ~46 h | $2,700–2,900 |
+| rehearsal (2 steps, the checklist) | 0.6 h | ~1.6 h | ~$100 |
+
+- The probe server is the batch's pace: one copy scores every valid train and eval episode of six runs, one at a time,
+  so a step takes ~8 minutes, not Vlad's controls' 1.3. A second copy would halve the hours (same probe cost), but
+  needs 4 more GPUs than hub's 8.
+- hub-gpu allows $500 in any 24 hours: a 90-step batch needs ~$750 within ~12 h. The owner raises `usd_per_day` for
+  the batch; else leases stop being extended once the room runs out, and the servers end at their deadlines (the runs
+  wait, then resume when servers return: `restart-server … --new-instance`).
+
+**Judges: 4× H200 is enough.** Six probe rows put on the judges only their evals: 31 evals × 256 episodes × 4 judges
+per run, ~8,200 calls an hour on the q3 GPU and as many on the three q35 engines over the batch's ~11 hours: 36% of what
+Vlad's batch had them serve (12 rows at once, 2026-09-30: 22,500 calls/h on his one q3 GPU, 22,700 on his three q35
+engines; W&B timings), with the same per-call work (his eval episodes' judge calls: q3 ~1.3k completion tokens, q35
+~2.4–2.9k). The two controls of `probe_rows_v2_seeds216.json` add ~11,000 calls/h while they run (~3 h): ~87% then.
+8× H200 would need the owner to raise the GPU limit from 8 to 12; if more GPUs come, a second probe copy helps more.
+
+**Failure handling:**
+
+| what fails | what happens |
+|---|---|
+| a tunnel's ssh dies (link, host) | its loop reconnects (≤ 30 s between tries); the clients retry; the watch repairs a dead loop and authorizes the key again |
+| the probe server dies or hangs | the runs wait (the probe client retries forever); after 10 min down the watch restarts it on its instance (`serve`, the shas checked first), at most 3 times |
+| one judge engine dies | setup_vllm.sh starts it again alone (its log kept); the balancer sends its calls to the others meanwhile; judge calls retry forever |
+| an instance goes away | the watch starts a new one (once per server), moves its tunnel there and ends the old one; by hand: `restart-server ROLE --new-instance` |
+| a run fails | the supervisor starts it again with `--resume` from its last save (every 9 steps), after a backoff, up to 8 failed attempts |
+| a run aborts on a fatal monitor answer (a judge's 400, a probe 409/422) | the same: resumed from its last save; a repeat fails it after its attempts |
+| the RL machine's supervisor dies | the runs go on (sessions of their own); the watch starts a new supervisor, which takes them over |
+| this driver dies (pod restart, SIGTERM) | nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the RL machine powers off; `resume --out DIR` takes the batch back, `down --out DIR` ends it now |
+| an episode too long for the GPU | a 503 the client retries forever: the run stalls (the rehearsal measures where; Vlad's episodes reached 7.5k of the ~12k tokens that fit) |
+
+- By hand: `restart-server probe|judges --out DIR [--new-instance]`, `restart-run|stop-run RUN --out DIR`,
+  `sync|extend --out DIR` (a running driver takes them as requests within a minute), `down --out DIR` (stops the
+  runs, syncs, ends every machine and verifies), `watchdog --out DIR` (one check: extend and sync, or end a batch that
+  is over; for cron, or a hub scheduled job the owner approves).
+
+**The rehearsal's checklist** (`DIR/rehearsal.json`, each item ok or not): check_probe_server.py on the serving GPUs
+before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (`experiments/
+check_probe_long_episodes.py`); W&B in `jyudel-redwood-research`; `nobody` unable to read the keys' files or the
+supervisor's environment on the RL machine; the probe server stopped and restarted, a judge engine killed, each
+tunnel's ssh killed, with the runs waiting, not failing; a run killed after its step-0 save and resumed; every run
+done with no failed attempt; the per-step wall time and the probe queue's depth with every run at once; and the
+judge-consistency compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes per run and eval step of
+Vlad's seven local runs, ~5,600 calls, against the batch's judges) once that script is in the repo.
+
+**Known risks:**
+- **Long episodes:** the reader's attention bias is ~340 B × T² per episode (`whitebox/features.py`): ~49 GB at 12k
+  tokens, ~87 GB at 16k, against ~55 GB free per B200 beside the weights. An episode past ~12k tokens fails with out of
+  memory, which the server answers 503 and the client retries forever: that run stalls. Vlad's 72,145 valid eval
+  episodes reached 7,541 tokens (none above 8k), so it is unlikely in 90 steps; a policy pushed to evade a probe may
+  write longer. The server runs with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (less fragmentation, the same
+  arithmetic). Fixes, in whitebox/ (not changed here): attention in query chunks, so the bias is ~340 B × T × chunk;
+  and a status of its own for an out of memory at one episode, which the client would have to turn into a score
+  (e.g. 1.0, as a judge's parse error) rather than a retry: a non-retryable error alone only turns the stall into a
+  crash that the resume repeats. The post-hoc scorer (`eval_inkling_probes_on_runs.py`) has the same limit.
+- **Judge calls wait up to 7,200 s each** (`monitors/vllm.py`, `VLLM_TIMEOUT`, as Vlad's recorded calls). A 20-minute
+  read timeout would re-sample every call slower than that, which his calls were not, so it is not changed: the
+  tunnels' keepalives end a dead connection within ~30 s, and a hung engine is restarted by the watch.
+- **tinker's side** can't be pinned: Inkling-Small's serving may have changed since 2026-09-30.
+
+**Parity with Vlad's runs** (W&B `jyudel-redwood-research/terminal-env-inkling-small`):
+- **Code.** His batch ran on c30c466 (the rows of seeds 200–205, 208–211) and 4400bf0 (the controls 216–218, the
+  resumed 207); 214 on cebb41a, the resumed 206 and 215 on 1f3c1c5 and e8038b1. c30c466 → 4400bf0 changed configs only.
+  4400bf0 → HEAD changed nothing in `rl/` (`renderers.py` included) or in the judges (`monitors/`: only the new
+  `inkling_probe_monitor.py`); `envs/terminal_verifier.py` gained a docstring paragraph and `grid_key`/`prompt_grid`
+  (used by the analysis only); `experiment_config.py`, `run_experiment.py` and `backends/tinker_backend.py` gained the
+  `inkling_probe` monitor, `replay_env_options` (read only by it) and `init_from_tinker_ckpt` (off unless set). None of
+  it changes a run without those. The judge requests are his byte for byte: `rescore_terminal_judges.py`'s dry run
+  rebuilt every one of his seven local runs' recorded requests identically (temperature 1.0, max_tokens 16384,
+  thinking on, thinking_token_budget 12288, eval priority 1, a 7,200 s client timeout).
+- **Packages** (his runs' W&B requirements.txt vs uv.lock): tinker 0.29.1, tinker-cookbook 0.5.7 and tml-renderers 0.1.0
+  are the same. transformers 5.5.4 → 5.19.0, torch 2.12.0 → 2.14.1, tokenizers 0.22.2 → 0.23.3, safetensors 0.7.0 →
+  0.8.0, huggingface-hub 1.18.0 → 2.2.0 (and torchvision 0.29.1, new) changed, for the Inkling probes. None of them
+  renders the policy's prompts (tml-renderers' own o200k tokenizer does) or samples (tinker does); the judges' prompts
+  are rendered by vLLM's own environment. His resumed 206 and 215 already ran on transformers 5.18.0 / torch 2.14.1.
+- **Run settings:** his; early stop null where his judge rows had it (his controls and 214 had 16, stated per run in
+  the roster); `save_every` 9 instead of 999 (no effect on training: `tests/test_resume.py`).
+- **Judges:** the same engines, flags and models (HF main, unchanged since before his batch); vLLM 0.32.0 for his
+  unknown version; `--disable-uvicorn-access-log` and `--host 127.0.0.1` (logging and binding only); H200 NVL if no
+  H200 is offered (the same GH100 chip and 141 GB, PCIe, lower power); through SSH tunnels (latency only); a third of
+  his load. The rehearsal's judge-consistency compare measures what is left.
+- **The RL machine:** root, Ubuntu 24.04 (glibc 2.39, dash as /bin/sh), CPython 3.11.16, as his; 32 vCPUs for six runs
+  where his box had 112 for twelve plus the judges.
+- **W&B:** `WANDB_ENTITY=jyudel-redwood-research` (his key's default; Dennis's is `denizhan`).
+
+**The plumbing test** (`scripts/rl_batch.py tunnel-test`, 2026-10-23; no model, no vLLM, no tinker, no key on the GPU):
+a Nebius cpu-d3 2vcpu-8gb ($0.07/h) and a vast.ai 1× GTX 1660 S ($0.065/h, `up --provider vast` with a dummy HTTP
+server on 127.0.0.1:8178), the batch's own tunnel code between them.
+- The dummy reached from the Nebius VM through the tunnel 10 s after its loop started; the tunnel key ran no command
+  (`/bin/false`) and opened no other port ("administratively prohibited"); a killed ssh was replaced and the server
+  reachable again 8.6 s later; with the vast.ai host blackholed on the Nebius VM (`ip route add blackhole`), ssh
+  noticed after 37 s and the tunnel was back 11.6 s after the route was removed. Both machines ended and verified
+  gone. $0.04 for the three attempts of that day (the first found that vast.ai's authorized_keys ends without a
+  newline, fixed; the second was refused by the launcher's push check, the tree being dirty).
+- `experiment=probes-v2-rl` (23 characters) was accepted as a tag.
 
 ## Legacy: the Qwen3.5-4B runbook (superseded)
 
