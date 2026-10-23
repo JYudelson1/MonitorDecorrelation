@@ -201,6 +201,24 @@ def test_resume_a_crashed_run_from_its_last_save_every_state(dirs, crash_at, res
     assert load_resume_state(split)["state_checkpoint"] == load_resume_state(full)["state_checkpoint"]
 
 
+@pytest.mark.parametrize("save_every", [3, 2])  # not a multiple of eval_every (it waits for the eval), and one
+def test_save_every_changes_what_is_saved_not_the_training(dirs, save_every):
+    """The probe rows save a state every 9 steps where Vlad's rows saved at step 0 only (save_every 999): only the
+    saved states differ. Every train step, every sampled rollout, every eval and the final state are the same, with
+    evals in the background as on tinker."""
+    full, split = dirs
+    a = _run(full.name, 7, save_every=100, async_eval=True)
+    b = _run(split.name, 7, save_every=save_every, async_eval=True)
+    for f in ("metrics.jsonl", "rollouts.jsonl", "eval_metrics.jsonl", "eval_checkpoints.jsonl"):
+        assert [{k: v for k, v in r.items() if k != "path"} for r in _rows(full, f)] == \
+            [{k: v for k, v in r.items() if k != "path"} for r in _rows(split, f)], f
+    assert (a.w, a.opt) == (b.w, b.opt)
+    assert load_resume_state(full)["state_checkpoint"] == load_resume_state(split)["state_checkpoint"]
+    saved = sorted(p.name for p in (split / RESUME_STATES_DIR).iterdir())
+    assert saved == [f"step_{k:06d}.json" for k in range(0, 7, save_every)] + ["step_000007.json"]
+    assert sorted(p.name for p in (full / RESUME_STATES_DIR).iterdir()) == ["step_000000.json", "step_000007.json"]
+
+
 def test_resume_refusals(dirs):
     _, split = dirs
     _run(split.name, 3)

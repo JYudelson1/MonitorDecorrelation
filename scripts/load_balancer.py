@@ -159,7 +159,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--listen-port", type=int, required=True, help="port clients send requests to")
     parser.add_argument("--backend-ports", type=int, nargs="+", required=True, help="ports to route to")
-    parser.add_argument("--listen-host", default="0.0.0.0")
+    parser.add_argument("--listen-host", default="127.0.0.1",
+                        help="the address to listen on (default 127.0.0.1: clients on this machine, or an SSH tunnel "
+                             "to it; 0.0.0.0 opens it to every network the machine is on)")
     parser.add_argument("--backend-host", default="127.0.0.1")
     parser.add_argument("--backlog", type=int, default=16384, help="listen backlog (capped by net.core.somaxconn)")
     parser.add_argument("--report-every", type=float, default=60.0, help="seconds between stats lines; 0 = off")

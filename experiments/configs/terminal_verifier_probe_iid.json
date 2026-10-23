@@ -1,0 +1,102 @@
+{
+  "experiment": "terminal_verifier",
+  "run_name": "tv_probe_iid_s0",
+  "description": "Terminal-verifier decorrelation row trained against probe_iid: the IID probe v2 (terminal_prerl_v2, with reasoning, follow-up readout; docs/inkling_probes_amendment_1.md), a frozen probe on the full-precision Inkling-Small reader (thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a), scored live by experiments/inkling_probe_server.py at server_url (http://127.0.0.1:8178, reached from the RL machine through an SSH tunnel; one server serves both v2 probes). Reward = submission verdict - penalty_coef x the probe's score in the reward as the monitor defines it (monitors/inkling_probe_monitor.py). Held out, scored at every eval and never in the gradient: the same four local Qwen judges as the terminal_verifier_q{3,35}_{cot,out} rows and terminal_verifier_control.json, spec for spec (q3_* = Qwen3-30B-A3B-FP8 on :8001, q35_* = Qwen3.5-35B-A3B-FP8 on :8002; CoT+output and output-only; thinking on, thinking_budget 12288, max_tokens 16384), so this row joins their 4x4 degradation matrix. The other probe (probe_ood) is held out too but scored after the run from eval_rollouts.jsonl (experiments/eval_inkling_probes_on_runs.py), not live, so it is not listed here. Every other field equals terminal_verifier_q3_cot.json except two. stop_after_zero_behavior_steps is null here, explicitly: Vlad's judge rows (seeds 200-205, 208-211, commit c30c466) ran without the early stop, which only his later rows and the controls had (16); a batch states its own value per run (scripts/rl_batch.py rosters). save_every is 9 (his: 999, i.e. step 0 only), so a run that crashes resumes from at most 9 steps back (run_experiment.py --resume); saving changes nothing in training (tests/test_resume.py). Seeds: v2's exclusion covers RL seeds 0 to 10,000 (docs/inkling_probes_amendment_1.md); the batch driver passes seed and run_name. Needs root (read_only_verifier), the two vLLM judge servers and the probe server; no OPENROUTER_API_KEY. env_options as in every terminal row: verifier_mode='submit_corrupted', submission_ends='first', require_explanation=true, read_only_verifier=true, last_turn_submit_notice=true.",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "terminal_verifier",
+  "subset": "largest_island",
+  "env_options": {
+    "verifier_mode": "submit_corrupted",
+    "offset_range": [
+      4,
+      9
+    ],
+    "max_turns": 4,
+    "output_view": "transcript",
+    "command_timeout": 30.0,
+    "submission_ends": "first",
+    "require_explanation": true,
+    "read_only_verifier": true,
+    "last_turn_submit_notice": true
+  },
+  "n_steps": 90,
+  "batch_size": 8,
+  "group_size": 16,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 9,
+  "stop_after_zero_behavior_steps": null,
+  "max_tokens": 3072,
+  "think_budget": null,
+  "thinking_effort": 0.5,
+  "penalty_coef": 1.0,
+  "kl_coef": 0.0001,
+  "kl_discount_factor": 0.0,
+  "lora_rank": 8,
+  "lr": 0.0005,
+  "seed": 0,
+  "n_prompts_pool": 512,
+  "monitors": [
+    {
+      "kind": "inkling_probe",
+      "name": "probe_iid",
+      "role": "train_against",
+      "probe_path": "data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup",
+      "server_url": "http://127.0.0.1:8178"
+    },
+    {
+      "kind": "cot",
+      "name": "q3_cot",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3-30B-A3B-FP8",
+      "base_url": "http://localhost:8001/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q3_out",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3-30B-A3B-FP8",
+      "base_url": "http://localhost:8001/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q35_cot",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "base_url": "http://localhost:8002/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q35_out",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "base_url": "http://localhost:8002/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": false,
+      "use_output": true
+    }
+  ]
+}

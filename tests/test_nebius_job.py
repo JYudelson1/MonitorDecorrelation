@@ -2057,7 +2057,7 @@ class FakeHubGpu:
         n, ends = 9000 + len(FakeHubGpu.rows) + 1, time.time() + (FakeHubGpu.LIFETIME or kw["hours"] * 3600)
         FakeHubGpu.rows[n] = {"instance": n, "name": kw["name"], "state": "running", "gpus": o["gpus"], "gpu": o["gpu"],
                               "usd_per_hour": o["usd_per_hour"], "ended": None, "deadline": ends, "paused": False,
-                              "tags": kw["tags"], "purpose": kw["purpose"],
+                              "started": time.time(), "tags": kw["tags"], "purpose": kw["purpose"],
                               "ssh": {"direct": "ssh -p 40022 root@203.0.113.7",
                                       "proxy": "ssh -p 31234 root@ssh5.vast.ai"}}
         return {"instance": n, "usd_per_hour": o["usd_per_hour"], "hours": kw["hours"],
@@ -2072,6 +2072,12 @@ class FakeHubGpu:
         FakeHubGpu.calls.append(("end", instance))
         FakeHubGpu.rows[instance].update(ended=time.time(), state="exited")
         return {"instance": instance, "name": FakeHubGpu.rows[instance]["name"], "note": "ended"}
+
+    def extend(self, instance, hours):
+        FakeHubGpu.calls.append(("extend", instance, hours))
+        row = FakeHubGpu.rows[instance]
+        row["deadline"] = row["started"] + hours * 3600
+        return {"instance": instance, "name": row["name"], "deadline": row["deadline"]}
 
     def attach_key(self, instance):
         FakeHubGpu.calls.append(("attach", instance))
@@ -2698,3 +2704,227 @@ def test_vast_ledger_entries_are_recorded_but_not_counted(tmp_path, capsys, regi
     assert entries["md-vast-2"]["kind"] == "reserved" and not FakeNebius.clouds  # reap leaves it alone
     assert nj.main(["budget", "--budget-file", str(ledger)]) == 0
     assert "(vast.ai: not counted)" in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------- vast.ai: kept instances, servers
+
+
+def _up_args(tmp_path: Path, *extra: str) -> list[str]:
+    return ["up", *_vast_args(tmp_path), "--name", "md-srv", *extra]
+
+
+def test_vast_up_keeps_the_instance_with_its_server_running(tmp_path, monkeypatch, fake_hub, capsys):
+    """up --provider vast -- CMD: the instance set up, its server started as a step and waited for (its health check),
+    then kept: not ended, recorded as kept, its ledger entry left reserved for down to settle."""
+    seen = {}
+
+    def steps(remote, job, rec, check_vm=None):
+        seen.update(serve=job.serve, step=job.step, health=job.health, command=job.command,
+                    timeout=job.health_timeout, ends=job.ends)
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", steps)
+    ledger = _ledger(tmp_path, 0.0)
+    code = nj.main([*_up_args(tmp_path, "--health", "curl -sf http://127.0.0.1:8178/v1/meta", "--health-timeout",
+                              "600", "--budget-file", str(ledger)), "--", "python3 -m http.server 8178"])
+    assert code == 0
+    assert seen == {"serve": True, "step": "serve", "health": "curl -sf http://127.0.0.1:8178/v1/meta",
+                    "command": "python3 -m http.server 8178", "timeout": 600.0, "ends": FakeHubGpu.rows[9001]["deadline"]}
+    (row,) = FakeHubGpu.rows.values()
+    assert row["ended"] is None and not any(c[0] == "end" for c in FakeHubGpu.calls if isinstance(c, tuple))
+    rec = _vast_record(tmp_path)
+    assert rec["kept"] is True and rec["mode"] == "up" and rec["estimated_cost_usd"] is None
+    (entry,) = [e for e in json.loads(ledger.read_text())["entries"] if e.get("provider") == "vast"]
+    assert entry["kind"] == "reserved" and entry["kept"] is True and entry["provider"] == "vast"
+    out = capsys.readouterr().out
+    assert f"instance kept: {row['name']}" in out and "serve --provider vast" in out and "down --provider vast" in out
+
+
+def test_vast_up_ends_an_instance_whose_server_never_got_healthy(tmp_path, monkeypatch, fake_hub):
+    def steps(remote, job, rec, check_vm=None):
+        raise nj.InfraError("the server (serve) exited 1 before its health check passed")
+
+    monkeypatch.setattr(nj, "remote_steps", steps)
+    assert nj.main([*_up_args(tmp_path, "--health", "true"), "--", "false"]) == 2
+    (row,) = FakeHubGpu.rows.values()
+    assert row["ended"] and _vast_record(tmp_path)["teardown_verified"] is True and not _vast_record(tmp_path)["kept"]
+
+
+def test_vast_up_without_a_server_is_set_up_and_kept(tmp_path, fake_hub):
+    assert nj.main(_up_args(tmp_path)) == 0
+    (row,) = FakeHubGpu.rows.values()
+    assert row["ended"] is None and _vast_record(tmp_path)["kept"] is True
+
+
+@pytest.mark.parametrize("argv, error", [
+    (["--", "srv"], "give --health"),
+    (["--health", "true"], "give its command after --"),
+    (["--fetch", "results", "--health", "true", "--", "srv"], "fetches nothing"),
+    (["--step", "Bad Step", "--health", "true", "--", "srv"], "--step wants"),
+])
+def test_vast_up_refuses_what_a_kept_server_cannot_do(tmp_path, fake_hub, argv, error):
+    with pytest.raises(SystemExit, match=error):
+        nj.main([*_up_args(tmp_path), *argv])
+    assert not FakeHubGpu.started
+
+
+def test_nebius_up_takes_no_server_and_no_vast_flags(tmp_path, fake_cloud):
+    with pytest.raises(SystemExit, match="up takes no job command"):
+        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--", "srv"])
+    with pytest.raises(SystemExit, match="only with up --provider vast"):
+        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--health", "true"])
+    with pytest.raises(SystemExit, match="only with --provider vast"):
+        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--gpu", "B200"])
+
+
+def test_vast_up_dry_run_shows_the_server_its_health_check_and_that_it_is_kept(tmp_path, fake_hub, capsys):
+    assert nj.main([*_up_args(tmp_path, "--dry-run", "--health", "curl -sf http://127.0.0.1:8178/v1/meta"), "--",
+                    "python3 -m http.server 8178"]) == 0
+    out = capsys.readouterr().out
+    assert "== server 'serve' (detached" in out and 'echo $$ > "$HOME/nebius_job/serve.pid"' in out
+    assert "== health check (on the machine" in out and "== kept ==" in out and "== fetch" not in out
+    assert not FakeHubGpu.started
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_a_server_step_starts_is_healthy_restarts_and_stops_through_a_local_shell(tmp_path, monkeypatch):
+    """serve_step with the real scripts in a local shell: the server (a parent with a child in its own process group,
+    as setup_vllm.sh's engines are) starts and answers its health check; serving again stops all of it first (its
+    whole session) and starts a new one; stop_step stops that; a server that exits before it is healthy is an error."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    (home / "md").mkdir(parents=True)
+    out.mkdir()
+    r = LocalRemote(home)
+    monkeypatch.setattr(nj, "HEALTH_INTERVAL", 0.2)
+    server = ("echo $$ > srv.$$.pid; set -m; (sleep 300 & echo $! > child.pid; wait) & echo up > up.txt; "
+              "while :; do sleep 1; done")
+    job = nj.JobSpec(out=out, command=server, serve=True, health="test -s md/up.txt", health_timeout=30)
+    rec = nj.Record(mode="serve")
+    assert nj.serve_step(r, job, rec) == 0
+    first_child = int((home / "md" / "child.pid").read_text())
+    first_leader = int((home / nj.REMOTE_LOGS / "serve.pid").read_text())
+    assert not nj_ended(first_child) and os.getpgid(first_child) != os.getpgid(first_leader)  # a group of its own
+    (home / "md" / "up.txt").unlink()
+    assert nj.serve_step(r, job, rec) == 0  # a restart: everything of the first stopped, a new one up
+    assert _wait_ended(first_child) and _wait_ended(first_leader)
+    second = int((home / nj.REMOTE_LOGS / "serve.pid").read_text())
+    assert second != first_leader and not nj_ended(second)
+    said = nj.stop_step(r, "serve", grace=5)
+    assert "stopping serve: session" in said and _wait_ended(second)
+    assert "serve: not running" in nj.stop_step(r, "serve")
+    dying = nj.JobSpec(out=out, command="echo booting; exit 4", serve=True, health="false", health_timeout=30)
+    with pytest.raises(nj.InfraError, match="exited 4 before its health check passed"):
+        nj.serve_step(r, dying, rec)
+    assert (out / "serve.log").read_text().strip() == "booting"
+    slow = nj.JobSpec(out=out, command="sleep 60", serve=True, health="false", health_timeout=0.5)
+    with pytest.raises(nj.InfraError, match="not healthy after"):
+        nj.serve_step(r, slow, rec)
+    nj.stop_step(r, "serve", grace=5)
+
+
+def nj_ended(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    return stat.rsplit(")", 1)[-1].split()[0] in ("Z", "X")
+
+
+def _wait_ended(pid: int, timeout: float = 20.0) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if nj_ended(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_a_stale_pid_file_is_never_a_reason_to_kill(tmp_path):
+    """A <step>.pid naming a process that isn't the step's (its pid reused) stops nothing."""
+    home = tmp_path / "home"
+    (home / nj.REMOTE_LOGS).mkdir(parents=True)
+    other = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        (home / nj.REMOTE_LOGS / "serve.pid").write_text(f"{other.pid}\n")
+        assert "serve: not running" in nj.stop_step(LocalRemote(home), "serve", grace=2)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+def _kept_instance(tmp_path: Path, monkeypatch, ledger: Path | None = None) -> dict:
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    extra = ["--budget-file", str(ledger)] if ledger else []
+    assert nj.main(_up_args(tmp_path, *extra)) == 0
+    (row,) = FakeHubGpu.rows.values()
+    return row
+
+
+def test_down_vast_ends_a_kept_instance_verifies_it_and_settles_its_entry(tmp_path, monkeypatch, fake_hub, capsys):
+    ledger = _ledger(tmp_path, 0.0)
+    row = _kept_instance(tmp_path, monkeypatch, ledger)
+    row["started"] = time.time() - 1800  # it ran half an hour
+    assert nj.main(["down", "--provider", "vast", "--name", row["name"], "--budget-file", str(ledger)]) == 0
+    assert row["ended"] and ("end", row["instance"]) in FakeHubGpu.calls
+    (entry,) = [e for e in json.loads(ledger.read_text())["entries"] if e.get("provider") == "vast"]
+    assert entry["kind"] == "spent" and entry["usd"] == pytest.approx(row["usd_per_hour"] * 0.5, abs=0.01)
+    assert "verified: instance" in capsys.readouterr().out
+    assert nj.main(["down", "--provider", "vast", "--name", "md-nothing-like-it"]) == 0  # nothing to end: fine
+
+
+def test_extend_vast_moves_the_end_within_hub_gpus_limits(tmp_path, monkeypatch, fake_hub, capsys):
+    ledger = _ledger(tmp_path, 0.0)
+    row = _kept_instance(tmp_path, monkeypatch, ledger)  # 2 h from its start
+    name, price = row["name"], row["usd_per_hour"]
+    assert nj.main(["extend", "--provider", "vast", "--name", name, "--hours", "1.5"]) == 0  # sooner: nothing
+    assert not any(c[0] == "extend" for c in FakeHubGpu.calls if isinstance(c, tuple))
+    with pytest.raises(SystemExit, match="above the 72 h"):
+        nj.main(["extend", "--provider", "vast", "--name", name, "--hours", "80"])
+    FakeHubGpu.LIMITS["room_usd"] = price * 1.0  # room for one more hour only
+    with pytest.raises(SystemExit, match="left in any 24 hours"):
+        nj.main(["extend", "--provider", "vast", "--name", name, "--hours", "5"])
+    FakeHubGpu.LIMITS["room_usd"] = 500.0
+    assert nj.main(["extend", "--provider", "vast", "--name", name, "--hours", "6", "--budget-file", str(ledger)]) == 0
+    assert ("extend", row["instance"], 6.0) in FakeHubGpu.calls
+    assert row["deadline"] == pytest.approx(row["started"] + 6 * 3600)
+    (entry,) = [e for e in json.loads(ledger.read_text())["entries"] if e.get("provider") == "vast"]
+    assert entry["usd"] == round(price * 6, 2) and entry["hours"] == 6.0 and entry["kind"] == "reserved"
+    with pytest.raises(SystemExit, match="--provider vast only"):
+        nj.main(["extend", "--name", name, "--hours", "8"])
+
+
+def test_status_lists_the_live_instances_with_their_time_left(tmp_path, monkeypatch, fake_hub, capsys):
+    row = _kept_instance(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert nj.main(["status", "--provider", "vast"]) == 0
+    out = capsys.readouterr().out
+    assert row["name"] in out and "ssh -p 40022 root@203.0.113.7" in out and "(+2.00 h)" in out and "limits:" in out
+    assert nj.main(["status", "--provider", "vast", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["instance"] == row["instance"]
+    row["ended"] = time.time()
+    assert nj.main(["status", "--provider", "vast"]) == 0 and "no instances running" in capsys.readouterr().out
+
+
+def test_serve_on_a_kept_vast_instance_restarts_its_server(tmp_path, monkeypatch, fake_hub):
+    row = _kept_instance(tmp_path, monkeypatch)
+    seen = {}
+
+    class R(nj.Remote):
+        def run(self, command, **kw):
+            return subprocess.CompletedProcess([], 0, b"", b"")
+
+    monkeypatch.setattr(nj, "Remote", R)
+    monkeypatch.setattr(nj, "serve_step", lambda remote, job, rec, check_vm=None: seen.update(
+        host=remote.host, port=remote.port, step=job.step, command=job.command, ends=job.ends) or 0)
+    assert nj.main(["serve", "--provider", "vast", "--name", row["name"], "--out", str(tmp_path / "s"), "--health",
+                    "true", "--", "srv --again"]) == 0
+    assert seen == {"host": "root@203.0.113.7", "port": 40022, "step": "serve", "command": "srv --again",
+                    "ends": row["deadline"]}
+    assert json.loads((tmp_path / "s" / "job.json").read_text())["exit_code"] == 0
+    with pytest.raises(SystemExit, match="no live instance"):
+        nj.main(["serve", "--provider", "vast", "--name", "md-gone", "--out", str(tmp_path / "s2"), "--health",
+                 "true", "--", "srv"])
+    with pytest.raises(SystemExit, match="looks like a key"):
+        nj.main(["serve", "--provider", "vast", "--name", row["name"], "--out", str(tmp_path / "s3"), "--health",
+                 "true", "--env", "HF_TOKEN=hf_aaaaaaaaaaaaaaaaaaaaaaaa", "--", "srv"])
