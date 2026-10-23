@@ -2406,6 +2406,7 @@ def test_the_vast_bootstrap_falls_back_to_a_plain_directory(tmp_path, monkeypatc
         assert ("NO RAM DISK: the container may not mount a tmpfs (mount: /mnt/ram: permission denied.), so "
                 f"{tmp_path / 'ram'} is a plain directory on the instance's disk") in out
     assert (tmp_path / "ram").is_dir() and "uv 0.0.0 (fake)" in out and "memory: " in out
+    assert (home / ".no_auto_tmux").exists()  # vast.ai's images would start tmux at each ssh login
     uv_toml = (home / ".config" / "uv" / "uv.toml").read_text()
     assert uv_toml == 'python-preference = "only-managed"\n'  # once, however often it runs
 

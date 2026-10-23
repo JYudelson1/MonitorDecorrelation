@@ -2034,6 +2034,7 @@ def vast_teardown(hub: HubGpu, name: str, instance=None, timeout: float = 300) -
 
 def vast_bootstrap_script() -> str:
     """A vast.ai instance's bootstrap. It is a docker container: the login user is root, and there is no systemd.
+    - No tmux at ssh logins (vast.ai's images start one unless ~/.no_auto_tmux exists; the steps run in login shells).
     - A tmpfs at /mnt/ram if the container may mount one (80% of its memory limit), else a plain directory on the
       instance's disk, said so in the log: the ``--hf`` downloads and the job's /mnt/ram files then use that disk.
     - rsync (``--fetch``) and a C compiler (a locked package builds from source) if missing; uv, and only uv's own
@@ -2042,6 +2043,7 @@ def vast_bootstrap_script() -> str:
     return f"""set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 S=""; [ "$(id -u)" = 0 ] || S="sudo -n"
+touch "$HOME/.no_auto_tmux"  # vast.ai's images start tmux at each ssh login unless this file exists
 mkdir -p {RAM_DIR} 2>/dev/null || $S mkdir -p {RAM_DIR}
 mem=$(( $(awk '/^MemTotal:/ {{print $2}}' /proc/meminfo) * 1024 ))
 lim=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
