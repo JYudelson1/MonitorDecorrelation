@@ -95,8 +95,9 @@ flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it
 ``--offer``, …) without it.
 - The offer: the cheapest of ``hub-gpu offers`` for ``--gpu`` × ``--gpus`` with ``--disk-gib`` of disk whose driver runs
   CUDA ``--min-cuda`` (default 13.0: the locked torch is a CUDA 13.0 build, which also rules out GPUs older than
-  Turing), under ``--max-price`` (USD/h for the whole instance); or ``--offer ID``. If its start fails, the next (three
-  in all). While none qualifies, the offers are checked again every 15 minutes for ``--wait-hours``.
+  Turing), under ``--max-price`` (USD/h for the whole instance); or ``--offer ID``. hub-gpu lists offers that its start
+  then refuses as no longer rentable: after a refusal the offers are listed again and the cheapest one not yet tried is
+  started, 8 tries in all. While none qualifies, the offers are checked again every 15 minutes for ``--wait-hours``.
 - Before the start: its worst case, price × ``--hours``, must fit in what ``hub-gpu limits`` leaves of the project's 24
   hours, and under ``--max-cost``; ``--hours`` must be within its timed runs' limit (72 h), the GPUs within its count.
 - The start is timed (``hub-gpu start --hours``): vast.ai destroys the instance at its end, with what is on it. Its name
@@ -1742,7 +1743,7 @@ VAST_NAME = re.compile(r"[a-z0-9-]{1,24}")  # hub-gpu's names: lowercase letters
 VAST_MAX_TAGS = 8  # hub-gpu's, of which the launcher takes two (launcher=, commit=)
 VAST_MIN_CUDA = 13.0  # the locked torch is a CUDA 13.0 build: a driver with an older CUDA can't run it
 VAST_RESERVE_MINUTES = 30.0  # before the instance's end, for the fetch (at most a quarter of --hours)
-VAST_STARTS = 3  # offers tried in turn when a start fails (the offer was taken meanwhile)
+VAST_STARTS = 8  # offers tried in turn when a start is refused: hub-gpu lists offers it then calls not rentable
 VAST_DEAD = {"exited", "stopped", "offline", "error", "failed", "destroyed", "deleted", "ended", "inactive"}
 # GPUs before Turing (compute capability < 7.5: Maxwell, Pascal, Volta), by hub-gpu's names. Their drivers may run CUDA
 # 13.0, but CUDA 13 builds such as the locked torch have no kernels for them (2026-10-23: a GTX 1080 was the cheapest
@@ -2782,11 +2783,12 @@ def vast_run(args, cmd: list[str]) -> int:
     return vast_attempt(args, HubGpu(args.hub_gpu), name, job, code, budget)
 
 
-def vast_survey(hub: HubGpu, args, disk: int) -> tuple[list[dict], list[dict]]:
-    """The offers for the instance and the ones to try, in order: the cheapest few that qualify, or ``--offer``."""
+def vast_survey(hub: HubGpu, args, disk: int, tried: set = frozenset()) -> tuple[list[dict], list[dict]]:
+    """The offers for the instance and the ones to try, in order: those that qualify, cheapest first, but the
+    ``tried`` ones; or ``--offer``."""
     offers = hub.offers(gpu=args.gpu, gpus=args.gpus, disk_gb=disk, max_price=args.max_price)
     if args.offer is None:
-        return offers, vast_candidates(offers, args.min_cuda, args.max_price)[:VAST_STARTS]
+        return offers, [o for o in vast_candidates(offers, args.min_cuda, args.max_price) if o["offer"] not in tried]
     mine = next((o for o in offers if o["offer"] == args.offer), None)
     if mine is None:
         raise SystemExit(f"--offer {args.offer} is not among the current offers for {args.gpus}× "
@@ -2866,12 +2868,22 @@ def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, 
         if why := vast_gone(row):
             raise VmStopped(why)
 
+    tried: set = set()
     try:
-        for k, offer in enumerate(order):
+        while started is None and len(tried) < VAST_STARTS:
+            if tried:  # refused: the listing goes stale fast, so look again (without the refused offers)
+                if args.offer is not None:
+                    break
+                offers, order = vast_survey(hub, args, disk, tried)
+                if not order:
+                    log("no other offer qualifies")
+                    break
+            offer = order[0]
             price = float(offer["usd_per_hour"])
-            if k and (problem := limits_problem(lim, args.gpus, args.hours, price * args.hours, args.max_cost)):
+            if tried and (problem := limits_problem(lim, args.gpus, args.hours, price * args.hours, args.max_cost)):
                 log(f"not trying offer {offer['offer']}: {problem}")
                 break
+            tried.add(offer["offer"])
             log(f"starting {name}: offer {offer['offer']}, {offer.get('gpus')}× {offer.get('gpu')} in "
                 f"{offer.get('where')} at ${price:.3f}/h, {disk} GB of disk, for {args.hours:g} h (then destroyed)")
             rec.region = offer.get("where")
@@ -2885,7 +2897,6 @@ def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, 
                                     disk_gb=disk, image=args.image)
                 rec.creates[-1]["minutes"] = round((time.time() - t) / 60, 2)
                 rec.vast["offer"] = offer
-                break
             except InfraError as e:
                 log(f"start failed: {e}")
                 rec.errors.append(f"start of offer {offer['offer']}: {e}")

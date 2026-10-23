@@ -2245,18 +2245,25 @@ def test_vast_run_fetches_ends_verifies_and_records(tmp_path, monkeypatch, fake_
 
 
 def test_vast_falls_back_to_the_next_offer_and_takes_a_given_one(tmp_path, fake_hub):
-    FakeHubGpu.FAIL_START = {103}  # taken between the listing and the start
+    """hub-gpu lists offers that its start then refuses (2026-10-23: the three cheapest, in a row). After a refusal the
+    offers are listed again, and the cheapest one not tried yet is started."""
+    FakeHubGpu.FAIL_START = {103}
     assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == 0
     assert [s["offer"] for s in FakeHubGpu.started] == [103, 101]
+    assert FakeHubGpu.calls.count("offers") == 2  # looked again after the refusal
     rec = _vast_record(tmp_path)
     assert [c["offer"] for c in rec["creates"]] == [103, 101] and "no longer available" in rec["creates"][0]["error"]
     assert all(r["ended"] for r in FakeHubGpu.rows.values())
+    FakeHubGpu.FAIL_START = {101, 103, 104}  # every qualifying offer refused: each tried once, nothing left behind
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_INFRA
+    assert [s["offer"] for s in FakeHubGpu.started[2:]] == [103, 101, 104] and len(FakeHubGpu.rows) == 1
+    FakeHubGpu.FAIL_START = set()
     assert nj.main(["run", *_vast_args(tmp_path, "--offer", "104"), "--", "true"]) == 0
     assert FakeHubGpu.started[-1]["offer"] == 104
-    for offer, why in (("999", "not among the current offers"), ("102", "CUDA 12.2")):
+    for offer, why in (("999", "not among the current offers"), ("102", "CUDA 12.2"), ("105", "older than Turing")):
         with pytest.raises(SystemExit, match=why):
             nj.main(["run", *_vast_args(tmp_path, "--offer", offer), "--", "true"])
-    assert len(FakeHubGpu.started) == 3
+    assert len(FakeHubGpu.started) == 6
 
 
 @pytest.mark.parametrize("sig", SIGNALS)
