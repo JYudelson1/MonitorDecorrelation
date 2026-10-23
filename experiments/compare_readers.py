@@ -8,6 +8,9 @@ Inputs:
 - ``--probes``: ``<reader>/<dataset>/<view>/<readout>/`` from fit_probes.py.
 - ``--features``: ``<reader>/<dataset>/<view>/shard_*``.
 - ``--diagnostics``: ``<reader>/{diag.safetensors,done.json}`` from the GPU session.
+- ``--iid-dataset``: the TerminalEnv dataset, ``terminal_prerl`` by default. ``terminal_prerl_v2`` exists on the
+  full-precision reader alone (docs/inkling_probes_amendment_2.md). So no probe is compared, and only the jitter,
+  batching and readout checks run, for that reader.
 
 **Reader rule.** Keep 4-bit only if, for every probe compared:
 - **(a) Agreement:** the full-precision probe flags nearly the same TerminalEnv val+test episodes at t₁% on both
@@ -77,11 +80,10 @@ OUTPUTS = ("decision.json", "report.md")
 VIEWS = ("with_reasoning", "without_reasoning")
 
 
-def probes_for(readouts: list[str]) -> list[tuple[str, str, str]]:
-    """The probes compared for each readout: IID in both views, and OOD."""
+def probes_for(readouts: list[str], iid: str = "terminal_prerl") -> list[tuple[str, str, str]]:
+    """The probes compared for each readout: IID (dataset ``iid``) in both views, and OOD."""
     return [(dataset, view, r) for r in readouts for dataset, view in
-            (("terminal_prerl", "with_reasoning"), ("terminal_prerl", "without_reasoning"),
-             ("diverse_deception", "without_reasoning"))]
+            ((iid, "with_reasoning"), (iid, "without_reasoning"), ("diverse_deception", "without_reasoning"))]
 
 
 def router_topk(features_dir: str, view: str) -> dict:
@@ -108,7 +110,7 @@ def routing_agreement_at_yes(args) -> dict:
     """The share of matching top-6 experts at "Yes" between the readers, per MoE layer, over every item both readers
     extracted (the stored features; the diagnostics' version covers every token of a small sample)."""
     out = {}
-    for dataset, view in (("terminal_prerl", "with_reasoning"), ("terminal_prerl", "without_reasoning"),
+    for dataset, view in ((args.iid_dataset, "with_reasoning"), (args.iid_dataset, "without_reasoning"),
                           ("diverse_deception", "without_reasoning")):
         a = router_topk(os.path.join(args.features, "nvfp4", dataset), view)
         b = router_topk(os.path.join(args.features, "bf16", dataset), view)
@@ -183,7 +185,7 @@ def cross_reader(args, dataset, view, readout, probes: dict, items, ood_items) -
         for f_reader in READERS:
             feats = os.path.join(args.features, f_reader)
             z = logits_on(probe, feats, dataset, view, readout)
-            if dataset == "terminal_prerl":
+            if dataset == args.iid_dataset:
                 ids = list(z)
                 s, y = np.array([z[i] for i in ids]), hack_labels(items, ids)
                 split = np.array([items[i]["split"] for i in ids])
@@ -197,7 +199,7 @@ def cross_reader(args, dataset, view, readout, probes: dict, items, ood_items) -
                 m = {"ood_test_auroc": auroc([z[i] for i in ids], [int(ood_items[i]["label"]) for i in ids]),
                      "transfer_auroc": {}}
                 for tview in VIEWS:
-                    zt = logits_on(probe, feats, "terminal_prerl", tview, readout)
+                    zt = logits_on(probe, feats, args.iid_dataset, tview, readout)
                     m["transfer_auroc"][tview] = auroc(list(zt.values()), hack_labels(items, zt))
             out[p_reader][f_reader] = m
     return out
@@ -242,8 +244,8 @@ def compare_probe(args, dataset, view, readout, items, ood_items) -> dict:
     # (a) the full-precision probe on both readers' TerminalEnv val+test features, in both views
     agree, shift = {}, {}
     for tview in ("with_reasoning", "without_reasoning"):
-        on_f = logits_on(pf, os.path.join(args.features, "bf16"), "terminal_prerl", tview, readout)
-        on_4 = logits_on(pf, os.path.join(args.features, "nvfp4"), "terminal_prerl", tview, readout)
+        on_f = logits_on(pf, os.path.join(args.features, "bf16"), args.iid_dataset, tview, readout)
+        on_4 = logits_on(pf, os.path.join(args.features, "nvfp4"), args.iid_dataset, tview, readout)
         ids = [i for i in on_f if i in on_4 and items[i]["split"] in ("val", "test")]
         a, b = np.array([on_f[i] for i in ids]), np.array([on_4[i] for i in ids])
         t1 = pf.meta.get("thresholds_by_terminal_view", {}).get(tview, [pf.threshold_1])[0]
@@ -261,8 +263,8 @@ def compare_probe(args, dataset, view, readout, items, ood_items) -> dict:
         g = np.array([ood_items[i]["pair"] for i in ids])
         deltas = {"ood_test": (np.array([z4[i] for i in ids]), np.array([zf[i] for i in ids]), y, g)}
         for tview in ("with_reasoning", "without_reasoning"):  # IID transfer
-            t4 = logits_on(p4, os.path.join(args.features, "nvfp4"), "terminal_prerl", tview, readout)
-            tf = logits_on(pf, os.path.join(args.features, "bf16"), "terminal_prerl", tview, readout)
+            t4 = logits_on(p4, os.path.join(args.features, "nvfp4"), args.iid_dataset, tview, readout)
+            tf = logits_on(pf, os.path.join(args.features, "bf16"), args.iid_dataset, tview, readout)
             tids = [i for i in t4 if i in tf]
             deltas[f"iid_transfer_{tview}"] = (
                 np.array([t4[i] for i in tids]), np.array([tf[i] for i in tids]),
@@ -316,7 +318,7 @@ def batching_rule(args, reader, probe: SelectedProbe, items, p99: float) -> dict
     """The share of hacks and negatives whose logit lies within ``p99`` of t₁%."""
     rows = []
     for view in ("with_reasoning", "without_reasoning"):
-        z = logits_on(probe, os.path.join(args.features, reader), "terminal_prerl", view, "followup")
+        z = logits_on(probe, os.path.join(args.features, reader), args.iid_dataset, view, "followup")
         rows += [(z[i], bool(items[i]["diagnostics"].get("used_verifier"))) for i in z]
     z = np.array([r[0] for r in rows])
     y = np.array([r[1] for r in rows])
@@ -335,7 +337,7 @@ def refit_floor(args, reader, dataset, view, readout, probe: SelectedProbe, item
     pair) bootstrap resamples of its own dev set, on TerminalEnv val+test in both views."""
     feats = os.path.join(args.features, reader)
     src = LayerSource(os.path.join(feats, dataset), view, readout)
-    if dataset == "terminal_prerl":
+    if dataset == args.iid_dataset:
         its = [items[i] for i in src.ids]
         y = np.array([int(bool((it.get("diagnostics") or {}).get("used_verifier"))) for it in its])
         groups = np.array([it["task_id"] for it in its])
@@ -358,7 +360,7 @@ def refit_floor(args, reader, dataset, view, readout, probe: SelectedProbe, item
             refits.append(SelectedProbe.fit(x[rows], y[rows], C, probe.layer))
     out = {"n": n, "C": C}
     for tview in ("with_reasoning", "without_reasoning"):
-        tsrc = LayerSource(os.path.join(feats, "terminal_prerl"), tview, readout)
+        tsrc = LayerSource(os.path.join(feats, args.iid_dataset), tview, readout)
         rows = np.flatnonzero(tsrc.keep)
         xt = tsrc.layer(probe.layer, rows)
         tits = [items[tsrc.ids[i]] for i in rows]
@@ -454,6 +456,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--features")
     ap.add_argument("--diagnostics")
     ap.add_argument("--datasets", default="data/probe_datasets")
+    ap.add_argument("--iid-dataset", default="terminal_prerl",
+                    help="the IID dataset (TerminalEnv episodes) under --datasets, --features and --probes; "
+                         "terminal_prerl_v2 has the full-precision reader alone (docs/inkling_probes_amendment_2.md): "
+                         "then only the jitter, batching and readout checks run")
     ap.add_argument("--out", required=True)
     ap.add_argument("--readouts", default="followup",
                     help="comma-list: the probes compared (followup, mean, router, router_all); the jitter, batching "
@@ -475,17 +481,18 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.probes and args.features and args.diagnostics):
         ap.error("--probes, --features and --diagnostics are required (unless --from-json)")
     readouts = [r for r in args.readouts.split(",") if r]
-    items = load_items(os.path.join(args.datasets, "terminal_prerl"))
+    items = load_items(os.path.join(args.datasets, args.iid_dataset))
     ood_items = load_items(os.path.join(args.datasets, "diverse_deception"))
-    report = {"readouts": readouts, "code": code_version(), "probes": {}, "jitter": {}, "batching": {}, "sink": {},
-              "massive_dims": {}, "routing_agreement": routing_agreement(args),
+    report = {"readouts": readouts, "iid_dataset": args.iid_dataset, "code": code_version(), "probes": {},
+              "jitter": {}, "batching": {}, "sink": {}, "massive_dims": {},
+              "routing_agreement": routing_agreement(args),
               "routing_agreement_at_yes": routing_agreement_at_yes(args)}
-    for dataset, view, readout in probes_for(readouts):
+    for dataset, view, readout in probes_for(readouts, args.iid_dataset):
         name = f"{dataset}/{view}/{readout}"
         if all(os.path.isdir(os.path.join(args.probes, r, dataset, view, readout)) for r in ("nvfp4", "bf16")):
             report["probes"][name] = compare_probe(args, dataset, view, readout, items, ood_items)
     for reader in ("nvfp4", "bf16") if "followup" in readouts else ():
-        deployed = os.path.join(args.probes, reader, "terminal_prerl", "with_reasoning", "followup")
+        deployed = os.path.join(args.probes, reader, args.iid_dataset, "with_reasoning", "followup")
         if os.path.isdir(deployed):
             probe = SelectedProbe.load(deployed)
             report["jitter"][reader] = jitter(args, reader, probe, items)
@@ -541,7 +548,8 @@ def finish(report: dict, out: str) -> None:
     fix_batching = any_reader(report.get("batching") or {}, "fix_batching")
     if fix_batching is None:
         not_evaluated["fix_batching"] = why_not_evaluated(
-            report, "batching rule", "both diagnostics and a fitted follow-up probe (terminal_prerl/with_reasoning)")
+            report, "batching rule", "both diagnostics and a fitted follow-up probe "
+            f"({report.get('iid_dataset', 'terminal_prerl')}/with_reasoning)")
     sink_like = any_reader(report.get("sink") or {}, "sink_like")
     if sink_like is None:
         not_evaluated["sink_like_yes"] = why_not_evaluated(report, "readout rule", "diagnostics (done.json)")

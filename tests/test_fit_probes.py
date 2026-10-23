@@ -199,11 +199,11 @@ def test_selection_prefers_smaller_c_within_one_se():
     assert auroc(base, y) > 0.7
 
 
-def _write_diagnostics(folder, data, rng, per_class=4, ood_pairs=3):
+def _write_diagnostics(folder, data, rng, per_class=4, ood_pairs=3, iid="terminal_prerl"):
     """One reader's diagnostics files (whitebox/diagnostics.py), sampled as pick_sample does: TerminalEnv train hacks
-    and non-hacks in both views, then OOD train pairs. One-at-a-time readouts are the batched ones plus a little
-    noise."""
-    terminal = [json.loads(line) for line in open(data / "terminal_prerl" / "items.jsonl")]
+    and non-hacks in both views (from dataset ``iid``), then OOD train pairs. One-at-a-time readouts are the batched
+    ones plus a little noise."""
+    terminal = [json.loads(line) for line in open(data / iid / "items.jsonl")]
     ood = [json.loads(line) for line in open(data / "diverse_deception" / "items.jsonl")]
     train = [it for it in terminal if it["split"] == "train"]
     iid = [it for it in train if it["label"]][:per_class] + [it for it in train if not it["label"]][:per_class]
@@ -389,6 +389,64 @@ def test_compare_readers_applies_the_reader_rule(tmp_path):
         (tmp_path / "rerendered_old_mean" / "report.md").read_text()
 
 
+def test_compare_readers_on_the_full_precision_reader_alone_for_v2(tmp_path):
+    """docs/inkling_probes_amendment_2.md: v2 has only the full-precision reader, so ``--iid-dataset
+    terminal_prerl_v2`` compares no probes, and the batching rule's numbers come from the v2 probe on the v2 features
+    and the full-precision diagnostics, as they came from the 4-bit ones for v1."""
+    import shutil
+
+    from monitordecorrelation.whitebox.probe_fit import LayerSource
+
+    data, feats = make_world(tmp_path)
+    readers = tmp_path / "readers"  # <reader>/<dataset>: the full-precision reader alone
+    (readers / "bf16").mkdir(parents=True)
+    for root, dest in ((data, data), (feats, readers / "bf16")):
+        shutil.move(str(root / "terminal_prerl"), str(dest / "terminal_prerl_v2"))
+    for name in ("diverse_deception", "terminal_concealed"):
+        shutil.move(str(feats / name), str(readers / "bf16" / name))
+    (readers / "bf16" / "terminal_prerl_v2" / "index.json").write_text(json.dumps(
+        {"reader": {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"},
+         "max_batch_tokens": 1}))
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "bf16",
+                         "--features", str(readers / "bf16"), "--datasets", str(data), "--out",
+                         str(tmp_path / "probes" / "bf16"), "--repeats", "1", "--jobs", "2", "--readouts", "followup",
+                         "--probes", "iid", "--skip-baselines", "--skip-sensitivity", "--iid-dataset",
+                         "terminal_prerl_v2"], capture_output=True, text=True, cwd=REPO, timeout=1800)
+    assert cp.returncode == 0, cp.stderr[-3000:]
+    rng = np.random.default_rng(7)
+    _write_diagnostics(tmp_path / "diagnostics" / "bf16", data, rng, iid="terminal_prerl_v2")
+    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "compare_readers.py"),
+                         "--probes", str(tmp_path / "probes"), "--features", str(readers),
+                         "--diagnostics", str(tmp_path / "diagnostics"), "--datasets", str(data),
+                         "--iid-dataset", "terminal_prerl_v2", "--out", str(tmp_path / "compare")],
+                        capture_output=True, text=True, cwd=REPO, timeout=1800)
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    report = json.loads((tmp_path / "compare" / "decision.json").read_text())
+    assert report["iid_dataset"] == "terminal_prerl_v2" and report["probes"] == {}
+    assert set(report["jitter"]) == {"bf16"} and set(report["batching"]) == {"bf16"}
+    # the same numbers from the v2 probe, the full-precision diagnostics and the v2 features of both views
+    from safetensors.torch import load_file
+
+    probe = SelectedProbe.load(str(tmp_path / "probes" / "bf16" / "terminal_prerl_v2" / "with_reasoning" / "followup"))
+    diag = load_file(str(tmp_path / "diagnostics" / "bf16" / "diag.safetensors"))
+    a, b = (probe.logit(diag[k][:, probe.layer].double().numpy()) for k in ("followup_batched", "followup_alone"))
+    p99 = float(np.percentile(np.abs(a - b), 99))
+    assert abs(report["jitter"]["bf16"]["dlogit_p99"] - p99) < 1e-9
+    items = {json.loads(line)["id"]: json.loads(line) for line in open(data / "terminal_prerl_v2" / "items.jsonl")}
+    z, y = [], []
+    for view in ("with_reasoning", "without_reasoning"):
+        src = LayerSource(str(readers / "bf16" / "terminal_prerl_v2"), view, "followup")
+        rows = np.flatnonzero(src.keep)
+        z += list(probe.logit(src.layer(probe.layer, rows)))
+        y += [bool(items[src.ids[i]]["diagnostics"]["used_verifier"]) for i in rows]
+    near, y = np.abs(np.array(z) - probe.threshold_1) <= p99, np.array(y)
+    batching = report["batching"]["bf16"]
+    assert abs(batching["near_threshold_hacks"] - near[y].mean()) < 1e-12
+    assert abs(batching["near_threshold_negatives"] - near[~y].mean()) < 1e-12
+    decision = report["decision"]
+    assert decision["fix_batching"] == batching["fix_batching"] and decision["reader"].startswith("undecided")
+
+
 def _compare_readers():
     import importlib.util
 
@@ -551,8 +609,9 @@ def test_learning_curves_run_on_synthetic_probes(tmp_path):
                   "--out", str(tmp_path / "curves")])
 
 
-def test_an_iid_dataset_other_than_terminal_prerl_fits_under_the_amendment(tmp_path):
-    """--iid-dataset terminal_prerl_v2 reads and writes that dataset only, and its probes record the amendment."""
+def test_an_iid_dataset_other_than_terminal_prerl_fits_under_the_amendments(tmp_path):
+    """--iid-dataset terminal_prerl_v2 reads and writes that dataset only, and its probes record both amendments.
+    Amendment 2 fixes the features (full precision, one episode per forward): others are refused before any fit."""
     import hashlib
     import shutil
 
@@ -560,16 +619,27 @@ def test_an_iid_dataset_other_than_terminal_prerl_fits_under_the_amendment(tmp_p
     for root in (data, feats):
         shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
     out = tmp_path / "probes"
-    cp = subprocess.run([sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic",
-                         "--features", str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1",
-                         "--jobs", "2", "--readouts", "followup", "--probes", "iid", "--skip-sensitivity",
-                         "--iid-dataset", "terminal_prerl_v2"],
-                        capture_output=True, text=True, cwd=REPO, timeout=1800)
+    cmd = [sys.executable, os.path.join(REPO, "experiments", "fit_probes.py"), "--reader", "synthetic", "--features",
+           str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1", "--jobs", "2", "--readouts",
+           "followup", "--probes", "iid", "--skip-sensitivity", "--iid-dataset", "terminal_prerl_v2"]
+    index = feats / "terminal_prerl_v2" / "index.json"
+    reader = {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"}
+    for wrong in ({"reader": {**reader, "loader": "nvfp4"}, "max_batch_tokens": 1},
+                  {"reader": reader, "max_batch_tokens": 65536}, {}):
+        index.write_text(json.dumps(wrong))
+        cp = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, timeout=600)
+        assert cp.returncode == 2 and "amendment_2" in cp.stderr and not out.exists(), cp.stderr[-2000:]
+    index.write_text(json.dumps({"reader": {**reader, "path": "/mnt/ram/Inkling-Small", "dtype": "torch.bfloat16"},
+                                 "max_batch_tokens": 1}))
+    cp = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, timeout=1800)
     assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
     assert not (out / "terminal_prerl").exists()
-    with open(os.path.join(REPO, "docs", "inkling_probes_amendment_1.md"), "rb") as fh:
-        amendment = hashlib.sha256(fh.read()).hexdigest()
+    shas = {}
+    for n in (1, 2):
+        with open(os.path.join(REPO, "docs", f"inkling_probes_amendment_{n}.md"), "rb") as fh:
+            shas[n] = hashlib.sha256(fh.read()).hexdigest()
     for view in ("with_reasoning", "without_reasoning"):
         meta = json.loads((out / "terminal_prerl_v2" / view / "followup" / "meta.json").read_text())
-        assert meta["dataset"] == "terminal_prerl_v2" and meta["amendment_sha256"] == amendment
+        assert meta["dataset"] == "terminal_prerl_v2" and meta["amendment_sha256"] == shas[1]
+        assert meta["amendment_2_sha256"] == shas[2] and meta["reader_info"]["revision"] == reader["revision"]
         assert "prereg_sha256" in meta

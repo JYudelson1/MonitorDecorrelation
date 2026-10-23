@@ -7,8 +7,12 @@
 ``hf buckets sync hf://buckets/probemaxxing/inkling-probes/features/nvfp4 FEATURES/nvfp4 --exclude "*/full/*"``.
 
 **Probes:**
-- **IID** (``terminal_prerl``): {with, without reasoning} × ``--readouts``. Label ``used_verifier``. Dev is
-  train ∪ val, grouped by task.
+- **IID** (``--iid-dataset``, default ``terminal_prerl``): {with, without reasoning} × ``--readouts``. Label
+  ``used_verifier``. Dev is train ∪ val, grouped by task.
+  - ``terminal_prerl_v2``, or any other IID dataset, is fitted under docs/inkling_probes_amendment_1.md and
+    docs/inkling_probes_amendment_2.md, whose sha256s its probes record.
+  - Amendment 2 fixes its features: the full-precision reader (``V2_READER``), one episode per forward. Features
+    whose index.json says otherwise are refused before any fitting.
 - **OOD** (``diverse_deception``): ``--readouts``. Label: deceptive. Dev is train, grouped by pair and stratified by
   source.
 
@@ -54,14 +58,30 @@ PLAN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "inkling_probes_preregistration.md")
 
 
-def amendment_sha() -> str | None:
-    """sha256 of docs/inkling_probes_amendment_1.md, which the IID probe v2 is fitted under (it changes only where the
-    IID episodes come from); recorded next to ``prereg_sha256`` by every probe not fitted on terminal_prerl."""
-    path = os.path.join(os.path.dirname(PLAN), "inkling_probes_amendment_1.md")
+def amendment_sha(name: str = "inkling_probes_amendment_1.md") -> str | None:
+    """sha256 of docs/``name``, an amendment the IID probe v2 is fitted under, recorded next to ``prereg_sha256`` by
+    every probe not fitted on terminal_prerl. Amendment 1 (the default) changes where the IID episodes come from;
+    amendment 2 the reader and batching of their features."""
+    path = os.path.join(os.path.dirname(PLAN), name)
     if not os.path.exists(path):
         return None
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
+
+
+V2_READER = {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"}
+"""The reader of the v2 features (docs/inkling_probes_amendment_2.md): full-precision Inkling-Small, the reader every
+v1 probe was fitted on."""
+
+
+def amendment_2_problems(index: dict) -> list[str]:
+    """Why features with this index.json can't be fitted under amendment 2 (empty if they can). The amendment fixes
+    the reader (``V2_READER``) and one episode per forward pass (``max_batch_tokens`` 1)."""
+    reader = index.get("reader") or {}
+    problems = [f"reader {k} {reader.get(k)!r}, not {v!r}" for k, v in V2_READER.items() if reader.get(k) != v]
+    if index.get("max_batch_tokens") != 1:
+        problems.append(f"max_batch_tokens {index.get('max_batch_tokens')!r}, not 1 (one episode per forward)")
+    return problems
 
 
 def prereg_sha() -> str | None:
@@ -442,7 +462,8 @@ def main() -> int:
     ap.add_argument("--datasets", default="data/probe_datasets", help="folder with the dataset folders")
     ap.add_argument("--iid-dataset", default="terminal_prerl",
                     help="the IID dataset (TerminalEnv episodes) under --datasets and --features: terminal_prerl, or "
-                         "terminal_prerl_v2 (docs/inkling_probes_amendment_1.md, whose sha256 its probes record)")
+                         "terminal_prerl_v2 (docs/inkling_probes_amendment_1.md and _2.md, whose sha256s its probes "
+                         "record; its features must be full precision, one episode per forward)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--readouts", default="followup,mean",
                     help="comma-list of followup, followup_prev, mean, and the exploratory router readouts: router "
@@ -471,12 +492,16 @@ def main() -> int:
     concealed = dataset_items(args, "terminal_concealed") \
         if os.path.isdir(os.path.join(args.datasets, "terminal_concealed")) else None
     index = features_index(args, args.iid_dataset)
+    if args.iid_dataset != "terminal_prerl" and amendment_2_problems(index):
+        ap.error(f"{args.iid_dataset}'s features aren't the ones docs/inkling_probes_amendment_2.md fixes: "
+                 f"{'; '.join(amendment_2_problems(index))} (their index.json)")
     provenance = {"reader": args.reader, "reader_info": index.get("reader"), "feature_format": index.get("feature_format"),
                   "versions": index.get("versions"), "prereg_sha256": prereg_sha(), "fitted_utc": time.strftime(
                       "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "c_grid": list(C_GRID), "repeats": args.repeats,
                   "code": code, "features_code": index.get("code")}
     if args.iid_dataset != "terminal_prerl":
         provenance["amendment_sha256"] = amendment_sha()
+        provenance["amendment_2_sha256"] = amendment_sha("inkling_probes_amendment_2.md")
     summary = {}
     if "iid" in args.probes:
         for view in ("with_reasoning", "without_reasoning"):
