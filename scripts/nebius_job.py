@@ -94,9 +94,9 @@ billed to the account the owner bills this project to, within the limits the own
 flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it, its own (``--gpu``, ``--gpus``,
 ``--offer``, …) without it.
 - The offer: the cheapest of ``hub-gpu offers`` for ``--gpu`` × ``--gpus`` with ``--disk-gib`` of disk whose driver runs
-  CUDA ``--min-cuda`` (default 13.0: the locked torch is a CUDA 13.0 build), under ``--max-price`` (USD/h for the whole
-  instance); or ``--offer ID``. If its start fails, the next (three in all). While none qualifies, the offers are
-  checked again every 15 minutes for ``--wait-hours``.
+  CUDA ``--min-cuda`` (default 13.0: the locked torch is a CUDA 13.0 build, which also rules out GPUs older than
+  Turing), under ``--max-price`` (USD/h for the whole instance); or ``--offer ID``. If its start fails, the next (three
+  in all). While none qualifies, the offers are checked again every 15 minutes for ``--wait-hours``.
 - Before the start: its worst case, price × ``--hours``, must fit in what ``hub-gpu limits`` leaves of the project's 24
   hours, and under ``--max-cost``; ``--hours`` must be within its timed runs' limit (72 h), the GPUs within its count.
 - The start is timed (``hub-gpu start --hours``): vast.ai destroys the instance at its end, with what is on it. Its name
@@ -1744,6 +1744,11 @@ VAST_MIN_CUDA = 13.0  # the locked torch is a CUDA 13.0 build: a driver with an 
 VAST_RESERVE_MINUTES = 30.0  # before the instance's end, for the fetch (at most a quarter of --hours)
 VAST_STARTS = 3  # offers tried in turn when a start fails (the offer was taken meanwhile)
 VAST_DEAD = {"exited", "stopped", "offline", "error", "failed", "destroyed", "deleted", "ended", "inactive"}
+# GPUs before Turing (compute capability < 7.5: Maxwell, Pascal, Volta), by hub-gpu's names. Their drivers may run CUDA
+# 13.0, but CUDA 13 builds such as the locked torch have no kernels for them (2026-10-23: a GTX 1080 was the cheapest
+# CUDA 13.0 offer). The offers carry no compute capability.
+PRE_TURING = re.compile(r"GTX (9|10)\d\d|GTX TITAN|TITAN [XV]|GT \d|TESLA [KMPV]|QUADRO ([KMP]\d|G[PV]100)|[PV]100",
+                        re.IGNORECASE)
 SECRET_WORDS = {"TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD", "CREDENTIALS", "APIKEY", "AUTH"}
 SECRET_DIRS = ("~/.secrets", "~/.ssh", "~/.nebius", "~/.cache/huggingface", "~/.config/gcloud", "~/.aws")
 
@@ -1815,10 +1820,13 @@ def disk_gb(gib: float) -> int:
 
 
 def offer_skip(offer: dict, min_cuda: float, max_price: float | None) -> str | None:
-    """Why a vast.ai offer doesn't qualify (None: it does). Its ``cuda`` is the newest CUDA its driver runs."""
+    """Why a vast.ai offer doesn't qualify (None: it does). Its ``cuda`` is the newest CUDA its driver runs; for CUDA 13
+    the GPU must also be Turing or newer (``PRE_TURING``)."""
     cuda = offer.get("cuda")
     if cuda is None or float(cuda) < min_cuda - 1e-9:
         return f"its driver's CUDA {cuda if cuda is not None else '?'} < {min_cuda:g}"
+    if min_cuda >= 13 - 1e-9 and PRE_TURING.match(str(offer.get("gpu") or "").strip()):
+        return "older than Turing: no CUDA 13 kernels"
     if max_price is not None and float(offer["usd_per_hour"]) > max_price + 1e-9:
         return f"above the ${max_price:g}/h cap"
     return None
@@ -3246,7 +3254,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="vast.ai: start this offer of hub-gpu offers, not the cheapest (give its --gpu and --gpus)")
     vast.add_argument("--min-cuda", type=float, metavar="VERSION",
                       help=f"vast.ai: skip offers whose driver runs an older CUDA (default {VAST_MIN_CUDA:g}: the "
-                           "locked torch is a CUDA 13.0 build)")
+                           "locked torch is a CUDA 13.0 build; from 13 on, GPUs older than Turing are skipped too)")
     vast.add_argument("--max-cost", type=float, metavar="USD",
                       help="vast.ai: refuse an instance whose price × --hours is above this (hub-gpu limits are "
                            "checked anyway)")

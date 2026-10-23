@@ -1996,6 +1996,9 @@ VAST_OFFERS = [
     {"offer": 104, "gpu": "RTX 4090", "gpus": 1, "gpu_ram_gb": 24.0, "usd_per_hour": 0.30, "reliability": 0.99,
      "where": "Texas, US", "cpu_cores": 16.0, "ram_gb": 64.0, "cuda": 13.0, "down_mbps": 2000.0, "up_mbps": 2000.0,
      "datacenter": True},
+    {"offer": 105, "gpu": "GTX 1080", "gpus": 1, "gpu_ram_gb": 8.0, "usd_per_hour": 0.045, "reliability": 0.996,
+     "where": "South Korea, KR", "cpu_cores": 4.0, "ram_gb": 12.0, "cuda": 13.0, "down_mbps": 595.9, "up_mbps": 500.0,
+     "datacenter": None},  # a CUDA 13.0 driver, but Pascal: CUDA 13 builds have no kernels for it
     {"offer": 51600760, "gpu": "B200", "gpus": 4, "gpu_ram_gb": 183.4, "usd_per_hour": 30.18, "reliability": 0.9974,
      "where": "Oregon, US", "cpu_cores": 96.0, "ram_gb": 1022.0, "cuda": 13.0, "down_mbps": 57346.0, "up_mbps": 5171.3,
      "datacenter": None},
@@ -2039,7 +2042,8 @@ class FakeHubGpu:
         FakeHubGpu.rows[n] = {"instance": n, "name": kw["name"], "state": "running", "gpus": o["gpus"], "gpu": o["gpu"],
                               "usd_per_hour": o["usd_per_hour"], "ended": None, "deadline": ends, "paused": False,
                               "tags": kw["tags"], "purpose": kw["purpose"],
-                              "ssh": {"direct": "ssh -p 40022 root@203.0.113.7", "proxy": "ssh -p 31234 root@ssh5.vast.ai"}}
+                              "ssh": {"direct": "ssh -p 40022 root@203.0.113.7",
+                                      "proxy": "ssh -p 31234 root@ssh5.vast.ai"}}
         return {"instance": n, "usd_per_hour": o["usd_per_hour"], "hours": kw["hours"],
                 "cost_usd": o["usd_per_hour"] * kw["hours"], "deadline": ends, "note": "started",
                 "ssh_key_attached": True, "open": False}
@@ -2088,16 +2092,24 @@ def _vast_record(tmp_path: Path) -> dict:
 
 
 def test_vast_takes_the_cheapest_offer_whose_driver_runs_cuda_13(tmp_path, capsys, fake_hub):
-    order = nj.vast_candidates(VAST_OFFERS[:4], 13.0, None)
-    assert [o["offer"] for o in order] == [103, 101, 104]  # 102's CUDA 12.2 can't run cu130; ties: more reliable
-    assert [o["offer"] for o in nj.vast_candidates(VAST_OFFERS[:4], 13.0, 0.1)] == [103, 101]
-    assert [o["offer"] for o in nj.vast_candidates(VAST_OFFERS[:4], 12.0, None)][0] == 102
-    assert nj.offer_skip(VAST_OFFERS[1], 13.0, None) == "its driver's CUDA 12.2 < 13"
-    assert nj.offer_skip(VAST_OFFERS[3], 13.0, 0.25) == "above the $0.25/h cap"
+    one = [o for o in VAST_OFFERS if o["gpus"] == 1]
+    order = nj.vast_candidates(one, 13.0, None)
+    assert [o["offer"] for o in order] == [103, 101, 104]  # not 102 (CUDA 12.2) nor 105 (Pascal); ties: more reliable
+    assert [o["offer"] for o in nj.vast_candidates(one, 13.0, 0.1)] == [103, 101]
+    assert [o["offer"] for o in nj.vast_candidates(one, 12.0, None)][:2] == [102, 105]  # a cu12x torch runs on both
+    assert nj.offer_skip(one[1], 13.0, None) == "its driver's CUDA 12.2 < 13"
+    assert nj.offer_skip(one[4], 13.0, None) == "older than Turing: no CUDA 13 kernels"
+    assert nj.offer_skip(one[3], 13.0, 0.25) == "above the $0.25/h cap"
+    old = ["GTX 1080", "GTX 1080 Ti", "GTX 1070 Ti", "GTX 980", "GTX TITAN X", "Titan Xp", "Titan V", "Tesla V100",
+           "Tesla V100S", "Tesla P100", "Tesla K80", "Quadro P4000", "GT 1030"]
+    new = ["GTX 1650", "GTX 1660 S", "GTX 1660 Ti", "RTX 2070S", "Q RTX 6000", "Tesla T4", "Titan RTX", "RTX A4000",
+           "RTX 3060 laptop", "RTX 5060 Ti", "A100 SXM4", "H100 SXM", "B200"]  # names hub-gpu offered, 2026-10-23
+    assert all(nj.PRE_TURING.match(g) for g in old) and not any(nj.PRE_TURING.match(g) for g in new)
     assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == 0
     assert [s["offer"] for s in FakeHubGpu.started] == [103]
     table = capsys.readouterr().out
     assert "<- cheapest, tried first" in table and "its driver's CUDA 12.2 < 13" in table
+    assert "older than Turing" in table
     # nothing under the cap: nothing started, and the record says why
     assert nj.main(["run", *_vast_args(tmp_path, "--max-price", "0.05", "--wait-hours", "0"), "--", "true"]) == 2
     assert len(FakeHubGpu.started) == 1 and "no offer qualifies" in _vast_record(tmp_path)["errors"][0]
@@ -2120,8 +2132,8 @@ def test_vast_start_arguments_name_purpose_and_tags(tmp_path, monkeypatch, fake_
     assert _vast_record(tmp_path)["name"] == start["name"]
     # the default purpose is the job, on one line
     assert nj.main(["run", *_vast_args(tmp_path), "--", "uv run python x.py\n  --flag"]) == 0
-    assert FakeHubGpu.started[-1]["purpose"] == "MonitorDecorrelation job (scripts/nebius_job.py): uv run python x.py " \
-                                                "--flag"
+    purpose = FakeHubGpu.started[-1]["purpose"]
+    assert purpose == "MonitorDecorrelation job (scripts/nebius_job.py): uv run python x.py --flag"
     assert len(nj.vast_purpose(None, "x" * 500)) == 160
     n = len(FakeHubGpu.started)
     for extra, why in ((("--name", "md-a-much-too-long-x"), "at most 17"), (("--name", "MD-job"), "lowercase"),
@@ -2220,7 +2232,8 @@ def test_vast_run_fetches_ends_verifies_and_records(tmp_path, monkeypatch, fake_
     rec = _vast_record(tmp_path)
     assert (rec["provider"], rec["instance_id"], rec["teardown_verified"], rec["host"]) == (
         "vast", "9001", True, "root@203.0.113.7")
-    assert rec["region"] == "Vietnam, VN" and rec["vast"]["ssh"]["port"] == 40022 and rec["vast"]["offer"]["offer"] == 103
+    assert rec["region"] == "Vietnam, VN" and rec["vast"]["ssh"]["port"] == 40022
+    assert rec["vast"]["offer"]["offer"] == 103
     assert rec["vast"]["end"]["ended"] and rec["fetched"] == {"results": "ok"} and rec["spot"] is False
     assert rec["price_samples"][0][1] == 0.056 and 0 <= rec["estimated_cost_usd"] <= 0.056 * hours
     assert {"create_start", "running", "deleted"} <= set(rec["times"]) and rec["flags"]["provider"] == "vast"
@@ -2313,8 +2326,8 @@ def test_vast_dry_run_starts_nothing(tmp_path, monkeypatch, capsys, fake_hub):
     monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
     ledger = _ledger(tmp_path, 5.2)
     before = ledger.read_text()
-    code = nj.main(["run", "--dry-run", *_vast_args(tmp_path, "--budget-file", str(ledger), "--hf", "org/model@abc",
-                                                    "--fetch", "results"), "--", "uv", "run", "python", "-c", "print(1)"])
+    extra = ("--budget-file", str(ledger), "--hf", "org/model@abc", "--fetch", "results")
+    code = nj.main(["run", "--dry-run", *_vast_args(tmp_path, *extra), "--", "uv", "run", "python", "-c", "print(1)"])
     text = capsys.readouterr().out
     assert code == 0
     assert "hub-gpu --json start 103 --name md-job-" in text and "--tag launcher=nebius-job" in text
