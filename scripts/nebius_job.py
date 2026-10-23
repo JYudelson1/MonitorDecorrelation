@@ -643,6 +643,12 @@ def root_command(body: str) -> str:
     return f"{ROOT_SUDO} bash -c {shlex.quote(body)}"
 
 
+# A machine without a GPU (a plain OS image) may lack a C compiler, and a locked package builds from source (reasoning-gym's
+# pycosat, 2026-10-23). The GPU images have one, as Vlad's container does.
+BUILD_TOOLS = ("command -v cc >/dev/null || { sudo -n apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive "
+               "apt-get install -y -qq build-essential >/dev/null; }")
+
+
 def setup_script(extra_gpu: bool, gpu: bool = True, sandbox_python: str | None = None) -> str:
     """The setup step, in the pushed repo: ``uv sync --locked``, then
     - with a GPU: check that torch sees it (else retarget torch with scripts/setup_box.sh), and show it;
@@ -653,6 +659,8 @@ def setup_script(extra_gpu: bool, gpu: bool = True, sandbox_python: str | None =
       will be (``ROOT_SUDO``)."""
     extra = " --extra gpu" if extra_gpu else ""
     lines = ["set -euo pipefail", 'export PATH="$HOME/.local/bin:$PATH"']
+    if not gpu:
+        lines += [BUILD_TOOLS, 'echo "cc: $(cc --version | head -1)"']
     if sandbox_python is None:
         lines.append(f"uv sync --locked{extra}")
     else:

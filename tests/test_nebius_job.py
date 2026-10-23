@@ -1649,8 +1649,11 @@ def test_the_budget_holds_an_on_demand_cpu_vm_at_its_fixed_price(tmp_path, monke
 def test_the_setup_without_a_gpu_skips_the_torch_check_and_the_gpu_one_is_unchanged(tmp_path, monkeypatch, capsys,
                                                                                      fake_cloud):
     cpu = nj.setup_script(False, gpu=False)
-    assert cpu.splitlines()[2] == "uv sync --locked" and "sys.version.split()[0]" in cpu
-    assert not any(word in cpu for word in ("import torch", "torch.cuda", "setup_box", "nvidia", "sudo"))
+    lines = cpu.splitlines()
+    assert lines[2] == nj.BUILD_TOOLS and lines.index("uv sync --locked") > 2 and "sys.version.split()[0]" in cpu
+    rest = "\n".join(line for line in lines if line != nj.BUILD_TOOLS)  # the compiler install is the only sudo
+    assert not any(word in rest for word in ("import torch", "torch.cuda", "setup_box", "nvidia", "sudo"))
+    assert "build-essential" in nj.BUILD_TOOLS and nj.BUILD_TOOLS.startswith("command -v cc >/dev/null ||")
     assert nj.setup_script(False) == GPU_SETUP  # byte for byte what it was
     assert nj.setup_script(True) == GPU_SETUP.replace("uv sync --locked", "uv sync --locked --extra gpu").replace(
         "setup_box.sh\n", "setup_box.sh --extra gpu\n")
@@ -1860,7 +1863,7 @@ def test_the_root_job_setup_installs_the_python_makes_the_repo_private_and_check
     def at(s):
         return next(i for i, line in enumerate(lines) if line.startswith(s))
 
-    assert (at("umask 022") < at('sudo -n install -d -m 755 -o "$(id -un)" /opt/uv-python')
+    assert (at(nj.BUILD_TOOLS) < at("umask 022") < at('sudo -n install -d -m 755 -o "$(id -un)" /opt/uv-python')
             < at("export UV_PYTHON_INSTALL_DIR=/opt/uv-python") < at("uv python install 3.11.16")
             < at('case "$(readlink -f .venv/bin/python 2>/dev/null)" in /opt/uv-python/*) ;; *) rm -rf .venv')
             < at("uv sync --locked --managed-python --python 3.11.16") < at('chmod 750 "$HOME"')
