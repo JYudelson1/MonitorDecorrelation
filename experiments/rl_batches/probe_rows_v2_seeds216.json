@@ -1,0 +1,26 @@
+{
+  "name": "probe-rows-v2-s216",
+  "description": "The v2 probe rows on Vlad's control seeds (216-218), so each probe row has his control on the same seed: probe_iid (v2) and probe_ood on seeds 216, 217 and 218, plus two new control runs on 216 and 217 (his control, resumable: terminal_verifier_control_resumable.json) to check that this batch's machines and code reproduce his controls. Early stop: off for the probe rows (as his judge rows), 16 for the controls (as his controls). Everything else as experiments/rl_batches/probe_rows_v2.json.",
+  "wandb_entity": "jyudel-redwood-research",
+  "wandb_project": "terminal-env-inkling-small",
+  "n_steps": 90,
+  "sets": [],
+  "runs": [
+    {"run_name": "probe-iid-seed-216", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 216,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-217", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 217,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-218", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 218,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-216", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 216,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-217", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 217,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-218", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 218,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "control-rerun-seed-216", "config": "experiments/configs/terminal_verifier_control_resumable.json",
+     "seed": 216, "stop_after_zero_behavior_steps": 16, "note": "his control-seed-216, again"},
+    {"run_name": "control-rerun-seed-217", "config": "experiments/configs/terminal_verifier_control_resumable.json",
+     "seed": 217, "stop_after_zero_behavior_steps": 16, "note": "his control-seed-217, again"}
+  ]
+}

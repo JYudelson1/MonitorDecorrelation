@@ -1,0 +1,22 @@
+{
+  "name": "probe-rows-v2",
+  "description": "The v2 probe rows of the TerminalEnv degradation matrix (scripts/rl_batch.py; docs/GPU_RUNBOOK.md, 'v2 probe rows: the RL batch'): three runs train against probe_iid (v2, terminal_prerl_v2) on seeds 219-221 and three against probe_ood on seeds 222-224, penalty_coef 1.0. The four Qwen judges are held out and scored live, as in Vlad's rows (seeds 200-218); the other probe is held out too, scored after the runs (experiments/eval_inkling_probes_on_runs.py). Early stop off, as in Vlad's judge rows of commit c30c466 (his controls had 16). n_steps 90, as his rows ran; 360 to see the trained-against monitor fall, which in his batch only the 360-step strong-cot-seed-207 showed.",
+  "wandb_entity": "jyudel-redwood-research",
+  "wandb_project": "terminal-env-inkling-small",
+  "n_steps": 90,
+  "sets": [],
+  "runs": [
+    {"run_name": "probe-iid-seed-219", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 219,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-220", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 220,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-221", "config": "experiments/configs/terminal_verifier_probe_iid.json", "seed": 221,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-222", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 222,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-223", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 223,
+     "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-224", "config": "experiments/configs/terminal_verifier_probe_ood.json", "seed": 224,
+     "stop_after_zero_behavior_steps": null}
+  ]
+}
