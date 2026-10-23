@@ -214,7 +214,7 @@ backed up; the features are ~51 GB):
 
 ```bash
 python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib 800 --hours 5 --reserve-minutes 60 \
-    --max-cost 160 --name dennis-probes-v2 \
+    --max-cost 210 --name dennis-probes-v2 \
     --purpose "Inkling-Small probes v2: full-precision features of terminal_prerl_v2" \
     --out /srv/agents/projects/monitor-correlation-probes/scratch/gpu_jobs/{stamp}-{name} \
     --hf thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a \
@@ -227,11 +227,12 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
 - **Tried on a small instance only:** the launcher's smoke test passed on a GTX 1660 SUPER
   ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)); no 4× B200 has run it yet. Check with `--dry-run`
   first. The instance pulls its image before anything runs: 7.5 minutes on the smoke test's host, more than 15 on
-  another. At $30/h that is $4–8, and the launcher waits up to 40 minutes.
-- **Cost:** $30.22/h in Oregon on 2026-10-23, the 859 GB of disk included. One copy extracts the ~32M tokens in about
-  1.5–3 h at 3–6k tokens/s; with the setup and the copy-back, 2–4 h: $60–120. The worst case, $151 for 5 h, is
-  checked against `hub-gpu limits` ($500 a day) and `--max-cost`; the ledger records it as a vast.ai entry, not counted
-  against the Nebius limit.
+  another, under a minute where it is cached. At $40/h, 15 minutes is $10; the launcher waits up to 40 minutes.
+- **Cost:** on 2026-10-23 the cheapest 4× B200 with 859 GB of disk was $30.22/h at 07:20 UTC and $40.22/h at 09:40.
+  One copy extracts the ~32M tokens in about 1.5–3 h at 3–6k tokens/s; with the setup and the copy-back, 2–4 h:
+  $60–160. The worst case, price × 5 h ($151–201), is checked against `hub-gpu limits` ($500 a day) and `--max-cost`,
+  which refuses an offer above it: set it from the dry run's price. The ledger records the instance as a vast.ai entry,
+  not counted against the Nebius limit.
 - **Deadline:** the session's `NEBIUS_JOB_DEADLINE` is the instance's end less the hour kept for the copy-back
   (`--reserve-minutes 60`). It starts no shard that wouldn't be done by then, and exits 75 if that stopped it. The
   launcher then fetches what is done and ends the instance. To resume, run the same command with
