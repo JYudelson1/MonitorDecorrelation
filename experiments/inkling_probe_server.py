@@ -31,6 +31,9 @@ for a second copy), and set each run's probe server URL to ``http://127.0.0.1:81
 - if a probe's golden episodes render differently or score differently than when the probe was deployed, in logits:
   one episode by more than ``--golden-tolerance``, or all of them by more than ``--golden-mean-tolerance`` on average
   (a systematic shift; the default is calibrated in whitebox/probe_server.py).
+
+**Memory:** an episode whose dense attention doesn't fit is retried with its attention in query chunks; one that
+doesn't fit even so is answered 413 (whitebox/probe_server.py), which the client doesn't retry.
 """
 
 from __future__ import annotations

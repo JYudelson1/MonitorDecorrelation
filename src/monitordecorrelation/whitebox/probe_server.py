@@ -23,8 +23,12 @@ The score is σ(logit − t₁%), so 0.5 is the probe's 1%-FPR operating point.
     lost response gets it without a second forward pass. A failed job is forgotten at once: a repeat computes anew.
   - Errors the request causes, which a retry can't fix: 400 for a malformed request, 404 for an unknown path, 409 for
     an unknown probe or protocol, 422 for an episode that can't be replayed.
-  - 503 for any other failure (the GPU ran out of memory, a CUDA error, a bug): not the request's fault, so the
-    client retries it.
+  - 413 {error, unscorable: [{key, view, n_tokens, error}]} for an episode the reader can't hold even alone: out of GPU
+    memory in a forward of its own, then again with its attention in query chunks (features.extract_features). Nothing
+    is left to split, so the client doesn't retry it (protocol 2, 2026-10-23: a client of protocol 1 retried it as a
+    503, forever).
+  - 503 for any other failure (the GPU ran out of memory in a batch, a CUDA error, a bug): not the request's fault, so
+    the client retries it.
 - One GPU worker thread runs the jobs in order; the HTTP threads only queue them and wait.
 
 **Reader check:** a probe is for the reader its meta.json ``reader_info`` names. ``ProbeScorer`` refuses, at
@@ -53,7 +57,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-PROTOCOL = 1
+PROTOCOL = 2  # 2 (2026-10-23): the 413 for an unscorable episode, which a protocol-1 client would retry forever
 
 KEEP_S = 600.0
 """Seconds a finished job's result stays in the server's job table, for a client whose answer got lost on the way."""
@@ -104,6 +108,15 @@ class ReplayError(ValueError):
 
 class UnknownProbeError(LookupError):
     """A probe this scorer doesn't serve (HTTP 409)."""
+
+
+class UnscorableEpisodeError(RuntimeError):
+    """An episode the reader can't hold even alone (``features.UnscorableInput``): a retry can't help (HTTP 413).
+    ``episodes``: [{key, view, n_tokens, error}] of each such episode found."""
+
+    def __init__(self, message: str, episodes: list[dict]):
+        super().__init__(message)
+        self.episodes = episodes
 
 
 REPLAY_ERRORS = (ValueError, KeyError, IndexError, TypeError, AttributeError, NotImplementedError, RuntimeError)
@@ -163,7 +176,7 @@ class Job:
     request: dict | None  # dropped once the job is done: only the worker needs it
     done: threading.Event = field(default_factory=threading.Event)
     result: dict | None = None
-    error: tuple[int, str] | None = None
+    error: tuple[int, dict] | None = None  # (HTTP status, the answer: {"error": message, ...})
     finished: float | None = None  # time.time() when it finished
 
 
@@ -171,14 +184,18 @@ class ProbeScorer:
     """Loads nothing itself: give it the reader (an Inkling causal LM) and the probe directories.
 
     ``reader_info`` is the reader's (whitebox/extraction.reader_info). A probe for another reader is refused here, with
-    a ValueError naming every such probe (``reader_mismatch``); without ``reader_info`` nothing is checked."""
+    a ValueError naming every such probe (``reader_mismatch``); without ``reader_info`` nothing is checked.
+    ``chunk_attention``: the query rows × keys per chunk of an episode retried in query chunks (extract_features)."""
 
-    def __init__(self, model, probe_dirs: list[str], *, max_batch_tokens: int = 65536, reader_info: dict | None = None):
+    def __init__(self, model, probe_dirs: list[str], *, max_batch_tokens: int = 65536, reader_info: dict | None = None,
+                 chunk_attention: int | None = None):
         from monitordecorrelation.whitebox.features import special_ids
+        from monitordecorrelation.whitebox.inkling_attention import CHUNK_CELLS
         from monitordecorrelation.whitebox.inkling_replay import FOLLOW_UP, InklingReplay
         from monitordecorrelation.whitebox.probe_fit import SelectedProbe
 
         self.model, self.max_batch_tokens, self.reader_info = model, max_batch_tokens, reader_info or {}
+        self.chunk_attention = CHUNK_CELLS if chunk_attention is None else chunk_attention
         self.probes: dict[str, Served] = {}
         efforts, other_reader = set(), []
         for d in probe_dirs:
@@ -222,12 +239,14 @@ class ProbeScorer:
                                   f"{type(e).__name__}: {e}") from e
         return out
 
-    def score(self, episodes: list[dict], shas: list[str]) -> list[dict]:
+    def score(self, episodes: list[dict], shas: list[str], *, skip_unscorable: bool = False) -> list[dict]:
         """Score ``episodes`` (replay items) with the probes ``shas``: one feature pass per view needed.
 
         Every episode is rendered in every view first, so one that can't be replayed raises ``ReplayError`` before the
-        GPU runs. What fails after that (out of memory, a CUDA error) raises as it is."""
-        from monitordecorrelation.whitebox.features import extract_features
+        GPU runs. An episode the reader can't hold even alone (``features.UnscorableInput``) raises
+        ``UnscorableEpisodeError``; with ``skip_unscorable`` it is left out instead: its logits and scores are None and
+        its ``unscorable`` says why, per view. What else fails (out of memory in a batch, a CUDA error) raises as it
+        is."""
         from monitordecorrelation.whitebox.probe_fit import ViewFeatures, feature_matrix
 
         unknown = [s for s in shas if s not in self.probes]
@@ -240,24 +259,55 @@ class ProbeScorer:
         out = [{"key": ep.get("key"), "scores": {}} for ep in episodes]
         for view in views:
             inputs = rendered[view]
-            feats = extract_features(self.model, inputs, self.sp, max_batch_tokens=self.max_batch_tokens)
-            vf = ViewFeatures([str(i) for i in range(len(episodes))], feats, [])
             for i, p in enumerate(inputs):
                 out[i].setdefault("n_tokens", {})[view] = len(p.tokens)
                 out[i].setdefault("conversation_sha256", {})[view] = conversation_sha(p.tokens)
-                if "router_topk" in feats:
-                    out[i].setdefault("router_topk", {})[view] = feats["router_topk"][i].sort(-1).values.tolist()
+            rows, feats = self._features(inputs, view, out, skip_unscorable)
+            vf = ViewFeatures([str(i) for i in rows], feats, [])
+            if "router_topk" in feats:
+                for row, i in enumerate(rows):
+                    out[i].setdefault("router_topk", {})[view] = feats["router_topk"][row].sort(-1).values.tolist()
             for s in shas:
                 served = self.probes[s]
                 if served.view != view:
+                    continue
+                for i in range(len(episodes)):
+                    out[i]["scores"][s] = {"logit": None, "score": None}  # stays so for an unscorable one
+                if not rows:
                     continue
                 x, keep = feature_matrix(vf, served.readout, view)
                 layer = x[:, served.probe.layer, :].float().numpy().astype(np.float64)
                 logit = served.probe.logit(layer)
                 score = served.probe.score(layer)
-                for i in range(len(episodes)):
-                    out[i]["scores"][s] = {"logit": float(logit[i]), "score": float(score[i]) if keep[i] else None}
+                for row, i in enumerate(rows):
+                    out[i]["scores"][s] = {"logit": float(logit[row]),
+                                           "score": float(score[row]) if keep[row] else None}
         return out
+
+    def _features(self, inputs: list, view: str, out: list[dict], skip: bool) -> tuple[list[int], dict]:
+        """(the indices of ``inputs`` that have features, in order; extract_features' features of those).
+
+        An input the reader can't hold even alone (``UnscorableInput``) raises ``UnscorableEpisodeError``; with
+        ``skip`` it is noted in its result (``out[i]["unscorable"][view]``) and the rest extracted again. Batches run
+        longest first, so the unscorable one usually comes first and little is redone; at one episode per forward the
+        others' features are the same either way."""
+        from monitordecorrelation.whitebox.features import UnscorableInput, extract_features
+
+        rows = list(range(len(inputs)))
+        while True:
+            try:
+                return rows, extract_features(self.model, [inputs[i] for i in rows], self.sp,
+                                              max_batch_tokens=self.max_batch_tokens,
+                                              chunk_attention=self.chunk_attention)
+            except UnscorableInput as e:
+                i = rows.pop(e.index)
+                if not skip:
+                    key = out[i]["key"]
+                    raise UnscorableEpisodeError(
+                        f"episode {i} (key {key!r}, {e.n_tokens} tokens in view {view}) ran out of GPU memory in a "
+                        f"forward of its own, and again with its attention in query chunks: {e.reason}",
+                        [{"key": key, "view": view, "n_tokens": e.n_tokens, "error": e.reason}]) from None
+                out[i].setdefault("unscorable", {})[view] = e.reason
 
     def golden_check(self, probe_dirs: list[str], tolerance: float, *,
                      mean_tolerance: float = GOLDEN_MEAN_TOLERANCE) -> dict:
@@ -365,11 +415,13 @@ class Server:
                 results = self.scorer.score(job.request["episodes"], job.request["probes"])
                 job.result = {"results": results, "timing": {"forward_s": round(time.time() - t, 3)}}
             except UnknownProbeError as e:
-                job.error = (409, str(e))
+                job.error = (409, {"error": str(e)})
             except ReplayError as e:
-                job.error = (422, str(e))
+                job.error = (422, {"error": str(e)})
+            except UnscorableEpisodeError as e:  # out of memory alone, in query chunks too: a retry can't help
+                job.error = (413, {"error": str(e), "unscorable": e.episodes})
             except Exception as e:  # noqa: BLE001 — out of GPU memory, a CUDA error, a bug: not the request's fault
-                job.error, detail = (503, f"{type(e).__name__}: {e}"), traceback.format_exc()
+                job.error, detail = (503, {"error": f"{type(e).__name__}: {e}"}), traceback.format_exc()
             with self.lock:
                 job.request, job.finished = None, time.time()
                 if job.error is not None and self.jobs.get(key) is job:
@@ -380,7 +432,9 @@ class Server:
                 release_gpu_memory()  # out here: the except block's traceback held the failed forward's tensors
                 self._note(f"job {key[:12]} failed with 503; its client will retry:\n{detail}")
             elif job.error is not None:
-                self._note(f"job {key[:12]} refused with {job.error[0]}: {job.error[1]}")
+                if job.error[0] == 413:
+                    release_gpu_memory()
+                self._note(f"job {key[:12]} refused with {job.error[0]}: {job.error[1]['error']}")
 
     def _note(self, message: str) -> None:
         try:
@@ -418,7 +472,7 @@ class Server:
         if not job.done.wait(float(request.get("wait_s", 20))):
             return 202, {"status": "queued", "position": self.queue.qsize()}
         if job.error:
-            return job.error[0], {"error": job.error[1]}
+            return job.error
         return 200, job.result
 
     def _handler(self):

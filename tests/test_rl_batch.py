@@ -654,7 +654,8 @@ def test_the_load_balancer_listens_on_localhost_by_default(tmp_path):
 
 
 class _FakeProbeServer(http.server.BaseHTTPRequestHandler):
-    """A probe server that runs out of memory above LIMIT tokens (503), as the real one would."""
+    """A probe server that can't hold an episode above LIMIT tokens even in query chunks (413), as the real one
+    answers then."""
     LIMIT = 10_000
     seen: list = []
 
@@ -667,7 +668,8 @@ class _FakeProbeServer(http.server.BaseHTTPRequestHandler):
         n = sum(len(t.get("output") or "") for t in ep["turns"]) // 5  # ~tokens of the padding, for the fake
         _FakeProbeServer.seen.append(n)
         if n > self.LIMIT:
-            self._send(503, {"error": "OutOfMemoryError: CUDA out of memory"})
+            self._send(413, {"error": "episode 0 ran out of GPU memory: OutOfMemoryError: CUDA out of memory",
+                             "unscorable": [{"key": ep.get("key"), "view": "with_reasoning", "n_tokens": n}]})
         else:
             self._send(200, {"results": [{"scores": {body["probes"][0]: {"score": 0.1, "logit": -4.0}},
                                           "n_tokens": {"with_reasoning": n}}], "timing": {"forward_s": 0.4}})
@@ -714,7 +716,7 @@ def test_the_long_episode_check_pads_episodes_to_length_and_reports_each_answer(
         srv.shutdown()
         _FakeProbeServer.LIMIT = 10_000
     row = json.loads(out.read_text())["results"][0]
-    assert code == 0 and row["status"] == 503 and "out of memory" in row["error"]
+    assert code == 0 and row["status"] == 413 and "out of memory" in row["error"]
 
 
 # ------------------------------------------------------------------------------- the driver, launcher faked

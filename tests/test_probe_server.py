@@ -13,6 +13,10 @@ Checks:
 - Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
+- Long episodes (the real scorer, out of memory simulated): one whose dense attention doesn't fit scores exactly its
+  dense score, from query chunks; one that doesn't fit even so answers 413, which the client raises at once and the RL
+  loop's unscored-monitor check turns into an abort; the post-hoc scorer counts it (``n_unscorable``), goes on, and
+  tries it again on a rerun.
 - The GPU check script checks one IID and one OOD monitor through HTTP, and only its own root's monitors.
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
   splits, whatever the task id: grids recur across seeds under other ids), and its resume after
@@ -42,16 +46,18 @@ import torch
 from inkling_tiny import write_tiny_checkpoints
 from test_extract_probe_features import RUN_ENV, TURNS
 from test_fit_probes import make_world
+from test_inkling_attention import DENSE_LIMIT, FILLER, dense_bias_doesnt_fit
 
-from monitordecorrelation.monitors.inkling_probe_monitor import FatalProbeError, InklingProbeMonitor
+from monitordecorrelation.monitors.inkling_probe_monitor import (
+    FatalProbeError, InklingProbeMonitor, UnscorableEpisodeError as ClientUnscorable)
 from monitordecorrelation.types import Prompt, Rollout
 from monitordecorrelation.whitebox.extraction import Job, extract, prepare, reader_info
 from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, terminal_items, write_dataset
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha,
-    reader_mismatch)
+    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, UnscorableEpisodeError,
+    item_sha, probe_sha, reader_mismatch)
 
 VIEW = "with_reasoning"
 V2_INDEX = {"reader": {"loader": "transformers", "revision": "8cc5877b44d343f88b92086aa1fb72897950f06a"},
@@ -501,6 +507,116 @@ def test_a_bad_request_is_refused_for_good(toy_probe, monkeypatch):
         srv.stop()
 
 
+def test_an_episode_the_reader_cant_hold_even_alone_is_refused_for_good(toy_probe):
+    """``UnscorableEpisodeError`` (out of GPU memory in a forward of its own, in query chunks too) answers 413 with the
+    episodes it names, and no job is kept. The client raises its own ``UnscorableEpisodeError`` (a FatalProbeError) at
+    once, naming the rollout and its length. The RL loop's ``MonitorScorer`` then aborts the run through its
+    unscored-monitor check: no reward is ever computed without the probe's score."""
+    from monitordecorrelation.rl.train import MonitorScorer
+
+    sha = probe_sha(toy_probe)
+
+    def unscorable(key: str) -> UnscorableEpisodeError:
+        return UnscorableEpisodeError(f"episode 1 (key {key!r}, 41234 tokens in view {VIEW}) ran out of GPU memory",
+                                      [{"key": key, "view": VIEW, "n_tokens": 41234, "error": "OutOfMemoryError: x"}])
+
+    scorer = FakeScorer(sha, fail=[unscorable("a")])
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        code, answer = post(srv.port, request(sha, {"key": "a"}))
+        assert code == 413 and "ran out of GPU memory" in answer["error"] and not srv.jobs
+        assert answer["unscorable"] == [{"key": "a", "view": VIEW, "n_tokens": 41234, "error": "OutOfMemoryError: x"}]
+        mon = InklingProbeMonitor("toy", toy_probe, f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                  run_effort=0.5, log=lambda m: None)
+        batch = [rollout(rows()[0]), rollout(rows()[2])]
+        key = mon.items(batch)[1]["key"]
+        scorer.fail = [unscorable(key)]
+        t = time.time()
+        with pytest.raises(ClientUnscorable, match=rf"toy: the probe server can't score rollout 1 of 2 \(key {key}, "
+                                                   rf"41234 tokens in {VIEW}\) even alone on its GPU") as e:
+            mon.score_batch(batch)
+        assert time.time() - t < 1 and isinstance(e.value, FatalProbeError)  # no retry
+        assert e.value.episodes == [{"key": key, "view": VIEW, "n_tokens": 41234, "error": "OutOfMemoryError: x"}]
+        scorer.fail = [unscorable(key)]
+        with pytest.raises(RuntimeError, match=r"monitor 'toy' returned NaN for 2/2 rollouts .* aborting\. First "
+                                               r"error: UnscorableEpisodeError: toy: the probe server can't score "
+                                               r"rollout 1"):
+            MonitorScorer([mon]).collect(batch)
+        assert len(scorer.keys) == 3  # each request once: the POST, score_batch, the loop's collect
+    finally:
+        srv.stop()
+
+
+def padded(row: dict, filler_rows: int) -> dict:
+    """``row`` (of ``rows()``) with ``filler_rows`` grid rows after its first command's output: a long episode."""
+    turns = [dict(t) for t in row["env_meta"]["turns"]]
+    turns[0]["output"] += "\n" + FILLER * filler_rows
+    return {**row, "env_meta": {**row["env_meta"], "turns": turns}}
+
+
+def never_fits(monkeypatch, min_tokens: int = DENSE_LIMIT) -> None:
+    """From now on every forward of an input of ``min_tokens`` or more runs out of GPU memory, chunked or not."""
+    import monitordecorrelation.whitebox.features as features
+
+    real = features._run_batch
+
+    def run_batch(model, inputs, masks, device, batch, *rest):
+        if max(len(inputs[i].tokens) for i in batch) >= min_tokens:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 60.00 GiB (simulated)")
+        return real(model, inputs, masks, device, batch, *rest)
+
+    monkeypatch.setattr(features, "_run_batch", run_batch)
+
+
+def test_a_long_episode_is_scored_in_chunks_and_one_that_never_fits_is_unscorable(world, monkeypatch):
+    """The real scorer on the tiny 4-bit reader, one episode per forward.
+    - A 2.7k-token episode whose dense attention doesn't fit is retried in query chunks: its result (logit, score,
+      router choices) is exactly the dense one.
+    - One that doesn't fit in chunks either raises ``UnscorableEpisodeError`` naming it (key, view, length), which the
+      server answers with 413. With ``skip_unscorable`` it is left out instead: no scores, ``unscorable`` says why,
+      and the other episode's result is the one it gets alone. (Alone: the probe's float64 dot products round in the
+      last bits by how many rows numpy multiplies at once, a feature-independent wobble of ~1e-14.)"""
+    sha = probe_sha(world["probe_dir"])
+    scorer = ProbeScorer(world["model"], [world["probe_dir"]], max_batch_tokens=1, chunk_attention=1)
+    short = {**episode_item(question(0), rows()[0]["env_meta"], RUN_ENV), "key": "short"}
+    long = {**episode_item(question(1), padded(rows()[2], 130)["env_meta"], RUN_ENV), "key": "long"}
+    want, alone = scorer.score([short, long], [sha]), scorer.score([short], [sha])
+    n_long = want[1]["n_tokens"][VIEW]
+    assert 2 * DENSE_LIMIT > n_long >= DENSE_LIMIT and want[0]["n_tokens"][VIEW] < DENSE_LIMIT
+    refused = dense_bias_doesnt_fit(monkeypatch)
+    assert scorer.score([short, long], [sha]) == want and refused == [n_long]
+    never_fits(monkeypatch)
+    with pytest.raises(UnscorableEpisodeError, match=rf"episode 1 \(key 'long', {n_long} tokens in view {VIEW}\) ran "
+                                                     r"out of GPU memory in a forward of its own, and again with its "
+                                                     r"attention in query chunks: OutOfMemoryError") as e:
+        scorer.score([short, long], [sha])
+    [named] = e.value.episodes
+    assert named == {"key": "long", "view": VIEW, "n_tokens": n_long, "error": named["error"]}
+    got = scorer.score([short, long], [sha], skip_unscorable=True)
+    assert got[0] == alone[0] and got[1]["scores"] == {sha: {"logit": None, "score": None}}
+    assert got[1]["n_tokens"] == want[1]["n_tokens"] and "router_topk" not in got[1]
+    assert got[1]["unscorable"][VIEW].startswith("OutOfMemoryError: CUDA out of memory")
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        code, answer = post(srv.port, request(sha, short, long))
+        assert code == 413 and [(u["key"], u["n_tokens"]) for u in answer["unscorable"]] == [("long", n_long)]
+        assert post(srv.port, request(sha, short)) == (200, {"results": alone, "timing": ANY_TIMING})
+    finally:
+        srv.stop()
+
+
+class _AnyTiming:
+    """Equal to any server ``timing`` record."""
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, dict) and set(other) == {"forward_s"}
+
+
+ANY_TIMING = _AnyTiming()
+
+
 def test_finished_jobs_are_kept_a_while_then_dropped(toy_probe, monkeypatch):
     """A finished job answers a repeat without another forward pass for ``KEEP_S`` seconds, then is dropped. Only the
     ``max_kept`` newest finished jobs stay, each without its request. A queued or running job is never dropped, so a
@@ -861,6 +977,49 @@ def test_posthoc_scoring_stops_on_a_failed_golden_check(world, tmp_path):
         mod.main([str(run), "--model", world["nvfp4_dir"], "--probes", str(probe), "--names", "probe_iid",
                   "--device", "cpu", "--grids", str(tmp_path / "absent.json")])
     assert not (run / "probe_scores_inkling.jsonl").exists()
+
+
+def test_posthoc_scoring_counts_an_unscorable_episode_and_goes_on(world, tmp_path, monkeypatch, capsys):
+    """eval_inkling_probes_on_runs on a run with one episode the reader can't hold even alone (2.7k tokens, out of
+    memory in any forward here): the session goes on and exits 0. That episode's record has no scores and says why; it
+    is left out of the metrics and counted at its step (``n_unscorable``), and logged. The other episodes score as in
+    a run without it. A rerun tries it again and, once it fits, scores it."""
+    mod = load_script("eval_inkling_probes_on_runs")
+    run = tmp_path / "terminal_run_s0"
+    run.mkdir()
+    saved = [{**r, "step": 0} for r in rows()]
+    (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in saved))
+    (run / "run_info.json").write_text(json.dumps({"config": {"env_options": RUN_ENV, "thinking_effort": 0.5}}))
+    argv = [str(run), "--model", world["nvfp4_dir"], "--probes", world["probe_dir"], "--names", "probe_iid",
+            "--device", "cpu", "--grids", str(tmp_path / "absent.json")]
+    assert mod.main(argv) == 0
+    plain = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
+    (run / "probe_scores_inkling.jsonl").unlink()
+    saved.append({**padded(rows()[2], 130), "step": 10})  # line 11, a long episode at a later eval step
+    (run / "eval_rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in saved))
+    import monitordecorrelation.whitebox.features as features
+
+    real_run_batch = features._run_batch
+    never_fits(monkeypatch)
+    capsys.readouterr()
+    assert mod.main(argv) == 0
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
+    assert [r["line"] for r in records] == list(range(1, 12)) and records[:10] == plain  # the others as without it
+    bad = records[10]
+    assert bad["scores"] == {"probe_iid": {"logit": None, "score": None}} and bad["n_tokens"][VIEW] >= DENSE_LIMIT
+    assert bad["unscorable"][VIEW].startswith("OutOfMemoryError: CUDA out of memory")
+    assert "line 11" in out and "1 of 11 episodes unscorable" in out
+    per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
+    assert [(r["step"], r["n"], r["n_unscorable"]) for r in per_step] == [(0, 10, 0), (10, 0, 1)]
+    assert math.isnan(per_step[1]["auroc"]) and math.isnan(per_step[1]["mean_neg"])
+    monkeypatch.setattr(features, "_run_batch", real_run_batch)  # it fits now (a larger GPU): the rerun scores it
+    assert mod.main(argv) == 0
+    records = [json.loads(line) for line in (run / "probe_scores_inkling.jsonl").read_text().splitlines()]
+    assert len(records) == 12 and records[11]["line"] == 11 and "unscorable" not in records[11]
+    assert records[11]["scores"]["probe_iid"]["score"] is not None
+    per_step = [json.loads(line) for line in (run / "probe_eval_probe_iid.jsonl").read_text().splitlines()]
+    assert [(r["step"], r["n"], r["n_unscorable"]) for r in per_step] == [(0, 10, 0), (10, 1, 0)]
 
 
 def test_posthoc_grids_default_to_the_probes_own_deployment(tmp_path):
