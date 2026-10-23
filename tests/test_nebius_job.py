@@ -2556,17 +2556,29 @@ def test_the_end_is_retried_and_verified(monkeypatch):
 
 class RsyncRemote(LocalRemote):
     """LocalRemote for rsync: its ``-e`` is a stand-in for ssh that drops ssh's options and the host, then runs the
-    command in a local bash in the fake home, joined into one line as ssh does."""
+    command in a local bash in the fake home, joined into one line as ssh does.
 
-    def rsh(self) -> str:
-        fake = self.home.parent / "fake-ssh"
-        fake.write_text(f"""#!/bin/bash
+    The stand-in is written when the remote is made, not per ``rsh()``: ``rsync_streams`` asks for ``rsh()`` once per
+    rsync it starts, while the ones started just before exec the script, and rewriting it then failed with ETXTBSY
+    ("Text file busy"), in the writer or in rsync's exec, the more often the busier the CPU (once in a full run). It is
+    written beside and renamed into place, so even a remote made while another's rsync runs (the end-to-end test makes
+    one per ``nj.Remote``) never opens a script being exec'd."""
+
+    def __init__(self, home: Path):
+        super().__init__(home)
+        fake = home.parent / "fake-ssh"
+        part = fake.with_name(f"fake-ssh.{os.getpid()}.{id(self)}.tmp")
+        part.write_text(f"""#!/bin/bash
 while [ $# -gt 0 ]; do case "$1" in -l|-p|-o|-i) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
-cd {shlex.quote(str(self.home))} && export HOME={shlex.quote(str(self.home))} && exec bash -c "$*"
+cd {shlex.quote(str(home))} && export HOME={shlex.quote(str(home))} && exec bash -c "$*"
 """)
-        fake.chmod(0o755)
-        return str(fake)
+        part.chmod(0o755)
+        os.replace(part, fake)
+        self.fake_ssh = str(fake)
+
+    def rsh(self) -> str:
+        return self.fake_ssh
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="needs rsync")
