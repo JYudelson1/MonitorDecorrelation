@@ -50,7 +50,7 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/eval_terminal_monitors_baseline.py` | **Pre-RL monitor eval** on the terminal-verifier env: sample episodes from the untrained policy and score every judge in `--config` (AUROC, gap, TPR/FPR, call health). Policy, seed and `thinking_effort` come from the config (no `--model` / `--seed` / `--effort`); switch policy with `--set`, validated as a whole, e.g. `--set policy=Qwen/Qwen3-8B thinking_effort=null think_budget=2048 answer_tokens=512 max_tokens=null`. | `data/runs/tv_monitor_baseline_<policy>/baseline.json` + `eval_rollouts{,_slim}.jsonl` |
 | `scripts/load_balancer.py` | **vLLM load balancer.** Transparent TCP proxy: `--listen-port 8002 --backend-ports 8003 8004 8005` spreads connections over identical vLLM engines (fewest open connections, round-robin ties, failed backend deprioritised 5s); bytes pass through untouched. Balances per *connection* — fine for judges, whose `httpx.post` opens one per call. Stdlib-only. | stdout stats |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
-| `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), per-monitor **score histograms split by `behavior_present`** at one selectable RL train step or eval step (or the single step of an `eval_terminal_monitors_baseline.py` dir), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score, and — for every LLM judge whose call the run saved — the exact prompt, request parameters and response incl. the judge's chain of thought; older dumps show "unavailable"). Re-scans on refresh, so new runs and new steps appear while a run is training; a dump rewritten in place (e.g. by `eval_terminal_monitors_baseline.py`) is detected and re-indexed, never mistaken for an append. Stdlib-only. | `http://127.0.0.1:8000` |
+| `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), per-monitor **score histograms split by `behavior_present`** at one selectable RL train step or eval step (or the single step of an `eval_terminal_monitors_baseline.py` dir), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score, and — for every LLM judge whose call the run saved — the exact prompt, request parameters and response incl. the judge's chain of thought; older dumps show "unavailable"). MBPP rollouts show whether they passed the **visible test** (`passes_visible`, flag + filter) — read from the full dumps only; the slim eval dump doesn't carry it. Re-scans on refresh, so new runs and new steps appear while a run is training; a dump rewritten in place (e.g. by `eval_terminal_monitors_baseline.py`) is detected and re-indexed, never mistaken for an append. Stdlib-only. | `http://127.0.0.1:8000` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
 
 ## The experiment runner (config-driven)
@@ -103,11 +103,33 @@ a multiple of `eval_every`; wandb keeps rows a crashed run logged past the snaps
 snapshot waits for an in-flight background eval, which stalls training only if `save_every` is not a
 multiple of `eval_every` (every repo config has it as one).
 
+**Starting a new run from another run's checkpoint (not a resume).** `init_from_tinker_ckpt` takes a
+tinker training-state path (`tinker://<run>/weights/<name>` — a run's `final_checkpoint.txt` /
+`checkpoint_<k>.txt`) and starts a **fresh** run at those **weights only** (`load_state`): new Adam
+moments, step 0, its own run dir / logs / λ schedule. E.g. train against a monitor starting from a
+finished control run:
+
+```bash
+uv run python experiments/run_experiment.py --config experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json \
+    --set init_from_tinker_ckpt=$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt) \
+          run_name=mbpp_inkling_qmonitors_cot_q3_weak_s0_fromctrl
+# or via the batch launcher: -I <ckpt> sets it on every job, -R <suffix> (required with -I) renames them
+scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json -n 1 -s -D \
+    -I "$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt)" -R fromctrl
+```
+
+The checkpoint's base model + LoRA rank are checked against `policy` / `lora_rank` (tinker
+`weights_info`) before a training client is created. The **KL penalty still anchors to the raw
+`policy`**, so with `kl_coef` > 0 the run starts with nonzero KL. The step-0 eval measures the init
+checkpoint. The path lands in `config.json`, in `run_info.json` (`init_from_tinker_ckpt`: path + tinker's
+metadata), and in the wandb config + an `init_from_ckpt` tag. `--resume` of such a run loads its own latest
+state (weights + optimizer) — the init checkpoint is not reloaded.
+
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
-thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank lr seed
-n_prompts_pool probe_server_url monitors`.
+thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank init_from_tinker_ckpt
+lr seed n_prompts_pool probe_server_url monitors`.
 `stop_after_zero_behavior_steps` (null = off, the default) = N ends training once the **train**
 `behavior_rate` has been exactly 0 on N consecutive steps (any env); the final eval + checkpoint still
 run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
@@ -129,6 +151,7 @@ something the run then quietly ignores. The conditional fields:
 | `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) — repo controls spell it `"penalty_coef": null`; `run_grpo` re-checks this for a hand-built `RunConfig` |
 | `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
 | `probe_server_url` | — | no monitor is a probe |
+| `init_from_tinker_ckpt` | — (null = start from `policy`) | not a `tinker://…/weights/…` path; the transformers backend. At launch the checkpoint's base model / LoRA rank must equal `policy` / `lora_rank` |
 
 The env-dependent three (`max_tokens` / `answer_tokens` / `think_budget`) are checked once the env is
 built, so the error names the env; the rest fail at config load. `--set` goes through the same
@@ -244,6 +267,8 @@ scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 3 -j 4 -D   # -D = d
 # ⭐ recommended for a real batch: -s -P -D (resume-safe · shared probe server · detached), high -j:
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P -D
 scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an already-running probe server
+# -I = start every job from a tinker checkpoint's weights (fresh optimizer); -R = run_name suffix (needed with -I)
+scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors -n 1 -s -D -I tinker://…/weights/… -R fromctrl
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```

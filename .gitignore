@@ -26,6 +26,7 @@ data/runs/*.json
 data/checkpoints/
 wandb/
 err.log
+logs/
 data/runs/archived/
 
 # …but DO track the small per-step metrics (the analysis reads eval_metrics.jsonl; the big
@@ -51,3 +52,6 @@ docs/Joey Research Ideas.md
 loose_threads.md
 # macOS
 .DS_Store
+
+#images
+figs-test*/

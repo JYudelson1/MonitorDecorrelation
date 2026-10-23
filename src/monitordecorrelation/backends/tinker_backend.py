@@ -38,6 +38,7 @@ class TinkerBackend:
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
         thinking_effort: float | None = None, resume_from: str | None = None,
+        init_from: str | None = None,
     ) -> None:
         # thinking_effort reaches the policy only through TmlRenderer, so an effort set for an
         # HF-templated policy would vanish — say so instead. None on a TML policy takes the model
@@ -52,6 +53,27 @@ class TinkerBackend:
         self.kl_coef = kl_coef
         self.kl_discount_factor = kl_discount_factor
         self._sc = tinker.ServiceClient()
+        # Starting from a saved checkpoint: it must be a LoRA over exactly this base model and rank
+        # (the run's config says what it trains; a checkpoint that disagrees would quietly change that,
+        # or fail opaquely in load_state). Checked before a training client costs anything.
+        self.init_from = init_from
+        self.init_info = None
+        if init_from is not None:
+            info = self._sc.create_rest_client().get_weights_info_by_tinker_path(init_from).result()
+            problems = []
+            if info.base_model != base_model:
+                problems.append(f"base model {info.base_model!r} ≠ policy {base_model!r}")
+            if not info.is_lora or info.lora_rank != lora_rank:
+                problems.append(f"LoRA rank {info.lora_rank if info.is_lora else '(not LoRA)'} ≠ "
+                                f"lora_rank {lora_rank}")
+            # create_lora_training_client trains unembed/MLP/attn by default; a checkpoint that froze
+            # one of them could not be loaded into that layout.
+            frozen = [k for k in ("train_unembed", "train_mlp", "train_attn") if getattr(info, k) is False]
+            if frozen:
+                problems.append(f"it was trained with {', '.join(f'{k}=False' for k in frozen)}")
+            if problems:
+                raise ValueError(f"init_from_tinker_ckpt {init_from}: {'; '.join(problems)}")
+            self.init_info = info.model_dump(mode="json")
         # seed lives on the training client (seeds the LoRA init), NOT on ServiceClient. Sampling is
         # seeded by the caller per batch (``seed=``), then per SAMPLE (one single-sample request per
         # rollout; a seeded n-sample request collapses the GRPO group — rollout.py / episodes.py).
@@ -61,8 +83,14 @@ class TinkerBackend:
         # Resuming a run: overwrite the fresh LoRA init with a saved training state — weights AND the
         # optimizer's (Adam moments + step count), so the next optim step is the one the uninterrupted
         # run would have taken (a ``save_checkpoint`` path; see rl/train.py "Resuming").
+        # Initialising from a checkpoint instead: its WEIGHTS only (``load_state``) — the optimizer
+        # keeps the fresh client's state (zero Adam moments, step 0), so the new run is a new
+        # optimisation that merely starts at those weights. A resume supersedes it: the resumed state
+        # already descends from the init checkpoint, optimizer included.
         if resume_from is not None:
             self.training_client.load_state_with_optimizer(resume_from).result()
+        elif init_from is not None:
+            self.training_client.load_state(init_from).result()
         # Prompt framing + CoT parsing are model-family specific (HF chat template vs Inkling's TML
         # rendering) — the renderer owns both, and is shared by sampling and the GRPO datum path so
         # the observation tokens always match what was sampled.
@@ -74,6 +102,8 @@ class TinkerBackend:
         self._sampler = None  # lazily (re)built from current weights
         # KL reference: a sampling client at the BASE model weights (the anchor for the KL penalty).
         # Only built when kl_coef > 0 (otherwise we skip the per-step reference forward passes).
+        # Always the raw base model — also for a run started from ``init_from`` (by design: KL values
+        # stay comparable with from-scratch runs).
         self._ref_sampler = (
             self._sc.create_sampling_client(base_model=base_model) if kl_coef > 0 else None
         )
