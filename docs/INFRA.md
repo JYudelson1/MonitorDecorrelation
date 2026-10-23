@@ -98,6 +98,8 @@ runs it.
 python3 scripts/nebius_job.py prices                    # every region's price and capacity now (read-only)
 python3 scripts/nebius_job.py run --hours 2 --out runs/{stamp}-{name} --hf ORG/REPO[@REV] --fetch results -- '<job>'
 python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --hours 5 --name dennis-job --out runs/x -- '<job>'
+python3 scripts/nebius_job.py up --provider vast … --health CHECK -- '<server>'   # a kept instance with its server
+python3 scripts/nebius_job.py serve|extend|status|down --provider vast …       # restart it, a later end, list, end
 python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}    # keep the VM; prints the ssh line
 python3 scripts/nebius_job.py exec --host user@ip --out runs/x -- '<job>'   # any SSH box, no Nebius
 python3 scripts/nebius_job.py down --name <vm>          # delete a VM and its boot disk, then verify (--budget-file:
@@ -269,6 +271,42 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   host with the image cached had SSH within a minute; the rounds while a 13-minute job ran brought back what it had
   saved; eight rsyncs at once fetched 32 files (1.6 GB, sha256-checked) at 37 MB/s. `hub-gpu limits` counted $0.08 for
   all six instances. (Starts before 08:07 UTC were refused by a hub bug.)
+
+### Kept vast.ai instances and servers (`up`, `serve`, `extend`, `status`, `down --provider vast`)
+
+For servers that must outlive a job (the RL batch's probe server and judges, [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch)):
+a `run` would only end when its server does, and bill until near its end.
+
+```bash
+python3 scripts/nebius_job.py up --provider vast --gpu H200 --gpus 4 --disk-gib 250 --hours 4 --name dennis-judges \
+    --out DIR --health 'curl -sf http://127.0.0.1:8001/v1/models' -- 'exec bash scripts/setup_vllm.sh'
+python3 scripts/nebius_job.py serve --provider vast --name dennis-judges-ab12cd --out DIR2 --health '…' -- '…'
+python3 scripts/nebius_job.py extend --provider vast --name dennis-judges-ab12cd --hours 10   # from its start
+python3 scripts/nebius_job.py status --provider vast                                          # time left, ssh
+python3 scripts/nebius_job.py down --provider vast --name dennis-judges-ab12cd                # end it, verified
+```
+
+- **`up --provider vast`** is `run`'s offer, limits, start, bootstrap, `--hf` downloads, push and setup; then the instance
+  is kept (job.json `kept`), with no fetch (`--fetch` is refused). With a command after `--`, that command is started as
+  a server: a detached step (`serve`, or `--step NAME`) whose session leader writes `~/nebius_job/<step>.pid`, then
+  `--health`, a shell command on the instance, is run every 15 s until it exits 0, within `--health-timeout` (default
+  2700 s), while the server's log streams. A server that exits first, a health check that never passes, or any failure
+  before that ends the instance and verifies it, as a run does. A command without `--health` is refused.
+- **`serve`** (re)starts a server on a kept instance (`--name`: its name or number) or on any SSH box (`--host`,
+  `--port`, `--ssh-key`). First it stops what runs as that step: SIGTERM to the step's whole session (so the process
+  groups a server makes, such as setup_vllm.sh's, go too), SIGKILL after 60 s, and on vast.ai any GPU process left. It
+  does so only if `<step>.pid` really names that step (its command line carries the pid file's path), never a reused
+  pid. Nothing is pushed: the instance keeps the repo and setup its `up` gave it. Exit 0 once healthy, 2 if never, 3 if
+  the instance went away.
+- **`extend`** moves a kept instance's end to `--hours` after its start (`hub-gpu extend`), refused above the 72 h of a
+  timed run or if the added hours' cost is above the room `hub-gpu limits` leaves in any 24 hours; the ledger's entry
+  follows. **`status`** lists the project's live instances (`--all`: the ended ones too) with state, price, start,
+  deadline and time left, SSH address and tags; `--json` prints hub-gpu's rows. **`down --provider vast`** ends one,
+  verified in `hub-gpu list`, and settles its ledger entry at its price × the time from its start to its verified end.
+- **The plumbing test** (2026-10-23, `scripts/rl_batch.py tunnel-test`,
+  [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch)) kept a dummy HTTP server this way on a 1× GTX 1660 S:
+  SSH after 6.5 minutes of image loading, setup 142 s, the server healthy 8 s after its start; then it reached the
+  server from a Nebius VM through the batch's tunnel and ended both, verified: $0.01 on vast.ai.
 
 ### Spot VMs: how they behave
 
