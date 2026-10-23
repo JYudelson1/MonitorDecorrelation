@@ -1,7 +1,8 @@
 """scripts/nebius_job.py: the pure parts of the GPU-job launcher, plus its lifecycle with the cloud faked.
 
-Offline. Nothing here talks to Nebius or opens SSH. The lifecycle tests replace the ``Nebius`` client
-and the SSH steps with fakes, and check that the VM is deleted whatever happens to the job.
+Offline. Nothing here talks to Nebius or vast.ai or opens SSH. The lifecycle tests replace the ``Nebius`` client (and
+``HubGpu``, hub's vast.ai CLI) and the SSH steps with fakes, and check that the VM or instance is deleted whatever
+happens to the job.
 """
 
 from __future__ import annotations
@@ -1977,3 +1978,549 @@ def test_a_root_job_runs_its_command_through_sudo_with_the_jobs_environment(tmp_
     assert (home / "shutdowns.txt").read_text().split() == ["shutdown", "-h", "+15"]  # the step's power-off, as ever
     assert (home / nj.REMOTE_LOGS / "deadline").read_text().strip() == str(deadline)  # in the login user's home
     assert not any(Path(nj.REMOTE_SECRETS).iterdir())  # and the key is gone
+
+
+# ------------------------------------------------------------------------------------- vast.ai (hub-gpu)
+
+# Shaped like hub-gpu's answers of 2026-10-23 (`hub-gpu --json offers …`, `hub-gpu --json limits`)
+VAST_OFFERS = [
+    {"offer": 101, "gpu": "GTX 1650", "gpus": 1, "gpu_ram_gb": 4.0, "usd_per_hour": 0.056, "reliability": 0.984,
+     "where": "Oregon, US", "cpu_cores": 4.0, "ram_gb": 12.0, "cuda": 13.2, "down_mbps": 4323.2, "up_mbps": 800.0,
+     "datacenter": None},
+    {"offer": 102, "gpu": "RTX 3060", "gpus": 1, "gpu_ram_gb": 12.0, "usd_per_hour": 0.04, "reliability": 0.999,
+     "where": "Poland, PL", "cpu_cores": 8.0, "ram_gb": 16.0, "cuda": 12.2, "down_mbps": 900.0, "up_mbps": 900.0,
+     "datacenter": None},  # the cheapest, but its driver can't run the CUDA 13.0 torch
+    {"offer": 103, "gpu": "GTX 1660 S", "gpus": 1, "gpu_ram_gb": 6.0, "usd_per_hour": 0.056, "reliability": 0.995,
+     "where": "Vietnam, VN", "cpu_cores": 6.0, "ram_gb": 16.0, "cuda": 13.3, "down_mbps": 632.3, "up_mbps": 500.0,
+     "datacenter": None},  # as cheap as 101, more reliable
+    {"offer": 104, "gpu": "RTX 4090", "gpus": 1, "gpu_ram_gb": 24.0, "usd_per_hour": 0.30, "reliability": 0.99,
+     "where": "Texas, US", "cpu_cores": 16.0, "ram_gb": 64.0, "cuda": 13.0, "down_mbps": 2000.0, "up_mbps": 2000.0,
+     "datacenter": True},
+    {"offer": 51600760, "gpu": "B200", "gpus": 4, "gpu_ram_gb": 183.4, "usd_per_hour": 30.18, "reliability": 0.9974,
+     "where": "Oregon, US", "cpu_cores": 96.0, "ram_gb": 1022.0, "cuda": 13.0, "down_mbps": 57346.0, "up_mbps": 5171.3,
+     "datacenter": None},
+]
+VAST_LIMITS = {"project": "monitor-correlation-probes",
+               "limits": {"usd_per_day": 500.0, "gpus": 8, "hours": 72.0, "open": False, "paused_hours": 24.0,
+                          "account": "aether"},
+               "gpus_in_use": 0, "spent_24h_usd": 0, "room_usd": 500.0, "open_max_usd_per_hour": None}
+
+
+class FakeHubGpu:
+    """hub-gpu, faked: ``OFFERS`` and ``LIMITS`` as the service answers; a started instance is listed running at once,
+    with an SSH address, and as ended after ``end``. Every call is recorded in ``calls``, every start in ``started``."""
+    OFFERS: list[dict] = []
+    LIMITS: dict = {}
+    FAIL_START: set = set()  # offers whose start fails (taken meanwhile)
+    LIFETIME: float | None = None  # seconds from a start to the instance's end (None: its --hours)
+    rows: dict = {}
+    calls: list = []
+    started: list = []
+
+    def __init__(self, binary="hub-gpu"):
+        self.binary = binary
+
+    def limits(self):
+        FakeHubGpu.calls.append("limits")
+        return json.loads(json.dumps(FakeHubGpu.LIMITS))
+
+    def offers(self, *, gpu, gpus, disk_gb, max_price):
+        FakeHubGpu.calls.append("offers")
+        return [dict(o) for o in FakeHubGpu.OFFERS if o["gpus"] == gpus and gpu in (None, o["gpu"])
+                and (max_price is None or o["usd_per_hour"] <= max_price)]
+
+    def start(self, offer, **kw):
+        FakeHubGpu.calls.append("start")
+        FakeHubGpu.started.append({"offer": offer, **kw})
+        if offer in FakeHubGpu.FAIL_START:
+            raise nj.InfraError("hub-gpu start failed (1): hub-gpu: the offer is no longer available")
+        o = next(o for o in FakeHubGpu.OFFERS if o["offer"] == offer)
+        n, ends = 9000 + len(FakeHubGpu.rows) + 1, time.time() + (FakeHubGpu.LIFETIME or kw["hours"] * 3600)
+        FakeHubGpu.rows[n] = {"instance": n, "name": kw["name"], "state": "running", "gpus": o["gpus"], "gpu": o["gpu"],
+                              "usd_per_hour": o["usd_per_hour"], "ended": None, "deadline": ends, "paused": False,
+                              "tags": kw["tags"], "purpose": kw["purpose"],
+                              "ssh": {"direct": "ssh -p 40022 root@203.0.113.7", "proxy": "ssh -p 31234 root@ssh5.vast.ai"}}
+        return {"instance": n, "usd_per_hour": o["usd_per_hour"], "hours": kw["hours"],
+                "cost_usd": o["usd_per_hour"] * kw["hours"], "deadline": ends, "note": "started",
+                "ssh_key_attached": True, "open": False}
+
+    def instances(self):
+        FakeHubGpu.calls.append("list")
+        return [dict(r) for r in FakeHubGpu.rows.values()]
+
+    def end(self, instance):
+        FakeHubGpu.calls.append(("end", instance))
+        FakeHubGpu.rows[instance].update(ended=time.time(), state="exited")
+        return {"instance": instance, "name": FakeHubGpu.rows[instance]["name"], "note": "ended"}
+
+    def attach_key(self, instance):
+        FakeHubGpu.calls.append(("attach", instance))
+
+
+@pytest.fixture
+def fake_hub(monkeypatch):
+    monkeypatch.setattr(FakeHubGpu, "OFFERS", [dict(o) for o in VAST_OFFERS])
+    monkeypatch.setattr(FakeHubGpu, "LIMITS", json.loads(json.dumps(VAST_LIMITS)))
+    monkeypatch.setattr(FakeHubGpu, "FAIL_START", set())
+    monkeypatch.setattr(FakeHubGpu, "LIFETIME", None)
+    monkeypatch.setattr(FakeHubGpu, "rows", {})
+    monkeypatch.setattr(FakeHubGpu, "calls", [])
+    monkeypatch.setattr(FakeHubGpu, "started", [])
+    monkeypatch.setattr(nj, "HubGpu", FakeHubGpu)
+    monkeypatch.setattr(nj, "collect", lambda remote, job, rec: None)
+    monkeypatch.setattr(nj, "vast_wait_ssh", lambda hub, remote, instance, check_vm, attached, timeout=900: None)
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    monkeypatch.setattr(nj.time, "sleep", lambda s: None)
+    monkeypatch.delenv("NEBIUS_MAX_GPU_PRICE", raising=False)
+
+
+def _vast_args(tmp_path: Path, *extra: str) -> list[str]:
+    rsync = tmp_path / "bin" / "rsync"  # what the launcher checks for; the fetch itself is faked
+    if not rsync.exists():
+        rsync.parent.mkdir(parents=True, exist_ok=True)
+        rsync.write_text("#!/bin/sh\n")
+        rsync.chmod(0o755)
+    return ["--provider", "vast", "--hours", "2", "--out", str(tmp_path / "out"), "--rsync", str(rsync), *extra]
+
+
+def _vast_record(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "out" / "job.json").read_text())
+
+
+def test_vast_takes_the_cheapest_offer_whose_driver_runs_cuda_13(tmp_path, capsys, fake_hub):
+    order = nj.vast_candidates(VAST_OFFERS[:4], 13.0, None)
+    assert [o["offer"] for o in order] == [103, 101, 104]  # 102's CUDA 12.2 can't run cu130; ties: more reliable
+    assert [o["offer"] for o in nj.vast_candidates(VAST_OFFERS[:4], 13.0, 0.1)] == [103, 101]
+    assert [o["offer"] for o in nj.vast_candidates(VAST_OFFERS[:4], 12.0, None)][0] == 102
+    assert nj.offer_skip(VAST_OFFERS[1], 13.0, None) == "its driver's CUDA 12.2 < 13"
+    assert nj.offer_skip(VAST_OFFERS[3], 13.0, 0.25) == "above the $0.25/h cap"
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == 0
+    assert [s["offer"] for s in FakeHubGpu.started] == [103]
+    table = capsys.readouterr().out
+    assert "<- cheapest, tried first" in table and "its driver's CUDA 12.2 < 13" in table
+    # nothing under the cap: nothing started, and the record says why
+    assert nj.main(["run", *_vast_args(tmp_path, "--max-price", "0.05", "--wait-hours", "0"), "--", "true"]) == 2
+    assert len(FakeHubGpu.started) == 1 and "no offer qualifies" in _vast_record(tmp_path)["errors"][0]
+
+
+def test_vast_start_arguments_name_purpose_and_tags(tmp_path, monkeypatch, fake_hub):
+    assert nj.main(["run", *_vast_args(tmp_path, "--name", "md-v2-bf16", "--purpose", "probe features v2 (BF16)",
+                                       "--tag", "experiment=v2", "--gpu", "B200", "--gpus", "4", "--disk-gib", "750",
+                                       "--hours", "4.5", "--image", "vastai/pytorch:cuda-13.0"), "--", "true"]) == 0
+    (start,) = FakeHubGpu.started
+    assert start["offer"] == 51600760 and nj.VAST_NAME.fullmatch(start["name"]) and len(start["name"]) <= 24
+    assert start["name"].startswith("md-v2-bf16-") and len(start["name"]) == len("md-v2-bf16-") + 6
+    assert (start["purpose"], start["tags"]) == ("probe features v2 (BF16)",
+                                                 ["experiment=v2", "launcher=nebius-job", "commit=c0de1c0de1c0"])
+    assert (start["hours"], start["disk_gb"], start["image"]) == (4.5, 806, "vastai/pytorch:cuda-13.0")  # 750 GiB
+    assert nj.start_args(51600760, **{k: v for k, v in start.items() if k != "offer"}) == [
+        "start", "51600760", "--name", start["name"], "--purpose", "probe features v2 (BF16)", "--tag", "experiment=v2",
+        "--tag", "launcher=nebius-job", "--tag", "commit=c0de1c0de1c0", "--hours", "4.5", "--disk", "806",
+        "--image", "vastai/pytorch:cuda-13.0"]
+    assert _vast_record(tmp_path)["name"] == start["name"]
+    # the default purpose is the job, on one line
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "uv run python x.py\n  --flag"]) == 0
+    assert FakeHubGpu.started[-1]["purpose"] == "MonitorDecorrelation job (scripts/nebius_job.py): uv run python x.py " \
+                                                "--flag"
+    assert len(nj.vast_purpose(None, "x" * 500)) == 160
+    n = len(FakeHubGpu.started)
+    for extra, why in ((("--name", "md-a-much-too-long-x"), "at most 17"), (("--name", "MD-job"), "lowercase"),
+                       (("--purpose", "two\nlines"), "one line"),
+                       (tuple(a for i in range(7) for a in ("--tag", f"t={i}")), "at most 6")):
+        with pytest.raises(SystemExit, match=why):
+            nj.main(["run", *_vast_args(tmp_path, *extra), "--", "true"])
+    assert len(FakeHubGpu.started) == n
+    monkeypatch.setattr(nj.secrets, "token_hex", lambda k: "abcdef")  # a name some instance of the project has
+    FakeHubGpu.rows[1] = {"instance": 1, "name": "md-job-abcdef", "state": "exited", "ended": 1.0}
+    with pytest.raises(SystemExit, match="taken"):
+        nj.main(["run", *_vast_args(tmp_path), "--", "true"])
+    assert len(FakeHubGpu.started) == n
+
+
+def test_vast_refuses_whatever_would_put_a_secret_on_the_instance(tmp_path, monkeypatch, fake_hub, keys):
+    token = tmp_path / "hf_token"
+    token.write_text(SENTINEL)
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / ".env.local").write_text(f"TOKEN={SENTINEL}\n")
+    monkeypatch.setattr(nj, "SECRET_DIRS", (str(keys),))
+    for extra, why in ((("--secret", "tinker_api_key"), "no secret goes"),
+                       (("--hf-token-file", str(token)), "no secret goes"),
+                       (("--upload", "results=hf://buckets/o/b/x"), "no secret goes"),
+                       (("--env", f"HF_TOKEN={SENTINEL}"), "--env HF_TOKEN"),
+                       (("--env", f"WANDB_API_KEY={KEY}"), "--env WANDB_API_KEY"),
+                       (("--push", f"{keys / 'tinker_api_key'}:data/k"), "it is in"),
+                       (("--push", f"{tmp_path / 'inputs'}:data/in"), "may hold keys")):
+        with pytest.raises(SystemExit, match=why) as err:
+            nj.main(["run", *_vast_args(tmp_path, *extra), "--", "true"])
+        assert SENTINEL not in str(err.value) and KEY not in str(err.value)
+    assert FakeHubGpu.calls == []  # refused before hub-gpu was even asked
+    assert nj.main(["run", *_vast_args(tmp_path, "--env", "HF_HUB_DISABLE_IMPLICIT_TOKEN=1"), "--", "true"]) == 0
+    assert not nj.secret_env("MONKEY", "a-long-value-that-is-no-key") and nj.secret_env("HF_TOKEN", SENTINEL)
+
+
+def test_vast_and_nebius_flags_stay_apart(tmp_path, fake_hub, fake_cloud):
+    for extra in (("--platform", "gpu-b200-sxm"), ("--max-gpu-price", "2.5"), ("--keep",), ("--on-demand",),
+                  ("--root-job",), ("--ssh-key", "/k"), ("--regions", "us-north1")):
+        with pytest.raises(SystemExit, match="are Nebius's"):
+            nj.main(["run", *_vast_args(tmp_path, *extra), "--", "true"])
+    with pytest.raises(SystemExit, match="no --attempts"):
+        nj.main(["run", *_vast_args(tmp_path, "--attempts", "3"), "--", "true"])
+    for extra in (("--gpu", "B200"), ("--gpus", "4"), ("--offer", "7"), ("--purpose", "x"), ("--max-cost", "9")):
+        with pytest.raises(SystemExit, match="only with --provider vast"):
+            nj.main(["run", *_run_args(tmp_path, *extra), "--", "true"])
+    assert FakeHubGpu.calls == [] and not FakeNebius.clouds
+    assert nj.main(["run", *_run_args(tmp_path, "--provider", "nebius"), "--", "true"]) == 0  # Nebius as before
+    assert FakeNebius.clouds["project-x"].created == 1 and FakeHubGpu.calls == []
+
+
+def test_vast_limits_are_checked_before_anything_starts(tmp_path, fake_hub):
+    b200 = ("--gpu", "B200", "--gpus", "4")
+    for limits, extra, why in (
+            ({}, ("--hours", "80"), "above the 72 h"),
+            ({"gpus_in_use": 6}, b200, "above the 8 this project may use at once"),
+            ({"room_usd": 50.0}, b200, r"worst case, \$60.36, is above the \$50.00"),  # $30.18/h x 2 h
+            ({}, (*b200, "--max-cost", "50"), r"above --max-cost \$50"),
+            ({"limits": {}}, (), "may not rent GPUs"),
+            ({}, ("--reserve-minutes", "70"), "leaves the job no time")):
+        FakeHubGpu.LIMITS = {**json.loads(json.dumps(VAST_LIMITS)), **limits}
+        with pytest.raises(SystemExit, match=why):
+            nj.main(["run", *_vast_args(tmp_path, *extra), "--", "true"])
+    assert "start" not in FakeHubGpu.calls
+    FakeHubGpu.LIMITS = {**json.loads(json.dumps(VAST_LIMITS)), "room_usd": 50.0}
+    assert nj.main(["run", *_vast_args(tmp_path, *b200, "--hours", "1"), "--", "true"]) == 0  # $30.18 fits
+    assert [s["offer"] for s in FakeHubGpu.started] == [51600760]
+
+
+@pytest.mark.parametrize("hours, reserve", [(2, 1800), (0.5, 450)])  # 30 min, but at most a quarter of --hours
+def test_vast_run_fetches_ends_verifies_and_records(tmp_path, monkeypatch, fake_hub, hours, reserve):
+    seen = {}
+
+    def remote_steps(remote, job, rec, check_vm=None):
+        check_vm()  # alive: nothing raised
+        seen.update(remote=remote, job=job)
+        rec.exit_code = 0
+        return 0
+
+    def collect(remote, job, rec):
+        seen["fetch"] = (remote, job)
+        rec.fetched["results"] = "ok"
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    monkeypatch.setattr(nj, "collect", collect)
+    ledger = _ledger(tmp_path, 5.2)
+    assert nj.main(["run", *_vast_args(tmp_path, "--hours", str(hours), "--budget-file", str(ledger),
+                                       "--fetch", "results"), "--", "true"]) == 0
+    remote, job = seen["remote"], seen["job"]
+    assert (remote.host, remote.port, remote.key) == ("root@203.0.113.7", 40022, str(Path(nj.HUB_GPU_KEY).expanduser()))
+    assert remote.known_hosts == tmp_path / "out" / "known_hosts"  # a fresh one per run, as on Nebius
+    row = FakeHubGpu.rows[9001]
+    assert (job.provider, job.reserve, job.poweroff_minutes) == ("vast", reserve, None)
+    assert job.ends == row["deadline"] and seen["fetch"][1].ends == job.ends  # the fetch knows the end too
+    assert row["ended"] and FakeHubGpu.calls.count(("end", 9001)) == 1 and FakeHubGpu.calls[-1] == "list"  # verified
+    rec = _vast_record(tmp_path)
+    assert (rec["provider"], rec["instance_id"], rec["teardown_verified"], rec["host"]) == (
+        "vast", "9001", True, "root@203.0.113.7")
+    assert rec["region"] == "Vietnam, VN" and rec["vast"]["ssh"]["port"] == 40022 and rec["vast"]["offer"]["offer"] == 103
+    assert rec["vast"]["end"]["ended"] and rec["fetched"] == {"results": "ok"} and rec["spot"] is False
+    assert rec["price_samples"][0][1] == 0.056 and 0 <= rec["estimated_cost_usd"] <= 0.056 * hours
+    assert {"create_start", "running", "deleted"} <= set(rec["times"]) and rec["flags"]["provider"] == "vast"
+    entries = json.loads(ledger.read_text())["entries"]
+    assert (entries[-1]["provider"], entries[-1]["kind"], entries[-1]["job"]) == ("vast", "spent", rec["name"])
+    assert entries[-1]["usd"] == rec["estimated_cost_usd"] and entries[-1]["instance"] == 9001
+    budget = nj.Budget(ledger)
+    assert budget.committed() == 5.2 and "vast.ai, not counted" in budget.summary()  # not against limit_usd
+
+
+def test_vast_falls_back_to_the_next_offer_and_takes_a_given_one(tmp_path, fake_hub):
+    FakeHubGpu.FAIL_START = {103}  # taken between the listing and the start
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == 0
+    assert [s["offer"] for s in FakeHubGpu.started] == [103, 101]
+    rec = _vast_record(tmp_path)
+    assert [c["offer"] for c in rec["creates"]] == [103, 101] and "no longer available" in rec["creates"][0]["error"]
+    assert all(r["ended"] for r in FakeHubGpu.rows.values())
+    assert nj.main(["run", *_vast_args(tmp_path, "--offer", "104"), "--", "true"]) == 0
+    assert FakeHubGpu.started[-1]["offer"] == 104
+    for offer, why in (("999", "not among the current offers"), ("102", "CUDA 12.2")):
+        with pytest.raises(SystemExit, match=why):
+            nj.main(["run", *_vast_args(tmp_path, "--offer", offer), "--", "true"])
+    assert len(FakeHubGpu.started) == 3
+
+
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_vast_a_signal_ends_the_instance(tmp_path, monkeypatch, fake_hub, guarded_signals, sig):
+    def remote_steps(remote, job, rec, check_vm=None):
+        signal.raise_signal(sig)
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_INTERRUPTED
+    assert FakeHubGpu.rows[9001]["ended"] and ("end", 9001) in FakeHubGpu.calls
+    rec = _vast_record(tmp_path)
+    assert rec["teardown_verified"] is True and any("interrupted" in e for e in rec["errors"])
+    assert all(signal.getsignal(s) is guarded_signals for s in SIGNALS)
+
+
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_vast_a_signal_during_the_end_waits_for_it(tmp_path, monkeypatch, fake_hub, guarded_signals, sig):
+    real = nj.vast_teardown
+
+    def teardown(hub, name, instance=None, timeout=300):
+        signal.raise_signal(sig)
+        return real(hub, name, instance, timeout)
+
+    monkeypatch.setattr(nj, "vast_teardown", teardown)
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_INTERRUPTED
+    assert FakeHubGpu.rows[9001]["ended"]
+    rec = _vast_record(tmp_path)
+    assert rec["teardown_verified"] is True and any(signal.Signals(sig).name in e for e in rec["errors"])
+
+
+@pytest.mark.parametrize("how, why, what", [
+    ("ended", "ended at", "disappeared or failed mid-job"),
+    ("vanished", "gone from hub-gpu list", "disappeared or failed mid-job"),
+    ("exited", "exited", "disappeared or failed mid-job"),
+    ("end", "ended at", "destroyed at its end"),
+])
+def test_vast_an_instance_that_goes_away_mid_job_is_reported(tmp_path, monkeypatch, fake_hub, how, why, what):
+    if how == "end":
+        FakeHubGpu.LIFETIME = 60.0  # its end is a minute after its start: the deadline did it
+
+    def remote_steps(remote, job, rec, check_vm=None):
+        row = FakeHubGpu.rows[9001]
+        if how == "vanished":
+            del FakeHubGpu.rows[9001]
+        elif how == "exited":
+            row["state"] = "exited"
+        else:
+            row["ended"] = time.time()
+        check_vm()  # what poll does when ssh fails
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", remote_steps)
+    assert nj.main(["run", *_vast_args(tmp_path), "--", "true"]) == nj.EXIT_STOPPED
+    rec = _vast_record(tmp_path)
+    assert rec["stopped_state"].startswith(why) and any(what in e for e in rec["errors"])
+    assert rec["teardown_verified"] is True and not rec["preempted"]
+    assert (("end", 9001) in FakeHubGpu.calls) is (how == "exited")  # still running somewhere: the launcher ends it
+
+
+def test_vast_dry_run_starts_nothing(tmp_path, monkeypatch, capsys, fake_hub):
+    def forbidden(*a, **k):
+        raise AssertionError(f"dry run must not run anything: {a[:1]}")
+
+    for name in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, name, forbidden)
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    ledger = _ledger(tmp_path, 5.2)
+    before = ledger.read_text()
+    code = nj.main(["run", "--dry-run", *_vast_args(tmp_path, "--budget-file", str(ledger), "--hf", "org/model@abc",
+                                                    "--fetch", "results"), "--", "uv", "run", "python", "-c", "print(1)"])
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "hub-gpu --json start 103 --name md-job-" in text and "--tag launcher=nebius-job" in text
+    assert "--hours 2 --disk 215" in text and "$0.056/h × 2 h = $0.11 at most: ok" in text
+    assert nj.vast_bootstrap_script() in text and "NO RAM DISK" in text
+    assert "hf download org/model --revision abc --local-dir /mnt/ram/model" in text and "uv sync --locked" in text
+    assert "print(1)" in text and "shutdown -h" not in text and "NEBIUS_JOB_DEADLINE" in text
+    assert "== fetch (rsync over ssh, resumable) ==\nmd/results ->" in text and "== no secrets ==" in text
+    assert "would be recorded" in text and "not counted" in text
+    assert FakeHubGpu.calls == ["limits", "offers", "list"] and not FakeHubGpu.started
+    assert not (tmp_path / "out").exists() and ledger.read_text() == before
+
+
+def test_vast_remote_steps_run_its_bootstrap_and_give_the_job_its_deadline(tmp_path, monkeypatch):
+    commands, scripts, timeouts = [], {}, {}
+
+    class Ok(nj.Remote):
+        def run(self, command, **kw):
+            commands.append(command)
+            return subprocess.CompletedProcess([], 0, b"", b"")
+
+    def poll(remote, step, out, **kw):
+        timeouts[step] = kw.get("timeout")
+        return 0
+
+    monkeypatch.setattr(nj, "repo_files", lambda: [])
+    monkeypatch.setattr(nj, "push_repo", lambda remote, files: None)
+    monkeypatch.setattr(nj, "start", lambda remote, step, script, cwd=None: scripts.update({step: script}))
+    monkeypatch.setattr(nj, "poll", poll)
+    ends = time.time() + 7200
+    job = nj.JobSpec(out=tmp_path, command="python x.py", provider="vast", ends=ends, reserve=1800)
+    rec = nj.Record(mode="run", provider="vast", hours=2, times={"create_start": nj.utc()})
+    assert nj.remote_steps(Ok("root@h", tmp_path / "kh", port=40022), job, rec) == 0
+    assert commands[1] == nj.vast_bootstrap_script() and nj.bootstrap_script() not in commands
+    assert f"usec={int(ends - 1800)}000000" in scripts["job"] and "shutdown -h" not in scripts["job"]
+    assert abs(timeouts["job"] - (ends - 900 - time.time())) < 5  # it stops waiting halfway into the reserve
+    vast = nj.Remote("root@h", tmp_path / "kh", "/k", port=40022)
+    assert vast.ssh()[vast.ssh().index("-p") + 1] == "40022" and shlex.split(vast.rsh()) == vast.ssh()
+    assert "-p" not in nj.Remote("md@h", tmp_path / "kh", "/k").ssh()  # Nebius: as before
+
+
+def _fake_bin(home: Path, name: str, body: str) -> None:
+    path = home / ".local" / "bin" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/bash\n{body}\n")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("mounts", [False, True])
+def test_the_vast_bootstrap_falls_back_to_a_plain_directory(tmp_path, monkeypatch, mounts):
+    """In a container that may not mount a tmpfs (vast.ai's usually), /mnt/ram is a plain directory and the log says
+    so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(nj, "RAM_DIR", str(tmp_path / "ram"))
+    _fake_bin(home, "sudo", '[ "$1" = -n ] && shift; exec "$@"')
+    _fake_bin(home, "mount", "exit 0" if mounts else 'echo "mount: /mnt/ram: permission denied." >&2; exit 32')
+    _fake_bin(home, "apt-get", 'echo "$*" >> "$HOME/apt.txt"')
+    _fake_bin(home, "uv", 'echo "uv 0.0.0 (fake)"')
+    r = LocalRemote(home)
+    for _ in range(2):
+        cp = r.run(nj.vast_bootstrap_script(), check=False)
+    out = cp.stdout.decode()
+    assert cp.returncode == 0, out + cp.stderr.decode()
+    if mounts:
+        assert f"ram disk: a tmpfs at {tmp_path / 'ram'}" in out and "NO RAM DISK" not in out
+    else:
+        assert ("NO RAM DISK: the container may not mount a tmpfs (mount: /mnt/ram: permission denied.), so "
+                f"{tmp_path / 'ram'} is a plain directory on the instance's disk") in out
+    assert (tmp_path / "ram").is_dir() and "uv 0.0.0 (fake)" in out and "memory: " in out
+    uv_toml = (home / ".config" / "uv" / "uv.toml").read_text()
+    assert uv_toml == 'python-preference = "only-managed"\n'  # once, however often it runs
+
+
+def test_hub_gpu_runs_the_cli_with_json_and_reads_its_answers(tmp_path):
+    calls = tmp_path / "argv.jsonl"
+    fake = tmp_path / "hub-gpu"
+    fake.write_text(f"""#!{sys.executable}
+import json, sys
+args = sys.argv[1:]
+open({str(calls)!r}, "a").write(json.dumps(args) + "\\n")
+op = args[1] if args[:1] == ["--json"] else args[0]
+answers = {{"limits": {{"limits": {{"hours": 72}}, "room_usd": 500}}, "offers": {{"offers": [{{"offer": 1}}]}},
+           "start": {{"instance": 7, "deadline": 1}}, "list": {{"instances": [{{"instance": 7}}]}},
+           "end": {{"instance": 7, "note": "ended"}}}}
+if op in answers:
+    print(json.dumps(answers[op]))
+elif op == "garbage":
+    print("not json")
+elif op != "ssh":
+    sys.exit("hub-gpu: refused: " + op)
+""")
+    fake.chmod(0o755)
+    hub = nj.HubGpu(str(fake))
+    assert hub.limits()["room_usd"] == 500
+    assert hub.offers(gpu="B200", gpus=4, disk_gb=806, max_price=40.0) == [{"offer": 1}]
+    assert hub.start(51600760, name="md-v2-abc123", purpose="probe features v2", tags=["a=b"], hours=4.5,
+                     disk_gb=806, image="img") == {"instance": 7, "deadline": 1}
+    assert hub.instances() == [{"instance": 7}] and hub.end(7)["note"] == "ended"
+    hub.attach_key(7)
+    assert [json.loads(line) for line in calls.read_text().splitlines()] == [
+        ["--json", "limits"],
+        ["--json", "offers", "--gpus", "4", "--disk", "806", "--limit", "50", "--gpu", "B200", "--max-price", "40"],
+        ["--json", "start", "51600760", "--name", "md-v2-abc123", "--purpose", "probe features v2", "--tag", "a=b",
+         "--hours", "4.5", "--disk", "806", "--image", "img"],
+        ["--json", "list"], ["--json", "end", "7"], ["ssh", "7", "true"]]
+    with pytest.raises(nj.InfraError, match="refused: pause"):
+        hub._run(["pause", "7"])
+    with pytest.raises(nj.InfraError, match="did not answer JSON"):
+        hub._run(["garbage"])
+    with pytest.raises(nj.InfraError):
+        nj.HubGpu(str(tmp_path / "no-such-cli")).limits()
+
+
+def test_the_end_is_retried_and_verified(monkeypatch):
+    monkeypatch.setattr(nj.time, "sleep", lambda s: None)
+    monkeypatch.setattr(FakeHubGpu, "rows", {5: {"instance": 5, "name": "md-x-1", "state": "running", "ended": None}})
+    monkeypatch.setattr(FakeHubGpu, "calls", [])
+
+    class Flaky(FakeHubGpu):
+        failures = 2
+
+        def end(self, instance):
+            if Flaky.failures:
+                Flaky.failures -= 1
+                raise nj.InfraError("hub-gpu end failed (1): hub-gpu: vast.ai did not answer")
+            return super().end(instance)
+
+    clock = iter(range(0, 100_000, 20))
+    monkeypatch.setattr(nj.time, "time", lambda: next(clock))
+    row = nj.vast_teardown(Flaky(), "md-x-1")  # by name only, as after a start whose answer never came
+    assert row["ended"] and FakeHubGpu.calls.count(("end", 5)) == 1
+    assert nj.vast_teardown(FakeHubGpu(), "md-never-started") is None  # nothing listed: nothing to end
+
+    class Stuck(FakeHubGpu):
+        def end(self, instance):  # accepted, but the listing never shows it ended
+            FakeHubGpu.calls.append(("end", instance))
+
+    FakeHubGpu.rows[6] = {"instance": 6, "name": "md-y-1", "state": "running", "ended": None}
+    with pytest.raises(nj.InfraError, match="end it by hand"):
+        nj.vast_teardown(Stuck(), "md-y-1", 6)
+
+
+class RsyncRemote(LocalRemote):
+    """LocalRemote for rsync: its ``-e`` is a stand-in for ssh that drops ssh's options and the host, then runs the
+    command in a local bash in the fake home, joined into one line as ssh does."""
+
+    def rsh(self) -> str:
+        fake = self.home.parent / "fake-ssh"
+        fake.write_text(f"""#!/bin/bash
+while [ $# -gt 0 ]; do case "$1" in -l|-p|-o|-i) shift 2 ;; -*) shift ;; *) break ;; esac; done
+shift
+cd {shlex.quote(str(self.home))} && export HOME={shlex.quote(str(self.home))} && exec bash -c "$*"
+""")
+        fake.chmod(0o755)
+        return str(fake)
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="needs rsync")
+def test_fetch_rsync_through_a_local_shell(tmp_path, monkeypatch):
+    home, out = tmp_path / "home", tmp_path / "out"
+    (home / "md" / "results" / "sub").mkdir(parents=True)
+    blob = os.urandom(1 << 20)
+    (home / "md" / "results" / "sub" / "a.bin").write_bytes(blob)
+    (home / "md" / "results" / "it's here.json").write_text("{}")
+    (home / "md" / "report.md").write_text("r")
+    (home / nj.REMOTE_LOGS).mkdir()
+    (home / nj.REMOTE_LOGS / "job.log").write_text("L")
+    r, rsync = RsyncRemote(home), shutil.which("rsync")
+    assert nj.fetch_rsync(r, "results", nj.fetch_dest("results", out), rsync) == "ok"
+    assert (out / "results" / "sub" / "a.bin").read_bytes() == blob and (out / "results" / "it's here.json").exists()
+    assert nj.fetch_rsync(r, "report.md", nj.fetch_dest("report.md", out), rsync) == "ok"
+    assert (out / "report.md").read_text() == "r"
+    assert nj.fetch_rsync(r, "missing/thing", out, rsync) == "missing"
+    (home / "md" / "results" / "new.txt").write_text("n")  # the job wrote more: a second fetch brings it too
+    job = nj.JobSpec(out=out, fetches=["results"], provider="vast", rsync=rsync, ends=time.time() + 3600)
+    rec = nj.Record(mode="run")
+    nj.collect(r, job, rec)
+    assert rec.fetched == {"results": "ok", f"~/{nj.REMOTE_LOGS}": "ok"}
+    assert (out / "results" / "new.txt").read_text() == "n"
+    assert (out / "remote_logs" / nj.REMOTE_LOGS / "job.log").read_text() == "L"
+
+    class NoRsync(RsyncRemote):  # a remote without rsync: tar over ssh, as for Nebius
+        def run(self, command, **kw):
+            if "command -v rsync" in command:
+                return subprocess.CompletedProcess([], 4, b"", b"")
+            return super().run(command, **kw)
+
+    assert nj.fetch_rsync(NoRsync(home), "report.md", tmp_path / "tar", rsync) == "ok"
+    assert (tmp_path / "tar" / "report.md").read_text() == "r"
+
+
+def test_vast_ledger_entries_are_recorded_but_not_counted(tmp_path, capsys, regions_file):
+    ledger = _ledger(tmp_path, 45.0)  # $5 of the $50 left for Nebius
+    b = nj.Budget(ledger)
+    b.record("md-vast-1", 60.36, "md-vast-1 (4× B200 on vast.ai, ≤2 h)", pid=999999, host="gone")
+    b.check(5.0, "a Nebius VM")  # still fits: the vast.ai reservation isn't counted
+    with pytest.raises(SystemExit, match="budget"):
+        b.check(5.01, "a Nebius VM")
+    b.settle("md-vast-1", 12.5, "vast.ai: its price × the time it existed")
+    again = nj.Budget(ledger)
+    assert again.committed() == 45.0 and again.vast_total() == 12.5
+    assert "$5.00 left" in again.summary() and "vast.ai, not counted" in again.summary()
+    b.record("md-vast-2", 30.18, "md-vast-2 (4× B200 on vast.ai, ≤1 h)", pid=999998, host="gone")
+    assert nj.main(["reap", "--regions-file", str(regions_file), "--budget-file", str(ledger)]) == 0
+    entries = {e["job"]: e for e in json.loads(ledger.read_text())["entries"]}
+    assert entries["md-vast-2"]["kind"] == "reserved" and not FakeNebius.clouds  # reap leaves it alone
+    assert nj.main(["budget", "--budget-file", str(ledger)]) == 0
+    assert "(vast.ai: not counted)" in capsys.readouterr().out

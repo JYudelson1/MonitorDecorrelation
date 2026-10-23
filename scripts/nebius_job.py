@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run a job on a fresh Nebius VM (a GPU one by default, or CPU-only) or on any SSH box, and always clean up.
+"""Run a job on a fresh Nebius VM (a GPU one by default, or CPU-only), a vast.ai instance or any SSH box, and always
+clean up.
 
 This automates what we first did by hand on 2026-10-09 (the Inkling-Small-NVFP4 load test on one
 B300), so a GPU job is a single command:
@@ -12,6 +13,7 @@ B300), so a GPU job is a single command:
     python3 scripts/nebius_job.py down --name md-job-3fa9c1                   # delete + verify, any region
     python3 scripts/nebius_job.py list                                        # every region
     python3 scripts/nebius_job.py prices                                      # every region's price now
+    python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --hours 5 --out runs/{stamp}-{name} -- CMD
     # run/up accept --dry-run: price check, then the create argv, cloud-init and remote scripts; create nothing
 
 Where the VM goes: ``--regions-file`` (env NEBIUS_REGIONS_FILE) lists the candidates, e.g.
@@ -87,6 +89,36 @@ CPU VMs, keys and root jobs (2026-10-17, for the pre-RL terminal rollouts: they 
         --config experiments/configs/terminal_verifier_control.json --n-prompts 512 --samples 64 \\
         --episode-workers N --run-name pre-rl-probe-v2 --set 'monitors=[]' seed=1000000
 
+vast.ai (``run --provider vast``, 2026-10-23, when Nebius had no B200/B300 capacity), through hub's ``hub-gpu`` CLI:
+billed to the account the owner bills this project to, within the limits the owner sets (``hub-gpu limits``). Nebius's
+flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it, its own (``--gpu``, ``--gpus``,
+``--offer``, …) without it.
+- The offer: the cheapest of ``hub-gpu offers`` for ``--gpu`` × ``--gpus`` with ``--disk-gib`` of disk whose driver runs
+  CUDA ``--min-cuda`` (default 13.0: the locked torch is a CUDA 13.0 build), under ``--max-price`` (USD/h for the whole
+  instance); or ``--offer ID``. If its start fails, the next (three in all). While none qualifies, the offers are
+  checked again every 15 minutes for ``--wait-hours``.
+- Before the start: its worst case, price × ``--hours``, must fit in what ``hub-gpu limits`` leaves of the project's 24
+  hours, and under ``--max-cost``; ``--hours`` must be within its timed runs' limit (72 h), the GPUs within its count.
+- The start is timed (``hub-gpu start --hours``): vast.ai destroys the instance at its end, with what is on it. Its name
+  is ``--name`` plus a random suffix (lowercase letters, digits and -, at most 24 characters, new among the project's
+  instances), its purpose line ``--purpose`` (default: the job), its tags ``--tag`` plus launcher= and commit=.
+- Then as on Nebius, over SSH as root with hub-gpu's key (~/.ssh/hub-gpu): bootstrap, downloads, push, setup, job. The
+  bootstrap mounts a tmpfs at /mnt/ram if the container may, else /mnt/ram is a plain directory on the instance's disk
+  (said so in bootstrap.log); it installs rsync and a C compiler if missing, and uv with only uv's own Python.
+- The job's ``NEBIUS_JOB_DEADLINE`` is the instance's end less ``--reserve-minutes`` (default 30, at most a quarter of
+  ``--hours``), kept for the fetch; the launcher stops waiting for the job halfway into that reserve. There is no
+  power-off after the job: the launcher ends the instance, and vast.ai destroys it at its end anyway.
+- ``--fetch`` paths and the logs come back with rsync (uncompressed, resumable), then ``hub-gpu end``, verified in
+  ``hub-gpu list``. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on Nebius; there is no ``--keep``. An
+  instance that disappears, ends or stops running mid-job is reported (exit 3); nothing relaunches it.
+- No secret reaches the instance (someone else's machine): ``--secret``, ``--hf-token-file`` and ``--upload`` (an HF
+  bucket needs a token) are refused, so are an ``--env`` that looks like a key (a name with TOKEN, KEY, SECRET, … and
+  a long value) and a ``--push`` from a key folder or with a .env file. ``--hf`` downloads are unauthenticated, as on
+  Nebius. Results come back only through ``--fetch``.
+- The ledger (``--budget-file``) records the instance as a vast.ai entry, reserved at its worst case and settled at its
+  price × the time from its start to its verified end, but not counted against ``limit_usd``: vast.ai is billed to
+  another account, under hub's limits for this project, which are checked instead.
+
 Relaunching (``run --attempts N``, default 3): after a spot preemption, or a job that exits 75 (it stopped early,
 e.g. at its deadline, and can resume), a fresh VM runs the job again, in whichever region is cheapest then. That
 continues up to N VMs in all.
@@ -133,8 +165,9 @@ Lessons from the manual session, built in here:
   is pushed as ``git ls-files`` plus untracked-but-not-ignored files, so .env*, .venv and .git never travel.
 
 Exit status: 0 on success; the job's own exit code if it failed; 2 for an infrastructure failure;
-3 if the VM stopped mid-run (spot preemption or the --hours cap); 75 if the job stopped early to resume
-later and no attempt was left; 130 on Ctrl-C, SIGTERM or SIGHUP (also when it arrived while the VM was deleted).
+3 if the VM stopped mid-run (spot preemption or the --hours cap; a vast.ai instance that went away); 75 if the job
+stopped early to resume later and no attempt was left; 130 on Ctrl-C, SIGTERM or SIGHUP (also when it arrived while
+the VM was deleted).
 Stdlib only, so plain ``python3`` (3.11+) runs it.
 """
 
@@ -145,10 +178,12 @@ import contextlib
 import fcntl
 import importlib.util
 import json
+import math
 import os
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1003,6 +1038,10 @@ class Budget:
       ledger) or ``reap`` finds it gone.
     - **Reservations** also record the launcher's pid and host, and the VM's region, so ``reap`` can settle them if
       the launcher dies.
+    - **vast.ai instances** (``record``) are entries with ``"provider": "vast"``, reserved at their worst case and
+      settled like the rest, but neither checked against ``limit_usd`` nor counted in ``committed``: vast.ai is billed
+      to another account, within the limits hub sets for this project (``hub-gpu limits``), which the launcher checks
+      instead. ``reap`` leaves them alone.
     - The file is re-read before every change, so launchers running side by side don't overwrite each other."""
 
     def __init__(self, path: Path) -> None:
@@ -1029,7 +1068,10 @@ class Budget:
         return self.data.get("limit_usd")
 
     def committed(self) -> float:
-        return round(sum(e["usd"] for e in self.data["entries"]), 2)
+        return round(sum(e["usd"] for e in self.data["entries"] if e.get("provider") != "vast"), 2)
+
+    def vast_total(self) -> float:
+        return round(sum(e["usd"] for e in self.data["entries"] if e.get("provider") == "vast"), 2)
 
     def _check(self, worst: float, what: str) -> None:
         if self.limit is not None and self.committed() + worst > self.limit + 1e-9:
@@ -1046,6 +1088,13 @@ class Budget:
             self._check(worst, what)
             self.data["entries"].append({"when": utc(), "job": job, "what": what, "kind": "reserved",
                                          "usd": round(worst, 2), **info})
+            self.save()
+
+    def record(self, job: str, worst: float, what: str, **info) -> None:
+        """A vast.ai instance's entry, reserved at its worst case for the record: not checked, not counted."""
+        with self.locked():
+            self.data["entries"].append({"when": utc(), "job": job, "what": what, "kind": "reserved",
+                                         "usd": round(worst, 2), "provider": "vast", **info})
             self.save()
 
     def annotate(self, job: str, **info) -> None:
@@ -1071,7 +1120,10 @@ class Budget:
     def summary(self) -> str:
         lim = "no limit" if self.limit is None else f"limit ${self.limit:g}"
         left = "" if self.limit is None else f", ${self.limit - self.committed():.2f} left"
-        return f"budget: ${self.committed():.2f} spent or reserved ({lim}{left})"
+        vast = any(e.get("provider") == "vast" for e in self.data["entries"])
+        return (f"budget: ${self.committed():.2f} spent or reserved ({lim}{left})"
+                + (f"; vast.ai, not counted (another account, hub-gpu limits): ${self.vast_total():.2f}" if vast
+                   else ""))
 
 
 def _seconds(stamp: str) -> float:
@@ -1209,14 +1261,25 @@ class Remote:
     host: str  # user@ip
     known_hosts: Path
     key: str | None = None
+    port: int | None = None  # a vast.ai instance's SSH port (None: 22)
 
-    def argv(self, command: str) -> list[str]:
+    def ssh(self) -> list[str]:
+        """ssh and its options, without the host."""
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
                 "-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "ConnectTimeout=15",
                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
+        if self.port is not None:
+            argv += ["-p", str(self.port)]
         if self.key:
             argv += ["-i", self.key, "-o", "IdentitiesOnly=yes"]
-        return argv + [self.host, command]
+        return argv
+
+    def argv(self, command: str) -> list[str]:
+        return self.ssh() + [self.host, command]
+
+    def rsh(self) -> str:
+        """rsync's ``-e``: the same ssh."""
+        return shlex.join(self.ssh())
 
     def run(self, command: str, *, timeout: float = 600, stdin=None, check: bool = True) -> subprocess.CompletedProcess:
         """``command`` runs under ``bash -c`` whatever the remote login shell is."""
@@ -1271,6 +1334,10 @@ class JobSpec:
     gpu: bool = True  # the setup checks that torch sees the GPU (not on cpu-* platforms, nor with exec --no-gpu)
     root_job: bool = False  # --root-job: the job runs as root, on uv's CPython ``sandbox_python`` (see setup_script)
     sandbox_python: str = DEFAULT_SANDBOX_PYTHON
+    provider: str = "nebius"  # "vast": a vast.ai instance (vast_bootstrap_script, fetch_rsync)
+    ends: float | None = None  # vast.ai: when the instance is destroyed (epoch s), whatever runs on it
+    reserve: float = 0.0  # vast.ai: seconds before ``ends`` kept for the fetch: the job's deadline is ends - reserve
+    rsync: str = "rsync"  # vast.ai: this machine's rsync, for the fetch
 
 
 def job_setup_script(job: JobSpec) -> str:
@@ -1317,6 +1384,8 @@ class Record:
     root_job: bool = False  # --root-job: the job ran as root
     sandbox_python: str | None = None  # --root-job: the exact CPython of the venv (and of the env's sandbox)
     secrets: dict = field(default_factory=dict)  # --secret: key name -> the job's variable (names only, never a key)
+    provider: str = "nebius"
+    vast: dict = field(default_factory=dict)  # vast.ai: limits, offer, start answer, last hub-gpu list row, …
 
     def save(self, out: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
@@ -1464,6 +1533,51 @@ def fetch_path(remote: Remote, path: str, dest: Path) -> str:
     return "ok"
 
 
+RSYNC_VANISHED = 24  # rsync: some source files vanished during the copy (a job still writing); the rest came
+
+
+def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", timeout: float = 3600) -> str:
+    """``fetch_path`` with rsync over the remote's ssh (vast.ai): uncompressed (tar's gzip would be the bottleneck for
+    tens of GB of tensors) and resumable: ``--partial``, and a broken copy is tried twice more, going on where it
+    stopped. Tar over ssh if the remote has no rsync. Returns "ok" or "missing"; InfraError if it fails or isn't done
+    within ``timeout`` seconds."""
+    full = remote_path(path.rstrip("/"))
+    rc = remote.run(f"test -e {shlex.quote(full)} || exit 3; command -v rsync >/dev/null || exit 4", check=False,
+                    timeout=60).returncode
+    if rc == SSH_DOWN:
+        raise InfraError(f"ssh {remote.host} unreachable")
+    if rc == 3:
+        return "missing"
+    if rc == 4:
+        log(f"fetch {path}: no rsync on the remote, so tar over ssh")
+        return fetch_path(remote, path, dest)
+    if rc != 0:
+        raise InfraError(f"fetch {path}: the remote check failed ({rc})")
+    dest.mkdir(parents=True, exist_ok=True)
+    argv = [rsync, "-a", "--partial", "--timeout=300", "--stats", "-e", remote.rsh(), f"{remote.host}:{full}",
+            f"{dest}/"]
+    t0, tries = time.time(), 0
+    while True:
+        tries += 1
+        try:
+            cp = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, check=False,
+                                timeout=max(30.0, t0 + timeout - time.time()))
+        except subprocess.TimeoutExpired:
+            raise InfraError(f"rsync of {path} not done after {timeout:.0f}s") from None
+        if cp.returncode in (0, RSYNC_VANISHED):
+            size = re.search(rb"Total transferred file size: ([\d,.]+)", cp.stdout)
+            n = int(re.sub(rb"[,.]", b"", size.group(1))) if size else 0
+            dt = time.time() - t0
+            log(f"rsync of {path}: {n / 1e9:.2f} GB in {dt:.0f}s ({n / 1e6 / max(dt, 1e-9):.0f} MB/s)"
+                + (" (some files vanished during the copy)" if cp.returncode else ""))
+            return "ok"
+        err = cp.stderr.decode(errors="replace").strip()[-1500:]
+        if tries >= 3 or time.time() - t0 > timeout - 60:
+            raise InfraError(f"rsync of {path} failed ({cp.returncode}): {err}")
+        log(f"rsync of {path} failed ({cp.returncode}), trying again: {err[-300:]}")
+        time.sleep(10)
+
+
 def vm_deadline(rec: Record) -> float | None:
     """When the in-VM ``--hours`` shutdown hits (creation + hours; the real one is a little later)."""
     if rec.hours and rec.times.get("create_start"):
@@ -1475,8 +1589,10 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
     """Everything over SSH up to the job's end. Returns the job's exit code (None: no job)."""
     wait_ssh(remote, check_vm)
     rec.times["ssh_ready"] = utc()
-    log(f"ssh ready: {remote.host}; bootstrapping (RAM disk, lingering, uv)")
-    cp = remote.run(bootstrap_script(), timeout=1200, check=False)
+    vast = job.provider == "vast"
+    log(f"ssh ready: {remote.host}; bootstrapping ("
+        + ("a RAM disk if the container allows one, rsync, uv)" if vast else "RAM disk, lingering, uv)"))
+    cp = remote.run(vast_bootstrap_script() if vast else bootstrap_script(), timeout=1200, check=False)
     (job.out / "bootstrap.log").write_bytes(cp.stdout + cp.stderr)
     for line in (cp.stdout + cp.stderr).decode(errors="replace").strip().splitlines():
         print(f"  bootstrap| {line}", flush=True)
@@ -1514,15 +1630,19 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
             + ", ".join(f"{s.name} as ${s.env}" for s in job.secrets))
     log(f"job{' (as root)' if job.root_job else ''}: {job.command}")
     fallback = None  # if the VM's own record of its shutdown can't be read: creation + --hours, slightly early
-    if rec.hours and rec.times.get("create_start"):
+    if job.ends is not None:  # vast.ai (no shutdown record in a container): the instance's end, less the reserve
+        fallback = int(job.ends - job.reserve)
+    elif rec.hours and rec.times.get("create_start"):
         fallback = int(_seconds(rec.times["create_start"]) + rec.hours * 3600)
     start(remote, "job", job_script(job.command, job.env, job.poweroff_minutes, fallback, secrets=job.secrets,
                                     root=job.root_job), cwd=REMOTE_REPO)
     rec.times["job_start"] = utc()
     rec.save(job.out)
     cap = vm_deadline(rec)  # past the cap + 10 min the VM can only be gone or wedged: stop waiting
-    code = poll(remote, "job", job.out, interval=job.poll_interval, check_vm=check_vm,
-                timeout=None if cap is None else max(60.0, cap + 600 - time.time()))
+    timeout = None if cap is None else max(60.0, cap + 600 - time.time())
+    if job.ends is not None:  # vast.ai destroys the instance at its end: stop waiting halfway into the reserve,
+        timeout = max(60.0, job.ends - job.reserve / 2 - time.time())  # so what the job made can still be fetched
+    code = poll(remote, "job", job.out, interval=job.poll_interval, check_vm=check_vm, timeout=timeout)
     rec.times["job_end"], rec.exit_code = utc(), code
     rec.save(job.out)
     if job.uploads:
@@ -1585,7 +1705,11 @@ def collect(remote: Remote, job: JobSpec, rec: Record) -> None:
     for path in [*job.fetches, f"~/{REMOTE_LOGS}"]:
         dest = job.out / "remote_logs" if path == f"~/{REMOTE_LOGS}" else fetch_dest(path, job.out)
         try:
-            rec.fetched[path] = fetch_path(remote, path, dest)
+            if job.provider == "vast":  # before the instance's end, which destroys what is on it
+                left = 3600.0 if job.ends is None else max(60.0, job.ends - time.time() - 60)
+                rec.fetched[path] = fetch_rsync(remote, path, dest, job.rsync, timeout=left)
+            else:
+                rec.fetched[path] = fetch_path(remote, path, dest)
         except Exception as e:  # noqa: BLE001
             rec.fetched[path] = f"error: {e}"
         log(f"fetch {path}: {rec.fetched[path]}")
@@ -1608,6 +1732,364 @@ def signals_held():
     finally:
         _held = None
         restore_signals(old)
+
+
+# ------------------------------------------------------------------------------------ vast.ai (hub-gpu)
+
+
+HUB_GPU_KEY = "~/.ssh/hub-gpu"  # hub-gpu's key for this project's instances; it attaches the .pub to each it starts
+VAST_NAME = re.compile(r"[a-z0-9-]{1,24}")  # hub-gpu's names: lowercase letters, digits and -, at most 24
+VAST_MAX_TAGS = 8  # hub-gpu's, of which the launcher takes two (launcher=, commit=)
+VAST_MIN_CUDA = 13.0  # the locked torch is a CUDA 13.0 build: a driver with an older CUDA can't run it
+VAST_RESERVE_MINUTES = 30.0  # before the instance's end, for the fetch (at most a quarter of --hours)
+VAST_STARTS = 3  # offers tried in turn when a start fails (the offer was taken meanwhile)
+VAST_DEAD = {"exited", "stopped", "offline", "error", "failed", "destroyed", "deleted", "ended", "inactive"}
+SECRET_WORDS = {"TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD", "CREDENTIALS", "APIKEY", "AUTH"}
+SECRET_DIRS = ("~/.secrets", "~/.ssh", "~/.nebius", "~/.cache/huggingface", "~/.config/gcloud", "~/.aws")
+
+
+class HubGpu:
+    """The ``hub-gpu`` CLI: hub's vast.ai service for this project, within the limits the owner sets for it
+    (``hub-gpu --help``). Each call asks for the service's own JSON (``--json``), with a timeout and no stdin. The
+    vast.ai key stays with hub: it never reaches this machine or an instance."""
+
+    def __init__(self, binary: str = "hub-gpu") -> None:
+        self.binary = binary
+
+    def _run(self, args: list[str], timeout: float = 300) -> dict:
+        try:
+            cp = subprocess.run([self.binary, "--json", *args], capture_output=True, text=True, timeout=timeout,
+                                stdin=subprocess.DEVNULL, start_new_session=True, check=False)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise InfraError(f"hub-gpu {args[0]}: {e}") from None
+        if cp.returncode != 0:
+            raise InfraError(f"hub-gpu {args[0]} failed ({cp.returncode}): {(cp.stderr or cp.stdout).strip()[-2000:]}")
+        try:
+            return json.loads(cp.stdout) if cp.stdout.strip() else {}
+        except ValueError:
+            raise InfraError(f"hub-gpu {args[0]} did not answer JSON: {cp.stdout.strip()[:300]!r}") from None
+
+    def limits(self) -> dict:
+        return self._run(["limits"], timeout=120)
+
+    def offers(self, *, gpu: str | None, gpus: int, disk_gb: int, max_price: float | None) -> list[dict]:
+        return self._run(offers_args(gpu, gpus, disk_gb, max_price), timeout=180).get("offers") or []
+
+    def start(self, offer: int, **kw) -> dict:
+        return self._run(start_args(offer, **kw), timeout=600)
+
+    def instances(self) -> list[dict]:
+        return self._run(["list"], timeout=120).get("instances") or []
+
+    def end(self, instance) -> dict:
+        return self._run(["end", str(instance)], timeout=300)
+
+    def attach_key(self, instance) -> None:
+        """``hub-gpu ssh N true``: attaches this project's key to the instance again, which its start may not have
+        done (``ssh_key_attached``), then runs ``true``. Its outcome doesn't matter."""
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run([self.binary, "ssh", str(instance), "true"], capture_output=True, timeout=90,
+                           stdin=subprocess.DEVNULL, start_new_session=True, check=False)
+
+
+def offers_args(gpu: str | None, gpus: int, disk_gb: int, max_price: float | None) -> list[str]:
+    """``hub-gpu offers`` for ``gpus`` × ``gpu`` (None: any) with ``disk_gb`` of disk: as many as it lists (50)."""
+    args = ["offers", "--gpus", str(gpus), "--disk", str(disk_gb), "--limit", "50"]
+    if gpu:
+        args += ["--gpu", gpu]
+    return args + (["--max-price", f"{max_price:g}"] if max_price is not None else [])
+
+
+def start_args(offer: int, *, name: str, purpose: str, tags: list[str], hours: float, disk_gb: int,
+               image: str | None = None) -> list[str]:
+    """``hub-gpu start``: timed, so vast.ai destroys the instance ``hours`` after its start whatever happens here."""
+    args = ["start", str(offer), "--name", name, "--purpose", purpose]
+    for tag in tags:
+        args += ["--tag", tag]
+    return args + ["--hours", f"{hours:g}", "--disk", str(disk_gb)] + (["--image", image] if image else [])
+
+
+def disk_gb(gib: float) -> int:
+    """``--disk-gib`` in the GB that hub-gpu takes, rounded up."""
+    return math.ceil(gib * 2**30 / 1e9 - 1e-9)
+
+
+def offer_skip(offer: dict, min_cuda: float, max_price: float | None) -> str | None:
+    """Why a vast.ai offer doesn't qualify (None: it does). Its ``cuda`` is the newest CUDA its driver runs."""
+    cuda = offer.get("cuda")
+    if cuda is None or float(cuda) < min_cuda - 1e-9:
+        return f"its driver's CUDA {cuda if cuda is not None else '?'} < {min_cuda:g}"
+    if max_price is not None and float(offer["usd_per_hour"]) > max_price + 1e-9:
+        return f"above the ${max_price:g}/h cap"
+    return None
+
+
+def vast_candidates(offers: list[dict], min_cuda: float, max_price: float | None) -> list[dict]:
+    """The qualifying offers, cheapest first; ties go to the more reliable machine."""
+    ok = [o for o in offers if offer_skip(o, min_cuda, max_price) is None]
+    return sorted(ok, key=lambda o: (float(o["usd_per_hour"]), -float(o.get("reliability") or 0)))
+
+
+def vast_offer_table(offers: list[dict], min_cuda: float, max_price: float | None, chosen: int | None,
+                     why: str = "cheapest") -> str:
+    """The offers by price, down to a few past the chosen one."""
+    rows = sorted(offers, key=lambda o: float(o["usd_per_hour"]))
+    at = next((i for i, o in enumerate(rows) if o["offer"] == chosen), -1)
+    shown = rows[:max(at + 5, 8)][:16]
+    lines = [f"  {'offer':>10}  {'GPUs':<22} {'$/hour':>7} {'CUDA':>5} {'RAM':>6} {'reliab.':>7}  {'where':<22} note"]
+    for o in shown:
+        note = f"<- {why}, tried first" if o["offer"] == chosen else (offer_skip(o, min_cuda, max_price) or "")
+        gpus, cuda = f"{o.get('gpus')}× {o.get('gpu')}"[:22], o.get("cuda") if o.get("cuda") is not None else "?"
+        lines.append(f"  {o['offer']:>10}  {gpus:<22} {float(o['usd_per_hour']):>7.3f} {cuda:>5} "
+                     f"{float(o.get('ram_gb') or 0):>5.0f}G {float(o.get('reliability') or 0):>7.3f}  "
+                     f"{str(o.get('where') or '?')[:22]:<22} {note}")
+    if len(rows) > len(shown):
+        lines.append(f"  … {len(rows) - len(shown)} more")
+    return "\n".join(lines)
+
+
+def limits_problem(lim: dict, gpus: int, hours: float, worst: float | None = None,
+                   max_cost: float | None = None) -> str | None:
+    """Why ``hub-gpu limits`` (``lim``), or ``--max-cost``, rule out ``gpus`` GPUs for ``hours`` at a worst case of
+    ``worst`` USD (None: they don't)."""
+    mine = lim.get("limits") or {}
+    if not mine:
+        return f"project {lim.get('project')} may not rent GPUs (the owner switches it on in Project options)"
+    if hours > float(mine.get("hours") or 0) + 1e-9:
+        return f"--hours {hours:g} is above the {float(mine.get('hours') or 0):g} h a timed run of this project has"
+    in_use = int(lim.get("gpus_in_use") or 0)
+    if in_use + gpus > int(mine.get("gpus") or 0):
+        return (f"{gpus} more GPU(s) with {in_use} in use is above the {mine.get('gpus')} this project may use at "
+                "once")
+    room = float(lim.get("room_usd") or 0)
+    if worst is not None and worst > room + 1e-9:
+        return f"its worst case, ${worst:.2f}, is above the ${room:.2f} this project has left in any 24 hours"
+    if worst is not None and max_cost is not None and worst > max_cost + 1e-9:
+        return f"its worst case, ${worst:.2f}, is above --max-cost ${max_cost:g}"
+    return None
+
+
+def vast_name(prefix: str) -> str:
+    """``prefix``-<6 hex>: a hub-gpu name (lowercase letters, digits and -, at most 24), new among this project's
+    instances with near certainty (``vast_attempt`` checks it against ``hub-gpu list``)."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", prefix) or len(prefix) > 17:
+        raise SystemExit(f"--name with --provider vast: lowercase letters, digits and dashes, starting with a letter, "
+                         f"at most 17 characters (a -XXXXXX suffix follows; hub-gpu names have at most 24), got "
+                         f"{prefix!r}")
+    return f"{prefix}-{secrets.token_hex(3)}"
+
+
+def vast_purpose(given: str | None, command: str | None) -> str:
+    """The instance's purpose line (``--purpose``, else the job command), which the owner sees."""
+    if given is not None:
+        if "\n" in given or "\r" in given or not given.strip():
+            raise SystemExit("--purpose is one line, not empty: what the instance is for")
+        return given.strip()
+    line = " ".join(f"MonitorDecorrelation job (scripts/nebius_job.py): {command}".split())
+    return line if len(line) <= 160 else line[:159] + "…"
+
+
+def vast_tags(given: list[str], code: dict) -> list[str]:
+    """``--tag``s, plus the launcher's and the commit pushed."""
+    commit = (code.get("commit") or "unknown")[:12] + ("-dirty" if code.get("dirty") else "")
+    tags = [*given, "launcher=nebius-job", f"commit={commit}"]
+    if len(tags) > VAST_MAX_TAGS:
+        raise SystemExit(f"--tag: at most {VAST_MAX_TAGS - 2} (hub-gpu takes {VAST_MAX_TAGS}, and the launcher adds "
+                         "launcher=nebius-job and commit=…)")
+    return tags
+
+
+def vast_ssh(row: dict) -> tuple[str, int | None] | None:
+    """(user@host, port) of an instance, from its ``hub-gpu list`` row: its direct address if it has one, else
+    vast.ai's proxy, as ``hub-gpu ssh`` picks. None while it has neither."""
+    ssh = row.get("ssh") or {}
+    address = ssh.get("direct") or ssh.get("proxy")
+    if not address:
+        return None
+    words, port, target = shlex.split(address), None, None  # "ssh -p PORT root@HOST"
+    rest = iter(words[1:] if words and words[0] == "ssh" else words)
+    for word in rest:
+        if word == "-p":
+            port = int(next(rest))
+        elif word in ("-o", "-i", "-l", "-J"):
+            next(rest, None)
+        elif not word.startswith("-"):
+            target = word
+    if target is None:
+        raise InfraError(f"can't read the SSH address {address!r}")
+    return target, port
+
+
+def vast_gone(row: dict | None) -> str | None:
+    """Why an instance (its ``hub-gpu list`` row; None: not listed) can't be running a job (None: it can)."""
+    if row is None:
+        return "gone from hub-gpu list"
+    if row.get("ended"):
+        return f"ended at {datetime.fromtimestamp(float(row['ended']), UTC):%H:%M:%S} UTC"
+    if row.get("paused"):
+        return "paused"
+    state = str(row.get("state") or "")
+    return state if state.lower() in VAST_DEAD else None
+
+
+def vast_row(hub: HubGpu, instance) -> dict | None:
+    return next((r for r in hub.instances() if r.get("instance") == instance), None)
+
+
+def vast_wait_running(hub: HubGpu, instance, timeout: float = 1800) -> dict:
+    """Wait until the instance runs and has an SSH address (pulling its image can take minutes); returns its list row.
+    An address listed for 2 minutes is tried whatever the state says. InfraError if the instance goes away first (not
+    listed 2 minutes after its start counts), or after ``timeout``."""
+    t0, last, addressed = time.time(), None, None
+    while True:
+        try:
+            row = vast_row(hub, instance)
+        except InfraError as e:
+            log(f"could not list the instances: {e}")
+        else:
+            if (gone := vast_gone(row)) and (row is not None or time.time() - t0 > 120):
+                raise InfraError(f"instance {instance} is {gone} before it ever ran")
+            row = row or {}
+            state = str(row.get("state") or "?")
+            if state != last:
+                log(f"instance {instance}: {state}")
+                last = state
+            if vast_ssh(row):
+                addressed = addressed or time.time()
+                if state.lower() == "running" or time.time() - addressed > 120:
+                    return row
+        if time.time() > t0 + timeout:
+            raise InfraError(f"instance {instance} not running with an SSH address after {timeout:.0f}s")
+        time.sleep(10)
+
+
+def vast_wait_ssh(hub: HubGpu, remote: Remote, instance, check_vm, attached: bool, timeout: float = 900) -> None:
+    """``wait_ssh`` for a vast.ai instance: its key is attached again (``hub-gpu ssh``) if its start says it did not
+    attach, and after every 6 failed tries."""
+    if not attached:
+        log("the start says the SSH key did not attach: attaching it again (hub-gpu ssh)")
+        hub.attach_key(instance)
+    deadline, tries = time.time() + timeout, 0
+    while True:
+        try:
+            if remote.run("true", timeout=40, check=False).returncode == 0:
+                return
+        except subprocess.TimeoutExpired:
+            pass
+        tries += 1
+        check_vm()
+        if tries % 6 == 0:
+            hub.attach_key(instance)
+        if time.time() > deadline:
+            raise InfraError(f"no SSH to {remote.host} (port {remote.port}) after {timeout:.0f}s")
+        time.sleep(10)
+
+
+def vast_teardown(hub: HubGpu, name: str, instance=None, timeout: float = 300) -> dict | None:
+    """End the instance (by number, and by name in case its start failed before its number was known), then verify
+    that ``hub-gpu list`` shows it ended, or not at all. Every call is retried until ``timeout``, an end that the list
+    doesn't show yet asked again each minute; InfraError if the instance is still there then. Returns its last list
+    row (None: never listed)."""
+    deadline, ids, asked = time.time() + timeout, {instance} - {None}, {}
+    while True:
+        try:
+            rows = hub.instances()
+        except InfraError as e:
+            if time.time() > deadline:
+                raise InfraError(f"could not verify the end; end it by hand (hub-gpu end {name}): {e}") from None
+            log(f"  listing failed, retrying: {e}")
+            time.sleep(15)
+            continue
+        mine = [r for r in rows if r.get("instance") in ids or r.get("name") == name]
+        ids |= {r.get("instance") for r in mine}
+        left = [r for r in mine if not r.get("ended")]
+        if not left:
+            log(f"verified: instance {name!r} " + (f"ended ({', '.join(str(r.get('state')) for r in mine)})" if mine
+                                                     else "not listed"))
+            return mine[-1] if mine else None
+        if time.time() > deadline:
+            raise InfraError(f"end incomplete; end it by hand (hub-gpu end {name}): "
+                             f"{[(r.get('instance'), r.get('state')) for r in left]}")
+        for r in left:
+            if r.get("instance") in asked and time.time() - asked[r.get("instance")] < 60:
+                continue
+            log(f"ending instance {r.get('instance')} ({r.get('name')})")
+            asked[r.get("instance")] = time.time()
+            try:
+                hub.end(r.get("instance"))
+            except InfraError as e:
+                log(f"  end failed, retrying: {e}")
+                asked.pop(r.get("instance"))
+        time.sleep(5)
+
+
+def vast_bootstrap_script() -> str:
+    """A vast.ai instance's bootstrap. It is a docker container: the login user is root, and there is no systemd.
+    - A tmpfs at /mnt/ram if the container may mount one (80% of its memory limit), else a plain directory on the
+      instance's disk, said so in the log: the ``--hf`` downloads and the job's /mnt/ram files then use that disk.
+    - rsync (``--fetch``) and a C compiler (a locked package builds from source) if missing; uv, and only uv's own
+      Python (an image's may lack the headers that build needs).
+    - What the job gets: the disks, memory, /dev/shm, the GPUs and the newest CUDA of their driver."""
+    return f"""set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+S=""; [ "$(id -u)" = 0 ] || S="sudo -n"
+mkdir -p {RAM_DIR} 2>/dev/null || $S mkdir -p {RAM_DIR}
+mem=$(( $(awk '/^MemTotal:/ {{print $2}}' /proc/meminfo) * 1024 ))
+lim=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+case "$lim" in ''|max) lim=$mem ;; esac
+[ "$lim" -le "$mem" ] 2>/dev/null || lim=$mem
+size=$(( lim / 100 * 80 ))
+if mountpoint -q {RAM_DIR}; then
+  echo "ram disk: {RAM_DIR} is a mount already"
+elif err=$($S mount -t tmpfs -o size=$size,mode=1777 tmpfs {RAM_DIR} 2>&1); then
+  echo "ram disk: a tmpfs at {RAM_DIR}, $(( size / 1000000000 )) GB (80% of the container's memory limit)"
+else
+  echo "NO RAM DISK: the container may not mount a tmpfs (${{err:-mount failed}}), so {RAM_DIR} is a plain directory \\
+on the instance's disk: the --hf downloads and the job's files there use that disk"
+fi
+need=""
+command -v rsync >/dev/null || need="$need rsync"
+command -v cc >/dev/null || need="$need build-essential"
+command -v curl >/dev/null || need="$need curl ca-certificates"
+if [ -n "$need" ]; then
+  echo "installing:$need"
+  {{ $S apt-get update -qq && $S env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need; }} >/dev/null 2>&1 \\
+    || echo "WARNING: could not install$need"
+fi
+command -v rsync >/dev/null || echo "WARNING: no rsync here, so --fetch falls back to tar over ssh"
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+command -v uv >/dev/null || {{ echo "uv install failed" >&2; exit 1; }}
+mkdir -p "$HOME/.config/uv"
+grep -qs '^python-preference' "$HOME/.config/uv/uv.toml" \\
+  || echo 'python-preference = "only-managed"' >> "$HOME/.config/uv/uv.toml"
+uv --version
+echo "ram disk: $(df -h {RAM_DIR} | tail -1)"
+echo "home disk: $(df -h "$HOME" | tail -1)"
+echo "memory: $(( mem / 1000000000 )) GB, the container's limit $(( lim / 1000000000 )) GB; \\
+/dev/shm: $(df -h /dev/shm 2>/dev/null | tail -1)"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || echo "no nvidia-smi"
+nvidia-smi 2>/dev/null | grep -o "CUDA Version: [0-9.]*" || true
+"""
+
+
+def secret_env(name: str, value: str) -> bool:
+    """An ``--env`` that looks like a key: a word of its name is TOKEN, KEY, SECRET, … and its value is long (a
+    setting such as HF_HUB_DISABLE_IMPLICIT_TOKEN=1 is not)."""
+    return any(w in SECRET_WORDS for w in name.upper().split("_")) and len(value) >= 16
+
+
+def secret_push(local: str) -> str | None:
+    """Why the ``--push`` source ``local`` may hold a key (None: it doesn't): it is in one of this machine's key
+    folders (``SECRET_DIRS``), or it is or holds a .env or .netrc file."""
+    src = Path(local).expanduser().resolve()
+    for folder in SECRET_DIRS:
+        f = Path(folder).expanduser().resolve()
+        if src == f or f in src.parents:
+            return f"it is in {folder}"
+    for p in [src, *(src.rglob("*") if src.is_dir() else [])]:
+        if p.name.startswith(".env") or p.name == ".netrc":
+            return f"{p} may hold keys"
+    return None
 
 
 # --------------------------------------------------------------------------------------- commands
@@ -1728,10 +2210,23 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
     print("== create (dry run: nothing is created) ==")
     print(shlex.join(argv))
     print(f"== cloud-init (--cloud-init-user-data) ==\n{user_data}")
+    print_remote_plan(job, f"{spec.user}@<ip>", bootstrap_script())
+    print("== fetch ==")
+    for path in job.fetches:
+        print(f"{remote_path(path)} -> {fetch_dest(path, job.out) / os.path.basename(path.rstrip('/'))}")
+    print(f"~/{REMOTE_LOGS}/ -> {job.out / 'remote_logs'}; job.json -> {job.out / 'job.json'}")
+    end = "kept (prints the ssh command)" if keep else "deleted, then verified gone (instance and boot disk)"
+    print(f"== teardown ==\n{spec.name}: {end}; in-VM auto-shutdown after {spec.hours:g} h")
+    return 0
+
+
+def print_remote_plan(job: JobSpec, target: str, bootstrap: str, deadline: int | None = None) -> None:
+    """The dry run's SSH part, from the push to the job's uploads: what goes to ``target`` and what runs there.
+    ``deadline``: the job's NEBIUS_JOB_DEADLINE if the machine has no shutdown record (vast.ai)."""
     files = repo_files()
     size = sum((REPO / f).stat().st_size for f in files if (REPO / f).is_file())
     print(f"== push ==\n{len(files)} repo files, {size / 1e6:.1f} MB uncompressed: "
-          f"{REPO} -> {spec.user}@<ip>:{REMOTE_REPO}/")
+          f"{REPO} -> {target}:{REMOTE_REPO}/")
     for local, dest in job.pushes:
         print(f"{local} -> {remote_path(dest)}")
     code = code_version(REPO)
@@ -1740,7 +2235,7 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
     if code["dirty"] and code["source"] == "git":
         print(f"uncommitted changes (--allow-dirty): their patch -> {job.out / provenance.PATCH_FILE}, the untracked "
               f"files in it -> {job.out / provenance.UNTRACKED_FILE}")
-    print(f"== bootstrap (over ssh) ==\n{bootstrap_script()}")
+    print(f"== bootstrap (over ssh) ==\n{bootstrap}")
     if job.hf:
         print(f"== downloads (detached, started right after bootstrap) ==\n{download_script(job.hf)}\n")
     print(f"== setup (detached, in ~/{REMOTE_REPO}) ==\n{job_setup_script(job)}")
@@ -1755,7 +2250,8 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
         print("each over ssh stdin into an owner-only file (umask 077) right before the job; the job step reads it as "
               "it starts and deletes it when it ends (EXIT trap), the launcher again if it stops first")
     if job.command is not None:
-        script = job_script(job.command, job.env, job.poweroff_minutes, secrets=job.secrets, root=job.root_job)
+        script = job_script(job.command, job.env, job.poweroff_minutes, deadline, secrets=job.secrets,
+                            root=job.root_job)
         print(f"== job (detached, in ~/{REMOTE_REPO}{'; the command as root' if job.root_job else ''}) ==\n{script}\n")
         print(f"== how a detached step is launched (the job, verbatim) ==\n{detached(script, 'job', REMOTE_REPO)}\n")
     if job.uploads:
@@ -1764,13 +2260,6 @@ def dry_run(nebius: str, spec: VmSpec, job: JobSpec, pubkey: str, keep: bool) ->
             print(f"{remote_path(src)} -> {dest}")
         print(f"token: {job.hf_token_file} -> {REMOTE_HF_TOKEN} on the VM over ssh stdin, mode 600, before the job "
               f"(so it can save as it goes); deleted when the upload step ends")
-    print("== fetch ==")
-    for path in job.fetches:
-        print(f"{remote_path(path)} -> {fetch_dest(path, job.out) / os.path.basename(path.rstrip('/'))}")
-    print(f"~/{REMOTE_LOGS}/ -> {job.out / 'remote_logs'}; job.json -> {job.out / 'job.json'}")
-    end = "kept (prints the ssh command)" if keep else "deleted, then verified gone (instance and boot disk)"
-    print(f"== teardown ==\n{spec.name}: {end}; in-VM auto-shutdown after {spec.hours:g} h")
-    return 0
 
 
 def all_regions(args, regions: list[Region]) -> list[Region]:
@@ -1857,8 +2346,9 @@ def reap(args, budget: Budget, regions: list[Region]) -> None:
       deadline; with no samples, at the reserved worst case.
 
     A kept VM (``up``, ``run --keep``) is never deleted here. Its reservation is settled the same way once the VM is
-    gone from its region (deleted by hand; ``down`` with the ledger settles it at once)."""
-    for e in [e for e in budget.data["entries"] if e.get("kind") == "reserved"]:
+    gone from its region (deleted by hand; ``down`` with the ledger settles it at once). vast.ai entries are left
+    alone: hub destroys such an instance at its end, and the entry counts for nothing here."""
+    for e in [e for e in budget.data["entries"] if e.get("kind") == "reserved" and e.get("provider") != "vast"]:
         name = e["job"]
         if not e.get("kept") and launcher_alive(e):
             continue
@@ -1926,13 +2416,17 @@ def cmd_vm(args, cmd: list[str]) -> int:
     that arrives while a VM is being deleted is acted on once it is gone, with no further attempt (exit 130)."""
     handlers = {} if args.dry_run else install_launcher_signals()
     try:
-        return vm_attempts(args, cmd)
+        return vast_run(args, cmd) if getattr(args, "provider", "nebius") == "vast" else vm_attempts(args, cmd)
     finally:
         restore_signals(handlers)
 
 
 def vm_attempts(args, cmd: list[str]) -> int:
     """``cmd_vm`` inside its signal handlers."""
+    if args.cmd == "run" and (given := changed_flags(args) & set(VAST_ONLY)):
+        raise SystemExit(f"{flag_names(given)}: only with --provider vast")
+    if args.attempts is None:
+        args.attempts = 3
     base = vm_spec(args)
     args.max_gpu_price = spot_bid(args)  # the flag, else the environment's (spot only); job.json records this one
     first_job = job_spec(args, cmd, base.name)
@@ -2044,7 +2538,7 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         budget.check(worst, what)
     keep_always = args.cmd == "run" and args.keep
     rec = Record(mode=args.cmd, name=spec.name, spot=spec.spot, hours=spec.hours, command=job.command,
-                 flags={k: v for k, v in vars(args).items() if k not in ("func",)},
+                 flags={k: v for k, v in vars(args).items() if k not in ("func", *VAST_ONLY)},
                  max_price=cap, offers=[asdict(o) for o in offers], attempt=attempt, **job_fields(job))
     if not order:
         rec.errors.append("no region qualifies (cap, capacity, quota or price); nothing created")
@@ -2218,6 +2712,330 @@ def vm_stopped(rec: Record, state: str, created: float, hours: float) -> int:
     return EXIT_STOPPED
 
 
+NEBIUS_ONLY = ("platform", "preset", "spot", "on_demand", "max_gpu_price", "regions", "regions_file", "project_id",
+               "subnet_id", "image_family", "image_project", "user", "ssh_key", "nebius", "keep", "root_job",
+               "sandbox_python")
+CARRY_SECRETS = ("secret", "upload", "hf_token_file")
+VAST_ONLY = ("gpu", "gpus", "offer", "min_cuda", "max_cost", "purpose", "tag", "image", "reserve_minutes", "hub_gpu",
+             "rsync")
+
+
+def changed_flags(args) -> set[str]:
+    """The ``run`` flags whose value is not their default (with the same environment): those given on the command
+    line, unless given their default value."""
+    defaults = vars(build_parser().parse_args(["run", "--hours", "1", "--out", "-"]))
+    return {k for k, v in vars(args).items() if k in defaults and k not in ("hours", "out") and v != defaults[k]}
+
+
+def flag_names(dests) -> str:
+    return ", ".join(f"--{d.replace('_', '-')}" for d in sorted(dests))
+
+
+def vast_run(args, cmd: list[str]) -> int:
+    """``run --provider vast``: the job on a fresh vast.ai instance through hub-gpu, ended and verified gone whatever
+    happens (module docstring). Every refusal comes before anything is started."""
+    changed = changed_flags(args)
+    if mixed := changed & set(NEBIUS_ONLY):
+        raise SystemExit(f"--provider vast: {flag_names(mixed)} are Nebius's (vast.ai: --gpu, --gpus, --offer, "
+                         "--image; no --keep, no --root-job)")
+    if carry := changed & set(CARRY_SECRETS):
+        raise SystemExit(f"--provider vast: {flag_names(carry)} refused: no secret goes to a vast.ai instance, someone "
+                         "else's machine (an HF bucket upload needs a token); results come back with --fetch")
+    if args.attempts not in (None, 1):
+        raise SystemExit("--provider vast: no --attempts: a vast.ai instance is not preempted, and what one saved "
+                         "stays on it (relaunch by hand, --push-ing the fetched results back)")
+    args.attempts = 1
+    args.gpus = 1 if args.gpus is None else args.gpus
+    args.min_cuda = VAST_MIN_CUDA if args.min_cuda is None else args.min_cuda
+    if args.gpus < 1 or args.hours <= 0:
+        raise SystemExit("--provider vast: --gpus and --hours must be positive")
+    reserve = (min(VAST_RESERVE_MINUTES, args.hours * 15) if args.reserve_minutes is None else args.reserve_minutes)
+    if not 0 <= reserve * 120 < args.hours * 3600:
+        raise SystemExit(f"--reserve-minutes {reserve:g} leaves the job no time: keep it under half of --hours")
+    if os.environ.get("NEBIUS_MAX_GPU_PRICE", "").strip():
+        log(f"--provider vast: ignoring NEBIUS_MAX_GPU_PRICE={os.environ['NEBIUS_MAX_GPU_PRICE'].strip()}, a Nebius "
+            "spot bid (vast.ai: --max-price caps the instance's price)")
+    name = vast_name(args.name)
+    job = job_spec(args, cmd, name)
+    keys = [f"--env {k} (it looks like a key)" for k, v in job.env if secret_env(k, v)]
+    keys += [f"--push {local} ({why})" for local, _ in job.pushes if (why := secret_push(local))]
+    if keys:
+        raise SystemExit(f"--provider vast: no secret goes to a vast.ai instance, someone else's machine: "
+                         f"{'; '.join(keys)}")
+    code = check_code(job.allow_dirty)
+    job = replace(job, provider="vast", reserve=reserve * 60, rsync=args.rsync)
+    if shutil.which(args.rsync) is None and not args.dry_run:
+        raise SystemExit(f"rsync ({args.rsync}) not found on this machine: --fetch from vast.ai needs it (--rsync or "
+                         "RSYNC_BIN; on hub, rsync in .hub/apt-packages)")
+    if args.budget_file and not Path(args.budget_file).expanduser().exists():
+        raise SystemExit(f"budget ledger {args.budget_file} not found: refusing to spend without it "
+                         "(create it with {\"limit_usd\": N, \"entries\": []})")
+    budget = Budget(args.budget_file) if args.budget_file else None
+    return vast_attempt(args, HubGpu(args.hub_gpu), name, job, code, budget)
+
+
+def vast_survey(hub: HubGpu, args, disk: int) -> tuple[list[dict], list[dict]]:
+    """The offers for the instance and the ones to try, in order: the cheapest few that qualify, or ``--offer``."""
+    offers = hub.offers(gpu=args.gpu, gpus=args.gpus, disk_gb=disk, max_price=args.max_price)
+    if args.offer is None:
+        return offers, vast_candidates(offers, args.min_cuda, args.max_price)[:VAST_STARTS]
+    mine = next((o for o in offers if o["offer"] == args.offer), None)
+    if mine is None:
+        raise SystemExit(f"--offer {args.offer} is not among the current offers for {args.gpus}× "
+                         f"{args.gpu or 'any GPU'} with {disk} GB of disk" + (f" under ${args.max_price:g}/h" if
+                                                                             args.max_price is not None else "")
+                         + ": give the --gpu and --gpus it has (hub-gpu offers), or another one")
+    if why := offer_skip(mine, args.min_cuda, args.max_price):
+        raise SystemExit(f"--offer {args.offer}: {why} (--min-cuda, --max-price)")
+    return offers, [mine]
+
+
+def vast_attempt(args, hub: HubGpu, name: str, job: JobSpec, launch_code: dict, budget: Budget | None) -> int:
+    """The instance: hub-gpu limits, the offer (waiting up to ``--wait-hours`` for one), its worst case, the start (the
+    next offer if it fails), the SSH part, the fetch, the end and its check, the ledger. Returns the exit code."""
+    lim = hub.limits()
+    if problem := limits_problem(lim, args.gpus, args.hours):
+        raise SystemExit(f"hub-gpu limits: {problem}")
+    disk = disk_gb(args.disk_gib)
+    log(f"checking vast.ai offers: {args.gpus}× {args.gpu or 'any GPU'}, {disk} GB of disk, CUDA ≥ {args.min_cuda:g}"
+        + (f", at most ${args.max_price:g}/h" if args.max_price is not None else " (no price cap)"))
+    offers, order = vast_survey(hub, args, disk)
+    why = "--offer" if args.offer is not None else "cheapest"
+    print(vast_offer_table(offers, args.min_cuda, args.max_price, order[0]["offer"] if order else None, why),
+          flush=True)
+    checks = 0 if args.dry_run or args.offer is not None else max(0, round(args.wait_hours * 3600 /
+                                                                         PRICE_RECHECK_SECONDS))
+    while not order and checks > 0:
+        log(f"no offer qualifies now (GPU, CUDA, price, disk); checking again in {PRICE_RECHECK_SECONDS // 60} min "
+            f"({checks} more checks, --wait-hours)")
+        time.sleep(PRICE_RECHECK_SECONDS)
+        checks -= 1
+        offers, order = vast_survey(hub, args, disk)
+        if order:
+            print(vast_offer_table(offers, args.min_cuda, args.max_price, order[0]["offer"]), flush=True)
+    rec = Record(mode="run", provider="vast", name=name, spot=False, hours=args.hours, command=job.command,
+                 flags={k: v for k, v in vars(args).items() if k not in ("func",)}, max_price=args.max_price,
+                 offers=offers[:16], **job_fields(job))
+    if not order:
+        if args.dry_run:
+            print("== nothing would be started: no offer qualifies (GPU, CUDA, price, disk) ==")
+            return EXIT_INFRA
+        rec.errors.append("no offer qualifies (GPU, CUDA, price, disk); nothing started")
+        rec.save(job.out)
+        log("no offer qualifies; nothing started")
+        return EXIT_INFRA
+    worst = float(order[0]["usd_per_hour"]) * args.hours
+    if problem := limits_problem(lim, args.gpus, args.hours, worst, args.max_cost):
+        raise SystemExit(f"{name}: {problem}")
+    log(f"worst case ${worst:.2f} (${float(order[0]['usd_per_hour']):.3f}/h × {args.hours:g} h); hub-gpu limits: "
+        f"${float(lim.get('room_usd') or 0):.2f} left in any 24 hours"
+        + (f"; --max-cost ${args.max_cost:g}" if args.max_cost is not None else ""))
+    if name in {r.get("name") for r in hub.instances()}:
+        raise SystemExit(f"{name} is taken among this project's instances: run again for another suffix")
+    purpose, tags = vast_purpose(args.purpose, job.command), vast_tags(args.tag, launch_code)
+    what = f"{name} ({args.gpus}× {order[0].get('gpu')} on vast.ai, ≤{args.hours:g} h)"
+    if args.dry_run:
+        return vast_dry_run(args, job, name, order[0], purpose, tags, disk, worst, lim, budget)
+    if budget is not None:
+        budget.record(name, worst, what, pid=os.getpid(), host=socket.gethostname(), out=os.path.abspath(job.out),
+                      hours=args.hours)
+        log(budget.summary())
+    rec.vast = {"limits": lim, "disk_gb": disk, "min_cuda": args.min_cuda, "purpose": purpose, "tags": tags,
+                "image": args.image, "reserve_minutes": round(job.reserve / 60, 2)}
+    instance = remote = started = ends = None
+    price = float(order[0]["usd_per_hour"])
+    code = EXIT_INFRA
+    t0 = time.time()
+
+    def check_vm() -> None:
+        if instance is None:
+            return
+        try:
+            row = vast_row(hub, instance)
+        except InfraError as e:
+            log(f"could not read the instance's state: {e}")
+            return
+        if why := vast_gone(row):
+            raise VmStopped(why)
+
+    try:
+        for k, offer in enumerate(order):
+            price = float(offer["usd_per_hour"])
+            if k and (problem := limits_problem(lim, args.gpus, args.hours, price * args.hours, args.max_cost)):
+                log(f"not trying offer {offer['offer']}: {problem}")
+                break
+            log(f"starting {name}: offer {offer['offer']}, {offer.get('gpus')}× {offer.get('gpu')} in "
+                f"{offer.get('where')} at ${price:.3f}/h, {disk} GB of disk, for {args.hours:g} h (then destroyed)")
+            rec.region = offer.get("where")
+            rec.times["create_start"] = utc()
+            rec.creates.append({"offer": offer["offer"], "price": price, "where": offer.get("where"),
+                                "start": rec.times["create_start"]})
+            rec.save(job.out)
+            t = time.time()
+            try:
+                started = hub.start(offer["offer"], name=name, purpose=purpose, tags=tags, hours=args.hours,
+                                    disk_gb=disk, image=args.image)
+                rec.creates[-1]["minutes"] = round((time.time() - t) / 60, 2)
+                rec.vast["offer"] = offer
+                break
+            except InfraError as e:
+                log(f"start failed: {e}")
+                rec.errors.append(f"start of offer {offer['offer']}: {e}")
+                rec.creates[-1].update(error=str(e)[-600:], minutes=round((time.time() - t) / 60, 2))
+                vast_teardown(hub, name)  # if the start did make an instance after all, end it before the next
+        if started is None:
+            raise InfraError("could not start an instance from any qualifying offer")
+        instance = started["instance"]
+        price = float(started.get("usd_per_hour") or price)
+        ends = float(started.get("deadline") or _seconds(rec.times["create_start"]) + args.hours * 3600)
+        job = replace(job, ends=ends)  # the job's deadline, and how long the fetch may take
+        rec.instance_id = str(instance)
+        rec.price_samples.append([rec.times["create_start"], price])
+        rec.vast.update(start=started, ends_utc=datetime.fromtimestamp(ends, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        rec.save(job.out)
+        if budget is not None:
+            budget.annotate(name, instance=instance, usd=round(price * args.hours, 2), ends=rec.vast["ends_utc"])
+        log(f"instance {instance}: ${price:.3f}/h, destroyed at {rec.vast['ends_utc']} "
+            f"(${float(started.get('cost_usd') or price * args.hours):.2f} if it runs to then)")
+        row = vast_wait_running(hub, instance)
+        target, port = vast_ssh(row)
+        remote = Remote(target, job.out / "known_hosts", str(Path(HUB_GPU_KEY).expanduser()), port=port)
+        rec.host, rec.ip, rec.times["running"] = target, target.rpartition("@")[2], utc()
+        rec.vast["ssh"] = {"host": target, "port": port, "state": row.get("state")}
+        rec.save(job.out)
+        log(f"instance {instance} running ({time.time() - t0:.0f}s): ssh -p {port} {target}")
+        vast_wait_ssh(hub, remote, instance, check_vm, bool(started.get("ssh_key_attached", True)))
+        job_code = remote_steps(remote, job, rec, check_vm)
+        code = 0 if job_code in (None, 0) else job_code
+        if code:
+            log(f"job failed with exit code {code}")
+    except VmStopped as e:
+        code = vast_stopped(rec, str(e), ends)
+    except KeyboardInterrupt as e:
+        log(f"interrupted ({e or 'Ctrl-C'})")
+        rec.errors.append(f"interrupted ({e or 'Ctrl-C'})")
+        code = EXIT_INTERRUPTED
+    except Exception as e:  # noqa: BLE001 — anything else is an infrastructure failure: still fetch and end
+        traceback.print_exc()
+        rec.errors.append(f"{type(e).__name__}: {e}")
+        code = EXIT_INFRA
+        if ends is not None and time.time() > ends - job.reserve:
+            log("the instance's end is near (--reserve-minutes): fetching what the job made so far, then ending it")
+        try:  # SSH failing is often the instance going away under us
+            check_vm()
+        except VmStopped as stopped:
+            code = vast_stopped(rec, str(stopped), ends)
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        with signals_held() as held:  # Ctrl-C, SIGTERM and SIGHUP wait until the instance is ended
+            if remote is not None and rec.stopped_state is None:
+                try:
+                    held.cut_collection = True  # SIGTERM/SIGHUP skip the rest of this best-effort step
+                    try:
+                        collect(remote, job, rec)
+                    finally:
+                        held.cut_collection = False
+                except LauncherSignal as e:
+                    log(f"collection cut short ({e}): ending the instance first")
+                    rec.errors.append(f"collection cut short by {e}")
+            if rec.creates:  # a start was tried: end whatever it made
+                try:
+                    rec.vast["end"] = vast_teardown(hub, name, instance)
+                    rec.teardown_verified = True
+                except Exception as e:  # noqa: BLE001
+                    rec.teardown_verified = False
+                    rec.errors.append(f"teardown: {e}")
+                    log(f"!!! END FAILED: {e}\n!!! the instance bills until vast.ai destroys it"
+                        + (f" at {rec.vast.get('ends_utc')}" if ends else "") + f": hub-gpu end {name}")
+                    code = EXIT_INFRA
+                rec.times["deleted"] = utc()
+                if not rec.price_samples and rec.vast.get("end"):  # started, though the answer never came
+                    rec.price_samples.append([rec.times["create_start"],
+                                              float(rec.vast["end"].get("usd_per_hour") or price)])
+            end = rec.times.get("deleted") or utc()
+            if ends is not None:  # it can't have run past its end
+                end = min(end, datetime.fromtimestamp(ends, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            rec.estimated_cost_usd = estimated_cost(rec.price_samples, end)
+            if budget is not None:
+                if rec.teardown_verified is False:  # still at its worst case: it may run until its end
+                    budget.annotate(name, teardown_failed=True)
+                elif rec.estimated_cost_usd is not None:
+                    budget.settle(name, rec.estimated_cost_usd, "vast.ai: its price × the time from its start to its "
+                                                                "verified end")
+                else:
+                    budget.settle(name, 0.0, "no instance was started")
+                log(budget.summary())
+            if rec.estimated_cost_usd is not None:
+                log(f"estimated cost ${rec.estimated_cost_usd:.2f} (${price:.3f}/h from its start to its verified end; "
+                    "hub-gpu limits shows what was committed)")
+            rec.save(job.out)
+            log(f"record: {job.out / 'job.json'}")
+        if held.signum is not None:
+            what = signal.Signals(held.signum).name
+            log(f"{what} received while cleaning up: stopping here")
+            rec.errors.append(f"{what} while the instance was being ended; the launcher stopped after it")
+            rec.save(job.out)
+            if rec.teardown_verified is not False:
+                code = EXIT_INTERRUPTED
+    return code
+
+
+def vast_stopped(rec: Record, why: str, ends: float | None) -> int:
+    """Classify an instance that went away (``vast_gone``). If the job had already ended, its own code stands, as on
+    Nebius. Otherwise it was destroyed at its end (``--hours``), if that is when, or it disappeared or failed mid-job:
+    exit 3 either way (nothing relaunches on vast.ai)."""
+    rec.stopped_state = why
+    if rec.exit_code in (0, EXIT_UNFINISHED):
+        log(f"the instance is {why}, after the job had exited {rec.exit_code}")
+        rec.errors.append(f"instance {why} after the job ended (collection incomplete)")
+        return rec.exit_code
+    what = ("destroyed at its end (--hours)" if ends is not None and time.time() > ends - 120 else
+            "it disappeared or failed mid-job")
+    log(f"!!! the instance is {why}: {what}")
+    rec.errors.append(f"instance {why} ({what})")
+    return EXIT_STOPPED
+
+
+def vast_dry_run(args, job: JobSpec, name: str, offer: dict, purpose: str, tags: list[str], disk: int, worst: float,
+                 lim: dict, budget: Budget | None) -> int:
+    """Print what ``run --provider vast`` would do with ``offer``. Nothing is started and nothing goes over SSH; the
+    only hub-gpu calls (before this) are the read-only limits, offers and list."""
+    mine = lim["limits"]
+    print(f"== limits (hub-gpu limits) ==\n${float(mine['usd_per_day']):g} a day, {mine['gpus']} GPUs at once, timed "
+          f"runs of at most {float(mine['hours']):g} h; ${float(lim['room_usd']):.2f} left in any 24 hours, "
+          f"{lim.get('gpus_in_use', 0)} GPUs in use\nthis instance: ${float(offer['usd_per_hour']):.3f}/h × "
+          f"{args.hours:g} h = ${worst:.2f} at most" + (f" (--max-cost ${args.max_cost:g})" if args.max_cost is not None
+                                                        else "") + ": ok")
+    argv = [args.hub_gpu, "--json", *start_args(offer["offer"], name=name, purpose=purpose, tags=tags,
+                                                 hours=args.hours, disk_gb=disk, image=args.image)]
+    print(f"== start (dry run: nothing is started) ==\n{shlex.join(argv)}\nvast.ai destroys it {args.hours:g} h after "
+          "its start, with whatever is on it")
+    key = Path(HUB_GPU_KEY).expanduser()
+    print(f"== ssh ==\nroot@<host> -p <port> from hub-gpu list, with hub-gpu's key {key}"
+          + ("" if key.is_file() else " (hub-gpu makes it at its first start)")
+          + f"; known_hosts {job.out / 'known_hosts'}")
+    deadline = int(time.time() + args.hours * 3600 - job.reserve)
+    print_remote_plan(job, "root@<host>", vast_bootstrap_script(), deadline)
+    print(f"(the job's NEBIUS_JOB_DEADLINE, {deadline} here: the instance's end less {job.reserve / 60:g} min kept for "
+          f"the fetch; the launcher stops waiting for the job {job.reserve / 120:g} min before the end)")
+    print("== fetch (rsync over ssh, resumable) ==")
+    for path in job.fetches:
+        print(f"{remote_path(path)} -> {fetch_dest(path, job.out) / os.path.basename(path.rstrip('/'))}")
+    print(f"~/{REMOTE_LOGS}/ -> {job.out / 'remote_logs'}; job.json -> {job.out / 'job.json'}")
+    found = shutil.which(job.rsync)
+    print(f"rsync here: {found}" if found else f"!! no rsync here ({job.rsync}): a real run refuses to start (--rsync, "
+          "RSYNC_BIN; on hub: .hub/apt-packages)")
+    print("== no secrets ==\nnone goes to the instance, someone else's machine: no --secret, no HF token (--hf "
+          "downloads are unauthenticated), no --upload; results come back only through --fetch")
+    print(f"== teardown ==\n{name}: hub-gpu end, then verified ended in hub-gpu list (after errors, Ctrl-C, SIGTERM "
+          "and SIGHUP too)")
+    if budget is not None:
+        print(f"== budget: a vast.ai entry of at most ${worst:.2f} would be recorded in {budget.path}, not counted "
+              f"against its limit ({budget.summary()}) ==")
+    return 0
+
+
 def cmd_exec(args, cmd: list[str]) -> int:
     """The SSH part only, on an existing box (an ``up`` VM, any CUDA machine, or any box with ``--no-gpu``)."""
     job = job_spec(args, cmd, args.name)
@@ -2299,7 +3117,8 @@ def cmd_budget(args, cmd: list[str]) -> int:
         raise SystemExit("--budget-file (or $NEBIUS_BUDGET_FILE) is required")
     b = Budget(args.budget_file)
     for e in b.data["entries"]:
-        print(f"  {e['when'][:16]}  {e['kind']:8}  ${e['usd']:7.2f}  {e.get('what', '')}")
+        print(f"  {e['when'][:16]}  {e['kind']:8}  ${e['usd']:7.2f}  {e.get('what', '')}"
+              + ("  (vast.ai: not counted)" if e.get("provider") == "vast" else ""))
     print(b.summary())
     return 0
 
@@ -2349,7 +3168,7 @@ def build_parser() -> argparse.ArgumentParser:
     pricing.add_argument("--on-demand", action="store_true", help="regular, non-preemptible VM")
     machine.add_argument("--max-price", type=float, default=None, metavar="USD",
                          help="skip regions whose price for the whole VM is above this, per hour (default: no cap)."
-                              " Checked at launch; a spot price can still rise during the run")
+                              " Checked at launch; a spot price can still rise during the run. vast.ai: offers")
 
     remote = argparse.ArgumentParser(add_help=False)
     remote.add_argument("--out", required=True, help="local output dir; {stamp} and {name} are expanded")
@@ -2392,33 +3211,66 @@ def build_parser() -> argparse.ArgumentParser:
     vm = argparse.ArgumentParser(add_help=False)
     vm.add_argument("--subnet-id", default=os.environ.get("NEBIUS_SUBNET_ID"),
                     help="with --project-id only (env NEBIUS_SUBNET_ID)")
-    vm.add_argument("--hours", type=float, required=True, help="in-VM auto-shutdown after this long (spending cap)")
+    vm.add_argument("--hours", type=float, required=True,
+                    help="in-VM auto-shutdown after this long (spending cap); vast.ai: the instance is destroyed then")
     vm.add_argument("--ssh-key", default=os.environ.get("NEBIUS_SSH_KEY"),
                     help="private key; KEY.pub goes into cloud-init (env NEBIUS_SSH_KEY)")
-    vm.add_argument("--name", default="md-job", help="VM name prefix (a random suffix is added)")
+    vm.add_argument("--name", default="md-job",
+                    help="VM name prefix (a random suffix is added); vast.ai: at most 17 characters")
     vm.add_argument("--user", default="md", help="login user created on the VM")
     vm.add_argument("--max-gpu-price", type=float, default=None,  # else NEBIUS_MAX_GPU_PRICE, for spot: spot_bid
                     metavar="USD", help="spot bid per GPU-hour through a Nebius pricing policy: never charged more; "
                                         "the VM doesn't run while the market is above it (env NEBIUS_MAX_GPU_PRICE, "
                                         "which --on-demand ignores; the flag with --on-demand is refused)")
     vm.add_argument("--budget-file", default=os.environ.get("NEBIUS_BUDGET_FILE"),
-                    help="spending ledger; refuse a VM whose worst case would exceed its limit (env NEBIUS_BUDGET_FILE)")
-    vm.add_argument("--disk-gib", type=int, default=200, help="boot disk (network SSD; weights go to RAM, not here)")
+                    help="spending ledger; refuse a VM whose worst case would exceed its limit (env NEBIUS_BUDGET_FILE)."
+                         " A vast.ai instance is recorded there, not counted against the limit")
+    vm.add_argument("--disk-gib", type=int, default=200,
+                    help="boot disk (network SSD; weights go to RAM, not here). vast.ai: the instance's disk, where "
+                         "the weights go if the container can't mount a RAM disk")
     vm.add_argument("--image-family", default="ubuntu24.04-cuda13.0",
                     help="ubuntu24.04-cuda13.0 (default); for a CPU VM, ubuntu24.04-driverless")
     vm.add_argument("--image-project", default="project-e03public-images",
                     help="with --project-id only: the region's public-image project (default: uk-south1's)")
     vm.add_argument("--wait-hours", type=float, default=2.0,
                     help="when no region qualifies (price above the bid or cap, no capacity), re-check every 15 min "
-                         "for this long before giving up")
+                         "for this long before giving up (vast.ai: no offer)")
     vm.add_argument("--dry-run", action="store_true", help="print the plan; create nothing")
 
-    p = sub.add_parser("run", parents=[nebius, machine, vm, remote],
+    vast = argparse.ArgumentParser(add_help=False)
+    vast.add_argument("--provider", choices=("nebius", "vast"), default="nebius",
+                      help="nebius (default), or vast: a vast.ai instance through hub-gpu (the vast.ai flags below)")
+    vast.add_argument("--gpu", help="vast.ai: the GPU model, as hub-gpu offers names it, e.g. B200 (default: any)")
+    vast.add_argument("--gpus", type=int, help="vast.ai: how many GPUs (default 1)")
+    vast.add_argument("--offer", type=int,
+                      help="vast.ai: start this offer of hub-gpu offers, not the cheapest (give its --gpu and --gpus)")
+    vast.add_argument("--min-cuda", type=float, metavar="VERSION",
+                      help=f"vast.ai: skip offers whose driver runs an older CUDA (default {VAST_MIN_CUDA:g}: the "
+                           "locked torch is a CUDA 13.0 build)")
+    vast.add_argument("--max-cost", type=float, metavar="USD",
+                      help="vast.ai: refuse an instance whose price × --hours is above this (hub-gpu limits are "
+                           "checked anyway)")
+    vast.add_argument("--purpose", help="vast.ai: the instance's purpose line, which the owner sees (default: the job)")
+    vast.add_argument("--tag", action="append", default=[],
+                      help=f"vast.ai: a tag, e.g. experiment=v2 (repeatable, up to {VAST_MAX_TAGS - 2}; the launcher "
+                           "adds launcher= and commit=)")
+    vast.add_argument("--image", help="vast.ai: the docker image (default: hub-gpu's, vastai/pytorch)")
+    vast.add_argument("--reserve-minutes", type=float, metavar="MIN",
+                      help=f"vast.ai: kept before the instance's end for --fetch; the job's NEBIUS_JOB_DEADLINE is "
+                           f"that much earlier, and the launcher stops waiting for the job halfway into it (default "
+                           f"{VAST_RESERVE_MINUTES:g}, at most a quarter of --hours)")
+    vast.add_argument("--hub-gpu", default=os.environ.get("HUB_GPU_BIN", "hub-gpu"),
+                      help="vast.ai: the hub-gpu CLI (env HUB_GPU_BIN)")
+    vast.add_argument("--rsync", default=os.environ.get("RSYNC_BIN", "rsync"),
+                      help="vast.ai: this machine's rsync, for --fetch (env RSYNC_BIN)")
+
+    p = sub.add_parser("run", parents=[nebius, machine, vm, remote, vast],
                        help="cheapest region → create → set up → job → fetch → delete")
     p.add_argument("--keep", action="store_true", help="do not delete the VM at the end")
-    p.add_argument("--attempts", type=int, default=3,
-                   help=f"VMs to use in all: after a spot preemption, or a job exit of {EXIT_UNFINISHED} (stopped "
-                        "early, can resume), a fresh VM runs the job again in the then-cheapest region")
+    p.add_argument("--attempts", type=int, default=None,
+                   help=f"VMs to use in all (default 3): after a spot preemption, or a job exit of {EXIT_UNFINISHED} "
+                        "(stopped early, can resume), a fresh VM runs the job again in the then-cheapest region. "
+                        "vast.ai: 1, no relaunch")
     p.set_defaults(func=cmd_vm)
     p = sub.add_parser("up", parents=[nebius, machine, vm, remote],
                        help="cheapest region → create + set up (+ downloads), keep the VM")
