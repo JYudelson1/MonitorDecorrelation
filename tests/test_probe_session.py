@@ -6,6 +6,8 @@ Checks:
 - A deadline that leaves no time for a single shard ends with 76, not a relaunch; a second run finishes.
 - A broken optional reader doesn't fail the session and isn't retried; the required reader still finishes.
 - A worker stopped by the deadline or SIGTERM with uploads still in flight exits 75 (resumable), not 1 (failed).
+- A plan that extracts one episode per forward records it, and its diagnostics still batch (their own setting); a plan
+  whose diagnostics would read one at a time twice is refused.
 """
 
 from __future__ import annotations
@@ -110,6 +112,25 @@ def test_both_readers_extract_everything_and_run_diagnostics(setup):
     assert diag["n_inputs"] == 3 * 2 + 4 and diag["jitter_rel_max"] < 0.05  # 2 + 1 TerminalEnv items x 2 views
     labels = {d["label"] for d in diag["items"] if d["view"] == "with_reasoning"}
     assert labels == {0, 1}  # from the real TerminalEnv set, not the concealment set (hacks only)
+
+
+def test_one_episode_per_forward_and_diagnostics_that_still_batch(setup):
+    """The v2 session's settings (docs/inkling_probes_amendment_2.md): the extraction one episode per forward, the
+    diagnostics batched against one at a time. Without a batching of their own the plan is refused before any work."""
+    tmp_path, plan, stores = setup
+    plan["readers"].pop("nvfp4")
+    plan["readers"]["bf16"].update(required=True, stagger=False)
+    plan["datasets"] = plan["datasets"][:2]
+    plan["max_batch_tokens"] = 1
+    refused = run(tmp_path, plan)
+    assert refused.returncode == 2 and "max_batch_tokens" in refused.stderr and not stores.exists(), refused.stderr
+    plan["diagnostics"]["max_batch_tokens"] = 65536
+    cp = run(tmp_path, plan)
+    assert cp.returncode == 0, cp.stdout[-4000:] + cp.stderr[-2000:]
+    for name in ("terminal_tiny", "toy_contrastive"):
+        assert json.loads((stores / "bf16" / name / "index.json").read_text())["max_batch_tokens"] == 1
+    diag = json.loads((stores / "diagnostics" / "bf16" / "done.json").read_text())
+    assert diag["max_batch_tokens_batched"] == 65536 and diag["n_inputs"] == 3 * 2 + 4
 
 
 def test_no_time_for_a_shard_ends_with_76_and_a_second_run_finishes(setup):

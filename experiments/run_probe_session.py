@@ -19,7 +19,10 @@
 - Each GPU group of a reader gets one worker: this script with ``--worker``, pinned with CUDA_VISIBLE_DEVICES.
 - A worker loads its reader once. It then extracts its part of every dataset, where the part is its index among
   the reader's GPU groups (whitebox/extraction.py).
-- Then the first worker of each reader runs the diagnostics (whitebox/diagnostics.py).
+- Then the first worker of each reader runs the diagnostics (whitebox/diagnostics.py): a fixed sample read batched and
+  one at a time. The batched read takes ``diagnostics.max_batch_tokens``, else the plan's ``max_batch_tokens``. A plan
+  that extracts one episode per forward (``"max_batch_tokens": 1``) must set it, else there'd be no batching to measure:
+  such a plan is refused.
 - With ``"stagger": true``, a reader's next worker starts only once the previous one has loaded (or after 20
   minutes), so two full-precision copies don't load into RAM at once.
 - **Parts across VMs:** ``"parts_total": n`` and ``"part_offset": i`` let several VMs share a reader. This VM's workers
@@ -72,6 +75,11 @@ def log(msg: str) -> None:
 
 def dataset_name(path: str) -> str:
     return os.path.basename(path.rstrip("/"))
+
+
+def diagnostics_batch(plan: dict) -> int:
+    """``max_batch_tokens`` of the diagnostics' batched read: their own, else the extraction's."""
+    return int(plan["diagnostics"].get("max_batch_tokens", plan.get("max_batch_tokens", 65536)))
 
 
 def jobs_for(plan: dict, reader: str, copy: int) -> list[Job]:
@@ -130,9 +138,10 @@ def run_diagnostics(model, plan: dict, reader: str, wlog) -> None:
     replay = InklingReplay(effort=PROBE_EFFORT, follow_up=FOLLOW_UP)
     inputs = [replay.probe_input(item_messages(it, view)) for it, view in sample]
     wlog(f"diagnostics on {len(inputs)} inputs ({sum(len(p.tokens) for p in inputs)} tokens)")
-    tensors, summary = diagnostics.run(model, inputs, special_ids(replay),
-                                       max_batch_tokens=plan.get("max_batch_tokens", 65536))
+    batched = diagnostics_batch(plan)
+    tensors, summary = diagnostics.run(model, inputs, special_ids(replay), max_batch_tokens=batched)
     summary.update(reader=reader, model=plan["readers"][reader]["model"], finished_utc=now(), code=code_version(),
+                   max_batch_tokens_batched=batched,
                    items=[{"id": it["id"], "view": view, "label": it["label"], "split": it["split"]}
                           for it, view in sample])
     out = os.path.join(plan["out"], "diagnostics", reader)
@@ -289,6 +298,9 @@ def main() -> int:
     ap.add_argument("--retry-failed", action="store_true", help="retry optional readers that failed before")
     args = ap.parse_args()
     plan = json.load(open(args.plan))
+    if plan.get("diagnostics") and diagnostics_batch(plan) <= 1:
+        ap.error("the diagnostics' batched read would be one episode per forward too: give the plan's diagnostics a "
+                 "max_batch_tokens (the extraction's batching was 65536)")
     if args.worker:
         return worker(plan, args.reader, args.copy)
     return driver(plan, args.plan, args.retry_failed)
