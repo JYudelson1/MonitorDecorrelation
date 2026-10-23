@@ -34,6 +34,7 @@ _spec.loader.exec_module(nj)
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyOnly hub: test key"
 CLEAN = {"commit": "c0de1" * 8, "dirty": False, "diff_sha256": None, "source": "git"}
 REAL_CODE_VERSION = nj.code_version
+REAL_REMOTE_STEPS, REAL_COLLECT = nj.remote_steps, nj.collect
 
 
 @pytest.fixture(autouse=True)
@@ -2386,8 +2387,8 @@ def _fake_bin(home: Path, name: str, body: str) -> None:
 
 @pytest.mark.parametrize("mounts", [False, True])
 def test_the_vast_bootstrap_falls_back_to_a_plain_directory(tmp_path, monkeypatch, mounts):
-    """In a container that may not mount a tmpfs (likely for a vast.ai instance, a docker container), /mnt/ram is a plain
-    directory and the log says so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
+    """In a container that may not mount a tmpfs (likely for a vast.ai instance, a docker container), /mnt/ram is a
+    plain directory and the log says so; the bootstrap still succeeds. uv, sudo, mount and apt-get are stand-ins here."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(nj, "RAM_DIR", str(tmp_path / "ram"))
@@ -2527,6 +2528,43 @@ def test_fetch_rsync_through_a_local_shell(tmp_path, monkeypatch):
 
     assert nj.fetch_rsync(NoRsync(home), "report.md", tmp_path / "tar", rsync) == "ok"
     assert (tmp_path / "tar" / "report.md").read_text() == "r"
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None or shutil.which("setsid") is None, reason="needs rsync and setsid")
+def test_vast_end_to_end_through_a_local_shell(tmp_path, monkeypatch, fake_hub):
+    """The whole run with the real remote steps. The fake hub-gpu's instance is a local bash in a temp home, with
+    stand-ins for uv, mount (refused, as in a docker container), sudo, apt-get and nvidia-smi: the push with
+    CODE_VERSION.json, the bootstrap, the setup and its CUDA check, the detached job and its deadline, the rsync fetch,
+    the end and its check, job.json."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(nj, "RAM_DIR", str(tmp_path / "ram"))
+    _fake_bin(home, "sudo", '[ "$1" = -n ] && shift; exec "$@"')
+    _fake_bin(home, "mount", 'echo "mount: /mnt/ram: permission denied." >&2; exit 32')
+    _fake_bin(home, "apt-get", "exit 0")
+    _fake_bin(home, "nvidia-smi", 'echo "FakeGPU, 4096 MiB, 580.00"')
+    _fake_bin(home, "uv", 'case "$1" in --version) echo "uv 0.0.0 (fake)" ;; sync) echo "fake uv $*" ;; '
+                          'run) echo "torch 2.14.1 13.0 FakeGPU" ;; esac')
+    monkeypatch.setattr(nj, "Remote", lambda host, known_hosts, key=None, port=None: RsyncRemote(home))
+    monkeypatch.setattr(nj, "remote_steps", REAL_REMOTE_STEPS)
+    monkeypatch.setattr(nj, "collect", REAL_COLLECT)
+    monkeypatch.setattr(nj, "repo_files", lambda repo=nj.REPO: ["pyproject.toml"])
+    job = 'mkdir -p results && echo "deadline=$NEBIUS_JOB_DEADLINE ram=$NEBIUS_JOB_RAM" > results/env.txt'
+    assert nj.main(["run", *_vast_args(tmp_path, "--fetch", "results", "--poll-interval", "0", "--rsync",
+                                       shutil.which("rsync")), "--", job]) == 0
+    out, row = tmp_path / "out", FakeHubGpu.rows[9001]
+    assert (out / "results" / "env.txt").read_text().split() == [f"deadline={int(row['deadline'] - 1800)}",
+                                                                  f"ram={tmp_path / 'ram'}"]
+    assert json.loads((home / "md" / "CODE_VERSION.json").read_text()) == CLEAN
+    assert (home / "md" / "pyproject.toml").read_bytes() == (nj.REPO / "pyproject.toml").read_bytes()
+    assert "NO RAM DISK" in (out / "bootstrap.log").read_text()
+    assert "fake uv sync --locked" in (out / "setup.log").read_text() and "FakeGPU" in (out / "setup.log").read_text()
+    assert (out / "remote_logs" / nj.REMOTE_LOGS / "job.exit").read_text().strip() == "0"
+    rec = _vast_record(tmp_path)
+    assert (rec["exit_code"], rec["teardown_verified"], rec["fetched"]) == (0, True, {"results": "ok",
+                                                                                      f"~/{nj.REMOTE_LOGS}": "ok"})
+    assert rec["code"] == CLEAN and {"ssh_ready", "setup_done", "job_start", "job_end", "deleted"} <= set(rec["times"])
+    assert row["ended"] and FakeHubGpu.calls.count(("end", 9001)) == 1
 
 
 def test_vast_ledger_entries_are_recorded_but_not_counted(tmp_path, capsys, regions_file):
