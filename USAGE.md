@@ -546,9 +546,10 @@ ssh -N -L 8178:127.0.0.1:8178 md@<vm>        # on the RL machine
   was batched with.
 - **Startup check:** the server refuses to start if a golden episode renders or scores differently.
 - **Constructing the monitor** fails if the server doesn't serve that exact probe or reader revision.
-- **Failures:** a request the server can never serve (malformed, unknown probe, an episode it can't render) aborts the
-  run; anything else (out of GPU memory, a dropped tunnel) is retried. A failure that repeats on every attempt
-  therefore stalls the run, with a warning every 3 minutes: nothing restarts the server. See docs/MONITORS.md.
+- **Failures:** a request the server can never serve (malformed, unknown probe, an episode it can't render, an episode
+  too big for the GPU even with its attention in query chunks: 413) aborts the run; anything else (out of GPU memory in
+  a batch, a dropped tunnel) is retried. A failure that repeats on every attempt therefore stalls the run, with a
+  warning every 3 minutes: nothing restarts the server. See docs/MONITORS.md.
 
 ## Probe-investigation scripts (2026-06-15 — see docs/PROBES.md)
 

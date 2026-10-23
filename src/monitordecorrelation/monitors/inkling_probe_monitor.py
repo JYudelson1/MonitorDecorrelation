@@ -10,11 +10,23 @@ It plugs into the same seam as the other monitors (``name`` / ``score`` / ``scor
   server applies at its startup too).
 - **Retries:**
   - Connection errors, timeouts, an answer cut off or not JSON (a tunnel dropping mid-answer), 202 (still running) and
-    5xx (503: the server failed for a reason of its own, such as running out of GPU memory) are retried forever, with
-    backoff from 1 s up to ``max_backoff`` and a warning every few minutes. A run that trains against the probe waits
-    for it rather than computing a reward without it.
+    5xx (503: the server failed for a reason of its own, such as running out of GPU memory in a batch) are retried
+    forever, with backoff from 1 s up to ``max_backoff`` and a warning every few minutes. A run that trains against the
+    probe waits for it rather than computing a reward without it.
   - A request the server can never serve raises: malformed (400), an unknown path (404), a version mismatch (409) or an
     episode it can't replay (422). The run then aborts through its usual unscored-monitor check.
+- **An episode the reader can't hold even alone** (413: out of GPU memory in a forward of its own, then with its
+  attention in query chunks): ``UnscorableEpisodeError``, at once, naming the rollouts and their token counts. The run
+  aborts as above (rl/train.py ``_assert_scored``); scripts/rl_batch.py's supervisor resumes it from its last save.
+  - **Why not a "no score" the loop leaves out and counts:** the probe's score is part of a train-against rollout's
+    reward. Leaving it out un-penalizes exactly the episodes too long to score: counted or not, the reward then pays
+    for length, an evasion a policy pressed by the probe can learn. A stand-in (1.0, as a judge's parse error) is a
+    penalty the probe never gave, a length penalty in disguise. Either corrupts those rollouts' rewards, so the run
+    stops instead, as for any monitor that didn't answer; a held-out probe's metrics are no reason to treat it
+    otherwise (``_assert_scored``: a dropped score biases them toward the episodes that could be scored).
+  - Retrying would never end: as a 503, before, it stalled the run for good. With the attention in query chunks, a
+    valid episode (up to ~20k tokens) should fit a 4× B200 server by the arithmetic (not yet run on GPUs), which
+    leaves this for a broken server or a pathological episode.
 """
 
 from __future__ import annotations
@@ -30,7 +42,7 @@ from monitordecorrelation.types import MonitorResult, Rollout
 from monitordecorrelation.whitebox.probe_datasets import REPLAY_ENV_KEYS, episode_item
 from monitordecorrelation.whitebox.probe_server import PROTOCOL, READER_KEYS, item_sha, probe_sha, reader_mismatch
 
-FATAL_STATUS = (400, 404, 409, 422)
+FATAL_STATUS = (400, 404, 409, 413, 422)
 """The server's answers to a request it can never serve (whitebox/probe_server.py); every other status is retried."""
 
 RETRYABLE = (
@@ -44,12 +56,29 @@ class FatalProbeError(RuntimeError):
     """The server refused for a reason retrying can't fix (version mismatch, unreplayable episode)."""
 
 
+class UnscorableEpisodeError(FatalProbeError):
+    """The server can't score an episode even alone (HTTP 413). ``episodes``: its [{key, view, n_tokens, error}]."""
+
+    def __init__(self, message: str, episodes=()) -> None:
+        super().__init__(message)
+        self.episodes = list(episodes)
+
+
 def _error_text(e: urllib.error.HTTPError) -> str:
     """An error answer's body, as far as it arrived: a connection dropping mid-body must not escape the retries."""
     try:
-        return e.read().decode(errors="replace")[:500]
+        return e.read().decode(errors="replace")
     except (OSError, http.client.HTTPException) as cut:
         return f"(body cut off: {type(cut).__name__})"
+
+
+def _unscorable(text: str) -> list[dict]:
+    """The ``unscorable`` episodes a 413's body lists ([] if it isn't the server's JSON)."""
+    try:
+        listed = json.loads(text).get("unscorable")
+    except (ValueError, AttributeError):
+        return []
+    return [u for u in listed if isinstance(u, dict)] if isinstance(listed, list) else []
 
 
 class InklingProbeMonitor:
@@ -100,9 +129,12 @@ class InklingProbeMonitor:
                     continue
             except urllib.error.HTTPError as e:
                 text = _error_text(e)
+                if e.code == 413:
+                    raise UnscorableEpisodeError(f"{self.name}: {method} {path} -> 413: {text[:1000]}",
+                                                 _unscorable(text)) from None
                 if e.code in FATAL_STATUS:
-                    raise FatalProbeError(f"{self.name}: {method} {path} -> {e.code}: {text}") from None
-                problem = f"HTTP {e.code}: {text}"
+                    raise FatalProbeError(f"{self.name}: {method} {path} -> {e.code}: {text[:500]}") from None
+                problem = f"HTTP {e.code}: {text[:500]}"
             except http.client.InvalidURL:
                 raise  # the configured server_url, not the connection: retrying can't fix it
             except RETRYABLE as e:
@@ -138,8 +170,17 @@ class InklingProbeMonitor:
         if not rollouts:
             return []
         items = self.items(rollouts)
-        payload = self._call("POST", "/v1/score", {"protocol": PROTOCOL, "probes": [self.sha], "episodes": items,
-                                                   "wait_s": self.wait_s})
+        try:
+            payload = self._call("POST", "/v1/score", {"protocol": PROTOCOL, "probes": [self.sha], "episodes": items,
+                                                       "wait_s": self.wait_s})
+        except UnscorableEpisodeError as e:
+            at = {item["key"]: n for n, item in enumerate(items)}
+            which = "; ".join(f"rollout {at.get(u.get('key'), '?')} of {len(items)} (key {u.get('key')}, "
+                              f"{u.get('n_tokens')} tokens in {u.get('view')})" for u in e.episodes)
+            raise UnscorableEpisodeError(
+                f"{self.name}: the probe server can't score {which or 'an episode'} even alone on its GPU: out of "
+                f"memory, also with the attention in query chunks. There is no score to return (the RL loop stops the "
+                f"run rather than compute a reward without it). The server said: {e}", e.episodes) from None
         results = []
         for item, res in zip(items, payload["results"]):
             s = res["scores"][self.sha]

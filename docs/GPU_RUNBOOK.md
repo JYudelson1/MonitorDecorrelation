@@ -107,9 +107,10 @@ port. An on-demand VM costs several times more but isn't preempted.
 
 **Failures.** A request the server can never serve (malformed, an unknown probe, an episode that can't be rendered)
 aborts the run. Any other failure, such as the GPU running out of memory, is retried: the server drops the failed
-job and the monitor asks again. A failure that repeats on every attempt, e.g. one episode too big for the GPU,
-therefore stalls the runs, each warning every 3 minutes in its log, and nothing restarts the server or skips the
-episode. Watch the runs' logs. The status codes are in
+job and the monitor asks again. An episode too big for the GPU even with its attention in query chunks is answered
+413, which aborts its run (2026-10-23; as a 503 before, it stalled the runs). Any other failure that repeats on every
+attempt still stalls the runs, each warning every 3 minutes in its log, and nothing restarts the server. Watch the
+runs' logs. The status codes are in
 [`MONITORS.md`](MONITORS.md#inkling-probe-monitors-kind-inkling_probe).
 
 ### Post-hoc scoring of finished runs
@@ -425,7 +426,7 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
 | a run aborts on a fatal monitor answer (a judge's 400, a probe 409/422) | the same: resumed from its last save; a repeat fails it after its attempts |
 | the RL machine's supervisor dies | the runs go on (sessions of their own); the watch starts a new supervisor, which takes them over |
 | this driver dies (pod restart, SIGTERM) | nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the RL machine powers off; `resume --out DIR` takes the batch back, `down --out DIR` ends it now |
-| an episode too long for the GPU | a 503 the client retries forever: the run stalls (the rehearsal measures where; Vlad's episodes reached 7.5k of the ~12k tokens that fit) |
+| an episode too long for the GPU | retried with its attention in query chunks; if even that doesn't fit, a 413: the run aborts and is resumed from its last save (the rehearsal's 8k/12k/16k-token episodes test it; Vlad's reached 7.5k) |
 
 - By hand: `restart-server probe|judges --out DIR [--new-instance]`, `restart-run|stop-run RUN --out DIR`,
   `sync|extend --out DIR` (a running driver takes them as requests within a minute), `down --out DIR` (stops the
@@ -442,15 +443,18 @@ judge-consistency compare (`experiments/rescore_terminal_judges.py compare`, 4 +
 Vlad's seven local runs, ~5,600 calls, against the batch's judges) once that script is in the repo.
 
 **Known risks:**
-- **Long episodes:** the reader's attention bias is ~340 B × T² per episode (`whitebox/features.py`): ~49 GB at 12k
-  tokens, ~87 GB at 16k, against ~55 GB free per B200 beside the weights. An episode past ~12k tokens fails with out of
-  memory, which the server answers 503 and the client retries forever: that run stalls. Vlad's 72,145 valid eval
-  episodes reached 7,541 tokens (none above 8k), so it is unlikely in 90 steps; a policy pushed to evade a probe may
-  write longer. The server runs with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (less fragmentation, the same
-  arithmetic). Fixes, in whitebox/ (not changed here): attention in query chunks, so the bias is ~340 B × T × chunk;
-  and a status of its own for an out of memory at one episode, which the client would have to turn into a score
-  (e.g. 1.0, as a judge's parse error) rather than a retry: a non-retryable error alone only turns the stall into a
-  crash that the resume repeats. The post-hoc scorer (`eval_inkling_probes_on_runs.py`) has the same limit.
+- **Long episodes:** the reader's dense attention bias is ~340 B × T² per episode (`whitebox/features.py`): ~49 GB at
+  12k tokens, ~87 GB at 16k, against ~55 GB free per B200 beside the weights. Vlad's 72,145 valid eval episodes reached
+  7,541 tokens (none above 8k); a policy pushed to evade a probe may write longer. Since 2026-10-23:
+  - an episode that runs out of memory alone is retried with its attention in query chunks (~6 GB of attention
+    transients up to ~22k tokens); whatever fits runs exactly as before. Not yet run on a GPU: the rehearsal's
+    8k/12k/16k-token episodes are its first test there;
+  - one that doesn't fit even so is answered 413 and aborts its run, which the supervisor resumes; a repeat fails it
+    after its attempts. Not turned into a score (e.g. 1.0, as a judge's parse error): that would be a penalty the
+    probe never gave, and leaving the rollout out would pay for length (docs/MONITORS.md);
+  - the server sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` itself unless the environment configures the
+    allocator; the post-hoc scorer (`eval_inkling_probes_on_runs.py`) retries the same way and counts what still
+    doesn't fit (`n_unscorable`).
 - **Judge calls wait up to 7,200 s each** (`monitors/vllm.py`, `VLLM_TIMEOUT`, as Vlad's recorded calls). A 20-minute
   read timeout would re-sample every call slower than that, which his calls were not, so it is not changed: the
   tunnels' keepalives end a dead connection within ~30 s, and a hung engine is restarted by the watch.

@@ -242,8 +242,9 @@ def test_the_probe_server_starts_only_with_the_pinned_probes(tmp_path):
     (d / "meta.json").write_text("{}")
     sha = rb.probe_sha(d)
     cmd = rb.probe_server_command({IID: sha}, rehearsal=False)
-    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True exec .venv/bin/python experiments/inkling_probe_server.py" \
-           in cmd and "--max-batch-tokens 1" in cmd and f"--probes {IID}" in cmd
+    assert "\nexec .venv/bin/python experiments/inkling_probe_server.py" in cmd and "--max-batch-tokens 1" in cmd \
+           and f"--probes {IID}" in cmd
+    assert "ALLOC_CONF" not in cmd  # the server's own default (probe_server.default_allocator_conf), not set twice
     head = cmd.split("\nmkdir -p results")[0]
     ok = subprocess.run(["bash", "-c", head + "\necho reached"], cwd=tmp_path / "md", capture_output=True, text=True)
     assert ok.returncode == 0 and "the pinned one" in ok.stdout and "reached" in ok.stdout
@@ -654,7 +655,8 @@ def test_the_load_balancer_listens_on_localhost_by_default(tmp_path):
 
 
 class _FakeProbeServer(http.server.BaseHTTPRequestHandler):
-    """A probe server that runs out of memory above LIMIT tokens (503), as the real one would."""
+    """A probe server that can't hold an episode above LIMIT tokens even in query chunks (413), as the real one
+    answers then."""
     LIMIT = 10_000
     seen: list = []
 
@@ -667,7 +669,8 @@ class _FakeProbeServer(http.server.BaseHTTPRequestHandler):
         n = sum(len(t.get("output") or "") for t in ep["turns"]) // 5  # ~tokens of the padding, for the fake
         _FakeProbeServer.seen.append(n)
         if n > self.LIMIT:
-            self._send(503, {"error": "OutOfMemoryError: CUDA out of memory"})
+            self._send(413, {"error": "episode 0 ran out of GPU memory: OutOfMemoryError: CUDA out of memory",
+                             "unscorable": [{"key": ep.get("key"), "view": "with_reasoning", "n_tokens": n}]})
         else:
             self._send(200, {"results": [{"scores": {body["probes"][0]: {"score": 0.1, "logit": -4.0}},
                                           "n_tokens": {"with_reasoning": n}}], "timing": {"forward_s": 0.4}})
@@ -714,7 +717,7 @@ def test_the_long_episode_check_pads_episodes_to_length_and_reports_each_answer(
         srv.shutdown()
         _FakeProbeServer.LIMIT = 10_000
     row = json.loads(out.read_text())["results"][0]
-    assert code == 0 and row["status"] == 503 and "out of memory" in row["error"]
+    assert code == 0 and row["status"] == 413 and "out of memory" in row["error"]
 
 
 # ------------------------------------------------------------------------------- the driver, launcher faked

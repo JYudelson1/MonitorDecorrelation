@@ -340,7 +340,8 @@ Only replay fields leave the run, never the oracle's labels.
 | 404 | an unknown path | raises |
 | 409 | an unknown protocol or probe | raises |
 | 422 | an episode that can't be rendered (rendering runs on the CPU, before the GPU) | raises |
-| 503 | scoring failed after rendering: GPU out of memory, a CUDA error, a bug | retries; the server has dropped the failed job, so the retry computes it again |
+| 413 | an episode the reader can't hold even alone: out of GPU memory in a forward of its own, then again with its attention in query chunks; the body lists it (`unscorable`: key, view, tokens) | raises `UnscorableEpisodeError` at once, naming the rollout |
+| 503 | scoring failed after rendering: GPU out of memory in a batch, a CUDA error, a bug | retries; the server has dropped the failed job, so the retry computes it again |
 | 500 | an unexpected error in the HTTP handler | retries |
 
 - The client also retries connection errors, timeouts, and an answer that is cut off or isn't JSON (e.g. a tunnel
@@ -349,9 +350,19 @@ Only replay fields leave the run, never the oracle's labels.
   server is down: a train-against run never computes a reward without the probe.
 - A status the client raises on aborts the run through its usual unscored-monitor check. An invalid `server_url`
   raises too.
-- **Known risk:** a failure that repeats on every attempt, such as one episode too big for the GPU's memory, is a 503
-  like any other. The run then waits, warning every 3 minutes, instead of aborting. Nothing restarts the server or
-  skips the episode: someone has to notice the warnings.
+- **Long episodes (2026-10-23).** transformers builds the reader's attention bias densely, ~340 B per (query, key)
+  pair: ~49 GB for one 12k-token episode, about all of the ~55 GB per GPU a 4× B200 copy has free beside its weights.
+  An episode whose forward runs out of memory alone is retried once with its attention in query chunks
+  (`whitebox/inkling_attention.py`): ~6 GB of attention transients up to ~22k tokens, growing linearly beyond.
+  Whatever fits is computed exactly as before; the chunked retry is bit-identical on CPU (tests), not yet run on a
+  GPU. Only if that runs out of memory too does the server answer 413 (protocol 2; a 503 before, which the client
+  retried forever, stalling the run).
+- **What a 413 does to a run:** it aborts, like any monitor that didn't answer (the RL batch's supervisor resumes it
+  from its last save; a repeat fails it after its attempts). Not a "no score" the loop would leave out and count: for
+  a train-against probe that un-penalizes exactly the episodes too long to score (a reward for length a policy can
+  learn), and a stand-in score (1.0, as a judge's parse error) is a penalty the probe never gave. Either corrupts the
+  reward; the abort can't. The post-hoc scorer, which feeds no reward, instead records such an episode as
+  `unscorable`, counts it per step (`n_unscorable`) and goes on.
 
 Each `MonitorResult.meta` holds the probe's name and sha256, the logit, the episode's token count and the experts the
 reader chose at "Yes".

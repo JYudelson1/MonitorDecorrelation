@@ -1,12 +1,14 @@
 """Send synthetic TerminalEnv episodes of given lengths to a running Inkling probe server, one at a time, and report
-what each got: its score, an error status (a 503: e.g. the GPU out of memory), or no answer in time.
+what each got: its score, an error status (413: too big for the GPU even alone, with its attention in query chunks;
+503: another failure), or no answer in time.
 
 For the RL batch's rehearsal (scripts/rl_batch.py). A valid RL episode can be much longer than any golden one (up to 4
 turns of 3,072 sampled tokens, plus the commands' output; Vlad's 72,145 valid eval episodes reached 7,541 tokens in
 the with-reasoning view, none above 8k), and the reader's dense attention bias grows with the square of the length
 (whitebox/features.py: ~340 B × T² per episode, ~49 GB at 12k tokens, ~87 GB at 16k). On a 4× B200 copy of the
-full-precision reader, ~55 GB per GPU is left beside the weights, so an episode past ~12k tokens may not fit. The
-server answers such a failure with 503, which the RL loop's client retries forever: this check says where that starts.
+full-precision reader, ~55 GB per GPU is left beside the weights, so an episode past ~12k tokens may not fit densely.
+The server then retries it with its attention in query chunks (whitebox/inkling_attention.py), and answers 413, which
+aborts an RL run, only if even that doesn't fit: this check says whether that happens, and the forward time it costs.
 
     .venv/bin/python experiments/check_probe_long_episodes.py --url http://127.0.0.1:8178 \\
         --probe data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup --tokens 8000,12000,16000 \\
@@ -15,7 +17,7 @@ server answers such a failure with 503, which the RL loop's client retries forev
 - **The episodes:** the probe's first golden episode, its first command's output padded with rows of 0/1 cells (as the
   env prints grids) until the probe's view renders to the length asked, as the server renders it (``InklingReplay``).
 - **No retries:** each request is sent once and asked again only while the server says it is still running (202), up
-  to ``--timeout``; a 503 is the answer.
+  to ``--timeout``; a 413 or a 503 is the answer.
 - After each, ``/v1/meta`` says whether the server still answers.
 
 Exit status 0 if every request was answered (scores or an error status) and the server still answered after the
