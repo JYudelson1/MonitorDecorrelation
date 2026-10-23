@@ -193,6 +193,41 @@ reasoning_tokens` ≥ budget − 1 (`monitors.vllm.hit_thinking_budget`; a force
 the budget on Qwen3 and one short of it on Qwen3.5). NaN if any call lacks that count. Per call, the
 full dumps (`rollouts.jsonl`, `eval_rollouts.jsonl`) carry `finish_reason` and (budgeted vLLM calls)
 `hit_thinking_budget` next to the `call` record under `monitors.<name>`, and the slim dump keeps both.
+
+### Re-scoring saved TerminalEnv episodes (`experiments/rescore_terminal_judges.py`)
+
+A TerminalEnv run's `eval_rollouts.jsonl` holds every eval episode in full, and every judge's live verdict under
+`monitors.<judge>`: `score` (its `SCORE:` / 100), `label` and the whole `call`. The re-scorer sends those episodes to
+judge servers again, the way the loop did: to check that two servers score alike, or to re-score a run elsewhere.
+
+    uv run python experiments/rescore_terminal_judges.py compare RUN... --out-dir DIR --pos 4 --neg 4 \
+        --judge-url q3=http://localhost:8001/v1 --judge-url q35=http://localhost:8002/v1   # add --dry-run first
+    uv run python experiments/rescore_terminal_judges.py full RUN... --out-dir DIR
+
+- **As live:** the run's own specs (`run_info.json` `config.monitors`) through `build_monitors(..., multi_turn=True)`,
+  so `AgentCoTMonitor` with the run's views and request settings, checked against what the run recorded. Each call
+  goes through the loop's `rl.train._score_at` at `EVAL_PRIORITY`. Every rebuilt request is compared with the recorded
+  one before anything is sent; a difference stops the run (`--allow-request-drift` overrides).
+- **Inclusion:** only the episodes the loop showed its monitors. `invalid_reason` is re-derived with
+  `envs.base.invalid_reason` and the env's own predicates, and must agree with the record.
+- **`compare`:** a seeded sample per (run, eval step): `--pos` episodes with `behavior_present`, `--neg` without.
+  Per judge: the mean and spread of new − live, Pearson and Spearman, AUROC on both, and the shares exactly at 1.0
+  and 0.0, in `DIR/compare_report.json`. Non-hacks are scarce in these runs after the first steps, so a large `--neg`
+  takes nearly all of them.
+- **`full`:** every episode, then `DIR/<run>/eval_metrics.jsonl`: the run's per-step rows with every
+  `monitor/<judge>/…` field recomputed by the loop's code. A copy of `run_info.json` sits beside it, so
+  `eval/degradation.py` reads the folder like a run's; `eval_inkling_probes_on_runs.py --out-dir DIR` adds the probes.
+- **Endpoints:** the run's `base_url`s unless `--judge-url KEY=URL` (KEY a judge name, or a family: `q3` = `q3_cot`
+  + `q3_out`).
+- **Resumable:** each verdict is appended as it returns, and reused only for the same line, judge, request hash and
+  endpoint.
+- **`--dry-run`:** no call, nothing written. It checks every request, re-reads every live score from its recorded
+  reply, and recomputes the per-step fields from the live verdicts against the run's `eval_metrics.jsonl`.
+
+On the seven runs of Vlad's 2026-10-01 batch we have, all 288,580 requests were rebuilt byte for byte and every live
+score and per-step field was reproduced (2026-10-23). Pinned by `tests/test_rescore_terminal_judges.py`: runs written
+by `run_grpo` itself, judged by a fake server shaped like `vllm serve --reasoning-parser qwen3`.
+
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |
