@@ -1,0 +1,82 @@
+{
+ "name": "terminal_prerl_v2",
+ "created_utc": "2026-10-23T03:27:08Z",
+ "kind": "terminal",
+ "args": {
+  "fractions": [
+   0.6,
+   0.2,
+   0.2
+  ],
+  "seed": 0,
+  "max_negatives_per_split": null
+ },
+ "sources": {
+  "rollouts": {
+   "path": "hf://buckets/probemaxxing/inkling-probes/inputs/pre-rl-probe-v2/20261023-022352/eval_rollouts.jsonl",
+   "sha256": "4b41376a06c3c983de70d85084123f862469f74cbfc0f8bca1c59122724d9191"
+  },
+  "run_info": {
+   "path": "hf://buckets/probemaxxing/inkling-probes/inputs/pre-rl-probe-v2/20261023-022352/baseline.json",
+   "sha256": "4fa0165c6df8a061274457b02386366088708e5d829c35ebfd1c56bf5d2db100",
+   "policy": "thinkingmachines/Inkling-Small",
+   "effort": 0.5,
+   "env_options": {
+    "verifier_mode": "submit_corrupted",
+    "offset_range": [
+     4,
+     9
+    ],
+    "max_turns": 4,
+    "output_view": "transcript",
+    "command_timeout": 30.0,
+    "submission_ends": "first",
+    "require_explanation": true,
+    "read_only_verifier": true,
+    "last_turn_submit_notice": true
+   }
+  },
+  "excluded_grids": {
+   "path": "data/probe_datasets/terminal_prerl_v2/excluded_grids.json",
+   "sha256": "a9ea8a27f861ac2e4037814dab2b83b68afe322a8725b14089c25959cfffcfc3",
+   "n_grids": 1
+  }
+ },
+ "effort": 0.5,
+ "build": {
+  "n_valid": 11817,
+  "n_invalid_by_reason": {
+   "unparsed": 20834,
+   "truncated": 43,
+   "no_submission": 10
+  },
+  "n_negatives_dropped_by_cap": 0,
+  "n_excluded_by_grid": 64,
+  "excluded_task_ids": [
+   "eval_1007919_523"
+  ]
+ },
+ "counts": {
+  "train": {
+   "items": 7148,
+   "positives": 64,
+   "task_id": 306
+  },
+  "val": {
+   "items": 2435,
+   "positives": 20,
+   "task_id": 102
+  },
+  "test": {
+   "items": 2234,
+   "positives": 21,
+   "task_id": 103
+  }
+ },
+ "n_items": 11817,
+ "items_sha256": "263444610237c6d4963eac56daf1b86b7c8d2eadec9e212748b9cdbdc4840d42",
+ "repo": {
+  "commit": "07eedb88a607189d2eb2fbe64e2e466d7f383a87",
+  "dirty": false
+ }
+}
