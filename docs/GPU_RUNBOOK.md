@@ -223,9 +223,10 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
     -- 'mkdir -p results && uv run python experiments/run_probe_session.py --plan experiments/session_plans/probe_session_v2_bf16_vast.json 2>&1 | tee results/session.log; exit ${PIPESTATUS[0]}'
 ```
 
-- **Untried on a real instance:** on 2026-10-23 hub-gpu refused every start
-  ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)). Run the command with `--dry-run` first, and a cheap
-  job (`--max-price 0.6 --hours 0.5`) before this one.
+- **Tried on a small instance only:** the launcher's smoke test passed on a GTX 1660 SUPER
+  ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)); no 4× B200 has run it yet. Check with `--dry-run`
+  first. The instance pulls its image before anything runs: 7.5 minutes on the smoke test's host, more than 15 on
+  another. At $30/h that is $4–8, and the launcher waits up to 40 minutes.
 - **Cost:** $30.22/h in Oregon on 2026-10-23, the 859 GB of disk included. One copy extracts the ~32M tokens in about
   1.5–3 h at 3–6k tokens/s; with the setup and the copy-back, 2–4 h: $60–120. The worst case, $151 for 5 h, is
   checked against `hub-gpu limits` ($500 a day) and `--max-cost`; the ledger records it as a vast.ai entry, not counted
@@ -234,10 +235,10 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
   (`--reserve-minutes 60`). It starts no shard that wouldn't be done by then, and exits 75 if that stopped it. The
   launcher then fetches what is done and ends the instance. To resume, run the same command with
   `--push <out>/results:results` added: the session skips the shards already in its stores.
-- **Disk:** if the container may not mount a tmpfs (likely for a docker container; bootstrap.log says which),
+- **Disk:** the container may not mount a tmpfs (permission denied on the smoke test's host; bootstrap.log says), so
   `/mnt/ram` is a plain directory. The weights (496 GiB), the session's copy of the features in `/mnt/ram/session`,
-  the stores' copy in `results/` (~51 GB each) and the venv (~10 GB) then share the instance's disk: 800 GiB leaves
-  about 150 GiB spare.
+  the stores' copy in `results/` (~51 GB each) and the venv with uv's cache (~13 GB) then share the instance's disk:
+  800 GiB leaves about 150 GiB spare. The image doesn't count against it.
 - **Copy-back:** `--fetch results` rsyncs `results/` (the features, `diagnostics-v2/bf16/`, `status/`, `session.log`)
   into `<out>/results/`, resumable. This pod downloads at about 100 MB/s (2026-10-23), so ~51 GB takes about 10
   minutes, more from a slow host. The features keep the store's layout

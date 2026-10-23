@@ -215,8 +215,8 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   `--disk-gib` of disk, whose driver runs CUDA `--min-cuda` (default 13.0, for the locked cu130 torch), under
   `--max-price` (USD/h for the whole instance); or `--offer ID`, among the 50 cheapest of those. A GPU older than Turing
   is skipped for CUDA 13: its driver may run CUDA 13.0 (a GTX 1080 was the cheapest such offer), but CUDA 13 builds
-  have no kernels for it. hub-gpu lists offers that its start then refuses as no longer rentable, so after a refusal
-  the launcher lists them again and starts the cheapest one not tried, 8 tries in all.
+  have no kernels for it. If the start is refused (the offer was taken meanwhile), the cheapest of a fresh listing is
+  started instead, once.
 - **Spending:** before the start, the worst case (price × `--hours`) must fit in what `hub-gpu limits` leaves of the
   project's 24 hours, and under `--max-cost` if given. The instance is timed: vast.ai destroys it at its end, whatever
   runs on it. The disk is in the price (`--disk-gib`, passed in GB); bandwidth, which some hosts charge, is not.
@@ -230,10 +230,14 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
 - **Then as on Nebius,** over SSH as root: the same push (refused with uncommitted changes, `CODE_VERSION.json`,
   `--push`), `uv sync --locked` and the CUDA check, the unauthenticated `--hf` downloads to `/mnt/ram/<name>`, the job
   detached and polled, and `job.json` (`provider`, and a `vast` part: limits, offer, start answer, last list row).
-  - **RAM disk:** the bootstrap mounts a tmpfs at `/mnt/ram` if the container may (80% of its memory limit). If it may
-    not, `/mnt/ram` is a plain directory on the instance's disk, and bootstrap.log says so. Size `--disk-gib` for the
-    weights, what the job writes and the venv (~10 GB). The bootstrap also installs rsync and a C compiler if they are
-    missing, and makes uv use its own Python only.
+  - **Image:** hub-gpu may list the instance as running at once, then as loading while it pulls its image
+    (vastai/pytorch): 7.5 minutes on the smoke test's host, more than 15 on another. The launcher waits for SSH while
+    it loads, up to 40 minutes and never past the job's deadline; that time is billed.
+  - **RAM disk:** the bootstrap mounts a tmpfs at `/mnt/ram` if the container may (80% of its memory limit). A vast.ai
+    container may not (permission denied, 2026-10-23), so `/mnt/ram` is then a plain directory on the instance's disk,
+    and bootstrap.log says so. Size `--disk-gib` for the weights, what the job writes and the venv (~13 GB with uv's
+    cache); the image itself doesn't count. The bootstrap also installs uv, rsync and a C compiler if they are missing,
+    and makes uv use its own Python only.
   - **Deadline:** the job's `NEBIUS_JOB_DEADLINE` is the instance's end less `--reserve-minutes` (default 30, at most a
     quarter of `--hours`), kept for the fetch. The launcher stops waiting for the job halfway into that reserve,
     fetches what is there and ends the instance. There is no power-off after the job.
@@ -247,10 +251,14 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   file. Results come back only through `--fetch`; to put them in a bucket, upload them from the launching machine.
 - **Nebius's flags** (`--platform`, `--max-gpu-price`, `--regions`, `--keep`, `--root-job`, …) are refused with
   `--provider vast`, and the vast.ai ones without it. `NEBIUS_MAX_GPU_PRICE` (set by hub's `bin/gpu-job`) is ignored.
-- **Not yet run on a real instance.** The first smoke test (2026-10-23, 07:55–08:06 UTC) never got one: hub-gpu refused
-  all 37 starts, on consumer and datacenter offers from $0.06 to $0.50/h, as `offer N is not rentable any more`, and so
-  did a plain `hub-gpu start` with its defaults. Nothing was created or billed; each refusal was checked to leave
-  nothing behind, and the ledger settled each try at $0.
+- **Smoke test (2026-10-23):** `run --provider vast --hours 0.5 --max-price 0.6` on the cheapest qualifying offer, a
+  GTX 1660 SUPER in Vietnam at $0.074/h. Started at 08:30, it loaded its image for 7.5 minutes; then SSH (through
+  vast.ai's proxy), the bootstrap (no tmpfs; uv installed), the push, the setup in 58 s (uv's CPython 3.11, the locked
+  torch 2.14.1+cu130, CUDA seen on the compute-capability-7.5 GPU), the job in 4 s (nvidia-smi, a CUDA matmul,
+  `NEBIUS_JOB_DEADLINE` = the end less 7.5 minutes), the rsync fetch, and `hub-gpu end` verified 40 s later: 10
+  minutes, $0.01. A first instance on another host was still loading after the SSH wait's 15 minutes then; the
+  launcher ended it, verified ($0.01), and now waits through loading. `hub-gpu limits` counted $0.03 for both. (Starts
+  before 08:07 UTC were refused by a hub bug.)
 
 ### Spot VMs: how they behave
 
