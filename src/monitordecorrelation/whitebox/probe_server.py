@@ -1,4 +1,5 @@
-"""The Inkling probe server: scores TerminalEnv episodes with deployed probes on one GPU, for RL runs, over HTTP.
+"""The Inkling probe server: scores TerminalEnv episodes with deployed probes on the reader's GPUs (one for the 4-bit
+reader, 3–4 for full precision), for RL runs, over HTTP.
 
 ``experiments/inkling_probe_server.py`` is the command line; monitors/inkling_probe_monitor.py is the client.
 

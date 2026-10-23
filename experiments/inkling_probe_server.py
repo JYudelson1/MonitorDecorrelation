@@ -1,15 +1,36 @@
-"""Serve Inkling probes to RL runs from one GPU (whitebox/probe_server.py).
+"""Serve Inkling probes to RL runs on the reader ``--model`` (whitebox/probe_server.py).
+
+**4-bit reader** (NVFP4; the v1 monitors, data/probes/Inkling-Small/): our loader, on the one GPU ``--device`` names.
 
     uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
         --probes data/probes/Inkling-Small/terminal_prerl/with_reasoning/followup,data/probes/Inkling-Small/diverse_deception/with_reasoning/followup \
         --port 8178
 
-Then, on the machine running the RL loop: ``ssh -N -L 8178:127.0.0.1:8178 md@<vm>``, and set the runs' probe server
-URL to ``http://127.0.0.1:8178`` (monitors/inkling_probe_monitor.py).
+**Full-precision reader** (BF16; the v2 monitors, data/probes/Inkling-Small/v2/, fitted and served on it):
+- **GPUs:** a checkpoint that isn't NVFP4 loads with transformers across every GPU the process sees
+  (``device_map="auto"``; ``--device`` doesn't apply). Choose them with ``CUDA_VISIBLE_DEVICES``. The log's "loaded
+  ... on" line names the devices it took: on too few GPUs transformers puts the rest on the CPU (``cpu`` or
+  ``meta``), which works but is far too slow for RL runs.
+- **One copy needs 3–4 B300s,** so an 8-GPU VM holds two copies: two servers, each on four GPUs and its own port.
+- **Each RL run is pointed at one of them** (its monitors' server URL). The copies serve the same probes on the same
+  reader, so a run gets the same scores from either.
 
-The server refuses to start if a probe's golden episodes render differently or score differently than when the probe
-was fitted, in logits: one episode by more than ``--golden-tolerance``, or all of them by more than
-``--golden-mean-tolerance`` on average (a systematic shift; the default is calibrated in whitebox/probe_server.py).
+    P=data/probes/Inkling-Small/v2
+    CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small \
+        --probes $P/terminal_prerl_v2/with_reasoning/followup,$P/diverse_deception/with_reasoning/followup --port 8178
+    CUDA_VISIBLE_DEVICES=4,5,6,7 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small \
+        --probes $P/terminal_prerl_v2/with_reasoning/followup,$P/diverse_deception/with_reasoning/followup --port 8179
+
+Then, on the machine running the RL loop: ``ssh -N -L 8178:127.0.0.1:8178 md@<vm>`` (add ``-L 8179:127.0.0.1:8179``
+for a second copy), and set each run's probe server URL to ``http://127.0.0.1:8178`` or ``http://127.0.0.1:8179``
+(monitors/inkling_probe_monitor.py).
+
+**The server refuses to start:**
+- if a probe is for another reader than ``--model``: its meta.json ``reader_info`` names another loader or revision
+  (e.g. the v1 monitors, served on the 4-bit reader, on the full-precision one);
+- if a probe's golden episodes render differently or score differently than when the probe was deployed, in logits:
+  one episode by more than ``--golden-tolerance``, or all of them by more than ``--golden-mean-tolerance`` on average
+  (a systematic shift; the default is calibrated in whitebox/probe_server.py).
 """
 
 from __future__ import annotations
@@ -25,10 +46,13 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="the reader checkpoint (local dir): NVFP4 or BF16 Inkling-Small")
-    ap.add_argument("--probes", required=True, help="comma-list of probe directories (probe.npz + meta.json)")
-    ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
+    ap.add_argument("--probes", required=True, help="comma-list of probe directories (probe.npz + meta.json), all for "
+                                                    "this reader")
+    ap.add_argument("--device", default="cuda:0",
+                    help="for NVFP4 (one device). BF16 ignores it: it spreads over every visible GPU "
+                         "(CUDA_VISIBLE_DEVICES; one copy needs 3-4 B300s)")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8178)
+    ap.add_argument("--port", type=int, default=8178, help="e.g. 8179 for a second copy on the same VM")
     ap.add_argument("--max-batch-tokens", type=int, default=1,
                     help="padded tokens per forward. The default 1 scores one episode per forward: the pre-registered "
                          "batching rule's fix, since the rule fired on 2026-10-10 (docs/INKLING_PROBES.md, section 7). "
@@ -49,7 +73,8 @@ def main() -> int:
     t = time.time()
     model = (load_inkling_nvfp4(args.model, device=args.device) if is_nvfp4_checkpoint(args.model)
              else load_inkling_text(args.model)).eval()
-    print(f"[probe-server] loaded {args.model} in {time.time() - t:.0f}s", flush=True)
+    devices = sorted({str(p.device) for p in model.parameters()})  # BF16: its GPUs; cpu or meta = offloaded, slow
+    print(f"[probe-server] loaded {args.model} in {time.time() - t:.0f}s on {', '.join(devices)}", flush=True)
     info = reader_info(model, args.model)
     if not info.get("revision"):  # reader_info reads it from the metadata `hf download --local-dir` leaves
         print(f"[probe-server] WARNING: can't tell which revision {args.model} is; monitors can't check it. Download "

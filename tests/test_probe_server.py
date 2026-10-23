@@ -13,7 +13,7 @@ Checks:
 - Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
-- The GPU check script checks one IID and one OOD monitor through HTTP.
+- The GPU check script checks one IID and one OOD monitor through HTTP, and only its own root's monitors.
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
   splits, whatever the task id: grids recur across seeds under other ids), and its resume after
   ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
@@ -559,9 +559,10 @@ def test_the_client_retries_an_answer_lost_on_the_way(toy_probe):
         mon.score_batch([rollout(rows()[0])])
 
 
-def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http():
+def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http(tmp_path):
     """check_probe_server.end_to_end_dirs: per dataset of the deployed probes, its with-reasoning follow-up probe
-    (the first two follow-up probes in path order were both OOD ones)."""
+    (the first two follow-up probes in path order were both OOD ones). ``deployed_dirs``: a deployment's monitors, not
+    those of a deployment nested in its root (v2's in ``v2/``), which ``--probes-root <root>/v2`` checks instead."""
     check = load_script("check_probe_server")
     root = os.path.join("data", "probes", "Inkling-Small")
     dirs = sorted(os.path.join(root, d, v, r) for d in ("diverse_deception", "terminal_prerl")
@@ -572,6 +573,16 @@ def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http():
     assert check.end_to_end_dirs(output_only, root) == [w.replace("with_reasoning", "without_reasoning") for w in want]
     assert check.end_to_end_dirs([d for d in dirs if "terminal_prerl" in d], root) == want[1:]
     assert check.end_to_end_dirs([d for d in dirs if d.endswith("mean")], root) == []
+    v2 = os.path.join(root, "v2")
+    v2_dirs = sorted(os.path.join(v2, d, v, r) for d in ("diverse_deception", "terminal_prerl_v2")
+                     for v in ("with_reasoning", "without_reasoning") for r in ("followup", "mean"))
+    assert check.end_to_end_dirs(v2_dirs, v2) == [os.path.join(v2, d, "with_reasoning", "followup")
+                                                  for d in ("diverse_deception", "terminal_prerl_v2")]
+    for d in [*dirs, *v2_dirs]:
+        os.makedirs(tmp_path / d)
+        (tmp_path / d / "probe.npz").write_bytes(b"")
+    assert check.deployed_dirs(str(tmp_path / root)) == [str(tmp_path / d) for d in dirs]
+    assert check.deployed_dirs(str(tmp_path / v2)) == [str(tmp_path / d) for d in v2_dirs]
 
 
 def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
