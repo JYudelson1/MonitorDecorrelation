@@ -783,6 +783,7 @@ def test_the_machines_come_up_together_with_their_names_tags_and_servers(repo, t
         assert up[up.index("--hours") + 1] == "4" and "--secret" not in up and "--health" in up
         assert len(up[up.index("--name") + 1]) + 7 <= 24  # hub-gpu's names: the launcher adds -XXXXXX
     assert probe[-1].startswith("check() {") and judges[-1] == rb.JUDGES_COMMAND
+    assert (probe[probe.index("--max-price") + 1], judges[judges.index("--max-price") + 1]) == ("60", "30")
     assert all(batch.machines[r]["kept"] for r in ("rl", "probe", "judges"))
     assert batch.machines["probe"]["port"] == 31000
 

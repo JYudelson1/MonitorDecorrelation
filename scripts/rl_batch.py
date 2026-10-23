@@ -406,11 +406,11 @@ class Settings:
     probe_gpu: str = "B200"
     probe_gpus: int = 4
     probe_disk_gib: int = 650
-    probe_max_price: float | None = None
+    probe_max_price: float | None = 60.0  # USD/h for the instance: 4× B200 was $30-43 on 2026-10-23
     judge_gpus_names: str = "H200,H200 NVL"  # the first with an offer
     judge_gpus: int = 4
     judge_disk_gib: int = 250
-    judge_max_price: float | None = None
+    judge_max_price: float | None = 30.0  # 4× H200 NVL $16-20, 8× H200 $40 on 2026-10-23
     lease_hours: float = 4.0
     sync_minutes: float = 10.0
     health_minutes: float = 5.0
@@ -2337,12 +2337,12 @@ def add_settings(p: argparse.ArgumentParser) -> None:
     p.add_argument("--probe-gpu", help=f"the probe server's GPU (default {d.probe_gpu})")
     p.add_argument("--probe-gpus", type=int, help=f"its count (default {d.probe_gpus}: one copy of the BF16 reader)")
     p.add_argument("--probe-disk-gib", type=int, help=f"its disk (default {d.probe_disk_gib}: 496 GiB of weights)")
-    p.add_argument("--probe-max-price", type=float, help="USD/h cap for its instance")
+    p.add_argument("--probe-max-price", type=float, help=f"USD/h cap for its instance (default {d.probe_max_price:g})")
     p.add_argument("--judge-gpu", dest="judge_gpus_names",
                    help=f"the judges' GPU, or a comma list in order of preference (default {d.judge_gpus_names!r})")
     p.add_argument("--judge-gpus", type=int, help=f"their count (default {d.judge_gpus}: setup_vllm.sh's 4-GPU layout)")
     p.add_argument("--judge-disk-gib", type=int, help=f"their disk (default {d.judge_disk_gib})")
-    p.add_argument("--judge-max-price", type=float, help="USD/h cap for their instance")
+    p.add_argument("--judge-max-price", type=float, help=f"USD/h cap for their instance (default {d.judge_max_price:g})")
     p.add_argument("--lease-hours", type=float, help=f"each vast.ai lease (default {d.lease_hours:g})")
     p.add_argument("--sync-minutes", type=float, help=f"between run-folder syncs (default {d.sync_minutes:g})")
     p.add_argument("--health-minutes", type=float, help=f"between health checks (default {d.health_minutes:g})")
