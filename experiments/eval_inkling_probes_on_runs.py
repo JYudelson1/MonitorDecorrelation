@@ -15,7 +15,8 @@ for post-hoc probes (eval/degradation.py). Train-against runs still need the liv
 - Every valid one (no ``invalid_reason``) is replayed exactly as in training: ``episode_item`` with the run's env
   options, from its ``run_info.json``, with the env's defaults for keys the config leaves out.
 - The run's ``thinking_effort`` must equal the probes'. The model must be the reader the probes are served on (the
-  loader and revision in their meta).
+  loader and revision in their meta's ``reader_info``): ``ProbeScorer`` refuses any other, as the server does
+  (whitebox/probe_server.reader_mismatch).
 
 **Resumable:** per-episode scores are appended to ``<run>/probe_scores_inkling.jsonl`` chunk by chunk; a rerun scores
 only what's missing. ``--out-dir DIR`` writes to ``DIR/<run name>/`` instead of into the run folders.
@@ -215,11 +216,6 @@ def main(argv: list[str] | None = None) -> int:
     model = (load_inkling_nvfp4(args.model, device=args.device) if is_nvfp4_checkpoint(args.model)
              else load_inkling_text(args.model)).eval()
     info = reader_info(model, args.model)
-    for d, m in zip(dirs, metas):
-        want = m.get("reader_info") or {}
-        for k in ("loader", "revision"):
-            if want.get(k) is not None and info.get(k) is not None and want[k] != info[k]:
-                raise SystemExit(f"{d} is served on {k}={want[k]!r}, but --model has {info[k]!r}")
     scorer = ProbeScorer(model, dirs, max_batch_tokens=args.max_batch_tokens, reader_info=info)
     shas = {name: probe_sha(d) for name, d in zip(names, dirs)}
     log(f"loaded {args.model}; {len(dirs)} probes: {', '.join(names)}")

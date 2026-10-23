@@ -5,6 +5,7 @@ Checks:
 - Served scores of RL-style rollouts equal the probe applied to the training features.
 - The golden check passes, and refuses a changed rendering, a systematic shift of the logits and a non-finite logit.
 - A wrong effort, or a probe the server doesn't serve, fails at construction.
+- A server refuses, at construction, the probes for another reader: the committed v1 monitors on the full-precision one.
 - A client that starts before the server waits for it.
 - Identical concurrent requests share one forward pass.
 - Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
@@ -44,7 +45,8 @@ from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, t
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha)
+    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha,
+    reader_mismatch)
 
 VIEW = "with_reasoning"
 
@@ -146,6 +148,28 @@ def test_construction_refuses_a_mismatch(world, server):
     json.dump({**meta, "name": "other"}, open(os.path.join(other, "meta.json"), "w"))  # a different sha
     with pytest.raises(FatalProbeError, match="doesn't serve"):
         InklingProbeMonitor("p", other, url, env_options=RUN_ENV, run_effort=0.5)
+
+
+def test_a_full_precision_server_refuses_the_v1_monitors_at_startup():
+    """The committed v1 monitors (served on the 4-bit reader) on a server running the full-precision reader the v2
+    monitors are for (the reader_info of v1's full-precision OOD fit, which v2 deploys): refused at construction, all
+    eight named. The 4-bit reader, wherever its checkpoint sits, takes them. The rule (``reader_mismatch``): loader
+    and revision, each only where both name one."""
+    repo = os.path.join(os.path.dirname(__file__), "..")
+    v1 = load_script("check_probe_server").deployed_dirs(os.path.join(repo, "data", "probes", "Inkling-Small"))
+    nvfp4 = json.load(open(os.path.join(v1[0], "meta.json")))["reader_info"]
+    bf16 = json.load(open(os.path.join(repo, "data", "probe_results", "fitted", "bf16", "diverse_deception",
+                                       "without_reasoning", "followup", "meta.json")))["reader_info"]
+    assert len(v1) == 8 and (nvfp4["loader"], bf16["loader"]) == ("nvfp4", "transformers")
+    assert len(ProbeScorer(None, v1, reader_info={**nvfp4, "path": "/elsewhere/Inkling-Small-NVFP4"}).probes) == 8
+    with pytest.raises(ValueError, match="refusing probes for another reader than this one") as err:
+        ProbeScorer(None, v1, reader_info=bf16)
+    assert all(f"{d} (loader 'nvfp4' for the probe, 'transformers' for the reader; revision {nvfp4['revision']!r} for "
+               f"the probe, {bf16['revision']!r} for the reader)" in str(err.value) for d in v1)
+    assert reader_mismatch(nvfp4, {**nvfp4, "revision": None}) is None  # a reader that can't tell its revision
+    assert reader_mismatch(None, bf16) is None and reader_mismatch(nvfp4, {}) is None
+    assert reader_mismatch(nvfp4, {**bf16, "revision": None}) == ("loader 'nvfp4' for the probe, 'transformers' for "
+                                                                  "the reader")
 
 
 def test_the_golden_check_refuses_a_changed_rendering(world, tmp_path):

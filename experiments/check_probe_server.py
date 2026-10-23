@@ -26,6 +26,12 @@ import sys
 import time
 
 
+def deployed_dirs(root: str) -> list[str]:
+    """The monitors of the deployment at ``root``: every ``<dataset>/<view>/<readout>/`` with a probe.npz, sorted. A
+    deployment nested in it (``<root>/v2/<dataset>/<view>/<readout>``) sits a level deeper, so it is not among them."""
+    return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "*", "*", "probe.npz")))
+
+
 def end_to_end_dirs(dirs: list[str], root: str) -> list[str]:
     """The monitors to check through HTTP: per dataset (``terminal_prerl`` = IID, ``diverse_deception`` = OOD) one
     follow-up probe, the with-reasoning one if deployed, as an RL run uses them."""
@@ -61,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     from monitordecorrelation.whitebox.probe_server import ProbeScorer, Server, probe_sha
 
     log = lambda m: print(f"[check {time.strftime('%H:%M:%S')}] {m}", flush=True)  # noqa: E731
-    dirs = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(args.probes_root, "*", "*", "*", "probe.npz")))
+    dirs = deployed_dirs(args.probes_root)
     t = time.time()
     model = (load_inkling_nvfp4(args.model, device=args.device) if is_nvfp4_checkpoint(args.model)
              else load_inkling_text(args.model)).eval()
