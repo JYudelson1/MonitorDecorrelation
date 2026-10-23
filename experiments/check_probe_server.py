@@ -1,7 +1,14 @@
 """GPU check of the Inkling probe server with the deployed probes, on the serving reader.
 
+``--probes-root`` is one deployment's root, holding ``<dataset>/<view>/<readout>/`` (experiments/deploy_probes.py
+``--out``); a deployment nested in it (``v2/``) is not part of it. ``--model`` is the reader its monitors are served
+on, loaded as the server loads it: the 4-bit v1 monitors on one GPU (``--device``), the full-precision (BF16) v2 ones
+across the visible GPUs (one copy needs 3–4 B300s).
+
     uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
         --probes-root data/probes/Inkling-Small --out results/check_probe_server.json
+    CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small \
+        --probes-root data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json
 
 1. **Golden check** of every deployed probe, scoring one episode per forward (``--max-batch-tokens 1``, the batching
    rule's fix) and batched as in the extraction (65,536 tokens):
@@ -26,9 +33,16 @@ import sys
 import time
 
 
+def deployed_dirs(root: str) -> list[str]:
+    """The monitors of the deployment at ``root``: every ``<dataset>/<view>/<readout>/`` with a probe.npz, sorted. A
+    deployment nested in it (``<root>/v2/<dataset>/<view>/<readout>``) sits a level deeper, so it is not among them."""
+    return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "*", "*", "probe.npz")))
+
+
 def end_to_end_dirs(dirs: list[str], root: str) -> list[str]:
-    """The monitors to check through HTTP: per dataset (``terminal_prerl`` = IID, ``diverse_deception`` = OOD) one
-    follow-up probe, the with-reasoning one if deployed, as an RL run uses them."""
+    """The monitors to check through HTTP: per dataset (the IID one, ``terminal_prerl`` or ``terminal_prerl_v2``, and
+    the OOD one, ``diverse_deception``) one follow-up probe, the with-reasoning one if deployed, as an RL run uses
+    them."""
     picked: dict[str, str] = {}
     for d in sorted(dirs, key=lambda d: (os.path.basename(os.path.dirname(d)) != "with_reasoning", d)):
         dataset, _view, readout = os.path.relpath(d, root).split(os.sep)
@@ -42,7 +56,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--probes-root", default="data/probes/Inkling-Small")
+    ap.add_argument("--probes-root", default="data/probes/Inkling-Small",
+                    help="a deployment's root (deploy_probes.py --out), e.g. data/probes/Inkling-Small/v2")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda:0", help="for NVFP4 (one device); BF16 uses the visible GPUs")
     ap.add_argument("--golden-mean-tolerance", type=float, default=GOLDEN_MEAN_TOLERANCE,
@@ -61,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     from monitordecorrelation.whitebox.probe_server import ProbeScorer, Server, probe_sha
 
     log = lambda m: print(f"[check {time.strftime('%H:%M:%S')}] {m}", flush=True)  # noqa: E731
-    dirs = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(args.probes_root, "*", "*", "*", "probe.npz")))
+    dirs = deployed_dirs(args.probes_root)
     t = time.time()
     model = (load_inkling_nvfp4(args.model, device=args.device) if is_nvfp4_checkpoint(args.model)
              else load_inkling_text(args.model)).eval()

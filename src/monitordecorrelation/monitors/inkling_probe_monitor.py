@@ -6,7 +6,8 @@ It plugs into the same seam as the other monitors (``name`` / ``score`` / ``scor
   so a live episode renders byte-identically to a training one. Only replay fields leave the run, never the oracle's.
 - **Score:** σ(logit − t₁%), so ``threshold=0.5`` flags at the probe's 1%-FPR operating point.
 - **Checks at construction:** the run's effort and env options match the probe's; then a handshake checks that the
-  server serves this exact probe (by sha) on the same reader.
+  server serves this exact probe (by sha) on the reader the probe is for (probe_server.reader_mismatch, the rule the
+  server applies at its startup too).
 - **Retries:**
   - Connection errors, timeouts, an answer cut off or not JSON (a tunnel dropping mid-answer), 202 (still running) and
     5xx (503: the server failed for a reason of its own, such as running out of GPU memory) are retried forever, with
@@ -27,7 +28,7 @@ from typing import Sequence
 
 from monitordecorrelation.types import MonitorResult, Rollout
 from monitordecorrelation.whitebox.probe_datasets import REPLAY_ENV_KEYS, episode_item
-from monitordecorrelation.whitebox.probe_server import PROTOCOL, item_sha, probe_sha
+from monitordecorrelation.whitebox.probe_server import PROTOCOL, READER_KEYS, item_sha, probe_sha, reader_mismatch
 
 FATAL_STATUS = (400, 404, 409, 422)
 """The server's answers to a request it can never serve (whitebox/probe_server.py); every other status is retried."""
@@ -73,10 +74,10 @@ class InklingProbeMonitor:
         if self.sha not in meta.get("probes", {}):
             raise FatalProbeError(f"{name}: the server at {self.url} doesn't serve probe {self.sha[:12]}")
         want, have = (self.probe.meta.get("reader_info") or {}), meta.get("reader") or {}
-        for k in ("loader", "revision"):
-            if want.get(k) is not None and have.get(k) is not None and want[k] != have[k]:
-                raise FatalProbeError(f"{name}: the probe was fitted on reader {k}={want[k]!r}, the server runs "
-                                      f"{have[k]!r}")
+        why = reader_mismatch(want, have)
+        if why:
+            raise FatalProbeError(f"{name}: the server at {self.url} runs another reader than the probe is for: {why}")
+        for k in READER_KEYS:
             if want.get(k) is not None and have.get(k) is None:  # e.g. a checkpoint not fetched with hf download
                 self.log(f"[{name}] WARNING: the server can't tell its reader's {k}; the probe expects "
                          f"{want[k]!r}. Only the server's golden check guards against a different checkpoint.")

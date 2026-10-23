@@ -1,4 +1,5 @@
-"""The Inkling probe server: scores TerminalEnv episodes with deployed probes on one GPU, for RL runs, over HTTP.
+"""The Inkling probe server: scores TerminalEnv episodes with deployed probes on the reader's GPUs (one for the 4-bit
+reader, 3–4 for full precision), for RL runs, over HTTP.
 
 ``experiments/inkling_probe_server.py`` is the command line; monitors/inkling_probe_monitor.py is the client.
 
@@ -25,6 +26,10 @@ The score is σ(logit − t₁%), so 0.5 is the probe's 1%-FPR operating point.
   - 503 for any other failure (the GPU ran out of memory, a CUDA error, a bug): not the request's fault, so the
     client retries it.
 - One GPU worker thread runs the jobs in order; the HTTP threads only queue them and wait.
+
+**Reader check:** a probe is for the reader its meta.json ``reader_info`` names. ``ProbeScorer`` refuses, at
+construction, every probe for another reader than its own (``reader_mismatch``): e.g. the v1 monitors, served on the
+4-bit reader, on a full-precision server. The client and the post-hoc scorer apply the same rule.
 
 **Golden check:** each probe directory may hold ``golden.jsonl``: episodes with their stored token hashes and logits.
 At startup the server re-scores them, and refuses to start if a rendering differs, a logit moves more than
@@ -107,6 +112,24 @@ NotImplementedError, and the RuntimeError of its rendering checks) and a field t
 Rendering runs on the CPU and depends only on the episode, so these are not transient: ``ReplayError``."""
 
 
+READER_KEYS = ("loader", "revision")
+"""What tells readers apart in ``reader_info`` (whitebox/extraction.py): the loader (``nvfp4``, the 4-bit one, or
+``transformers``, full precision) and the checkpoint's revision. Not the path, where the checkpoint happened to sit."""
+
+
+def reader_mismatch(probe_reader: dict | None, reader: dict | None) -> str | None:
+    """How the reader a probe is for (its meta.json ``reader_info``) differs from ``reader`` (a loaded reader's
+    ``reader_info``), or None if they agree.
+
+    A key of ``READER_KEYS`` counts only where both name a value: a checkpoint not fetched with ``hf download`` can't
+    tell its revision, and a probe without ``reader_info`` names none. One rule for the server (``ProbeScorer``), the
+    client (monitors/inkling_probe_monitor.py) and the post-hoc scorer (experiments/eval_inkling_probes_on_runs.py).
+    experiments/deploy_probes.py's ``same_reader`` is stricter: both must name both."""
+    want, have = probe_reader or {}, reader or {}
+    return "; ".join(f"{k} {want[k]!r} for the probe, {have[k]!r} for the reader" for k in READER_KEYS
+                     if want.get(k) is not None and have.get(k) is not None and want[k] != have[k]) or None
+
+
 def probe_sha(probe_dir: str) -> str:
     """The probe's identity: sha256 over its probe.npz and meta.json."""
     h = hashlib.sha256()
@@ -145,7 +168,10 @@ class Job:
 
 
 class ProbeScorer:
-    """Loads nothing itself: give it the reader (an Inkling causal LM) and the probe directories."""
+    """Loads nothing itself: give it the reader (an Inkling causal LM) and the probe directories.
+
+    ``reader_info`` is the reader's (whitebox/extraction.reader_info). A probe for another reader is refused here, with
+    a ValueError naming every such probe (``reader_mismatch``); without ``reader_info`` nothing is checked."""
 
     def __init__(self, model, probe_dirs: list[str], *, max_batch_tokens: int = 65536, reader_info: dict | None = None):
         from monitordecorrelation.whitebox.features import special_ids
@@ -154,13 +180,20 @@ class ProbeScorer:
 
         self.model, self.max_batch_tokens, self.reader_info = model, max_batch_tokens, reader_info or {}
         self.probes: dict[str, Served] = {}
-        efforts = set()
+        efforts, other_reader = set(), []
         for d in probe_dirs:
             p = SelectedProbe.load(d)
+            why = reader_mismatch(p.meta.get("reader_info"), self.reader_info)
+            if why:
+                other_reader.append(f"{d} ({why})")
             sha = probe_sha(d)
             self.probes[sha] = Served(sha, p.meta.get("name") or os.path.basename(os.path.normpath(d)), p,
                                       p.meta["view"], p.meta["readout"])
             efforts.add(float(p.meta.get("effort", 0.5)))
+        if other_reader:
+            raise ValueError(f"refusing probes for another reader than this one: {'; '.join(other_reader)}. Serve "
+                             "each on the reader its meta.json reader_info names, or deploy it for this one "
+                             "(experiments/deploy_probes.py)")
         if len(efforts) > 1:
             raise ValueError(f"probes rendered at different efforts {sorted(efforts)}: serve them separately")
         self.effort = efforts.pop() if efforts else 0.5

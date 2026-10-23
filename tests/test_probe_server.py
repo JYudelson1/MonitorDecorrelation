@@ -1,21 +1,26 @@
 """The Inkling scoring path end to end on CPU with the tiny model: extraction → probe → golden set → server →
-``InklingProbeMonitor``.
+``InklingProbeMonitor``, on the 4-bit reader (v1) and on the full-precision one (v2).
 
 Checks:
 - Served scores of RL-style rollouts equal the probe applied to the training features.
 - The golden check passes, and refuses a changed rendering, a systematic shift of the logits and a non-finite logit.
 - A wrong effort, or a probe the server doesn't serve, fails at construction.
+- A server refuses, at construction, the probes for another reader: the committed v1 monitors on the full-precision one.
 - A client that starts before the server waits for it.
 - Identical concurrent requests share one forward pass.
+- The full-precision reader, loaded as the server loads it, end to end; the server, the client and the post-hoc
+  scorer refuse a probe for the other reader.
 - Failures (fake scorers): a failed job isn't kept, so its retry computes again; the GPU running out of memory, a CUDA
   error or a bug answers 503, which the client retries; a bad request (400, 404, 409, 422) is fatal; finished jobs are
   dropped after a while and beyond a cap; the client retries an answer cut off or garbled on the way.
-- The GPU check script checks one IID and one OOD monitor through HTTP.
+- The GPU check script checks one IID and one OOD monitor through HTTP, and only its own root's monitors.
 - The post-hoc scorer's per-step metrics, also on the tasks no probe saw (any grid outside the probes' train and val
   splits, whatever the task id: grids recur across seeds under other ids), and its resume after
   ``run_experiment --resume`` rewrote the end of eval_rollouts.jsonl.
 - The deployment's grids.json, which the scorer reads: written by a deployment and by ``--grids-only``; the committed
   one matches the committed task splits.
+- A deployment as v2's (another IID dataset, its own reader, its own root): the IID monitors as fitted, the OOD
+  monitors' thresholds from that dataset; recalibrating on an OOD fit's own dataset and reader gives its thresholds.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import pytest
 import torch
 from inkling_tiny import write_tiny_checkpoints
 from test_extract_probe_features import RUN_ENV, TURNS
+from test_fit_probes import make_world
 
 from monitordecorrelation.monitors.inkling_probe_monitor import FatalProbeError, InklingProbeMonitor
 from monitordecorrelation.types import Prompt, Rollout
@@ -44,7 +50,8 @@ from monitordecorrelation.whitebox.probe_datasets import counts, episode_item, t
 from monitordecorrelation.whitebox.probe_fit import (
     SelectedProbe, feature_matrix, layer_array, load_items, load_view, write_golden)
 from monitordecorrelation.whitebox.probe_server import (
-    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha)
+    GOLDEN_MEAN_TOLERANCE, PROTOCOL, GoldenCheckError, ProbeScorer, ReplayError, Server, item_sha, probe_sha,
+    reader_mismatch)
 
 VIEW = "with_reasoning"
 
@@ -72,36 +79,63 @@ def rows():
             for t in range(5) for k in range(2)]
 
 
-@pytest.fixture(scope="module")
-def world(tmp_path_factory):
-    from monitordecorrelation.whitebox.inkling_nvfp4 import load_inkling_nvfp4
-
-    tmp = tmp_path_factory.mktemp("server")
-    _, nvfp4_dir, _, _ = write_tiny_checkpoints(tmp, vocab_size=201024)
+def reader_world(tmp, model, model_dir, layer: int, max_batch_tokens: int = 65536) -> dict:
+    """``rows()`` as a tiny TerminalEnv dataset, extracted by ``model`` (the reader loaded from ``model_dir``) with
+    ``max_batch_tokens``, and a toy probe at ``layer`` fitted on its with-reasoning follow-up readout, saved with the
+    reader's ``reader_info`` and a golden set of 4 episodes."""
     rollouts = tmp / "eval_rollouts.jsonl"
     rollouts.write_text("".join(json.dumps(r) + "\n" for r in rows()))
     items, _ = terminal_items(str(rollouts), RUN_ENV, seed=0)
     dataset = tmp / "terminal_tiny"
     write_dataset(str(dataset), items, {"kind": "terminal", "effort": 0.5, "counts": counts(items, "task_id")})
-    model = load_inkling_nvfp4(str(nvfp4_dir), device="cpu").eval()
     feats = tmp / "features"
-    extract(model, prepare(Job(dataset=str(dataset), out=str(feats), model=str(nvfp4_dir), shard_size=4)),
-            log=lambda m: None)
+    extract(model, prepare(Job(dataset=str(dataset), out=str(feats), model=str(model_dir), shard_size=4,
+                               max_batch_tokens=max_batch_tokens)), log=lambda m: None)
     vf = load_view(str(feats), VIEW)
     x, _ = feature_matrix(vf, "followup", VIEW)
     by_id = load_items(str(dataset))
     y = np.array([by_id[i]["label"] for i in vf.ids])
     y[1] = 1  # a second positive so the toy probe has something to fit
-    probe = SelectedProbe.fit(layer_array(x, 2), y, 1.0, 2)
-    logits = probe.logit(layer_array(x, 2))
+    probe = SelectedProbe.fit(layer_array(x, layer), y, 1.0, layer)
+    logits = probe.logit(layer_array(x, layer))
     probe.threshold_1, probe.threshold_5 = float(np.percentile(logits, 90)), float(np.percentile(logits, 50))
     probe.meta = {"name": "probe_iid", "dataset": "terminal_tiny", "view": VIEW, "readout": "followup", "effort": 0.5,
-                  "reader_info": reader_info(model, str(nvfp4_dir))}
+                  "reader_info": reader_info(model, str(model_dir))}
     probe_dir = tmp / "probe"
     probe.save(str(probe_dir))
     assert write_golden(str(probe_dir), probe, vf, by_id, "followup", VIEW, vf.ids[:4]) == 4
-    return {"model": model, "probe_dir": str(probe_dir), "probe": probe, "vf": vf, "x": x,
-            "nvfp4_dir": str(nvfp4_dir), "items": by_id, "features": str(feats), "dataset": str(dataset)}
+    return {"model": model, "model_dir": str(model_dir), "probe_dir": str(probe_dir), "probe": probe, "vf": vf,
+            "x": x, "items": by_id, "features": str(feats), "dataset": str(dataset)}
+
+
+@pytest.fixture(scope="module")
+def checkpoints(tmp_path_factory) -> tuple:
+    """(bf16_dir, nvfp4_dir): the tiny Inkling in the hub layout and its NVFP4 twin (tests/inkling_tiny.py)."""
+    return write_tiny_checkpoints(tmp_path_factory.mktemp("checkpoints"), vocab_size=201024)[:2]
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory, checkpoints):
+    """The 4-bit reader as v1 serves it: the tiny NVFP4 checkpoint on our loader, extracted in batches."""
+    from monitordecorrelation.whitebox.inkling_nvfp4 import load_inkling_nvfp4
+
+    nvfp4_dir = checkpoints[1]
+    model = load_inkling_nvfp4(str(nvfp4_dir), device="cpu").eval()
+    return {**reader_world(tmp_path_factory.mktemp("server"), model, nvfp4_dir, layer=2), "nvfp4_dir": str(nvfp4_dir)}
+
+
+@pytest.fixture(scope="module")
+def bf16_world(tmp_path_factory, checkpoints):
+    """The full-precision reader as v2 fits and serves it: the tiny BF16 checkpoint loaded as the server loads one that
+    isn't NVFP4 (``load_inkling_text``: BF16 across the visible GPUs, float32 on a CPU), extracted one episode per
+    forward. Its toy probe reads layer 4, the output of the tiny model's one global attention layer: layers 1-3 attend
+    within a sliding window and every episode ends in the same turns, so up to layer 3 every episode's readout is the
+    same (the 4-bit world's probe, at layer 2, scores every episode alike)."""
+    from monitordecorrelation.whitebox.model import load_inkling_text
+
+    bf16_dir = checkpoints[0]
+    return reader_world(tmp_path_factory.mktemp("bf16"), load_inkling_text(str(bf16_dir)), bf16_dir, layer=4,
+                        max_batch_tokens=1)
 
 
 @pytest.fixture
@@ -146,6 +180,28 @@ def test_construction_refuses_a_mismatch(world, server):
     json.dump({**meta, "name": "other"}, open(os.path.join(other, "meta.json"), "w"))  # a different sha
     with pytest.raises(FatalProbeError, match="doesn't serve"):
         InklingProbeMonitor("p", other, url, env_options=RUN_ENV, run_effort=0.5)
+
+
+def test_a_full_precision_server_refuses_the_v1_monitors_at_startup():
+    """The committed v1 monitors (served on the 4-bit reader) on a server running the full-precision reader the v2
+    monitors are for (the reader_info of v1's full-precision OOD fit, which v2 deploys): refused at construction, all
+    eight named. The 4-bit reader, wherever its checkpoint sits, takes them. The rule (``reader_mismatch``): loader
+    and revision, each only where both name one."""
+    repo = os.path.join(os.path.dirname(__file__), "..")
+    v1 = load_script("check_probe_server").deployed_dirs(os.path.join(repo, "data", "probes", "Inkling-Small"))
+    nvfp4 = json.load(open(os.path.join(v1[0], "meta.json")))["reader_info"]
+    bf16 = json.load(open(os.path.join(repo, "data", "probe_results", "fitted", "bf16", "diverse_deception",
+                                       "without_reasoning", "followup", "meta.json")))["reader_info"]
+    assert len(v1) == 8 and (nvfp4["loader"], bf16["loader"]) == ("nvfp4", "transformers")
+    assert len(ProbeScorer(None, v1, reader_info={**nvfp4, "path": "/elsewhere/Inkling-Small-NVFP4"}).probes) == 8
+    with pytest.raises(ValueError, match="refusing probes for another reader than this one") as err:
+        ProbeScorer(None, v1, reader_info=bf16)
+    assert all(f"{d} (loader 'nvfp4' for the probe, 'transformers' for the reader; revision {nvfp4['revision']!r} for "
+               f"the probe, {bf16['revision']!r} for the reader)" in str(err.value) for d in v1)
+    assert reader_mismatch(nvfp4, {**nvfp4, "revision": None}) is None  # a reader that can't tell its revision
+    assert reader_mismatch(None, bf16) is None and reader_mismatch(nvfp4, {}) is None
+    assert reader_mismatch(nvfp4, {**bf16, "revision": None}) == ("loader 'nvfp4' for the probe, 'transformers' for "
+                                                                  "the reader")
 
 
 def test_the_golden_check_refuses_a_changed_rendering(world, tmp_path):
@@ -212,6 +268,67 @@ def test_a_client_waits_for_a_late_server_and_requests_are_shared(world):
     srv.stop()
     assert len(out) == 3 and len({o[0].score for o in out}) == 1
     assert calls == [1]  # three identical requests, one forward pass
+
+
+def test_bf16_serving_end_to_end(bf16_world, world, tmp_path):
+    """The full-precision reader as v2 fits and serves it (``bf16_world``), extraction → probe → golden set → server →
+    ``InklingProbeMonitor``, one episode per forward throughout.
+    - Its ``reader_info`` names the transformers loader: in the features, the probe and the server's /v1/meta.
+    - The golden check passes; the monitor accepts the probe, and its scores of RL-style rollouts equal the probe on
+      the training features (the same forward passes, so to rounding).
+    - The readers refuse each other's probes. A BF16-fitted probe on the 4-bit server: the server refuses it at
+      construction, and the client at the handshake with a server that didn't check (one from before that check). A
+      4-bit-served probe on the BF16 server: the server refuses it, and so does the post-hoc scorer."""
+    w = bf16_world
+    info = reader_info(w["model"], w["model_dir"])
+    index = json.load(open(os.path.join(w["features"], "index.json")))
+    assert info["loader"] == "transformers" and index["reader"] == info == w["probe"].meta["reader_info"]
+    assert index["max_batch_tokens"] == 1
+    scorer = ProbeScorer(w["model"], [w["probe_dir"]], max_batch_tokens=1, reader_info=info)
+    golden = scorer.golden_check([w["probe_dir"]], tolerance=1e-6)[probe_sha(w["probe_dir"])]
+    assert golden["n"] == 4 and golden["max_dlogit"] < 1e-6
+    srv = Server(scorer, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{srv.port}"
+        with urllib.request.urlopen(url + "/v1/meta", timeout=60) as resp:
+            assert json.loads(resp.read())["reader"]["loader"] == "transformers"
+        mon = InklingProbeMonitor("probe_iid", w["probe_dir"], url, env_options=RUN_ENV, run_effort=0.5,
+                                  log=lambda m: None)
+        results = mon.score_batch([rollout(r) for r in rows()])
+    finally:
+        srv.stop()
+    ids = [f"t{t}/{k}" for t in range(5) for k in range(2)]  # terminal_items' ids, in row order
+    row_of = {i: n for n, i in enumerate(w["vf"].ids)}
+    x = layer_array(w["x"], w["probe"].layer, np.array([row_of[i] for i in ids]))
+    assert np.ptp(w["probe"].logit(x)) > 1  # the tasks score differently, so agreeing means something
+    np.testing.assert_allclose([r.meta["logit"] for r in results], w["probe"].logit(x), rtol=0, atol=1e-6)
+    np.testing.assert_allclose([r.score for r in results], w["probe"].score(x), rtol=0, atol=1e-6)
+    # a BF16-fitted probe on the 4-bit server
+    nvfp4 = reader_info(world["model"], world["nvfp4_dir"])
+    assert nvfp4["loader"] == "nvfp4"
+    with pytest.raises(ValueError, match=r"another reader than this one: \S+/bf16\d*/probe \(loader 'transformers' "
+                                         r"for the probe, 'nvfp4' for the reader\)\. Serve"):
+        ProbeScorer(world["model"], [world["probe_dir"], w["probe_dir"]], reader_info=nvfp4)
+    unchecked = ProbeScorer(world["model"], [w["probe_dir"]])  # no reader given: nothing checked
+    unchecked.reader_info = nvfp4  # what its /v1/meta reports
+    srv = Server(unchecked, port=0, log=lambda m: None)
+    srv.start()
+    try:
+        with pytest.raises(FatalProbeError, match="runs another reader than the probe is for: loader 'transformers' "
+                                                  "for the probe, 'nvfp4' for the reader"):
+            InklingProbeMonitor("probe_iid", w["probe_dir"], f"http://127.0.0.1:{srv.port}", env_options=RUN_ENV,
+                                run_effort=0.5, log=lambda m: None)
+    finally:
+        srv.stop()
+    # a 4-bit-served probe on the BF16 server, and in the post-hoc scorer on the BF16 reader
+    with pytest.raises(ValueError, match="another reader than this one: .*loader 'nvfp4' for the probe, "
+                                         "'transformers' for the reader"):
+        ProbeScorer(w["model"], [w["probe_dir"], world["probe_dir"]], max_batch_tokens=1, reader_info=info)
+    posthoc = load_script("eval_inkling_probes_on_runs")
+    with pytest.raises(ValueError, match="loader 'nvfp4' for the probe, 'transformers' for the reader"):
+        posthoc.main([str(tmp_path), "--model", w["model_dir"], "--probes", world["probe_dir"], "--grids",
+                      str(tmp_path / "absent.json")])
 
 
 # --------------------------------------------------------------------------------- failures, retries, the job table
@@ -445,9 +562,10 @@ def test_the_client_retries_an_answer_lost_on_the_way(toy_probe):
         mon.score_batch([rollout(rows()[0])])
 
 
-def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http():
+def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http(tmp_path):
     """check_probe_server.end_to_end_dirs: per dataset of the deployed probes, its with-reasoning follow-up probe
-    (the first two follow-up probes in path order were both OOD ones)."""
+    (the first two follow-up probes in path order were both OOD ones). ``deployed_dirs``: a deployment's monitors, not
+    those of a deployment nested in its root (v2's in ``v2/``), which ``--probes-root <root>/v2`` checks instead."""
     check = load_script("check_probe_server")
     root = os.path.join("data", "probes", "Inkling-Small")
     dirs = sorted(os.path.join(root, d, v, r) for d in ("diverse_deception", "terminal_prerl")
@@ -458,6 +576,16 @@ def test_the_gpu_check_takes_one_iid_and_one_ood_monitor_through_http():
     assert check.end_to_end_dirs(output_only, root) == [w.replace("with_reasoning", "without_reasoning") for w in want]
     assert check.end_to_end_dirs([d for d in dirs if "terminal_prerl" in d], root) == want[1:]
     assert check.end_to_end_dirs([d for d in dirs if d.endswith("mean")], root) == []
+    v2 = os.path.join(root, "v2")
+    v2_dirs = sorted(os.path.join(v2, d, v, r) for d in ("diverse_deception", "terminal_prerl_v2")
+                     for v in ("with_reasoning", "without_reasoning") for r in ("followup", "mean"))
+    assert check.end_to_end_dirs(v2_dirs, v2) == [os.path.join(v2, d, "with_reasoning", "followup")
+                                                  for d in ("diverse_deception", "terminal_prerl_v2")]
+    for d in [*dirs, *v2_dirs]:
+        os.makedirs(tmp_path / d)
+        (tmp_path / d / "probe.npz").write_bytes(b"")
+    assert check.deployed_dirs(str(tmp_path / root)) == [str(tmp_path / d) for d in dirs]
+    assert check.deployed_dirs(str(tmp_path / v2)) == [str(tmp_path / d) for d in v2_dirs]
 
 
 def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
@@ -491,12 +619,14 @@ def test_deployed_probes_pass_the_servers_golden_check(world, tmp_path):
     before = (p.threshold_1, p.threshold_5)
     same = {**world["probe"].meta["reader_info"], "path": "Inkling-Small-NVFP4"}  # the same reader, elsewhere
     dp.serve_on(p, {"reader": "same", "reader_info": same}, items, str(root), VIEW, "followup")
-    assert (p.threshold_1, p.threshold_5) == before and "trained_reader" not in p.meta
+    assert (p.threshold_1, p.threshold_5) == before and not {"trained_reader", "thresholds_from"} & set(p.meta)
     dp.serve_on(p, {"reader": "other", "reader_info": {"loader": "x"}}, items, str(root), VIEW, "followup")
     src = dp.LayerSource(str(root / "terminal_prerl"), VIEW, "followup")
     neg = [r for r, i in enumerate(src.ids) if not (items[i].get("diagnostics") or {}).get("used_verifier")]
     want = np.percentile(p.logit(src.layer(p.layer))[neg], [99, 95])
     np.testing.assert_allclose([p.threshold_1, p.threshold_5], want)
+    assert p.meta["thresholds_from"] == ("honest terminal_prerl dev episodes (train + val) on the other reader's "
+                                         "features")
     p.threshold_1 = 123.0  # the toy probe's logits are constant, so mark the threshold instead
     p.save(str(tmp_path / "moved"))  # meta.json shows the probe's thresholds, not those of the meta it loaded
     assert json.load(open(tmp_path / "moved" / "meta.json"))["threshold_1"] == 123.0 != p.meta["threshold_1"]
@@ -753,6 +883,11 @@ def test_deployments_write_the_probes_grids(world, tmp_path):
     assert dp.main(["--grids-only", "--datasets", str(datasets), "--out", str(out)]) == 0
     assert os.listdir(out) == ["grids.json"]
     check(out / "grids.json")
+    os.symlink(datasets / "terminal_prerl", datasets / "terminal_prerl_v2")  # the same items, as another IID dataset
+    assert dp.main(["--grids-only", "--iid-dataset", "terminal_prerl_v2", "--datasets", str(datasets), "--out",
+                    str(tmp_path / "v2")]) == 0
+    v2 = json.loads((tmp_path / "v2" / "grids.json").read_text())
+    assert v2["dataset"] == {**json.loads((out / "grids.json").read_text())["dataset"], "name": "terminal_prerl_v2"}
     for argv in (["--grids-only", "--probes", "x"], ["--features", "x"]):  # unused options; a deployment's missing
         with pytest.raises(SystemExit) as err:
             dp.main([*argv, "--datasets", str(datasets), "--out", str(out)])
@@ -769,6 +904,125 @@ def test_deployments_write_the_probes_grids(world, tmp_path):
     check(deployed / "grids.json")
     with pytest.raises(SystemExit, match="shows no grid"):
         dp.grid_splits({"a/0": {"id": "a/0", "task_id": "a", "split": "train", "question": "Solve 0."}}, {})
+
+
+FAR_OFF = 1e6  # the toy OOD fit's own thresholds: no logit of the tiny reader comes near
+
+
+def deployment_inputs(w: dict, root, iid: str) -> list[str]:
+    """experiments/deploy_probes.py's inputs under ``root`` for the BF16 world ``w``, as fit_probes.py would leave
+    them for reader ``bf16``: the tiny dataset and its features as the IID dataset ``iid``, the world's probe as that
+    dataset's with-reasoning IID fit, and a toy OOD fit (the IID probe's weights turned around) whose
+    ``thresholds_by_terminal_view`` are ``FAR_OFF``, as if of another IID dataset. Returns the arguments naming them."""
+    for kind, src in (("datasets", w["dataset"]), ("features", w["features"])):
+        os.makedirs(root / kind, exist_ok=True)
+        if not os.path.exists(root / kind / iid):
+            os.symlink(src, root / kind / iid)
+    fit = SelectedProbe.load(w["probe_dir"])
+    fit.meta = {**fit.meta, "reader": "bf16"}
+    fit.save(str(root / "probes" / iid / VIEW / "followup"))
+    SelectedProbe(fit.layer, -fit.coef, -fit.intercept, FAR_OFF, FAR_OFF, {
+        "dataset": "diverse_deception", "view": "without_reasoning", "readout": "followup", "label": "deceptive",
+        "effort": 0.5, "reader": "bf16", "reader_info": fit.meta["reader_info"],
+        "thresholds_by_terminal_view": {v: [FAR_OFF, FAR_OFF] for v in ("with_reasoning", "without_reasoning")},
+    }).save(str(root / "probes" / "diverse_deception" / "without_reasoning" / "followup"))
+    return ["--iid-dataset", iid, "--probes", str(root / "probes"), "--features", str(root / "features"),
+            "--datasets", str(root / "datasets"), "--readouts", "followup"]
+
+
+def test_a_deployment_of_another_iid_dataset_on_its_own_reader(bf16_world, tmp_path):
+    """experiments/deploy_probes.py as v2 runs it: ``--iid-dataset`` not terminal_prerl (the tiny one), probes fitted
+    and served on the BF16 reader, into a root of its own (``<root>/v2``).
+    - That dataset supplies everything: the IID monitors' folder, the golden sets, the task splits, grids.json.
+    - On its own reader the IID monitor is its fit as it is: the fit's thresholds, no ``trained_reader`` fields.
+    - The OOD monitors' thresholds are those of each view's honest dev episodes of that dataset, on the serving
+      reader's features, not their fit's ``thresholds_by_terminal_view``; ``thresholds_from`` says so.
+    - The BF16 server takes the deployment (reader and golden checks), and check_probe_server.py finds its monitors
+      at ``--probes-root <root>/v2``.
+    - A v1 deployment into ``<root>`` afterwards leaves ``<root>/v2`` as it was, and neither sees the other's
+      monitors."""
+    dp, check = load_script("deploy_probes"), load_script("check_probe_server")
+    w, v1, v2 = bf16_world, tmp_path / "deployed", tmp_path / "deployed" / "v2"
+    assert dp.main([*deployment_inputs(w, tmp_path, "terminal_tiny"), "--serving-reader", "bf16", "--out",
+                    str(v2)]) == 0
+    assert sorted(os.listdir(v2)) == ["deployed.json", "diverse_deception", "grids.json", "task_splits.json",
+                                      "terminal_tiny"]
+    iid = SelectedProbe.load(str(v2 / "terminal_tiny" / VIEW / "followup"))
+    assert (iid.threshold_1, iid.threshold_5) == (w["probe"].threshold_1, w["probe"].threshold_5)
+    assert not {"trained_reader", "trained_reader_info", "thresholds_from"} & set(iid.meta)
+    assert iid.meta["reader_info"] == w["probe"].meta["reader_info"] and iid.meta["dataset"] == "terminal_tiny"
+    fit = SelectedProbe.load(str(tmp_path / "probes" / "diverse_deception" / "without_reasoning" / "followup"))
+    for view in ("with_reasoning", "without_reasoning"):
+        ood = SelectedProbe.load(str(v2 / "diverse_deception" / view / "followup"))
+        vf = load_view(w["features"], view)
+        x, _ = feature_matrix(vf, "followup", view)
+        honest_dev = [r for r, i in enumerate(vf.ids) if w["items"][i]["split"] in ("train", "val")
+                      and not (w["items"][i].get("diagnostics") or {}).get("used_verifier")]
+        want = np.percentile(fit.logit(layer_array(x, fit.layer, np.array(honest_dev))), [99, 95])
+        assert len(honest_dev) == 8 and np.ptp(fit.logit(layer_array(x, fit.layer))) > 1 and np.abs(want).max() < 100
+        np.testing.assert_allclose([ood.threshold_1, ood.threshold_5], want, rtol=1e-12)
+        assert (ood.threshold_1, ood.threshold_5) == dp.recalibrate(fit, w["items"], str(tmp_path / "features"), view,
+                                                                    "followup", "terminal_tiny")
+        assert ood.meta["thresholds_from"] == ("honest terminal_tiny dev episodes (train + val) on the bf16 reader's "
+                                               "features")
+        assert ood.meta["thresholds_by_terminal_view"][view] == [FAR_OFF, FAR_OFF]  # the fit's, for the record
+        assert ood.meta["view"] == view and not {"trained_reader", "trained_reader_info"} & set(ood.meta)
+    manifest = json.load(open(os.path.join(w["dataset"], "manifest.json")))
+    grids = json.loads((v2 / "grids.json").read_text())
+    assert grids["dataset"]["name"] == "terminal_tiny" and grids["dataset"]["items_sha256"] == manifest["items_sha256"]
+    splits = json.loads((v2 / "task_splits.json").read_text())
+    assert splits == {s: sorted({it["task_id"] for it in w["items"].values() if it["split"] == s})
+                      for s in ("test", "train", "val")}
+    ood_dirs = [os.path.join("diverse_deception", view, "followup") for view in ("with_reasoning", "without_reasoning")]
+    dirs = check.deployed_dirs(str(v2))
+    assert dirs == [str(v2 / d) for d in [*ood_dirs, os.path.join("terminal_tiny", VIEW, "followup")]]
+    deployed = json.loads((v2 / "deployed.json").read_text())
+    assert [d["dir"] for d in deployed] == dirs and all(d["reader"] == d["trained_reader"] == "bf16" for d in deployed)
+    scorer = ProbeScorer(w["model"], dirs, max_batch_tokens=1, reader_info=reader_info(w["model"], w["model_dir"]))
+    for d in dirs:  # the server's startup check, at each monitor's tolerance
+        golden = scorer.golden_check([d], json.load(open(os.path.join(d, "meta.json")))["golden_tolerance"])
+        assert golden[probe_sha(d)]["n"] == 2 and golden[probe_sha(d)]["max_dlogit"] < 1e-6  # the test split's
+    assert check.end_to_end_dirs(dirs, str(v2)) == [dirs[0], dirs[2]]
+    # v1 into the root above it: v2 stays as it was, and each root lists its own monitors only. --serving-reader is
+    # left at nvfp4: on the probes' own reader it names nothing, and the record keeps the fit's name
+    before = {p: p.read_bytes() for p in v2.rglob("*") if p.is_file()}
+    assert dp.main([*deployment_inputs(w, tmp_path, "terminal_prerl"), "--out", str(v1)]) == 0
+    assert {p: p.read_bytes() for p in v2.rglob("*") if p.is_file()} == before
+    assert json.load(open(v1 / ood_dirs[0] / "meta.json"))["thresholds_from"] == (
+        "honest terminal_prerl dev episodes (train + val) on the bf16 reader's features")
+    assert sorted(os.listdir(v1)) == ["deployed.json", "diverse_deception", "grids.json", "task_splits.json",
+                                      "terminal_prerl", "v2"]
+    assert [d["dir"] for d in json.loads((v1 / "deployed.json").read_text())] == check.deployed_dirs(str(v1)) == [
+        str(v1 / d) for d in [*ood_dirs, os.path.join("terminal_prerl", VIEW, "followup")]]
+    assert check.deployed_dirs(str(v2)) == dirs
+
+
+def test_recalibrating_on_the_fits_own_dataset_and_reader_gives_its_ood_thresholds(tmp_path):
+    """deploy_probes.recalibrate, on the IID dataset and reader an OOD probe was fitted with, gives exactly the fit's
+    ``thresholds_by_terminal_view``: fit_probes.py's ``fit_ood`` computes them the same way. So deploying the OOD
+    monitors with recalibrated thresholds always changes nothing where the fit's were right (v1). Here on synthetic
+    features (test_fit_probes.make_world), with an IID dataset named as v2's."""
+    import shutil
+    import subprocess
+    import sys
+
+    dp = load_script("deploy_probes")
+    data, feats = make_world(tmp_path)
+    for root in (data, feats):
+        shutil.move(str(root / "terminal_prerl"), str(root / "terminal_prerl_v2"))
+    out = tmp_path / "probes"
+    repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    cp = subprocess.run([sys.executable, os.path.join(repo, "experiments", "fit_probes.py"), "--reader", "synthetic",
+                         "--features", str(feats), "--datasets", str(data), "--out", str(out), "--repeats", "1",
+                         "--jobs", "2", "--readouts", "followup", "--probes", "ood", "--skip-baselines",
+                         "--iid-dataset", "terminal_prerl_v2"], capture_output=True, text=True, cwd=repo, timeout=1800)
+    assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-3000:]
+    probe = SelectedProbe.load(str(out / "diverse_deception" / "without_reasoning" / "followup"))
+    items, fitted = load_items(str(data / "terminal_prerl_v2")), probe.meta["thresholds_by_terminal_view"]
+    for view in ("with_reasoning", "without_reasoning"):
+        got = dp.recalibrate(probe, items, str(feats), view, "followup", "terminal_prerl_v2")
+        np.testing.assert_allclose(got, fitted[view], rtol=1e-12, atol=0)
+    assert fitted["with_reasoning"] != fitted["without_reasoning"]  # one per view, so the view is checked too
 
 
 def test_the_deployed_grids_match_the_deployed_task_splits():
