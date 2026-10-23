@@ -637,6 +637,19 @@ def test_start_and_poll_through_a_local_shell(tmp_path, capsys):
     assert "p 10%" not in printed.replace("p 100%", "")  # progress updates collapse to the last
 
 
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_poll_can_fetch_while_the_step_runs(tmp_path):
+    """vast.ai's fetch so far: ``during`` runs every ``every`` seconds while the step runs, not once it has ended."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    (home / "md").mkdir(parents=True)
+    out.mkdir()
+    r, calls = LocalRemote(home), []
+    nj.start(r, "job", "for i in 1 2 3 4 5 6; do echo $i > progress; sleep 0.25; done", cwd="md")
+    during = lambda: calls.append((home / "md" / "progress").read_text().strip())  # noqa: E731
+    assert nj.poll(r, "job", out, interval=0.05, during=during, every=0.4) == 0
+    assert 2 <= len(calls) <= 5 and calls == sorted(calls) and "6" not in calls[:1]
+
+
 def test_poll_checks_the_vm_when_ssh_drops(tmp_path, monkeypatch):
     monkeypatch.setattr(nj.time, "sleep", lambda s: None)
 
@@ -2384,7 +2397,8 @@ def test_vast_dry_run_starts_nothing(tmp_path, monkeypatch, capsys, fake_hub):
     assert nj.vast_bootstrap_script() in text and "NO RAM DISK" in text
     assert "hf download org/model --revision abc --local-dir /mnt/ram/model" in text and "uv sync --locked" in text
     assert "print(1)" in text and "shutdown -h" not in text and "NEBIUS_JOB_DEADLINE" in text
-    assert "== fetch (rsync over ssh, resumable) ==\nmd/results ->" in text and "== no secrets ==" in text
+    assert "every 10 min while the job runs, skipping *.part *.tmp, then once more) ==\nmd/results ->" in text
+    assert "== no secrets ==" in text
     assert "would be recorded" in text and "not counted" in text
     assert FakeHubGpu.calls == ["limits", "offers", "list"] and not FakeHubGpu.started
     assert not (tmp_path / "out").exists() and ledger.read_text() == before
@@ -2400,19 +2414,29 @@ def test_vast_remote_steps_run_its_bootstrap_and_give_the_job_its_deadline(tmp_p
 
     def poll(remote, step, out, **kw):
         timeouts[step] = kw.get("timeout")
+        durings[step] = kw.get("during"), kw.get("every")
         return 0
 
+    durings, fetched = {}, []
     monkeypatch.setattr(nj, "repo_files", lambda: [])
     monkeypatch.setattr(nj, "push_repo", lambda remote, files: None)
     monkeypatch.setattr(nj, "start", lambda remote, step, script, cwd=None: scripts.update({step: script}))
     monkeypatch.setattr(nj, "poll", poll)
+    monkeypatch.setattr(nj, "fetch_rsync", lambda remote, path, dest, rsync, timeout, exclude=(): fetched.append(
+        (path, dest, timeout, exclude)))
     ends = time.time() + 7200
-    job = nj.JobSpec(out=tmp_path, command="python x.py", provider="vast", ends=ends, reserve=1800)
+    job = nj.JobSpec(out=tmp_path, command="python x.py", provider="vast", ends=ends, reserve=1800, fetches=["results"])
     rec = nj.Record(mode="run", provider="vast", hours=2, times={"create_start": nj.utc()})
     assert nj.remote_steps(Ok("root@h", tmp_path / "kh", port=40022), job, rec) == 0
     assert commands[1] == nj.vast_bootstrap_script() and nj.bootstrap_script() not in commands
     assert f"usec={int(ends - 1800)}000000" in scripts["job"] and "shutdown -h" not in scripts["job"]
     assert abs(timeouts["job"] - (ends - 900 - time.time())) < 5  # it stops waiting halfway into the reserve
+    during, every = durings["job"]  # while the job runs, what it saved comes back every 10 minutes
+    assert durings["setup"][0] is None and every == nj.VAST_FETCH_EVERY == 600
+    during()
+    (path, dest, timeout, exclude), = fetched
+    assert (path, dest, exclude) == ("results", tmp_path, nj.IN_PROGRESS)
+    assert abs(timeout - (ends - 1800 - time.time())) < 5  # done by the job's deadline
     vast = nj.Remote("root@h", tmp_path / "kh", "/k", port=40022)
     assert vast.ssh()[vast.ssh().index("-p") + 1] == "40022" and shlex.split(vast.rsh()) == vast.ssh()
     assert "-p" not in nj.Remote("md@h", tmp_path / "kh", "/k").ssh()  # Nebius: as before
@@ -2553,6 +2577,10 @@ def test_fetch_rsync_through_a_local_shell(tmp_path, monkeypatch):
     assert nj.fetch_rsync(r, "report.md", nj.fetch_dest("report.md", out), rsync) == "ok"
     assert (out / "report.md").read_text() == "r"
     assert nj.fetch_rsync(r, "missing/thing", out, rsync) == "missing"
+    (home / "md" / "results" / "sub" / "b.bin.part").write_bytes(b"half")  # a store's file still being written
+    assert nj.fetch_rsync(r, "results", out, rsync, exclude=nj.IN_PROGRESS) == "ok"  # a fetch while the job runs
+    assert not (out / "results" / "sub" / "b.bin.part").exists()
+    (home / "md" / "results" / "sub" / "b.bin.part").unlink()
     (home / "md" / "results" / "new.txt").write_text("n")  # the job wrote more: a second fetch brings it too
     job = nj.JobSpec(out=out, fetches=["results"], provider="vast", rsync=rsync, ends=time.time() + 3600)
     rec = nj.Record(mode="run")

@@ -111,9 +111,11 @@ flags (``--platform``, ``--keep``, ``--max-gpu-price``, …) are refused with it
 - The job's ``NEBIUS_JOB_DEADLINE`` is the instance's end less ``--reserve-minutes`` (default 30, at most a quarter of
   ``--hours``), kept for the fetch; the launcher stops waiting for the job halfway into that reserve. There is no
   power-off after the job: the launcher ends the instance, and vast.ai destroys it at its end anyway.
-- ``--fetch`` paths and the logs come back with rsync (uncompressed, resumable), then ``hub-gpu end``, verified in
-  ``hub-gpu list``. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on Nebius; there is no ``--keep``. An
-  instance that disappears, ends or stops running mid-job is reported (exit 3); nothing relaunches it.
+- ``--fetch`` paths come back with rsync (uncompressed, resumable) every 10 minutes while the job runs, so what it saved
+  is here before the instance's end (12 MB/s through vast.ai's SSH proxy on 2026-10-23), and once more with the logs
+  after it. Then ``hub-gpu end``, verified in ``hub-gpu list``. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as
+  on Nebius; there is no ``--keep``. An instance that disappears, ends or stops running mid-job is reported (exit 3);
+  nothing relaunches it.
 - No secret reaches the instance (someone else's machine): ``--secret``, ``--hf-token-file`` and ``--upload`` (an HF
   bucket needs a token) are refused, so are an ``--env`` that looks like a key (a name with TOKEN, KEY, SECRET, … and
   a long value) and a ``--push`` from a key folder or with a .env file. ``--hf`` downloads are unauthenticated, as on
@@ -1418,11 +1420,12 @@ def start(remote: Remote, step: str, script: str, cwd: str | None = None) -> Non
 
 
 def poll(remote: Remote, step: str, out: Path, *, interval: float = 15.0, timeout: float | None = None,
-         check_vm=None, max_failures: int = 12) -> int:
+         check_vm=None, max_failures: int = 12, during=None, every: float = 600.0) -> int:
     """Wait for a detached step to finish. Streams new log lines to stdout and appends them to
-    ``out/<step>.log`` (so the log survives a preemption); returns the step's exit code."""
+    ``out/<step>.log`` (so the log survives a preemption); returns the step's exit code. ``during`` (vast.ai's fetch
+    so far) is called every ``every`` seconds while the step runs."""
     offset, failures, pending, shown = 0, 0, "", ""
-    t0 = time.time()
+    t0 = last = time.time()
     local_log = out / f"{step}.log"
     local_log.write_bytes(b"")
     while True:
@@ -1462,6 +1465,9 @@ def poll(remote: Remote, step: str, out: Path, *, interval: float = 15.0, timeou
             return code
         if timeout and time.time() - t0 > timeout:
             raise InfraError(f"{step} still running after {timeout:.0f}s")
+        if during is not None and time.time() - last >= every:
+            during()
+            last = time.time()
         time.sleep(interval)
 
 
@@ -1539,11 +1545,13 @@ def fetch_path(remote: Remote, path: str, dest: Path) -> str:
 RSYNC_VANISHED = 24  # rsync: some source files vanished during the copy (a job still writing); the rest came
 
 
-def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", timeout: float = 3600) -> str:
+def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", timeout: float = 3600,
+                exclude: tuple[str, ...] = ()) -> str:
     """``fetch_path`` with rsync over the remote's ssh (vast.ai): uncompressed (tar's gzip would be the bottleneck for
     tens of GB of tensors) and resumable: ``--partial``, and a broken copy is tried twice more, going on where it
-    stopped. Tar over ssh if the remote has no rsync. Returns "ok" or "missing"; InfraError if it fails or isn't done
-    within ``timeout`` seconds."""
+    stopped. Only what changed travels, so it can run again as the job goes on (``exclude``: patterns left out). Tar
+    over ssh if the remote has no rsync. Returns "ok" or "missing"; InfraError if it fails or isn't done within
+    ``timeout`` seconds."""
     full = remote_path(path.rstrip("/"))
     rc = remote.run(f"test -e {shlex.quote(full)} || exit 3; command -v rsync >/dev/null || exit 4", check=False,
                     timeout=60).returncode
@@ -1557,8 +1565,8 @@ def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", tim
     if rc != 0:
         raise InfraError(f"fetch {path}: the remote check failed ({rc})")
     dest.mkdir(parents=True, exist_ok=True)
-    argv = [rsync, "-a", "--partial", "--timeout=300", "--stats", "-e", remote.rsh(), f"{remote.host}:{full}",
-            f"{dest}/"]
+    argv = [rsync, "-a", "--partial", "--timeout=300", "--stats", *(f"--exclude={p}" for p in exclude), "-e",
+            remote.rsh(), f"{remote.host}:{full}", f"{dest}/"]
     t0, tries = time.time(), 0
     while True:
         tries += 1
@@ -1579,6 +1587,25 @@ def fetch_rsync(remote: Remote, path: str, dest: Path, rsync: str = "rsync", tim
             raise InfraError(f"rsync of {path} failed ({cp.returncode}): {err}")
         log(f"rsync of {path} failed ({cp.returncode}), trying again: {err[-300:]}")
         time.sleep(10)
+
+
+VAST_FETCH_EVERY = 600.0  # seconds between the rsyncs of the --fetch paths while a vast.ai job runs
+IN_PROGRESS = ("*.part", "*.tmp")  # files still being written (whitebox/store.py, extraction's write_json)
+
+
+def fetch_so_far(remote: Remote, job: JobSpec) -> None:
+    """vast.ai, while the job runs: rsync the ``--fetch`` paths as they are, so what the job saved is here before the
+    instance's end. Through vast.ai's SSH proxy rsync ran at 12 MB/s (2026-10-23): the v2 session's ~51 GB would take
+    70 minutes after the job, but arrive as it goes, at the 5-9 MB/s it extracts. Files still being written wait for
+    the next round; the final fetch takes everything. Best effort: a failed round only waits for the next."""
+    for path in job.fetches:
+        left = 3600.0 if job.ends is None else job.ends - job.reserve - time.time()
+        if left < 60:
+            return
+        try:
+            fetch_rsync(remote, path, fetch_dest(path, job.out), job.rsync, timeout=left, exclude=IN_PROGRESS)
+        except Exception as e:  # noqa: BLE001 — the final fetch tries again
+            log(f"fetch so far, {path}: {e}")
 
 
 def vm_deadline(rec: Record) -> float | None:
@@ -1645,7 +1672,9 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
     timeout = None if cap is None else max(60.0, cap + 600 - time.time())
     if job.ends is not None:  # vast.ai destroys the instance at its end: stop waiting halfway into the reserve,
         timeout = max(60.0, job.ends - job.reserve / 2 - time.time())  # so what the job made can still be fetched
-    code = poll(remote, "job", job.out, interval=job.poll_interval, check_vm=check_vm, timeout=timeout)
+    during = (lambda: fetch_so_far(remote, job)) if vast and job.fetches else None  # here before the instance's end
+    code = poll(remote, "job", job.out, interval=job.poll_interval, check_vm=check_vm, timeout=timeout, during=during,
+                every=VAST_FETCH_EVERY)
     rec.times["job_end"], rec.exit_code = utc(), code
     rec.save(job.out)
     if job.uploads:
@@ -3067,7 +3096,8 @@ def vast_dry_run(args, job: JobSpec, name: str, offer: dict, purpose: str, tags:
     print_remote_plan(job, "root@<host>", vast_bootstrap_script(), deadline)
     print(f"(the job's NEBIUS_JOB_DEADLINE, {deadline} here: the instance's end less {job.reserve / 60:g} min kept for "
           f"the fetch; the launcher stops waiting for the job {job.reserve / 120:g} min before the end)")
-    print("== fetch (rsync over ssh, resumable) ==")
+    print(f"== fetch (rsync over ssh, resumable: every {VAST_FETCH_EVERY / 60:g} min while the job runs, skipping "
+          f"{' '.join(IN_PROGRESS)}, then once more) ==")
     for path in job.fetches:
         print(f"{remote_path(path)} -> {fetch_dest(path, job.out) / os.path.basename(path.rstrip('/'))}")
     print(f"~/{REMOTE_LOGS}/ -> {job.out / 'remote_logs'}; job.json -> {job.out / 'job.json'}")
