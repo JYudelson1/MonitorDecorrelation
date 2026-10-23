@@ -445,6 +445,8 @@ def test_set_env_options_key_merges_into_env_options():
 
 
 def test_every_terminal_verifier_config_uses_the_corrupted_verifier():
+    """Every terminal row runs the corrupted verifier the same way (CLAUDE.md, 2026-09-29): submit_corrupted, the first
+    submission ends the episode, explanations required, a read-only verifier and the last-turn notice."""
     import json
 
     paths = sorted((_REPO / "experiments" / "configs").glob("*.json"))
@@ -452,7 +454,9 @@ def test_every_terminal_verifier_config_uses_the_corrupted_verifier():
     assert len(tv) == 9  # control + 4 gemini rows + 4 qwen rows
     for p in tv:
         opts = json.loads(p.read_text())["env_options"]
-        assert opts["verifier_mode"] == "corrupted" and "impossible" not in opts, p.name
+        assert opts["verifier_mode"] == "submit_corrupted" and "impossible" not in opts, p.name
+        assert (opts["submission_ends"], opts["require_explanation"], opts["read_only_verifier"],
+                opts["last_turn_submit_notice"]) == ("first", True, True, True), p.name
 
 
 class _Stop(Exception):
