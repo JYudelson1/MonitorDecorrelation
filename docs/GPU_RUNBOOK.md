@@ -240,8 +240,10 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
   the stores' copy in `results/` (~51 GB each) and the venv with uv's cache (~13 GB) then share the instance's disk:
   800 GiB leaves about 150 GiB spare. The image doesn't count against it.
 - **Copy-back:** `--fetch results` rsyncs `results/` (the features, `diagnostics-v2/bf16/`, `status/`, `session.log`)
-  into `<out>/results/`, resumable. This pod downloads at about 100 MB/s (2026-10-23), so ~51 GB takes about 10
-  minutes, more from a slow host. The features keep the store's layout
+  into `<out>/results/`, resumable, every 10 minutes while the session runs and once more after it. Through vast.ai's
+  SSH proxy rsync ran at 12 MB/s (2026-10-23): the ~51 GB would take 70 minutes after the session, but they come back
+  as they are extracted, at 5–9 MB/s, so the last fetch has only the last shards and the diagnostics left. If the host
+  fails, only what came after the last fetch is lost. The features keep the store's layout
   (`<out>/results/features/bf16/terminal_prerl_v2/<view>/shard_*`), which step 2 reads as it is. To put them in the
   bulk bucket too, upload them from hub, where the token stays:
 

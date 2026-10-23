@@ -241,8 +241,12 @@ hub-gpu list; hub-gpu end NAME                                    # by hand, if 
   - **Deadline:** the job's `NEBIUS_JOB_DEADLINE` is the instance's end less `--reserve-minutes` (default 30, at most a
     quarter of `--hours`), kept for the fetch. The launcher stops waiting for the job halfway into that reserve,
     fetches what is there and ends the instance. There is no power-off after the job.
-  - **Fetch:** rsync over SSH, uncompressed and resumable (tar over SSH if the instance has no rsync), then
-    `hub-gpu end`, verified in `hub-gpu list`. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on Nebius.
+  - **Fetch:** rsync over SSH, uncompressed and resumable (tar over SSH if the instance has no rsync). Through
+    vast.ai's SSH proxy, the only address the smoke tests' hosts had, it ran at 12 MB/s (2 GB in 170 s). So while the
+    job runs the `--fetch` paths are rsynced every 10 minutes, leaving out files still being written (`*.part`,
+    `*.tmp`); what the job saved is then here before the instance's end, and the final fetch after the job has little
+    left. Then `hub-gpu end`, verified in `hub-gpu list`. Errors, Ctrl-C, SIGTERM and SIGHUP end it too, held as on
+    Nebius.
   - **An instance that goes away mid-job** (ended, gone from the list, exited) is reported in the log and `job.json`
     (exit 3). Nothing relaunches it: no `--attempts`, and no `--keep` or `up` either. To resume, run again with the
     fetched results pushed back (`--push <out>/results:results`).
