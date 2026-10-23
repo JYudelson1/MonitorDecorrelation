@@ -451,12 +451,45 @@ def test_every_terminal_verifier_config_uses_the_corrupted_verifier():
 
     paths = sorted((_REPO / "experiments" / "configs").glob("*.json"))
     tv = [p for p in paths if json.loads(p.read_text()).get("env") == "terminal_verifier"]
-    assert len(tv) == 9  # control + 4 gemini rows + 4 qwen rows
+    assert len(tv) == 11  # control + 4 gemini rows + 4 qwen rows + 2 probe rows
     for p in tv:
         opts = json.loads(p.read_text())["env_options"]
         assert opts["verifier_mode"] == "submit_corrupted" and "impossible" not in opts, p.name
         assert (opts["submission_ends"], opts["require_explanation"], opts["read_only_verifier"],
                 opts["last_turn_submit_notice"]) == ("first", True, True, True), p.name
+
+
+def test_the_probe_rows_hold_out_the_qwen_rows_judges_spec_for_spec():
+    """terminal_verifier_probe_{iid,ood}.json: Vlad's q3_cot row with the train-against judge replaced by a v2 Inkling
+    probe, served at 127.0.0.1:8178. The four Qwen judges are held out exactly as in his rows and his control, every
+    run setting is his, and the early stop is stated, not inherited: null, as in his judge rows of commit c30c466."""
+    import json
+
+    from monitordecorrelation.experiment_config import apply_overrides, load_config
+
+    configs = _REPO / "experiments" / "configs"
+    q3_cot = json.loads((configs / "terminal_verifier_q3_cot.json").read_text())
+    control = json.loads((configs / "terminal_verifier_control.json").read_text())
+    probes = {"iid": "data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup",
+              "ood": "data/probes/Inkling-Small/v2/diverse_deception/with_reasoning/followup"}
+    for key, path in probes.items():
+        raw = json.loads((configs / f"terminal_verifier_probe_{key}.json").read_text())
+        assert "stop_after_zero_behavior_steps" in raw and raw["stop_after_zero_behavior_steps"] is None
+        same = {k for k in q3_cot if k not in ("run_name", "description", "monitors", "stop_after_zero_behavior_steps")}
+        assert {k: raw[k] for k in same} == {k: q3_cot[k] for k in same} and set(raw) == set(q3_cot)
+        probe, *judges = raw["monitors"]
+        assert probe == {"kind": "inkling_probe", "name": f"probe_{key}", "role": "train_against", "probe_path": path,
+                         "server_url": "http://127.0.0.1:8178"}
+        assert judges == control["monitors"] == [{**m, "role": "held_out"} for m in q3_cot["monitors"]]
+        cfg = load_config(configs / f"terminal_verifier_probe_{key}.json")
+        validate_token_budgets(cfg, _MultiTurnEnv())
+        assert [m.name for m in cfg.monitors if m.role == "train_against"] == [f"probe_{key}"]
+        assert cfg.penalty_coef == 1.0 and cfg.seed == 0 and cfg.stop_after_zero_behavior_steps is None
+        # what a batch passes on top (scripts/rl_batch.py): seed, run name, project, early stop, checkpoint cadence
+        cfg = apply_overrides(cfg, [f"seed={219 if key == 'iid' else 222}", f"run_name=probe-{key}-seed-219",
+                                    "wandb_project=terminal-env-inkling-small", "stop_after_zero_behavior_steps=16",
+                                    "save_every=9"])
+        assert (cfg.seed, cfg.stop_after_zero_behavior_steps, cfg.save_every) == (219 if key == "iid" else 222, 16, 9)
 
 
 class _Stop(Exception):
