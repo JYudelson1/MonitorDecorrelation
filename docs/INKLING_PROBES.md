@@ -956,8 +956,9 @@ pre-registered and reported as such.
    - No watchdog restarts a preempted server yet.
    - A run pauses while the server is down. Train-against runs never compute a reward without the probe; held-out
      probes can be scored afterwards instead (section 10).
-   - A failure that repeats on every attempt, such as one episode too big for the GPU's memory, also makes the runs
-     wait, warning every 3 minutes, instead of aborting. Nothing restarts the server or skips the episode.
+   - A failure that repeats on every attempt also makes the runs wait, warning every 3 minutes, instead of aborting.
+     Nothing restarts the server. One episode too big for the GPU's memory, even with its attention in query chunks,
+     is the exception since 2026-10-23: a 413, which aborts its run (docs/MONITORS.md).
    - The server as it is now has not run on a GPU. The real-B300 check of 2026-10-10 predates the golden check's
      bound on the mean shift and the server's current error handling, and it sent only the two OOD monitors through
      HTTP: the IID monitor has never been served over HTTP on a GPU. The redeployed mean monitors have been checked
@@ -1044,8 +1045,9 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
   src/monitordecorrelation/whitebox/probe_server.py (GOLDEN_MEAN_TOLERANCE docstring) -->
 - **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check and the current
   error handling, and sent only the OOD monitors through HTTP (section 11).
-- **Errors:** a request the server can never serve (malformed, an unknown probe, an episode that can't be rendered)
-  aborts the run; anything else, such as the GPU running out of memory, is retried and the run waits. A failure that
+- **Errors:** a request the server can never serve (malformed, an unknown probe, an episode that can't be rendered, an
+  episode too big for the GPU even in query chunks: 413, 2026-10-23) aborts the run; anything else, such as the GPU
+  running out of memory in a batch, is retried and the run waits. A failure that
   repeats on every attempt therefore stalls the runs, with a warning every 3 minutes: watch for it. Details in
   [`MONITORS.md`](MONITORS.md#inkling-probe-monitors-kind-inkling_probe).
 - `--max-batch-tokens 1` (the default) scores one episode per forward pass, the batching rule's fix.
