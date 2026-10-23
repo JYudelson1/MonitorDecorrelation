@@ -674,9 +674,11 @@ def authorized_line(pubkey: str, ports: list[int]) -> str:
     return f'restrict,port-forwarding,{opens},command="/bin/false" {pubkey}'
 
 
-AUTHORIZE = ('umask 077 && mkdir -p "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && line=$(cat) && '
-             '{ grep -qxF -- "$line" "$HOME/.ssh/authorized_keys" || printf "%s\\n" "$line" >> '
-             '"$HOME/.ssh/authorized_keys"; } && grep -cxF -- "$line" "$HOME/.ssh/authorized_keys"')
+# The line on stdin, appended once. vast.ai's authorized_keys ends without a newline (2026-10-23): its last line is
+# ended first, or the key would be glued to it (and match no line).
+AUTHORIZE = ('umask 077 && mkdir -p "$HOME/.ssh" && f="$HOME/.ssh/authorized_keys" && touch "$f" && line=$(cat) && '
+             '[ -n "$line" ] && { grep -qxF -- "$line" "$f" || { if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then '
+             'echo >> "$f"; fi; printf "%s\\n" "$line" >> "$f"; }; } && grep -cxF -- "$line" "$f"')
 
 
 def authorize(remote: nj.Remote, line: str) -> None:

@@ -215,6 +215,24 @@ def test_the_tunnel_key_opens_the_servers_ports_and_nothing_else():
     assert rb.tunnel_forwards("probe") == ["8178:127.0.0.1:8178"]
 
 
+def test_authorizing_the_tunnel_key_appends_its_line_once_after_an_unended_last_line(tmp_path):
+    """vast.ai's authorized_keys ends without a newline (the plumbing test, 2026-10-23): the key goes on a line of its
+    own, the existing key stays intact, and a second authorization adds nothing."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    keys = home / ".ssh" / "authorized_keys"
+    keys.write_text("ssh-ed25519 AAAAhubgpu hub-gpu")  # no newline at its end
+    line = rb.authorized_line("ssh-ed25519 AAAAtunnel rl-batch x", [8178])
+    remote = type("Local", (nj.Remote,), {"argv": lambda self, c: ["bash", "-c", f"export HOME={home}; {c}"]})(
+        "root@local", tmp_path / "kh")
+    rb.authorize(remote, line)
+    rb.authorize(remote, line)
+    assert keys.read_text() == f"ssh-ed25519 AAAAhubgpu hub-gpu\n{line}\n"
+    with pytest.raises(nj.InfraError):
+        rb.authorize(remote, "")  # nothing to authorize: refused, the file untouched
+    assert keys.read_text() == f"ssh-ed25519 AAAAhubgpu hub-gpu\n{line}\n"
+
+
 def test_the_probe_server_starts_only_with_the_pinned_probes(tmp_path):
     """The server step's first lines refuse a probe folder whose sha256 isn't the pinned one: a folder rewritten since
     the pin would answer the runs' requests with 409, fatal to them."""
