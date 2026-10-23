@@ -291,7 +291,9 @@ Only replay fields leave the run, never the oracle's labels.
 - the server serves this exact probe, identified by the sha256 of its `probe.npz` and `meta.json`;
 - the server's reader (loader and checkpoint revision) is the one in the probe's `reader_info`. The server reads the
   revision from the metadata `hf download --local-dir` leaves next to the weights; when it can't tell, the server and
-  the monitor warn, and only the golden check guards against a different checkpoint.
+  the monitor warn, and only the golden check guards against a different checkpoint. The server applies the same
+  rule at startup (`probe_server.reader_mismatch`, 2026-10-23): it refuses every probe deployed for another reader,
+  e.g. a v1 monitor (served on 4-bit) on a full-precision server.
 
 **Failures and retries.** The server's answers, and what the client does with each:
 

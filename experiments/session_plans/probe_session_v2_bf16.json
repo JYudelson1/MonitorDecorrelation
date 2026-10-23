@@ -21,7 +21,7 @@
     ]
    ],
    "required": true,
-   "stagger": false,
+   "stagger": true,
    "store": "hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16"
   }
  },

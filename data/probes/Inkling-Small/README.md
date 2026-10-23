@@ -10,6 +10,11 @@ model (the **reader**) over the policy's episode. All eight were trained on the 
 `thinkingmachines/Inkling-Small-NVFP4` at the revision in `reader_info`), which fits on one B300. Their thresholds
 were recalibrated on the 4-bit reader's features.
 
+These are the v1 monitors. The IID probe v2 ([amendment 1](../../../docs/inkling_probes_amendment_1.md)) is fitted
+and served on the full-precision reader ([amendment 2](../../../docs/inkling_probes_amendment_2.md)). Once deployed,
+its monitors go to `v2/` here, with their own `deployed.json`, `task_splits.json` and `grids.json`; nothing there
+exists yet.
+
 ## The monitors
 
 Each directory is `<dataset>/<view>/<readout>/`:

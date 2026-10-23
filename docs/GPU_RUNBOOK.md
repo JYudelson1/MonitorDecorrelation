@@ -8,7 +8,8 @@
 > kernel-install** steps (`uv sync --extra gpu`, flash-attn) and the MPS-OOM background.
 >
 > **Current (2026-10-12):** the first section below, on serving the Inkling-Small probes and scoring finished runs
-> with them, is up to date. Everything after it is the superseded Qwen3.5-4B runbook.
+> with them, is up to date. **2026-10-23:** the second, on the IID probe v2 on the full-precision reader, is the plan
+> for v2 (not yet run). Everything after them is the superseded Qwen3.5-4B runbook.
 
 ## Inkling-Small probes: serving on one B300, and post-hoc scoring
 
@@ -156,6 +157,101 @@ folder and commit them. **Cost:** a 90-step TerminalEnv run saves about 7,900 ev
 probes share one pass over them here: about one GPU-hour per run if all of them are valid and as long as the pre-RL
 episodes; only valid episodes are scored. Adding the without-reasoning probes adds about two-thirds of that again:
 that view averages 1,077 tokens per episode, against 1,607 with reasoning.
+
+## Inkling-Small probes v2: the full-precision reader, from extraction to serving
+
+The IID probe v2 ([amendment 1](inkling_probes_amendment_1.md)) is extracted, fitted and served on the
+full-precision reader alone, one episode per forward pass ([amendment 2](inkling_probes_amendment_2.md)). The reader
+is `thinkingmachines/Inkling-Small` @ `8cc5877b44d343f88b92086aa1fb72897950f06a` (BF16, ~496 GiB). One copy needs three
+or four B300s (four B200s), so an 8-GPU VM holds two. The v1 monitors and the section above are unchanged.
+
+### 1. The extraction session (8× B200 or 8× B300, GPU)
+
+The plan is `experiments/session_plans/probe_session_v2_bf16.json`:
+- two copies of the reader, on GPUs 0–3 and 4–7, each extracting half of `terminal_prerl_v2` one episode per
+  forward;
+- then copy 0 runs the full-precision diagnostics: 128 `terminal_prerl_v2` inputs and 100 `diverse_deception` items,
+  batched at 65,536 tokens and one at a time;
+- features go to `probemaximizer/inkling-probes-bulk/features/bf16/terminal_prerl_v2`, the diagnostics to
+  `probemaxxing/inkling-probes/diagnostics-v2/bf16/`.
+
+The two datasets' `items.jsonl` are gitignored, so push them.
+
+On an 8× B200 spot VM (us-central1: $20.80/h on 2026-10-23); for 8× B300, `--platform gpu-b300-sxm --preset
+8gpu-192vcpu-2768gb`:
+
+```bash
+python3 scripts/nebius_job.py run --platform gpu-b200-sxm --preset 8gpu-160vcpu-1792gb --hours 2.5 \
+    --name md-v2-bf16 --out runs/{stamp}-{name} \
+    --hf thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a \
+    --push data/probe_datasets/terminal_prerl_v2/items.jsonl:data/probe_datasets/terminal_prerl_v2/items.jsonl \
+    --push data/probe_datasets/diverse_deception/items.jsonl:data/probe_datasets/diverse_deception/items.jsonl \
+    --upload results=hf://buckets/probemaxxing/inkling-probes/runs/{stamp}-{name} --fetch results \
+    -- 'mkdir -p results && uv run python experiments/run_probe_session.py --plan experiments/session_plans/probe_session_v2_bf16.json 2>&1 | tee results/session.log; exit ${PIPESTATUS[0]}'
+```
+
+- **Spot or on demand.** The v1 full-precision VM, on spot, was preempted right after its features were done, before
+  the diagnostics. Spot is worth it when it is much cheaper (8× B200: $20.80/h spot, $68/h on demand, 2026-10-23); the
+  session resumes on relaunch.
+- **Time.** The v1 session's own timings (2026-10-10) give about 12 minutes from create to the first shard: VM, setup,
+  the 496 GiB download in 98 s, about 2 minutes to load each copy. Batched, a copy extracted about 10k tokens/s.
+  - One episode at a time is unmeasured on full precision. On 4-bit it was 2.5–3.9k tokens/s, against 8.8k batched.
+  - `terminal_prerl_v2` is about 32M tokens: 11,817 episodes × (1,607 + 1,077 tokens, the v1 averages with and
+    without reasoning).
+  - At 3–6k tokens/s per copy, two copies take 45–90 minutes. With the overhead that is 1–1.7 VM-hours.
+- **Cost:** 1–1.7 h × the 8× price (B200s are somewhat slower). On 8× B300 at $75.92/h ($9.49 per GPU-hour,
+  2026-10-23) that is $76–130; at the $26–29/h of 2026-10-10, $27–49. On 8× B200 spot at $20.80/h, $25–45.
+  - The budget ledger reserves `--hours` × the price before it creates the VM.
+  - If the budget can't hold that reservation, a shorter `--hours` works too: the session is resumable, and a relaunch
+    extracts only what's missing.
+
+### 2. Fit, check, deploy (CPU)
+
+```bash
+# the v2 features (~50 GB in full; the probes need these tensors)
+uv run python scripts/fetch_features.py hf://buckets/probemaximizer/inkling-probes-bulk/features/bf16 FEATURES/bf16 \
+    --datasets terminal_prerl_v2 --keep followup,mean_reasoning,mean_action,router_logits,counts,answer_logp
+uv run python experiments/fit_probes.py --reader bf16 --features FEATURES/bf16 --iid-dataset terminal_prerl_v2 \
+    --probes iid --readouts followup,mean --out PROBES/bf16
+uv run python experiments/compare_readers.py --probes PROBES --features FEATURES --iid-dataset terminal_prerl_v2 \
+    --diagnostics DIAGNOSTICS-v2 --out OUT/compare_v2        # the full-precision jitter and the batching rule's numbers
+```
+
+- `fit_probes.py` refuses v2 features that aren't full precision at that revision with `max_batch_tokens` 1, and the
+  v2 probes record both amendments' sha256s.
+- The OOD probe keeps its v1 full-precision fit (`data/probe_results/fitted/bf16/diverse_deception/`). The deployment
+  takes its thresholds from `terminal_prerl_v2`'s honest train + val episodes.
+- The v2 monitors deploy to their own folder, `data/probes/Inkling-Small/v2/`, next to the v1 ones
+  (`experiments/deploy_probes.py --iid-dataset terminal_prerl_v2 --serving-reader bf16`; its docstring has the
+  command).
+
+### 3. Serving on full precision
+
+The server takes every GPU it can see (`device_map="auto"`). Two copies on one 8× B300 VM:
+
+```bash
+python3 scripts/nebius_job.py up --platform gpu-b300-sxm --preset 8gpu-192vcpu-2768gb --on-demand --hours 12 \
+    --out runs/{stamp}-{name} --hf thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a
+# on the VM, in ~/md, each copy detached (e.g. in tmux), with the v2 monitors the runs use
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small \
+    --port 8178 --probes data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup,...
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small \
+    --port 8179 --probes data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup,...
+# on the RL machine: both ports; point each run at one of them
+ssh -N -L 8178:127.0.0.1:8178 -L 8179:127.0.0.1:8179 <user>@<vm>
+```
+
+- **Reader checks.** A server refuses a monitor deployed for another reader, and each monitor checks the server's
+  reader and revision. So a v1 monitor (served on 4-bit) can't be served here by mistake.
+- **Capacity:** unmeasured. Before starting the servers, run `experiments/check_probe_server.py --model
+  /mnt/ram/Inkling-Small --probes-root data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json` on the
+  VM: it also gives tokens/s one episode at a time.
+- **How long the servers run.** As long as the train-against runs.
+  - Vlad's 90-step runs took 9–12 h when trained against a judge (5–6 minutes a step) and 2.4–2.8 h as controls
+    (1.3 minutes a step; W&B, 2026-09-30).
+  - A probe run's step adds the server's time for its 128 episodes, about 0.6–1.2 minutes at 3–6k tokens/s.
+- **Cost:** 8× B300 costs $26–76/h (2026-10-10 vs 2026-10-23 prices) and 8× B200 $20.80/h spot or $68/h on demand
+  (2026-10-23), against $1–9.5/h for the one-B300 4-bit server of v1.
 
 ## Legacy: the Qwen3.5-4B runbook (superseded)
 

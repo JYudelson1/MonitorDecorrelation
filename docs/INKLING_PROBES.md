@@ -6,6 +6,12 @@ and cannot do, and how to use them. The tables are generated from the committed 
 
 - Pre-registration (the analysis rules, written before the main feature extraction and before any probe was
   fitted; section 5 says when): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
+- **The IID probe v2, in progress** (everything below is v1):
+  - [amendment 1](inkling_probes_amendment_1.md): the IID probe refitted on `terminal_prerl_v2`, a pre-RL run on
+    puzzles no RL run trains or evaluates on. v1's `terminal_prerl` is on puzzles the RL runs evaluate on.
+  - [amendment 2](inkling_probes_amendment_2.md): v2 extracted, fitted and served on the full-precision reader alone,
+    one episode per forward.
+  - The plan, from extraction to serving, is in [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md).
 - Deployed monitors and how to pick one: [`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md)
 - Where every result file came from: [`data/probe_results/PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
 - Related docs: [`MONITORS.md`](MONITORS.md) (the monitor and the server), [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)
@@ -1012,6 +1018,10 @@ make easy. The mean probes are kept to compare evasion strategies. Folder conten
 episodes. The OOD monitors carry the thresholds of their own TerminalEnv view.
 
 ### Serving (train-against runs need this)
+
+The v2 monitors, once deployed, are served on the full-precision reader instead (3–4 B300s a copy;
+[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-v2-the-full-precision-reader-from-extraction-to-serving)).
+The rest of this section is about the v1 monitors.
 
 One B300 runs the 4-bit reader and serves any number of probes. Step by step, including how to get the reader at the
 right revision, in [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring):
