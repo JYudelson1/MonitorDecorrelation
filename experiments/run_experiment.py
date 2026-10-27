@@ -104,6 +104,19 @@ def _resolve_wandb_mode() -> str:
     return os.environ.get("WANDB_MODE") or ("online" if _wandb_logged_in() else "offline")
 
 
+def _raise_open_files_limit(want: int = 65536) -> tuple[int, int]:
+    """The soft RLIMIT_NOFILE up to ``want`` (never past the hard limit); returns (soft, hard) after. A TerminalEnv
+    eval scores 256 episodes × 4 judges at once, each call a connection: at the default soft limit of 1024 the judge
+    calls failed with EMFILE ("Too many open files") and the loop aborted the run (2026-10-27, on the batch's RL VM)."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = want if hard == resource.RLIM_INFINITY else min(want, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    return resource.getrlimit(resource.RLIMIT_NOFILE)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="path to a JSON or YAML experiment config")
@@ -118,6 +131,7 @@ def main() -> None:
                          "run) up to this config's n_steps (must exceed that state's step); every other "
                          "config field must match the run's. Without it, an existing run dir is an error.")
     args = ap.parse_args()
+    _raise_open_files_limit()
 
     cfg = apply_overrides(load_config(args.config), args.set)
 
