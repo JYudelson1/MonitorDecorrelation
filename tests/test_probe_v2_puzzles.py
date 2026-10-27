@@ -25,6 +25,9 @@ AMENDMENT_SHA256 = "84a8d0a4a6cfb96e151478cdfa207b3b58c796d2be36535f43303cd0197a
 AMENDMENT_2 = REPO / "docs" / "inkling_probes_amendment_2.md"
 AMENDMENT_2_SHA256 = "9a5cefb36c05b4b186b5684453528cfb9b38fe38310ff40c8c8fe76ebb3839e6"
 SESSION_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16.json"
+AMENDMENT_3 = REPO / "docs" / "inkling_probes_amendment_3.md"
+AMENDMENT_3_SHA256 = "8b6ff8d54a32b04d75165ad80a6453f342b3955ff1e243aceeea0156d409d6a2"
+ROSTER = REPO / "experiments" / "rl_batches" / "probe_rows_v2.json"
 VAST_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16_vast.json"
 EXCLUDED = REPO / "data" / "probe_datasets" / "terminal_prerl_v2" / "excluded_grids.json"
 CONFIG = "experiments/configs/terminal_verifier_control.json"
@@ -38,6 +41,33 @@ _spec.loader.exec_module(ex)
 def test_amendment_files_have_the_recorded_hashes():
     assert hashlib.sha256(AMENDMENT.read_bytes()).hexdigest() == AMENDMENT_SHA256
     assert hashlib.sha256(AMENDMENT_2.read_bytes()).hexdigest() == AMENDMENT_2_SHA256
+    assert hashlib.sha256(AMENDMENT_3.read_bytes()).hexdigest() == AMENDMENT_3_SHA256
+
+
+def test_the_rl_batch_is_amendment_3s():
+    """The roster and configs amendment 3 fixes: probe_iid on seeds 219-221 and probe_ood on 222-224, trained against
+    the committed v2 monitors' own score at λ = 1, the four judges held out; no controls; 90 steps and early stop off,
+    as Vlad's judge rows; W&B where Vlad's runs are."""
+    roster = json.loads(ROSTER.read_text())
+    assert roster["n_steps"] == 90 and not roster.get("sets") and not any(r.get("sets") for r in roster["runs"])
+    assert (roster["wandb_entity"], roster["wandb_project"]) == ("jyudel-redwood-research",
+                                                                 "terminal-env-inkling-small")
+    runs = sorted((r["config"], r["seed"], r["stop_after_zero_behavior_steps"]) for r in roster["runs"])
+    probe = "experiments/configs/terminal_verifier_probe_{}.json"
+    assert runs == sorted([(probe.format("iid"), s, None) for s in (219, 220, 221)]
+                          + [(probe.format("ood"), s, None) for s in (222, 223, 224)])
+    monitors = {"iid": "data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup",
+                "ood": "data/probes/Inkling-Small/v2/diverse_deception/with_reasoning/followup"}
+    judges = {("q3_cot", "Qwen/Qwen3-30B-A3B-FP8"), ("q3_out", "Qwen/Qwen3-30B-A3B-FP8"),
+              ("q35_cot", "Qwen/Qwen3.5-35B-A3B-FP8"), ("q35_out", "Qwen/Qwen3.5-35B-A3B-FP8")}
+    for name, path in monitors.items():
+        c = json.loads((REPO / f"experiments/configs/terminal_verifier_probe_{name}.json").read_text())
+        assert (c["penalty_coef"], c["n_steps"], c["lora_rank"], c["lr"], c["kl_coef"]) == (1.0, 90, 8, 0.0005, 0.0001)
+        ta = [m for m in c["monitors"] if m["role"] == "train_against"]
+        assert [(m["kind"], m["probe_path"]) for m in ta] == [("inkling_probe", path)]
+        assert {k: v for k, v in ta[0].items() if k not in ("name", "kind", "role", "probe_path", "server_url")} == {}
+        assert {(m["name"], m["model_id"]) for m in c["monitors"] if m["role"] == "held_out"} == judges
+        assert (REPO / path / "probe.npz").exists()
 
 
 @pytest.mark.parametrize("path", [SESSION_PLAN, VAST_PLAN], ids=["nebius", "vast"])

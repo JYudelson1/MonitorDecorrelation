@@ -57,8 +57,9 @@ or project. Control files from this driver restart or stop one run, or all.
   leave the machines to their leases and say how to ``resume`` or ``down``.
 
 **Rehearsal** (``start --rehearsal``): the same batch, each run named ``rehearsal-…`` with ``n_steps`` 2 and an eval
-at every step, plus the checklist, whose results go to ``DIR/rehearsal.json``: check_probe_server.py on the serving
-GPUs before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (experiments/
+at every step, logged to W&B in ``--rehearsal-entity`` (default the roster's) and ``--rehearsal-project`` (default
+<project>-rehearsal), plus the checklist, whose results go to ``DIR/rehearsal.json``: check_probe_server.py on the
+serving GPUs before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (experiments/
 check_probe_long_episodes.py); the per-step wall time and the probe queue's depth with every run at once; the server,
 one judge engine and a tunnel killed, with the runs going on; a run killed after a save and resumed; the W&B entity
 of every run; ``nobody`` unable to read the keys on the RL machine; and, if the repo has
@@ -241,12 +242,14 @@ def load_roster(path: str | Path) -> Roster:
                   str(path), str(data.get("description", "")))
 
 
-def rehearsal_roster(roster: Roster, project: str | None) -> Roster:
+def rehearsal_roster(roster: Roster, project: str | None, entity: str | None) -> Roster:
     """The rehearsal of ``roster``: every run renamed rehearsal-<name>, 2 steps with an eval at each, in its own W&B
-    project (``project``, default <project>-rehearsal), everything else the batch's."""
+    project (``project``, default <project>-rehearsal) and entity (``entity``, default the roster's), everything else
+    the batch's."""
     rows = [dataclasses.replace(r, run_name=f"rehearsal-{r.run_name}") for r in roster.rows]
     return dataclasses.replace(roster, name=f"{roster.name}-rehearsal"[:41], n_steps=2, sets=[*roster.sets,
-                               "eval_every=1"], rows=rows, wandb_project=project or f"{roster.wandb_project}-rehearsal")
+                               "eval_every=1"], rows=rows, wandb_project=project or f"{roster.wandb_project}-rehearsal",
+                               wandb_entity=entity or roster.wandb_entity)
 
 
 # ----------------------------------------------------------------------------------------------------- plan
@@ -1903,10 +1906,11 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
     return rec
 
 
-def judge_compare(batch: Batch, ops: Ops, run_dirs: list[str]) -> dict:
+def judge_compare(batch: Batch, ops: Ops, run_dirs: list[str], passes: int = 1, workers: int | None = None) -> dict:
     """experiments/rescore_terminal_judges.py compare on the RL machine, through the tunnels to the batch's judges: the
     given run folders (Vlad's, with eval_rollouts.jsonl) pushed there first, 4 + 4 episodes per (run, eval step). Its
-    report comes back into DIR/judge_compare/."""
+    report comes back into DIR/judge_compare/. With ``passes`` > 1, the same sample is scored again into
+    DIR/judge_compare/pass<i>/ (a pass reuses only its own folder's verdicts): the judges' retest spread."""
     if not (REPO / "experiments" / "rescore_terminal_judges.py").is_file():
         return {"exit": None, "skipped": "experiments/rescore_terminal_judges.py is not in this repo yet"}
     rl, names = ops.rl(), []
@@ -1914,12 +1918,32 @@ def judge_compare(batch: Batch, ops: Ops, run_dirs: list[str]) -> dict:
         name = Path(d).name
         names.append(f"{REMOTE_BATCH}/compare/{name}")
         nj.push_path(rl, d, f"{REMOTE_BATCH}/compare/{name}")
-    rc, out = run_text(rl, f"cd {nj.REMOTE_REPO} && .venv/bin/python experiments/rescore_terminal_judges.py compare "
-                           f"{' '.join(map(shlex.quote, names))} --out-dir {REMOTE_BATCH}/judge_compare --pos 4 --neg 4",
-                       6 * 3600)
+    rc, tails = 0, []
+    for i in range(1, passes + 1):
+        sub = f"{REMOTE_BATCH}/judge_compare" + (f"/pass{i}" if passes > 1 else "")
+        rc, out = run_text(rl, f"cd {nj.REMOTE_REPO} && .venv/bin/python experiments/rescore_terminal_judges.py compare "
+                               f"{' '.join(map(shlex.quote, names))} --out-dir {sub} --pos 4 --neg 4"
+                               + (f" --workers {workers}" if workers else ""), 6 * 3600)
+        tails.append(out[-3000:])
+        if rc != 0:
+            break
     with contextlib.suppress(Exception):
         nj.fetch_rsync(rl, f"{REMOTE_BATCH}/judge_compare", batch.out, batch.settings.rsync, timeout=1800)
-    return {"exit": rc, "tail": out[-3000:], "report": str(batch.out / "judge_compare" / "compare_report.json")}
+    reports = [str(batch.out / "judge_compare" / (f"pass{i}" if passes > 1 else "") / "compare_report.json")
+               for i in range(1, passes + 1)]
+    return {"exit": rc, "tail": tails[-1], "report": reports[0] if passes == 1 else reports}
+
+
+def cmd_judge_compare(args) -> int:
+    """The judge compare against a running batch's judges (amendment 3: while the batch runs), beside its driver: it
+    only pushes the run folders to the RL machine and runs the compare there, through the batch's tunnels."""
+    batch = batch_from(args)
+    if not batch.machines.get("rl", {}).get("host"):
+        raise SystemExit(f"{batch.out}: the batch has no RL machine yet")
+    rec = judge_compare(batch, Ops(batch), args.runs, args.passes, args.workers)
+    log(f"judge-compare: exit {rec.get('exit')}; reports {rec.get('report')}")
+    print(rec.get("tail", ""))
+    return 0 if rec.get("exit") == 0 else 1
 
 
 # ------------------------------------------------------------------------------------------------- commands
@@ -1978,10 +2002,19 @@ def install_driver_signals() -> None:
         signal.signal(signal.SIGHUP, detach)
 
 
+def rehearsal_only(args) -> None:
+    """The rehearsal's own options are refused without --rehearsal: given alone, they would be dropped silently."""
+    given = [f for f, v in (("--rehearsal-project", args.rehearsal_project), ("--rehearsal-entity",
+             args.rehearsal_entity), ("--compare-runs", getattr(args, "compare_runs", None))) if v]
+    if given and not args.rehearsal:
+        raise SystemExit(f"{', '.join(given)}: the rehearsal's options; give --rehearsal too (or leave them out)")
+
+
 def cmd_plan(args) -> int:
     roster = load_roster(args.roster)
+    rehearsal_only(args)
     if args.rehearsal:
-        roster = rehearsal_roster(roster, args.rehearsal_project)
+        roster = rehearsal_roster(roster, args.rehearsal_project, args.rehearsal_entity)
     if args.n_steps:
         roster = dataclasses.replace(roster, n_steps=args.n_steps)
     plan = build_plan(roster, args.rehearsal)
@@ -1999,10 +2032,11 @@ def cmd_plan(args) -> int:
 
 def cmd_start(args) -> int:
     roster = load_roster(args.roster)
+    rehearsal_only(args)
     if args.n_steps:
         roster = dataclasses.replace(roster, n_steps=args.n_steps)
     if args.rehearsal:
-        roster = rehearsal_roster(roster, args.rehearsal_project)
+        roster = rehearsal_roster(roster, args.rehearsal_project, args.rehearsal_entity)
     plan = build_plan(roster, args.rehearsal)
     s = settings_from(args)
     use_prefix(s)
@@ -2369,6 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--roster", required=True, help="a roster file (experiments/rl_batches/*.json)")
         p.add_argument("--rehearsal", action="store_true", help="2 steps, an eval at each, and the checklist")
         p.add_argument("--rehearsal-project", help="the rehearsal's W&B project (default <project>-rehearsal)")
+        p.add_argument("--rehearsal-entity", help="the rehearsal's W&B entity (default the roster's)")
         p.add_argument("--n-steps", type=int, help="every run's n_steps instead of the roster's (e.g. 360)")
         add_settings(p)
         p.set_defaults(func=func)
@@ -2398,6 +2433,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("run")
         p.add_argument("--out", required=True)
         p.set_defaults(func=cmd_run_control)
+    p = sub.add_parser("judge-compare", help="rescore_terminal_judges.py compare against a running batch's judges")
+    p.add_argument("--out", required=True)
+    p.add_argument("--runs", nargs="+", required=True, help="run folders (eval_rollouts.jsonl + run_info.json)")
+    p.add_argument("--passes", type=int, default=2, help="the same sample scored this many times (default 2)")
+    p.add_argument("--workers", type=int, help="judge calls in flight (the compare's --workers; default its own)")
+    p.set_defaults(func=cmd_judge_compare)
     p = sub.add_parser("vm-supervise", help="(on the RL machine, as root) every run of the plan")
     p.add_argument("--plan", required=True)
     p.add_argument("--state", required=True)

@@ -1,6 +1,6 @@
 {
   "name": "probe-rows-v2",
-  "description": "The v2 probe rows of the TerminalEnv degradation matrix (scripts/rl_batch.py; docs/GPU_RUNBOOK.md, 'v2 probe rows: the RL batch'): three runs train against probe_iid (v2, terminal_prerl_v2) on seeds 219-221 and three against probe_ood on seeds 222-224, penalty_coef 1.0. The four Qwen judges are held out and scored live, as in Vlad's rows (seeds 200-218); the other probe is held out too, scored after the runs (experiments/eval_inkling_probes_on_runs.py). Early stop off, as in Vlad's judge rows of commit c30c466 (his controls had 16). n_steps 90, as his rows ran; 360 to see the trained-against monitor fall, which in his batch only the 360-step strong-cot-seed-207 showed.",
+  "description": "The v2 probe rows of the TerminalEnv degradation matrix, as docs/inkling_probes_amendment_3.md fixes them (scripts/rl_batch.py; docs/GPU_RUNBOOK.md, 'v2 probe rows: the RL batch'): three runs train against probe_iid (v2, terminal_prerl_v2) on seeds 219-221 and three against probe_ood on seeds 222-224, penalty_coef 1.0. The four Qwen judges are held out and scored live, as in Vlad's runs (seeds 200-218); the other probe is held out too, scored after the runs (experiments/eval_inkling_probes_on_runs.py). 90 steps and early stop off, as in Vlad's judge rows (commit c30c466); Vlad's three controls (seeds 216-218) are the control row.",
   "wandb_entity": "jyudel-redwood-research",
   "wandb_project": "terminal-env-inkling-small",
   "n_steps": 90,

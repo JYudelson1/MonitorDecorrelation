@@ -318,13 +318,11 @@ roster as one command; its docstring has every detail.
 
 **The roster** (`experiments/rl_batches/`) states every run: its config, seed (0 to 10,000, the range the v2 exclusion
 covers), run name and early stop, plus `n_steps` and the W&B entity and project for all.
-- `probe_rows_v2.json`: `probe_iid` on seeds 219–221, `probe_ood` on 222–224 (`probe-iid-seed-219`, …).
-- `probe_rows_v2_seeds216.json`: both probes on Vlad's control seeds 216–218, plus two new controls on 216 and 217
-  (`control-rerun-seed-216`, …).
+- The batch: `probe_rows_v2.json`, as [amendment 3](inkling_probes_amendment_3.md) fixes it: `probe_iid` on seeds
+  219–221, `probe_ood` on 222–224 (`probe-iid-seed-219`, …); no controls: Vlad's three (216–218) are the control row.
 - The configs: `experiments/configs/terminal_verifier_probe_{iid,ood}.json`, Vlad's q3_cot row with the train-against
   judge replaced by the v2 probe at `http://127.0.0.1:8178`; the four judges held out spec for spec;
   `stop_after_zero_behavior_steps` null (as his judge rows of c30c466; the roster states it per run); `save_every` 9.
-  `terminal_verifier_control_resumable.json` is his control with `save_every` 9.
 - `n_steps`: 90 as his rows, or `--n-steps 360`: in his batch only the 360-step strong-cot-seed-207 shows its
   trained-against judge falling (q35_cot on hacks down to 0.76).
 
@@ -375,13 +373,19 @@ cd /srv/agents/projects/monitor-correlation-probes/MonitorDecorrelation
 export NEBIUS_REGIONS_FILE=../bin/nebius-regions.json NEBIUS_BIN=~/.local/bin/nebius NEBIUS_SSH_KEY=~/.ssh/nebius_vm \
     NEBIUS_BUDGET_FILE=../output/gpu_jobs/budget.json NEBIUS_JOB_NAME_PREFIX=dennis- RSYNC_BIN=~/.local/bin/rsync
 python3 scripts/rl_batch.py plan --roster experiments/rl_batches/probe_rows_v2.json     # pins, estimate, prices
-# the rehearsal: the same batch, 2 steps with an eval at each, and the checklist (~1.6 h of machines, ~$100)
-nohup python3 scripts/rl_batch.py start --rehearsal --roster experiments/rl_batches/probe_rows_v2.json \
-    --out ../output/gpu_jobs/{stamp}-{name} --compare-runs ../scratch/vlad-batch-oct1/runs/* > rehearsal.out 2>&1 &
-# the batch (90 steps; --n-steps 360 for the long one)
+# Vlad's runs, slim (eval_rollouts.jsonl + run_info.json, hard links; strong-cot-seed-207 cut at step 90, line 7,936)
+VLAD=../scratch/posthoc_inputs/vlad15
+# the rehearsal: the same batch, 2 steps with an eval at each, and the checklist (~1.6 h of machines, ~$100), logged
+# to the owner's own W&B space, not the team's; its compare on two of Vlad's runs tests the compare's plumbing
+nohup python3 scripts/rl_batch.py start --rehearsal --rehearsal-entity denizhan \
+    --roster experiments/rl_batches/probe_rows_v2.json --out ../output/gpu_jobs/{stamp}-{name} \
+    --compare-runs $VLAD/weak-out-seed-200 $VLAD/strong-cot-seed-203 > rehearsal.out 2>&1 &
+# the batch (90 steps, amendment 3)
 nohup python3 scripts/rl_batch.py start --roster experiments/rl_batches/probe_rows_v2.json \
     --out ../output/gpu_jobs/{stamp}-{name} > batch.out 2>&1 &
 python3 scripts/rl_batch.py status --out DIR          # machines, leases, runs (steps, s/step), the probe queue
+# amendment 3's judge check, while the batch runs: Vlad's 15 runs, 4 + 4 episodes per eval step, scored twice
+nohup python3 scripts/rl_batch.py judge-compare --out DIR --runs $VLAD/* --workers 128 > judge_compare.out 2>&1 &
 ```
 
 **What `start` does:** the three `up`s at once (the probe instance downloads the reader, ~3 min, and starts the
@@ -412,7 +416,7 @@ sync, then every machine ended and verified gone. Everything is in `DIR`: `batch
 per run, ~8,200 calls an hour on the q3 GPU and as many on the three q35 engines over the batch's ~11 hours: 36% of what
 Vlad's batch had them serve (12 rows at once, 2026-09-30: 22,500 calls/h on his one q3 GPU, 22,700 on his three q35
 engines; W&B timings), with the same per-call work (his eval episodes' judge calls: q3 ~1.3k completion tokens, q35
-~2.4–2.9k). The two controls of `probe_rows_v2_seeds216.json` add ~11,000 calls/h while they run (~3 h): ~87% then.
+~2.4–2.9k).
 8× H200 would need the owner to raise the GPU limit from 8 to 12; if more GPUs come, a second probe copy helps more.
 
 **Failure handling:**
@@ -436,12 +440,15 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
 
 **The rehearsal's checklist** (`DIR/rehearsal.json`, each item ok or not): check_probe_server.py on the serving GPUs
 before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (`experiments/
-check_probe_long_episodes.py`); W&B in `jyudel-redwood-research`; `nobody` unable to read the keys' files or the
-supervisor's environment on the RL machine; the probe server stopped and restarted, a judge engine killed, each
+check_probe_long_episodes.py`); W&B in the rehearsal's entity (`--rehearsal-entity`, default the roster's); `nobody`
+unable to read the keys' files or the supervisor's environment on the RL machine; the probe server stopped and
+restarted, a judge engine killed, each
 tunnel's ssh killed, with the runs waiting, not failing; a run killed after its step-0 save and resumed; every run
 done with no failed attempt; the per-step wall time and the probe queue's depth with every run at once; and the
-judge-consistency compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes per run and eval step of
-Vlad's seven local runs, ~5,600 calls, against the batch's judges) once that script is in the repo.
+judge compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes per run and eval step) on the runs
+`--compare-runs` names, against the rehearsal's judges: a test of its plumbing. Amendment 3's judge check is
+`judge-compare` against the batch's own judges while it runs: Vlad's 15 runs, ~2,300 episodes, two passes into
+`DIR/judge_compare/pass{1,2}/` (the second is the retest).
 
 **Known risks:**
 - **Long episodes:** the reader's dense attention bias is ~340 B × T² per episode (`whitebox/features.py`): ~49 GB at
@@ -480,7 +487,7 @@ Vlad's seven local runs, ~5,600 calls, against the batch's judges) once that scr
   the roster); `save_every` 9 instead of 999 (no effect on training: `tests/test_resume.py`).
 - **Judges:** the same engines, flags and models (HF main, unchanged since before his batch); vLLM 0.30.0, his; `--disable-uvicorn-access-log` and `--host 127.0.0.1` (logging and binding only); H200 NVL if no
   H200 is offered (the same GH100 chip and 141 GB, PCIe, lower power); through SSH tunnels (latency only); a third of
-  his load. The rehearsal's judge-consistency compare measures what is left.
+  his load. The batch's `judge-compare` (amendment 3) measures what is left.
 - **The RL machine:** root, Ubuntu 24.04 (glibc 2.39, dash as /bin/sh), CPython 3.11.16, as his; 32 vCPUs for six runs
   where his box had 112 for twelve plus the judges.
 - **W&B:** `WANDB_ENTITY=jyudel-redwood-research` (his key's default; Dennis's is `denizhan`).

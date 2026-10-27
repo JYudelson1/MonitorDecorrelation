@@ -78,22 +78,16 @@ def _roster_file(tmp_path: Path, **over) -> Path:
 # --------------------------------------------------------------------------------------------------- roster
 
 
-def test_the_shipped_rosters_load_and_state_every_run(repo, tmp_path):
-    """Both shipped rosters load against the real configs: every run's seed, name and early stop stated."""
-    for name in ("probe_rows_v2.json", "probe_rows_v2_seeds216.json"):
-        raw = json.loads((ROOT / "experiments" / "rl_batches" / name).read_text())
-        roster = rb.load_roster(ROOT / "experiments" / "rl_batches" / name)
-        assert roster.wandb_entity == "jyudel-redwood-research" and roster.n_steps == 90
-        assert all("stop_after_zero_behavior_steps" in r for r in raw["runs"])
-    roster = rb.load_roster(ROOT / "experiments" / "rl_batches" / "probe_rows_v2.json")
+def test_the_shipped_roster_loads_and_states_every_run(repo, tmp_path):
+    """The shipped roster loads against the real configs: every run's seed, name and early stop stated."""
+    path = ROOT / "experiments" / "rl_batches" / "probe_rows_v2.json"
+    roster = rb.load_roster(path)
+    assert roster.wandb_entity == "jyudel-redwood-research" and roster.n_steps == 90
+    assert all("stop_after_zero_behavior_steps" in r for r in json.loads(path.read_text())["runs"])
     assert [(r.run_name, r.seed) for r in roster.rows] == [
         ("probe-iid-seed-219", 219), ("probe-iid-seed-220", 220), ("probe-iid-seed-221", 221),
         ("probe-ood-seed-222", 222), ("probe-ood-seed-223", 223), ("probe-ood-seed-224", 224)]
     assert {r.stop_after_zero_behavior_steps for r in roster.rows} == {None}
-    alt = rb.load_roster(ROOT / "experiments" / "rl_batches" / "probe_rows_v2_seeds216.json")
-    controls = [r for r in alt.rows if r.run_name.startswith("control")]
-    assert [(r.seed, r.stop_after_zero_behavior_steps) for r in controls] == [(216, 16), (217, 16)]
-    assert {r.seed for r in alt.rows if r.run_name.startswith("probe")} == {216, 217, 218}
 
 
 @pytest.mark.parametrize("change, error", [
@@ -132,9 +126,60 @@ def test_a_run_gets_exactly_what_the_roster_states(repo, tmp_path):
                         "monitors.probe_iid.threshold=0.6"]
     null = rb.run_argv(roster, roster.rows[0])
     assert "stop_after_zero_behavior_steps=null" in null  # stated even when null: the config's value never decides
-    reh = rb.rehearsal_roster(roster, None)
+    reh = rb.rehearsal_roster(roster, None, None)
     assert reh.n_steps == 2 and "eval_every=1" in reh.sets and reh.wandb_project.endswith("-rehearsal")
     assert all(r.run_name.startswith("rehearsal-") for r in reh.rows)
+
+
+def test_the_rehearsal_logs_to_its_own_wandb_entity_and_project(repo, tmp_path, capsys):
+    """--rehearsal-entity (e.g. the owner's own instead of the team's) and --rehearsal-project change the rehearsal's
+    W&B entity and project and nothing else, and the supervisor holds its runs to them; without them, the roster's
+    entity and <project>-rehearsal."""
+    f = _roster_file(tmp_path)
+    roster = rb.load_roster(f)
+    reh = rb.rehearsal_roster(roster, None, None)
+    assert (reh.wandb_entity, reh.wandb_project) == ("jyudel-redwood-research", "terminal-env-inkling-small-rehearsal")
+    assert rb.rehearsal_roster(roster, "md-rehearsal", None).wandb_entity == "jyudel-redwood-research"
+    assert rb.rehearsal_roster(roster, None, "denizhan") == rb.dataclasses.replace(reh, wandb_entity="denizhan")
+    own = rb.rehearsal_roster(roster, "md-rehearsal", "denizhan")
+    assert own == rb.dataclasses.replace(reh, wandb_entity="denizhan", wandb_project="md-rehearsal")
+    vm = rb.vm_plan(type("B", (), {"settings": rb.Settings()})(), rb.build_plan(own, True))
+    assert (vm["entity"], vm["project"]) == ("denizhan", "md-rehearsal")  # what the supervisor checks the runs against
+    assert rb.main(["plan", "--roster", str(f), "--offline", "--rehearsal", "--rehearsal-entity", "denizhan"]) == 0
+    assert "W&B denizhan/terminal-env-inkling-small-rehearsal (REHEARSAL)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("extra", [["--rehearsal-entity", "denizhan"], ["--rehearsal-project", "md-rehearsal"]])
+def test_the_rehearsals_options_are_refused_without_it(repo, tmp_path, extra):
+    """Given without --rehearsal they would be dropped silently, and the ~$750 batch would start instead."""
+    with pytest.raises(SystemExit, match="give --rehearsal too"):
+        rb.main(["plan", "--roster", str(_roster_file(tmp_path)), "--offline", *extra])
+    with pytest.raises(SystemExit, match="--compare-runs"):
+        rb.main(["start", "--roster", str(_roster_file(tmp_path)), "--out", str(tmp_path / "b"), "--compare-runs", "x"])
+
+
+def test_the_judge_compare_scores_its_sample_once_per_pass_into_its_own_folder(tmp_path, monkeypatch):
+    """Two passes: the same runs and sample, each into judge_compare/pass<i>/ (a pass reuses only its own folder's
+    verdicts, so the second is a retest); then the whole folder comes back."""
+    pushed, ran, fetched = [], [], []
+    monkeypatch.setattr(rb.nj, "push_path", lambda rl, d, dest: pushed.append((d, dest)))
+    monkeypatch.setattr(rb, "run_text", lambda rl, cmd, timeout: (ran.append(cmd), (0, "ok"))[1])
+    monkeypatch.setattr(rb.nj, "fetch_rsync", lambda rl, path, dest, rsync, timeout: fetched.append(path))
+    ops = type("O", (), {"rl": lambda self: "rl"})()
+    batch = type("B", (), {"out": tmp_path, "settings": rb.Settings()})()
+    rec = rb.judge_compare(batch, ops, ["/x/weak-out-seed-200", "/x/control-seed-216"], passes=2, workers=128)
+    assert [dest for _, dest in pushed] == [f"{rb.REMOTE_BATCH}/compare/weak-out-seed-200",
+                                            f"{rb.REMOTE_BATCH}/compare/control-seed-216"]
+    assert len(ran) == 2 and all("--pos 4 --neg 4 --workers 128" in c for c in ran)
+    assert [c.split("--out-dir ")[1].split()[0] for c in ran] == [f"{rb.REMOTE_BATCH}/judge_compare/pass1",
+                                                                  f"{rb.REMOTE_BATCH}/judge_compare/pass2"]
+    assert fetched == [f"{rb.REMOTE_BATCH}/judge_compare"] and rec["exit"] == 0
+    assert rec["report"] == [str(tmp_path / "judge_compare" / f"pass{i}" / "compare_report.json") for i in (1, 2)]
+    ran.clear()
+    one = rb.judge_compare(batch, ops, ["/x/weak-out-seed-200"])  # the rehearsal's: one pass, the compare's workers
+    assert len(ran) == 1 and "--workers" not in ran[0] and ran[0].endswith(
+        f"--out-dir {rb.REMOTE_BATCH}/judge_compare --pos 4 --neg 4")
+    assert one["report"] == str(tmp_path / "judge_compare" / "compare_report.json")
 
 
 # ----------------------------------------------------------------------------------------------------- plan
@@ -190,7 +235,7 @@ def test_the_estimate_is_the_probe_servers_hours_for_the_probe_rows(repo, tmp_pa
     assert 0.25 < est["judge_load"][8001] < 0.4 and est["judge_load"][8001] == est["judge_load"][8002]
     long = rb.estimate(rb.build_plan(rb.load_roster(_roster_file(tmp_path, n_steps=360))))
     assert 40 < long["batch_hours"] < 48
-    reh = rb.estimate(rb.build_plan(rb.rehearsal_roster(rb.load_roster(_roster_file(tmp_path)), None), True))
+    reh = rb.estimate(rb.build_plan(rb.rehearsal_roster(rb.load_roster(_roster_file(tmp_path)), None, None), True))
     assert 0.4 < reh["batch_hours"] < 0.8  # 2 steps and 3 evals of 6 probe runs: ~35 probe-server minutes
 
 
