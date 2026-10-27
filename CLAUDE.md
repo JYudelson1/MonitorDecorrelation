@@ -21,7 +21,7 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
 | The monitor abstraction (judges, probes, judge re-scoring) + activations risk | [`docs/MONITORS.md`](docs/MONITORS.md) |
 | RL backends / GRPO / logging | [`docs/INFRA.md`](docs/INFRA.md) |
 | What's actually built/tested | [`STATUS.md`](STATUS.md) |
-| How to run the scripts | [`USAGE.md`](USAGE.md) (the RL batch, matrix, judge re-scorer and text baselines: their docstrings and the docs below) |
+| How to run the scripts | [`USAGE.md`](USAGE.md) (the RL batch, the matrix, the judge re-scorer and the text baselines included; details in their docstrings) |
 | The TerminalEnv degradation matrix: catch rates at a fixed false-alarm rate, text baselines, a first run on 7 of Vlad's runs | [`docs/MATRIX.md`](docs/MATRIX.md); older metric notes (d′, coupling β, split-half): [`docs/DEGRADATION_METRICS.md`](docs/DEGRADATION_METRICS.md) |
 | Inkling-Small probes: design, results, caveats, pipeline | [`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md) |
 | The deployed Inkling probe monitors (which to use, thresholds, files) | v2, the ones runs use: [`data/probes/Inkling-Small/v2/README.md`](data/probes/Inkling-Small/v2/README.md); v1: [`data/probes/Inkling-Small/README.md`](data/probes/Inkling-Small/README.md) |
@@ -93,8 +93,8 @@ a LoRA (one reason for amendment 2). Details in `docs/MONITORS.md`.
 
 ## Current focus
 
-**The TerminalEnv degradation matrix** (terminal-verifier env, Inkling-Small policy; as of 2026-10-27 the probe-row
-batch is built and its plumbing tested, but neither its rehearsal nor the batch has run: `STATUS.md`). Its rows:
+**The TerminalEnv degradation matrix** (terminal-verifier env, Inkling-Small policy; as of 2026-10-27 its rehearsal passed
+and the probe-row batch runs, started 13:02 UTC: `STATUS.md`). Its rows:
 - **Vlad's 15 runs of 2026-10-01** (seeds 200–218; W&B `jyudel-redwood-research/terminal-env-inkling-small`; copies
   in `../scratch/vlad-batch-oct1/runs/`): four judge rows, {weak `Qwen/Qwen3-30B-A3B-FP8` (`q3_*`), strong
   `Qwen/Qwen3.5-35B-A3B-FP8` (`q35_*`)} × {CoT (thinking + output), output-only} vLLM judges, each run trained against
