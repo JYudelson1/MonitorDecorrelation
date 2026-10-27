@@ -228,6 +228,12 @@ On the seven runs of Vlad's 2026-10-01 batch we have, all 288,580 requests were 
 score and per-step field was reproduced (2026-10-23). Pinned by `tests/test_rescore_terminal_judges.py`: runs written
 by `run_grpo` itself, judged by a fake server shaped like `vllm serve --reasoning-parser qwen3`.
 
+**Against real servers** (2026-10-27, the RL batch's rehearsal: our judges on 4× H200, vLLM 0.30.0, through its
+tunnels): `compare` on two of Vlad's runs (weak-out-seed-200, strong-cot-seed-203; 370 episodes per judge) gave a mean
+difference ours − Vlad's live within ±0.011 for every judge, Pearson 0.87–0.91. Amendment 3's check, `rl_batch.py
+judge-compare` (Vlad's 15 runs, two passes, against the batch's own judges), runs while the batch does
+([`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch)).
+
 ## Monitor families (taxonomy, from Rohan)
 
 | Family | Reads | Status |
@@ -293,10 +299,12 @@ forward` round-trip per step (deferred; only worth it for the activations-decomp
 
 ## Inkling probe monitors (`kind: inkling_probe`)
 
-The Inkling-Small TerminalEnv runs use original-model probing through their own path: a probe server on one GPU,
-and `InklingProbeMonitor` (`monitors/inkling_probe_monitor.py`) as its client. The probes, their results and their
+The Inkling-Small TerminalEnv runs use original-model probing through their own path: a probe server (v1's monitors:
+the 4-bit reader on one GPU; v2's: the full-precision reader across every visible GPU, 4× B200 in the RL batch), and
+`InklingProbeMonitor` (`monitors/inkling_probe_monitor.py`) as its client. The probes, their results and their
 caveats are in [`INKLING_PROBES.md`](INKLING_PROBES.md); the deployed monitors are listed in
-[`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md).
+[`data/probes/Inkling-Small/v2/README.md`](../data/probes/Inkling-Small/v2/README.md) (v2, the ones runs use) and
+[`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md) (v1).
 
 **Config** (`InklingProbeMonitorSpec` in `experiment_config.py`):
 
@@ -307,6 +315,8 @@ caveats are in [`INKLING_PROBES.md`](INKLING_PROBES.md); the deployed monitors a
 ```
 
 - `role`: `held_out` or `train_against`, as for every monitor.
+- `probe_path`: a deployed monitor's folder. The probe rows (`terminal_verifier_probe_{iid,ood}.json`) train against
+  v2's, `data/probes/Inkling-Small/v2/{terminal_prerl_v2,diverse_deception}/with_reasoning/followup`.
 - `threshold` (default 0.5) applies to the score σ(logit − t₁%), so 0.5 flags at the probe's 1% false-alarm point
   on pre-RL honest episodes.
 - Rejected at load unless `env` is `terminal_verifier` and the policy is TML-rendered (Inkling). The run's
@@ -351,12 +361,13 @@ Only replay fields leave the run, never the oracle's labels.
 - A status the client raises on aborts the run through its usual unscored-monitor check. An invalid `server_url`
   raises too.
 - **Long episodes (2026-10-23).** transformers builds the reader's attention bias densely, ~340 B per (query, key)
-  pair: ~49 GB for one 12k-token episode, about all of the ~55 GB per GPU a 4× B200 copy has free beside its weights.
-  An episode whose forward runs out of memory alone is retried once with its attention in query chunks
-  (`whitebox/inkling_attention.py`): ~6 GB of attention transients up to ~22k tokens, growing linearly beyond.
-  Whatever fits is computed exactly as before; the chunked retry is bit-identical on CPU (tests), not yet run on a
-  GPU. Only if that runs out of memory too does the server answer 413 (protocol 2; a 503 before, which the client
-  retried forever, stalling the run).
+  pair: ~49 GB for one 12k-token episode, about all of the ~55 GB per GPU a 4× B200 copy was estimated to have free
+  beside its weights (~17 GiB measured, 2026-10-27). An episode whose forward runs out of memory alone is retried once
+  with its attention in query chunks (`whitebox/inkling_attention.py`): ~6 GB of attention transients up to ~22k
+  tokens, growing linearly beyond. Whatever fits is computed exactly as before; the chunked retry is bit-identical on
+  CPU (tests). Only if that runs out of memory too does the server answer 413 (protocol 2; a 503 before, which the
+  client retried forever, stalling the run). On the rehearsal's 4× B200 copy (2026-10-27) an episode of 8,012 tokens
+  scored and ones of 12,012 and 16,012 got that 413.
 - **What a 413 does to a run:** it aborts, like any monitor that didn't answer (the RL batch's supervisor resumes it
   from its last save; a repeat fails it after its attempts). Not a "no score" the loop would leave out and count: for
   a train-against probe that un-penalizes exactly the episodes too long to score (a reward for length a policy can
@@ -370,10 +381,11 @@ reader chose at "Yes".
 **The probe server** (`whitebox/probe_server.py`; command line `experiments/inkling_probe_server.py`):
 - **Scoring is the training extraction:** the same replay, view, follow-up, feature code and batching budget, then the
   probe's readout and layer.
-- **One GPU,** any number of probes. A request's probes on the same view share one forward pass, but each monitor
-  sends its own requests: with `probe_iid` and `probe_ood` both live, every step costs about twice the reader time
-  of one. `--max-batch-tokens 1` (the default) scores one episode per forward pass, so a score doesn't depend on what
-  else was in the batch: the pre-registered batching rule fired.
+- **One GPU** for v1's 4-bit reader, **every visible GPU** for v2's full-precision one (`device_map="auto"`: one copy
+  on 4× B200, as in the RL batch, or on 3–4 B300s); any number of probes. A request's probes on the same view share
+  one forward pass, but each monitor sends its own requests: with `probe_iid` and `probe_ood` both live, every step
+  costs about twice the reader time of one. `--max-batch-tokens 1` (the default) scores one episode per forward pass,
+  so a score doesn't depend on what else was in the batch: the pre-registered batching rule fired.
 - **Protocol:** JSON over HTTP on localhost only; runs on other machines reach it through an SSH tunnel.
   `GET /v1/meta` lists the reader, the effort and the probes; `POST /v1/score` scores episodes. A request is
   identified by the hash of its body, so a repeated request joins the running job instead of starting another. A
@@ -397,20 +409,22 @@ reader chose at "Yes".
   then the HTTP server → `InklingProbeMonitor` path for one IID and one OOD monitor (each dataset's with-reasoning
   follow-up probe), whose scores must equal the scorer's, then a throughput test. It loads its own reader, so run it
   before starting the server on the same GPU.
-  - On a real B300 (2026-10-10) the golden checks of the monitors then deployed passed at both batchings. The end to
-    end part then sent the two OOD follow-up monitors, so **the IID monitor has never gone through HTTP on a GPU**.
+  - On a real B300 (2026-10-10) the golden checks of the v1 monitors then deployed passed at both batchings. The end
+    to end part then sent the two OOD follow-up monitors, so **v1's IID monitor has never gone through HTTP on a GPU**.
   - That run also predates the golden check's mean bound, the redeployed mean monitors and the server's current
-    error handling. The check in its current form hasn't run on a GPU yet; the current server has been checked on
-    CPU only.
+    error handling; v1's check has not run on a GPU since.
+  - **With the v2 monitors** (the RL batch's rehearsal, 2026-10-27, on the 4× B200 serving copy) the check in its
+    current form passed: golden max |Δlogit| 2e-14, ~6,000 tokens/s one episode per forward, end to end (one IID and
+    one OOD monitor through HTTP) Δ 0.0. The current server then served the rehearsal's runs.
 
 **Post-hoc scoring, without a server.** Nothing in training reads a held-out probe's score, and runs save every eval
 episode in full (`eval_rollouts.jsonl`). So held-out Inkling probes can be scored after the runs:
-`experiments/eval_inkling_probes_on_runs.py` loads the reader once on a GPU, replays every valid eval episode of
-every run exactly as in training (with the run's own env options, after checking its effort against the probes'),
-and writes `probe_eval_<name>.jsonl` per run and probe (tracked by git): per eval step, AUROC against
-`behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and counts, and the same on
-the tasks no probe saw (`*_unseen`). `eval/degradation.py` reads these files into the AUROC-drop and end-AUROC grids;
-the suspiciousness-gap grid reads only `eval_metrics.jsonl`.
+`experiments/eval_inkling_probes_on_runs.py` loads the reader once (v1's on one GPU, v2's on every visible GPU),
+replays every valid eval episode of every run exactly as in training (with the run's own env options, after checking
+its effort against the probes'), and writes `probe_eval_<name>.jsonl` per run and probe (tracked by git): per eval
+step, AUROC against `behavior_present` and `used_verifier`, recall and false-alarm rate at 0.5, class means and
+counts, and the same on the tasks no probe saw (`*_unseen`). `eval/degradation.py` reads these files into the
+AUROC-drop and end-AUROC grids; the suspiciousness-gap grid reads only `eval_metrics.jsonl`.
 - **Unseen tasks** are those whose grid is in neither the `train` nor the `val` list of the probes' `grids.json`. It
   goes by grid because a task id carries its run's seed and a grid doesn't: seed s's eval task i is seed 0's task
   s + i, so a run with a seed below 660, the configs' 0 included, evaluates partly or wholly on the IID probe's own
@@ -424,8 +438,10 @@ the suspiciousness-gap grid reads only `eval_metrics.jsonl`.
   `eval_rollouts.jsonl` back and appends new episodes on the same lines. Score files written before this check are
   scored again, once, in full.
 
-Only train-against runs need the live server. Commands:
-[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring).
+Only train-against runs need the live server. Commands: v1's in
+[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-serving-on-one-b300-and-post-hoc-scoring); v2's in
+[its v2 section](GPU_RUNBOOK.md#inkling-small-probes-v2-the-full-precision-reader-from-extraction-to-serving) and
+[the RL batch](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch).
 
 ## Training *against* a probe — the two mechanisms (which model feeds the probe?)
 

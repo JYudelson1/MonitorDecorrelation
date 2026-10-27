@@ -4,6 +4,12 @@ Concrete designs for the derisking week and the experiments that follow. Backgro
 [`RESEARCH_CONTEXT.md`](RESEARCH_CONTEXT.md). Envs in [`ENVIRONMENTS.md`](ENVIRONMENTS.md), monitors
 in [`MONITORS.md`](MONITORS.md). Build state tracked in [`../STATUS.md`](../STATUS.md).
 
+> **Current (2026-10-27): the TerminalEnv matrix** on Inkling-Small (the terminal-verifier env,
+> [`ENVIRONMENTS.md`](ENVIRONMENTS.md) #5): Vlad's four Qwen-judge rows and three controls (15 runs, seeds
+> 200–218) and the v2 probe rows (6 runs, whose batch started 2026-10-27). How they are run, scored and read is fixed
+> by [amendment 3](inkling_probes_amendment_3.md); the catch-rate matrix ([`MATRIX.md`](MATRIX.md)) is exploratory.
+> State: [`../STATUS.md`](../STATUS.md). The MBPP matrix below came before it.
+>
 > **What we actually ran (2026-06-29).** Exp 1 (cross-method) and Exp 2 (monitor strength) below were
 > the derisking plan on **sycophancy**. They've since converged into **one headline experiment**: the
 > **MBPP-Honeypot reward-hacking cross-method matrix on Qwen3-8B** — 6 monitors

@@ -307,6 +307,9 @@ python3 scripts/nebius_job.py down --provider vast --name dennis-judges-ab12cd  
   [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch)) kept a dummy HTTP server this way on a 1× GTX 1660 S:
   SSH after 6.5 minutes of image loading, setup 142 s, the server healthy 8 s after its start; then it reached the
   server from a Nebius VM through the batch's tunnel and ended both, verified: $0.01 on vast.ai.
+- **The RL batch** (2026-10-27: its rehearsal, then the batch) keeps its probe server (4× B200) and judges (4× H200)
+  this way. vast.ai's SSH prints a login banner on stderr at every connection: read a command's answer from its stdout,
+  or drop ssh's own lines as `rl_batch.py` does (`SSH_NOISE`, since 5fa2f0c).
 
 ### Spot VMs: how they behave
 

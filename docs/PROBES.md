@@ -15,6 +15,8 @@ Methodology/seam: [`MONITORS.md`](MONITORS.md). _Last updated: 2026-06-15 (findi
 > results, caveats and how to serve them. They use a separate pipeline (episode replay through the TML renderer,
 > one selected layer, a probe server), so the extraction methods and training commands below don't apply to them.
 > The CoT-stripping bug doesn't either: the TML renderer keeps every turn's thinking in the with-reasoning view.
+> Since 2026-10-23 the runs use v2 (`data/probes/Inkling-Small/v2/`: the IID probe refitted on `terminal_prerl_v2`,
+> every v2 monitor fitted and served on the full-precision reader; amendments 1 and 2).
 
 ## Extraction methods (3 ways to read activations)
 

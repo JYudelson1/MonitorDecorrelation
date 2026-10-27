@@ -10,10 +10,10 @@ model (the **reader**) over the policy's episode. All eight were trained on the 
 `thinkingmachines/Inkling-Small-NVFP4` at the revision in `reader_info`), which fits on one B300. Their thresholds
 were recalibrated on the 4-bit reader's features.
 
-These are the v1 monitors. The IID probe v2 ([amendment 1](../../../docs/inkling_probes_amendment_1.md)) is fitted
-and served on the full-precision reader ([amendment 2](../../../docs/inkling_probes_amendment_2.md)). Once deployed,
-its monitors go to `v2/` here, with their own `deployed.json`, `task_splits.json` and `grids.json`; nothing there
-exists yet.
+These are the v1 monitors. The IID probe v2 ([amendment 1](../../../docs/inkling_probes_amendment_1.md)), fitted
+and served on the full-precision reader ([amendment 2](../../../docs/inkling_probes_amendment_2.md)), was deployed to
+`v2/` here on 2026-10-23, with its own `deployed.json`, `task_splits.json` and `grids.json`: those are the monitors
+runs use ([`v2/README.md`](v2/README.md)).
 
 ## The monitors
 
@@ -78,7 +78,7 @@ In each monitor directory:
   drift in the libraries, before it can look like monitor degradation. By its own calibration the mean bound also
   refuses a correct setup: with probability at most about 1.2% per follow-up probe, and about 1% that any of the four
   follow-up probes fails it (less for the mean probes). The real-B300 check of 2026-10-10 predates that bound, so the
-  server in its current form has not yet run on a GPU.
+  server in its current form has not yet run on a GPU with these monitors (with v2's, on 4× B200, it has: 2026-10-27).
 
 At the top level:
 - **`deployed.json`**: one entry per monitor: its directory, layer, readers, `threshold_1`, golden-set size and

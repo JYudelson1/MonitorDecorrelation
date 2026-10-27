@@ -6,13 +6,18 @@ and cannot do, and how to use them. The tables are generated from the committed 
 
 - Pre-registration (the analysis rules, written before the main feature extraction and before any probe was
   fitted; section 5 says when): [`inkling_probes_preregistration.md`](inkling_probes_preregistration.md)
-- **The IID probe v2, in progress** (everything below is v1):
+- **The IID probe v2, deployed 2026-10-23** (everything below is v1):
   - [amendment 1](inkling_probes_amendment_1.md): the IID probe refitted on `terminal_prerl_v2`, a pre-RL run on
     puzzles no RL run trains or evaluates on. v1's `terminal_prerl` is on puzzles the RL runs evaluate on.
   - [amendment 2](inkling_probes_amendment_2.md): v2 extracted, fitted and served on the full-precision reader alone,
     one episode per forward.
-  - The plan, from extraction to serving, is in [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md).
+  - [amendment 3](inkling_probes_amendment_3.md): the probe rows of the TerminalEnv matrix, which train against the
+    v2 monitors (their RL batch started 2026-10-27).
+  - The monitors and their test numbers:
+    [`data/probes/Inkling-Small/v2/README.md`](../data/probes/Inkling-Small/v2/README.md); how they were extracted,
+    fitted, deployed and served: [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md).
 - Deployed monitors and how to pick one: [`data/probes/Inkling-Small/README.md`](../data/probes/Inkling-Small/README.md)
+  (v1; v2's above)
 - Where every result file came from: [`data/probe_results/PROVENANCE.md`](../data/probe_results/PROVENANCE.md)
 - Related docs: [`MONITORS.md`](MONITORS.md) (the monitor and the server), [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md)
   (serving and post-hoc scoring), [`INFRA.md`](INFRA.md) (the GPU launcher and the buckets),
@@ -953,16 +958,16 @@ pre-registered and reported as such.
    - It needs one B300 for the 4-bit reader.
    - Spot VMs were preempted about 1.4 times per VM-hour in our runs, mostly in their first minutes. <!-- src:
      scripts/spot_events.py over the launcher's job.json records of 2026-10-10 (not in the repo) -->
-   - No watchdog restarts a preempted server yet.
+   - No watchdog restarts a preempted server yet (for v2's server the RL batch's watch does, since 2026-10-23).
    - A run pauses while the server is down. Train-against runs never compute a reward without the probe; held-out
      probes can be scored afterwards instead (section 10).
    - A failure that repeats on every attempt also makes the runs wait, warning every 3 minutes, instead of aborting.
      Nothing restarts the server. One episode too big for the GPU's memory, even with its attention in query chunks,
      is the exception since 2026-10-23: a 413, which aborts its run (docs/MONITORS.md).
-   - The server as it is now has not run on a GPU. The real-B300 check of 2026-10-10 predates the golden check's
-     bound on the mean shift and the server's current error handling, and it sent only the two OOD monitors through
-     HTTP: the IID monitor has never been served over HTTP on a GPU. The redeployed mean monitors have been checked
-     on CPU only.
+   - The server as it is now has not run on a GPU with these monitors (with v2's, on 4× B200, it has: 2026-10-27).
+     The real-B300 check of 2026-10-10 predates the golden check's bound on the mean shift and the server's current
+     error handling, and it sent only the two OOD monitors through HTTP: the IID monitor has never been served over
+     HTTP on a GPU. The redeployed mean monitors have been checked on CPU only.
 6. **Calibration can drift under RL.** The thresholds come from pre-RL honest episodes. As the policy changes, its
    honest episodes may score differently, and 0.5 may no longer mean a 1% false-alarm rate. Recalibrate on the run's
    own honest episodes when reading results, and audit train-against runs with held-out monitors: a policy can keep
@@ -996,7 +1001,8 @@ pre-registered and reported as such.
     stop after very few iterations, so they act like slightly stronger regularization. The one-SE rule prefers small
     C anyway; the only selected probes with C ≥ 0.1 are the IID mean probe with reasoning and the OOD router probes.
 13. **Not yet used in an RL run.** The `inkling_probe` monitor is tested in configs and against a real server on a
-    B300, but no RL run had used it at the time of writing.
+    B300, but no RL run had used it at the time of writing. (Since 2026-10-27 the v2 monitors are, in the probe rows'
+    rehearsal and batch; these v1 monitors still aren't.)
 
 ## 10. Using the probes
 
@@ -1020,8 +1026,9 @@ episodes. The OOD monitors carry the thresholds of their own TerminalEnv view.
 
 ### Serving (train-against runs need this)
 
-The v2 monitors, once deployed, are served on the full-precision reader instead (3–4 B300s a copy;
-[`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-v2-the-full-precision-reader-from-extraction-to-serving)).
+The v2 monitors (deployed 2026-10-23) are served on the full-precision reader instead: one copy across 3–4 B300s or
+4× B200, as in the RL batch of the probe rows
+([`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#inkling-small-probes-v2-the-full-precision-reader-from-extraction-to-serving)).
 The rest of this section is about the v1 monitors.
 
 One B300 runs the 4-bit reader and serves any number of probes. Step by step, including how to get the reader at the
@@ -1043,8 +1050,9 @@ ssh -N -L 8178:127.0.0.1:8178 <user>@<vm>
   and about 1% that any of the four follow-up probes fails it (the mean probes' golden noise is several times
   smaller). If only that check fails, read the reported mean and spread before overriding it. <!-- src:
   src/monitordecorrelation/whitebox/probe_server.py (GOLDEN_MEAN_TOLERANCE docstring) -->
-- **Not yet run on a GPU in this form:** the real-B300 check of 2026-10-10 predates the mean check and the current
-  error handling, and sent only the OOD monitors through HTTP (section 11).
+- **Not yet run on a GPU in this form with these monitors:** the real-B300 check of 2026-10-10 predates the mean check
+  and the current error handling, and sent only the OOD monitors through HTTP (section 11). (With the v2 monitors, on
+  4× B200, the current check passed on 2026-10-27: [`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch).)
 - **Errors:** a request the server can never serve (malformed, an unknown probe, an episode that can't be rendered, an
   episode too big for the GPU even in query chunks: 413, 2026-10-23) aborts the run; anything else, such as the GPU
   running out of memory in a batch, is retried and the run waits. A failure that
@@ -1155,9 +1163,10 @@ full.
   both batchings, one episode per forward and batched. The end-to-end check, the HTTP server feeding
   `InklingProbeMonitor` with the same scores as the scorer, ran on the two OOD follow-up monitors only. So the IID
   monitor has never gone through HTTP on a GPU. The check now sends one IID and one OOD monitor (each dataset's
-  with-reasoning follow-up probe), but in that form it hasn't run on a GPU yet. Since 2026-10-10 the golden check has
-  also gained its bound on the mean shift, the server its current error handling, and the mean monitors have been
-  replaced: the current server and the redeployed mean monitors have been checked on CPU only.
+  with-reasoning follow-up probe), but in that form it hasn't run on a GPU with these monitors (with v2's it passed on
+  4× B200 on 2026-10-27). Since 2026-10-10 the golden check has also gained its bound on the mean shift, the server
+  its current error handling, and the mean monitors have been replaced: with these monitors, the current server and
+  the redeployed mean monitors have been checked on CPU only.
 - **Cost:** all GPU work, including a load test the day before, cost about $35 of spot time. On 2026-10-10 that was
   12 VMs, about 8 GPU-hours, with 4 preemptions. <!-- src: the launcher's spending ledger and job.json records,
   summarized by scripts/spot_events.py (not in the repo) -->

@@ -9,7 +9,11 @@ per-rollout scores) live only on the training box / locally. The committed **`ev
 already carries every aggregate the analysis needs** — per-monitor AUROC / d′ / μ_hack / class-mean
 scores per eval step — so every coupling and degradation chart reproduces from a clean checkout.
 
-## MBPP-Honeypot matrix (the headline experiment)
+The TerminalEnv matrix's runs (the current experiment) are not here: Vlad's 15 are in W&B
+`jyudel-redwood-research/terminal-env-inkling-small` (local copies: `CLAUDE.md`), and the probe rows' come back into
+their batch's folder (`DIR/runs/`, `docs/GPU_RUNBOOK.md`, "v2 probe rows: the RL batch").
+
+## MBPP-Honeypot matrix (Qwen3-8B; the headline experiment before the TerminalEnv matrix)
 
 Policy = Qwen3-8B, trained to reward-hack while evading one monitor per run; the rest are held out and
 scored into `eval_metrics.jsonl`. Rows = train-against `{cot_weak, cot_strong, out_weak, out_strong,

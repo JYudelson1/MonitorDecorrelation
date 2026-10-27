@@ -3,11 +3,13 @@
 The runnable scripts (everything else under `src/` is library code). All run via `uv`; secrets load
 from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 
-> **Real runs are GPU (rented CUDA box); local MPS is for plumbing only.** The current experiment is
-> **Qwen3-8B** — RL on tinker (remote) + white-box probe forward passes on the base model. Probe scoring
-> at 2048-token sequences is GPU-preferred; on a CUDA machine `uv sync --extra gpu` adds the optional
-> kernels (flash-attn etc., Linux-gated so a plain `uv sync` on a Mac skips them). Full step-by-step in
-> [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md).
+> **Real runs are GPU (rented CUDA box); local MPS is for plumbing only.** The current experiment is the
+> **TerminalEnv matrix on Inkling-Small** (`CLAUDE.md`, "Current focus"): RL on tinker (remote), the runs on a Nebius
+> CPU VM, the vLLM judges and the Inkling probe server on vast.ai GPUs, all started and watched by one command,
+> `scripts/rl_batch.py` ([`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md), "v2 probe rows: the RL batch"). For the earlier
+> Qwen3-8B runs (RL on tinker + white-box probe forward passes on the base model), probe scoring at 2048-token
+> sequences is GPU-preferred; on a CUDA machine `uv sync --extra gpu` adds the optional kernels (flash-attn etc.,
+> Linux-gated so a plain `uv sync` on a Mac skips them).
 >
 > *(Legacy caveat for the Qwen3.5-4B env: its hybrid linear-attention OOMs MPS at 4096 tokens —
 > single-sequence O(T²), ~27 GiB; `batch_size=1` doesn't help, only shorter sequences do. Not on the
@@ -17,9 +19,10 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | --- | --- | --- |
 | `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb |
 | `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`), shared probe server (`-P`). | one `data/runs/<run>/` per (config×seed) |
+| `scripts/rl_batch.py` | **The RL batch of the probe rows**, from a roster (`experiments/rl_batches/`): a Nebius CPU VM runs every run as root; kept vast.ai instances serve the probes (4× B200) and the judges (4× H200, vLLM 0.30.0) through SSH tunnels; a root supervisor resumes a failed run from its last save; syncs, leases, health repair, the end verified. `plan` (checks and costs, starts nothing), `start [--rehearsal]`, `status`, `sync`, `extend`, `down`, `watchdog`, `resume`, `restart-server`, `restart-run` / `stop-run`, `judge-compare` (amendment 3's judge check), `tunnel-test`. Stdlib only; details in its docstring and [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch). | `--out` DIR: `batch.json`, `driver.log`, `launch/`, `runs/`, `vm/`, `rehearsal.json`, `judge_compare/` |
 | `experiments/probe_server.py` | Shared frozen-model activation server so parallel runs don't each load the base model (`queue_runs.sh -P` starts it). | localhost server |
 | `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef` xor `--penalty-schedule`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
-| `experiments/analyze_coupling.py` | **The headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
+| `experiments/analyze_coupling.py` | **The MBPP matrix's headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
 | `scripts/verify_runs.py` | **Post-launch check.** Does each run actually train against the monitor its name claims? Also checks judge reasoning settings, a shared monitor battery + hyperparameters across the batch, and backend queue pauses. Exits 1 on any problem. | stdout |
 | `experiments/train_probe.py` | Train a white-box linear probe on contrastive deception/hacking data (base model, Atlas §4.3). `--preset {simple_deception,diverse_deception,mbpp}`. | `data/probes/<model>/<datasets>/` |
 | `experiments/build_probe_datasets.py` | **Inkling probe datasets** (CPU, no model). `terminal`: a TerminalEnv run's valid episodes, split train/val/test by task. `contrastive`: the diverse-deception pairs, split by pair as `train_probe.py` splits them. | `data/probe_datasets/<name>/{items.jsonl,manifest.json}` |
@@ -33,9 +36,14 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/inkling_probe_server.py` | **Serve Inkling probes** to RL runs (HTTP on localhost; reach it over an SSH tunnel), one episode per forward by default: the 4-bit reader on one GPU (v1), the full-precision one on every visible GPU (v2; 3–4 B300s a copy, two copies on an 8-GPU VM). Refuses to start if a probe is for another reader, if a golden episode renders differently, or scores differently (each probe's max \|Δlogit\| tolerance, and `--golden-mean-tolerance`, default 0.3 logits, for a systematic shift). | stdout |
 | `scripts/fetch_features.py` | **Download features** from a store, optionally keeping only some tensors per shard (`--keep followup,counts,answer_logp`); complete shards only, marker last, resumable. | `<dest>/<dataset>/<view>/shard_*` |
 | `scripts/spot_events.py` | **Every Nebius VM attempt** from the launcher's `job.json` files: creation failures by kind and region, minutes to run, how it ended, cost; preemptions per VM-hour. | stdout, `--md`, `--json` |
-| `scripts/nebius_job.py` | **One-command GPU job on Nebius**: pick the cheapest region by current spot price and capacity (`--max-price` cap optional), create a B300 VM, push the repo, download HF weights to RAM, run, fetch, and always delete (`run` / `up` / `exec` / `down` / `list` / `prices` / `budget` / `reap`, `--dry-run`). After a spot preemption or a job exit of 75, it relaunches on a fresh VM (`--attempts`, default 3) within the budget. Refuses uncommitted code unless `--allow-dirty` (the patch is then saved in `--out`); pushes CODE_VERSION.json so the VM's outputs record their commit. Ctrl-C, SIGTERM and SIGHUP never interrupt the delete (it finishes, then the launcher exits 130); run it under `nohup` to outlive the terminal. `down --budget-file` settles a kept VM's reservation. | `--out` dir with logs + `job.json` (later attempts in `retry-k/`) |
-| `experiments/check_probe_server.py` | **GPU check of the serving path** with the deployed probes: golden checks one episode per forward and batched, throughput, and the HTTP server + `InklingProbeMonitor` against the scorer (one IID and one OOD with-reasoning follow-up monitor). Exits 1 on a failed check. | a JSON report |
-| `experiments/eval_inkling_probes_on_runs.py` | **Post-hoc probe scoring** of finished TerminalEnv runs' saved eval episodes on one GPU (replayed as in training, resumable). Per eval step: AUROC vs `behavior_present` and `used_verifier`, recall/FPR at 0.5, and the same on the tasks no probe saw: those whose grid is in neither the train nor the val list of `--grids` (default: the deployed `grids.json`; by grid, since grids repeat across seeds under other task ids). | `<run>/probe_eval_<name>.jsonl`, `<run>/probe_scores_inkling.jsonl` |
+| `scripts/nebius_job.py` | **One-command GPU job on Nebius**: pick the cheapest region by current spot price and capacity (`--max-price` cap optional), create a B300 VM, push the repo, download HF weights to RAM, run, fetch, and always delete (`run` / `up` / `exec` / `down` / `list` / `prices` / `budget` / `reap`, `--dry-run`). After a spot preemption or a job exit of 75, it relaunches on a fresh VM (`--attempts`, default 3) within the budget. Refuses uncommitted code unless `--allow-dirty` (the patch is then saved in `--out`); pushes CODE_VERSION.json so the VM's outputs record their commit. Ctrl-C, SIGTERM and SIGHUP never interrupt the delete (it finishes, then the launcher exits 130); run it under `nohup` to outlive the terminal. `down --budget-file` settles a kept VM's reservation. CPU VMs (`--platform cpu-d3 … --on-demand`), keys for the job (`--secret NAME`, from `~/.secrets`) and root jobs (`--root-job`). **`--provider vast`:** the job on a vast.ai instance through `hub-gpu` (no key ever reaches it), and kept instances with a server: `up` / `serve` / `extend` / `status` / `down --provider vast` ([`docs/INFRA.md`](docs/INFRA.md)). | `--out` dir with logs + `job.json` (later attempts in `retry-k/`) |
+| `scripts/tunnel.sh` | **One SSH tunnel kept up**, reconnecting forever: keepalives (a dead link ends ssh within ~30 s), ExitOnForwardFailure, 2 s between attempts doubling to 30 s. Reads `STATE_DIR/NAME.conf` (target, port, key, known_hosts, `-L` specs) again before each connection. `rl_batch.py` runs one per server machine on the RL machine. | `STATE_DIR/NAME.{pid,ssh.pid,state,log}` |
+| `experiments/check_probe_server.py` | **GPU check of the serving path** with the deployed probes of one deployment (`--probes-root`: v1's `data/probes/Inkling-Small`, or `data/probes/Inkling-Small/v2`): golden checks one episode per forward and batched, throughput, and the HTTP server + `InklingProbeMonitor` against the scorer (one IID and one OOD with-reasoning follow-up monitor). Exits 1 on a failed check. | a JSON report |
+| `experiments/check_probe_long_episodes.py` | **Where long episodes stop fitting** on a running probe server: synthetic episodes of the given lengths (`--tokens 8000,12000,16000`, in the probe's view), sent one at a time; each one's score or error status (413: too big even with its attention in query chunks), and whether the server still answers. The RL batch's rehearsal runs it. | a JSON report (`--out`) |
+| `experiments/eval_inkling_probes_on_runs.py` | **Post-hoc probe scoring** of finished TerminalEnv runs' saved eval episodes (v1's reader on one GPU, v2's on every visible GPU; the golden check first; replayed as in training, resumable). Per eval step: AUROC vs `behavior_present` and `used_verifier`, recall/FPR at 0.5, and the same on the tasks no probe saw: those whose grid is in neither the train nor the val list of `--grids` (default: the `grids.json` of the probes' own deployment; by grid, since grids repeat across seeds under other task ids). An episode too long for the GPU is counted (`n_unscorable`), not fatal. | `<run>/probe_eval_<name>.jsonl`, `<run>/probe_scores_inkling.jsonl` |
+| `experiments/rescore_terminal_judges.py` | **Re-score saved TerminalEnv eval episodes** with a run's vLLM judges, as the loop scored them (each request checked byte for byte against the recorded one first; `--dry-run` checks without a call). `compare`: a seeded sample per eval step (`--pos` hacks, `--neg` non-hacks), new vs live per judge; `full`: every episode, into a live-format `eval_metrics.jsonl`. `--judge-url KEY=URL`; resumable. `rl_batch.py judge-compare` runs `compare` against a batch's judges. | `DIR/compare_report.json`; `DIR/<run>/{judge_scores.jsonl,rescore_info.json}` (+ `eval_metrics.jsonl` with `full`) |
+| `experiments/build_matrix.py` | **The TerminalEnv degradation matrix** (`eval/matrix.py`, [`docs/MATRIX.md`](docs/MATRIX.md)): catch rates on hacks at a fixed false-alarm rate (τ from step-0 honest episodes, per `--group`), early vs late windows per seed, control-subtracted, task-bootstrap CIs, regimes, Holm; live judges, `--posthoc` probe and text scores, `--rescore` re-scores. Exploratory under amendment 3. Run it with `python -I` (run folders from elsewhere are untrusted). | `--out`: `matrix.{csv,json,md}`, `per_eval.csv`, `regimes.csv`, `thresholds.csv`, `holm.csv` |
+| `experiments/text_baselines.py` | **Text-only baseline monitors** on CPU: length, a "verifier" regex, TF-IDF + logistic regression per view. `fit --dataset` (the IID dataset, `terminal_prerl_v2`), then `score --fit FIT RUN…` into the probe scorer's file format, read by `build_matrix.py --posthoc`. Run it with `python -I`. | `FIT/` (`meta.json`, `tfidf_*.npz`, `tfidf_*.terms.json`, `fit_scores.jsonl`); per run `probe_scores_text.jsonl`, `probe_eval_<name>.jsonl`, `text_baselines_info.json` |
 | `experiments/verify_fits.py` | **Does today's code reproduce the fitted probes?** Per probe: recomputes a slice of its CV grid (compared with cv_grid.csv to its 5 decimals), re-derives the selection, refits the chosen probe and compares it with probe.npz, meta, the main metrics of metrics.json and the test logits (pass: each difference ≤ `--tol` × max(1, \|saved value\|), `--tol` 1e-9 by default; it reports the largest). The IID cross-fitted hard subsets and concealment, leave-one-source-out, the baselines and the sensitivity rows are not recomputed. `--check READER/READOUTS=FEATURES` (repeatable), `--only`. About 70 min for 21 probes. | `<out>/<UTC timestamp>/{summary.json,report.md}` |
 | `experiments/ood_refits.py` | **How stable is the OOD probe's transfer?** Pair-bootstrap refits at the probe's layer and C, and one fit per layer, each scored in distribution and on TerminalEnv. `--overwrite`. | `<out>/{summary.json,refits.csv,by_layer.csv}` |
 | `experiments/learning_curves.py` | **Was there enough training data?** Refits on growing fractions of the training data (IID by task, OOD by pair), and bootstrap refits of each OOD source mix. `--overwrite`. | `<out>/{summary.json,iid.csv,ood.csv,ood_sources.csv}` |
@@ -48,7 +56,8 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | `experiments/eval_probes_on_run.py` | Post-hoc: score a probe over a run's `rollouts.jsonl`, per step (original-model probing). | `data/runs/<run>/probe_eval_<name>.jsonl` |
 | `experiments/eval_terminal_baseline.py` | **No-training baseline** on the terminal-verifier env: sample real multi-turn episodes, print peek/tamper/pass rates + transcripts, optionally judge AUROC (`--judge`). | `data/runs/tv_baseline_<model>/episodes.jsonl` |
 | `experiments/eval_terminal_monitors_baseline.py` | **Pre-RL monitor eval** on the terminal-verifier env: sample episodes from the untrained policy and score every judge in `--config` (AUROC, gap, TPR/FPR, call health). Policy, seed and `thinking_effort` come from the config (no `--model` / `--seed` / `--effort`); switch policy with `--set`, validated as a whole, e.g. `--set policy=Qwen/Qwen3-8B thinking_effort=null think_budget=2048 answer_tokens=512 max_tokens=null`. | `data/runs/tv_monitor_baseline_<policy>/baseline.json` + `eval_rollouts{,_slim}.jsonl` |
-| `scripts/load_balancer.py` | **vLLM load balancer.** Transparent TCP proxy: `--listen-port 8002 --backend-ports 8003 8004 8005` spreads connections over identical vLLM engines (fewest open connections, round-robin ties, failed backend deprioritised 5s); bytes pass through untouched. Balances per *connection* — fine for judges, whose `httpx.post` opens one per call. Stdlib-only. | stdout stats |
+| `scripts/setup_vllm.sh` | **The Qwen judge servers** the terminal configs expect: on 2 GPUs Qwen3-30B at :8001 and Qwen3.5-35B at :8002; on 4, three Qwen3.5 engines (:8003–8005) behind `load_balancer.py` at :8002. Uses `vllm` on PATH, else `.venv-vllm/`, installing it there if missing. `VLLM_VERSION` pins it (the RL batch: 0.30.0, Vlad's), `VLLM_HOST=127.0.0.1` binds every server there, `VLLM_RESTART=1` restarts a dead server alone (its log kept). | `logs/vllm/<name>.log`, `logs/vllm/freeze.txt` |
+| `scripts/load_balancer.py` | **vLLM load balancer.** Transparent TCP proxy: `--listen-port 8002 --backend-ports 8003 8004 8005` spreads connections over identical vLLM engines (fewest open connections, round-robin ties, failed backend deprioritised 5s); bytes pass through untouched. Balances per *connection* — fine for judges, whose `httpx.post` opens one per call. Listens on 127.0.0.1 unless `--listen-host`. Stdlib-only. | stdout stats |
 | `scripts/plot_run.py` | Render a run's metrics to PNGs locally (no W&B server). | `data/runs/<run>/*.png` |
 | `visualize_transcripts.py` | **Local run viewer.** Serves a web UI over `data/runs/`: every run's config + monitors, all `metrics.jsonl` / `eval_metrics.jsonl` series (charted + tabulated), per-monitor **score histograms split by `behavior_present`** at one selectable RL train step or eval step (or the single step of an `eval_terminal_monitors_baseline.py` dir), and the **full untruncated rollouts** (prompt, CoT, answer, per-turn transcript, env grading record, every monitor's score, and — for every LLM judge whose call the run saved — the exact prompt, request parameters and response incl. the judge's chain of thought; older dumps show "unavailable"). MBPP rollouts show whether they passed the **visible test** (`passes_visible`, flag + filter) — read from the full dumps only; the slim eval dump doesn't carry it. Re-scans on refresh, so new runs and new steps appear while a run is training; a dump rewritten in place (e.g. by `eval_terminal_monitors_baseline.py`) is detected and re-indexed, never mistaken for an append. Stdlib-only. | `http://127.0.0.1:8000` |
 | `tests/test_*.py` | Offline unit tests (env, GRPO alignment, metrics, probe logic). | stdout (run via `uv run pytest`) |
@@ -308,7 +317,10 @@ instead of memory. `-U http://host:port` reuses an already-running server. Per-c
 `{"probe_server_url": "..."}`. Start one standalone with
 `uv run python experiments/probe_server.py --model Qwen/Qwen3-8B`.
 
-### Analyzing a run set — directed coupling (the headline)
+### Analyzing a run set — directed coupling (the MBPP matrix's headline)
+
+The TerminalEnv runs are read differently: amendment 3's mean score on hacks per eval step, and, exploratory, the
+catch-rate matrix (`experiments/build_matrix.py`, [`docs/MATRIX.md`](docs/MATRIX.md)).
 
 ```bash
 uv run python experiments/analyze_coupling.py 'data/runs/mbpp_Qwen3-8B_*lowpen' --bootstrap 3000
@@ -386,6 +398,9 @@ uv run python experiments/run_experiment.py \
     --config experiments/configs/terminal_verifier_gemini35_out.json --set \
     'monitors.model:gemini-3.5.reasoning={"effort":"medium"}' \
     run_name=tv_g35out_eff-medium_s0 seed=0
+# 5. the v2 probe rows, as one batch (machines, servers, tunnels, runs): its checks and costs, starting nothing
+#    (--offline: no hub-gpu prices); `start` and the rehearsal: docs/GPU_RUNBOOK.md, "v2 probe rows: the RL batch"
+python3 scripts/rl_batch.py plan --roster experiments/rl_batches/probe_rows_v2.json
 ```
 
 The baseline also prints the **cost accounting** an RL run is budgeted from — prefill / sampled /
@@ -400,7 +415,11 @@ forward over each episode's datum on top of these numbers.
 Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json` + the four
 `terminal_verifier_gemini{25,35}_{cot,out}.json` rows + the four local-Qwen rows
 `terminal_verifier_q{3,35}_{cot,out}.json` (identical to the Gemini rows except the monitors: train
-against one vLLM Qwen judge, hold out the other three; needs the :8001/:8002 servers). `env_options`: `verifier_mode`
+against one vLLM Qwen judge, hold out the other three; needs the :8001/:8002 servers; Vlad's 15 runs of 2026-10-01 are
+these rows and the control) + the v2 probe rows `terminal_verifier_probe_{iid,ood}.json` (Vlad's q3_cot row with the
+train-against judge replaced by the v2 `probe_iid` / `probe_ood`, needs the probe server at :8178; `save_every` 9; run
+by `scripts/rl_batch.py` from `experiments/rl_batches/probe_rows_v2.json`) + `terminal_verifier_control_resumable.json`
+(the control with `save_every` 9). `env_options`: `verifier_mode`
 (every config: `submit_corrupted` with `submission_ends: first`, `require_explanation`, `read_only_verifier`, `last_turn_submit_notice`; `corrupted` = perturbed verifier, the paper's variant; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option
 with `--set env_options.verifier_mode=possible`), `offset_range`, `max_turns`,
@@ -461,7 +480,32 @@ backend, post-hoc or in-reward) and **trained-model** (live policy activations; 
 
 ## Inkling probes (TerminalEnv)
 
-The frozen reader is Inkling-Small's official **NVFP4** release on **one B300**. transformers cannot load
+Two deployments ([`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md); which monitor to use: each one's README):
+- **v2, the monitors runs use** (`data/probes/Inkling-Small/v2/`, amendments 1 and 2, deployed 2026-10-23): the IID
+  probe refitted on `terminal_prerl_v2`, and every v2 monitor extracted, fitted and served on the full-precision reader
+  (`thinkingmachines/Inkling-Small` @ `8cc5877b…`, BF16, ~496 GiB) across every visible GPU (one copy: 4× B200, or
+  3–4 B300s), one episode per forward.
+- **v1** (`data/probes/Inkling-Small/`): trained on full precision, served on the 4-bit reader on one B300. The rest of
+  this section after the v2 commands is v1's, unless it says v2.
+
+The v2 pipeline (machines, costs and the full commands: [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md), its v2
+sections):
+
+```bash
+# 1. GPU, through nebius_job.py run (the runbook's commands): experiments/run_probe_session.py --plan PLAN, with PLAN
+#    experiments/session_plans/probe_session_v2_bf16.json (two copies on an 8-GPU Nebius VM) or
+#    probe_session_v2_bf16_vast.json (one copy on a vast.ai 4× B200)
+# 2. CPU: fit (refuses features that aren't full precision, one episode per forward), then deploy into v2's own root
+uv run python experiments/fit_probes.py --reader bf16 --features FEATURES/bf16 --iid-dataset terminal_prerl_v2 \
+    --probes iid --readouts followup,mean --out PROBES/bf16
+uv run python experiments/deploy_probes.py --iid-dataset terminal_prerl_v2 --probes PROBES/bf16 \
+    --features FEATURES/bf16 --diagnostics DIAGNOSTICS-v2/bf16 --serving-reader bf16 --out data/probes/Inkling-Small/v2
+# 3. serving on every visible GPU (for the probe rows, scripts/rl_batch.py starts it on its probe instance)
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python experiments/inkling_probe_server.py --model /mnt/ram/Inkling-Small \
+    --port 8178 --probes data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/followup,data/probes/Inkling-Small/v2/diverse_deception/with_reasoning/followup
+```
+
+**v1.** The frozen reader is Inkling-Small's official **NVFP4** release on **one B300**. transformers cannot load
 that checkpoint, so `whitebox/inkling_nvfp4.py` keeps the routed experts packed and decodes them per
 layer; `WhiteBoxModel` routes NVFP4 checkpoints there automatically. A B200 is too small: the model
 takes ~167 GiB plus a 12 GiB decode buffer. Probe inputs come from `whitebox/inkling_replay.py`: the
@@ -539,6 +583,9 @@ ssh -N -L 8178:127.0.0.1:8178 md@<vm>        # on the RL machine
  "server_url": "http://127.0.0.1:8178"}
 ```
 
+- **v2:** `probe_path` under `data/probes/Inkling-Small/v2/` (as in `terminal_verifier_probe_{iid,ood}.json`), served on
+  the full-precision reader (above); for the probe rows `scripts/rl_batch.py` starts the server, the tunnels and the
+  runs.
 - **Where it works:** only with `env: terminal_verifier` and a TML policy. The run's `thinking_effort` must equal the
   probes' (0.5).
 - **Score:** σ(logit − t₁%), so the default `threshold` of 0.5 is the 1% false-alarm point on pre-RL honest episodes.

@@ -7,13 +7,16 @@
 > (7 rows via `scripts/queue_runs.sh`). Kept below only for the still-valid **provisioning / GPU
 > kernel-install** steps (`uv sync --extra gpu`, flash-attn) and the MPS-OOM background.
 >
-> **Current (2026-10-12):** the first section below, on serving the Inkling-Small probes and scoring finished runs
-> with them, is up to date. **2026-10-23:** the second, on the IID probe v2 on the full-precision reader, is the plan
-> for v2 (not yet run), on Nebius or on vast.ai. The third, "v2 probe rows: the RL batch", runs the v2 probes' RL
-> rows (2026-10-23: built; its plumbing tested, the batch not yet run). Everything after them is the superseded
-> Qwen3.5-4B runbook.
+> **Current (2026-10-27):** the first section below serves the v1 Inkling-Small probes (the 4-bit reader on one B300)
+> and scores finished runs with them (as of 2026-10-12). The second, the IID probe v2 on the full-precision reader,
+> ran on 2026-10-23: the extraction on a vast.ai 4× B200, the monitors deployed in `data/probes/Inkling-Small/v2/` (the
+> ones runs use). The third, "v2 probe rows: the RL batch", runs the v2 probes' RL rows: its rehearsal passed on
+> 2026-10-27 and the batch started that day. Everything after them is the superseded Qwen3.5-4B runbook.
 
 ## Inkling-Small probes: serving on one B300, and post-hoc scoring
+
+This section is v1's monitors (`data/probes/Inkling-Small/`); v2's, which the runs use, need the full-precision reader
+(the next two sections).
 
 The Inkling-Small TerminalEnv probes ([`INKLING_PROBES.md`](INKLING_PROBES.md)) need a GPU only to run the frozen
 reader: the 4-bit Inkling-Small checkpoint (`thinkingmachines/Inkling-Small-NVFP4`, 171 GB), which our loader fits on
@@ -64,8 +67,9 @@ so that closing the terminal doesn't stop it.
    can't hold two (~179 GiB each), so run it before starting the server, or stop the server first. It runs every
    deployed probe's golden check at both batchings, the HTTP server → `InklingProbeMonitor` path for one IID and one
    OOD monitor (each dataset's with-reasoning follow-up probe; their scores must equal the scorer's), and a
-   throughput test. In this form it hasn't run on a GPU yet: the B300 check of 2026-10-10 sent only the two OOD
-   monitors through HTTP, so the IID monitor has never been served over HTTP on a GPU.
+   throughput test. With the v1 monitors it hasn't run on a GPU in this form: the B300 check of 2026-10-10 sent only
+   the two OOD monitors through HTTP, so v1's IID monitor has never been served over HTTP on a GPU. (With the v2
+   monitors on a 4× B200 it passed on 2026-10-27: "v2 probe rows: the RL batch", below.)
 
    ```bash
    cd ~/md && uv run python experiments/check_probe_server.py --model /mnt/ram/Inkling-Small-NVFP4 \
@@ -86,7 +90,8 @@ so that closing the terminal doesn't stop it.
    By its own calibration that mean bound also refuses a correct setup, with probability at most about 1.2% per
    follow-up probe and about 1% that any of the four follow-up probes fails it: if only the mean check fails, read the
    reported mean and spread before overriding it. The real-B300 check of 2026-10-10 predates this bound and the
-   server's current error handling, so the server in its current form has not yet run on a GPU.
+   server's current error handling, so the server in its current form has not yet run on a B300 with the v1 monitors
+   (it has with the v2 ones on 4× B200, 2026-10-27).
 
 4. **Tunnel from the RL machine,** and point the runs' monitors at it (`"server_url": "http://127.0.0.1:8178"`):
 
@@ -134,6 +139,10 @@ which reads `eval_metrics.jsonl` only).
   episode, by the sha256 of the episode's replay item: `run_experiment.py --resume` cuts `eval_rollouts.jsonl` back
   and appends new episodes on the same lines. Score files written before this check are scored again, once, in
   full.
+- **The v2 monitors** (amendment 3: both probes on every eval episode of all 21 runs, after the batch): the same script
+  on the full-precision reader, `--model /mnt/ram/Inkling-Small` on every visible GPU (4× B200, or 3–4 B300s), with
+  the v2 folders; `--grids` defaults to their own deployment's, `data/probes/Inkling-Small/v2/grids.json`. As on the
+  server, every probe's golden check runs first (amendment 2).
 
 ```bash
 # on a 1× B300 with the reader in /mnt/ram and the runs' folders (eval_rollouts.jsonl + run_info.json)
@@ -198,7 +207,8 @@ python3 scripts/nebius_job.py run --platform gpu-b200-sxm --preset 8gpu-160vcpu-
   session resumes on relaunch.
 - **Time.** The v1 session's own timings (2026-10-10) give about 12 minutes from create to the first shard: VM, setup,
   the 496 GiB download in 98 s, about 2 minutes to load each copy. Batched, a copy extracted about 10k tokens/s.
-  - One episode at a time is unmeasured on full precision. On 4-bit it was 2.5–3.9k tokens/s, against 8.8k batched.
+  - One episode at a time on full precision: 3.5–4.6k tokens/s per 4× B200 copy (the v2 extraction, 2026-10-23;
+    unmeasured when this plan was written). On 4-bit it was 2.5–3.9k tokens/s, against 8.8k batched.
   - `terminal_prerl_v2` is about 32M tokens: 11,817 episodes × (1,607 + 1,077 tokens, the v1 averages with and
     without reasoning).
   - At 3–6k tokens/s per copy, two copies take 45–90 minutes. With the overhead that is 1–1.7 VM-hours.
@@ -227,8 +237,9 @@ python3 scripts/nebius_job.py run --provider vast --gpu B200 --gpus 4 --disk-gib
     -- 'mkdir -p results && uv run python experiments/run_probe_session.py --plan experiments/session_plans/probe_session_v2_bf16_vast.json 2>&1 | tee results/session.log; exit ${PIPESTATUS[0]}'
 ```
 
-- **Tried on a small instance only:** the launcher's smoke test passed on a GTX 1660 SUPER
-  ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)); no 4× B200 has run it yet. Check with `--dry-run`
+- **Run on 2026-10-23** on a 4× B200: the features at 770d1f8, every shard verified; one episode per forward,
+  ~0.35–0.48 s per with-reasoning episode (3.5–4.6k tokens/s). Before it only the launcher's smoke test had run on
+  vast.ai, on a GTX 1660 SUPER ([`INFRA.md`](INFRA.md#vastai-instances-run---provider-vast)). Check with `--dry-run`
   first. The instance pulls its image before anything runs: 7.5 minutes on the smoke test's host, more than 15 on
   another, under a minute where it is cached. At $40/h, 15 minutes is $10; the launcher waits up to 40 minutes.
 - **Cost:** on 2026-10-23 the cheapest 4× B200 with 859 GB of disk was $30.22/h at 07:20 UTC and $40.22/h at 09:40.
@@ -283,7 +294,8 @@ uv run python experiments/compare_readers.py --probes PROBES --features FEATURES
 
 ### 3. Serving on full precision
 
-The server takes every GPU it can see (`device_map="auto"`). Two copies on one 8× B300 VM:
+The server takes every GPU it can see (`device_map="auto"`). The RL batch serves one copy on a vast.ai 4× B200
+(below). Two copies on one 8× B300 VM:
 
 ```bash
 python3 scripts/nebius_job.py up --platform gpu-b300-sxm --preset 8gpu-192vcpu-2768gb --on-demand --hours 12 \
@@ -299,9 +311,11 @@ ssh -N -L 8178:127.0.0.1:8178 -L 8179:127.0.0.1:8179 <user>@<vm>
 
 - **Reader checks.** A server refuses a monitor deployed for another reader, and each monitor checks the server's
   reader and revision. So a v1 monitor (served on 4-bit) can't be served here by mistake.
-- **Capacity:** unmeasured. Before starting the servers, run `experiments/check_probe_server.py --model
-  /mnt/ram/Inkling-Small --probes-root data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json` on the
-  VM: it also gives tokens/s one episode at a time.
+- **Capacity:** ~6,000 tokens/s one episode at a time on a 4× B200 copy (`check_probe_server.py`'s throughput on the
+  golden episodes, the rehearsal, 2026-10-27); the v2 extraction ran at 3.5–4.6k tokens/s. Before starting the
+  servers, run `experiments/check_probe_server.py --model /mnt/ram/Inkling-Small --probes-root
+  data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json` on the VM (the rehearsal does so on its probe
+  instance).
 - **How long the servers run.** As long as the train-against runs.
   - Vlad's 90-step runs took 9–12 h when trained against a judge (5–6 minutes a step) and 2.4–2.8 h as controls
     (1.3 minutes a step; W&B, 2026-09-30).
@@ -358,7 +372,9 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
 
 **Before a batch:**
 1. The v2 monitors deployed and committed at `data/probes/Inkling-Small/v2/{terminal_prerl_v2,diverse_deception}/
-   with_reasoning/followup` (`plan` refuses otherwise), this branch merged, a clean tree.
+   with_reasoning/followup` (`plan` refuses otherwise), this branch merged, a clean tree, kept clean while `start`
+   launches the machines (the rehearsal's second attempt, 2026-10-27: a doc edit made during the launch, and the RL
+   VM's push refused the dirty tree).
 2. The keys: `hub-secret set tinker_api_key`, `hub-secret set wandb_api_key` (the owner, in this project's terminal).
    W&B: the key's default entity is the owner's own, so the runs get `WANDB_ENTITY=jyudel-redwood-research` and
    `WANDB_MODE=online`; the supervisor refuses to start a run without the key or with another entity, and stops a run
@@ -433,7 +449,7 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
 | a run aborts on a fatal monitor answer (a judge's 400, a probe 409/422) | the same: resumed from its last save; a repeat fails it after its attempts |
 | the RL machine's supervisor dies | the runs go on (sessions of their own); the watch starts a new supervisor, which takes them over |
 | this driver dies (pod restart, SIGTERM) | nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the RL machine powers off; `resume --out DIR` takes the batch back, `down --out DIR` ends it now |
-| an episode too long for the GPU | retried with its attention in query chunks; if even that doesn't fit, a 413: the run aborts and is resumed from its last save (the rehearsal's 8k/12k/16k-token episodes test it; Vlad's reached 7.5k) |
+| an episode too long for the GPU | retried with its attention in query chunks; if even that doesn't fit, a 413: the run aborts and is resumed from its last save (the rehearsal, 2026-10-27: 8,012 tokens scored, 12,012 and 16,012 a 413; Vlad's valid episodes stay under ~7.5k) |
 
 - By hand: `restart-server probe|judges --out DIR [--new-instance]`, `restart-run|stop-run RUN --out DIR`,
   `sync|extend --out DIR` (a running driver takes them as requests within a minute), `down --out DIR` (stops the
@@ -452,13 +468,39 @@ judge compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes 
 `judge-compare` against the batch's own judges while it runs: Vlad's 15 runs, ~2,300 episodes, two passes into
 `DIR/judge_compare/pass{1,2}/` (the second is the retest).
 
+**The rehearsal (2026-10-27)**, the v2 probe rows at 2 steps, ran on vast.ai (4× B200 probe server, 4× H200
+judges) and a Nebius CPU VM:
+- **Attempt 1:** W&B refused the key in the owner's own space ("the provided API key cannot access this resource", at
+  wandb.init), so every run failed at its start. The rehearsal now logs to its own project in the team's space
+  (`<project>-rehearsal`, the default).
+- **Attempt 2:** the RL VM's launch refused a dirty tree (a doc edit made during the launch).
+- **Attempt 3 passed:** every run finished its 2 steps with no failed attempt; `nobody` could not read the keys; W&B in
+  the roster's entity and project; the probe server killed and started again with the runs waiting; each tunnel's ssh
+  killed and reconnected; the judge compare on weak-out-seed-200 and strong-cot-seed-203 (370 episodes per judge):
+  mean difference ours − Vlad's live within ±0.011 for every judge, Pearson 0.87–0.91.
+- **Marked NOT ok, but passed:** check_probe_server.py (its report on the instance: `ok` true, golden max |Δlogit|
+  2e-14, ~6,000 tokens/s one episode per forward, end to end Δ 0.0) and the killed judge engine (setup_vllm.sh started
+  it again within ~30 s, serving). vast.ai's SSH prints a login banner on stderr at every connection; `run_text`
+  joined it to the command's output, so the JSON didn't parse, and the batch's health watch would have taken healthy
+  servers for dead the same way. Fixed in 5fa2f0c (`SSH_NOISE`, `json_in`; a test in `tests/test_rl_batch.py`).
+- **Not run:** the kill-and-resume drill; the 2-step runs had finished before it. So the supervisor's restart with
+  `--resume` is tested offline only (`tests/test_rl_batch.py`); `--resume` itself is tested offline
+  (`tests/test_resume.py`) and in small live runs (2026-09-30, `STATUS.md`), and was used live in Vlad's batch.
+- **Long episodes:** 8,012 tokens scored (3 s); 12,012 and 16,012 were 413 (Known risks, below).
+
+**The batch** (6 runs, 90 steps) started 2026-10-27 at 13:02 UTC from 5fa2f0c, logging to
+`jyudel-redwood-research/terminal-env-inkling-small`.
+
 **Known risks:**
 - **Long episodes:** the reader's dense attention bias is ~340 B × T² per episode (`whitebox/features.py`): ~49 GB at
-  12k tokens, ~87 GB at 16k, against ~55 GB free per B200 beside the weights. Vlad's 72,145 valid eval episodes reached
-  7,541 tokens (none above 8k); a policy pushed to evade a probe may write longer. Since 2026-10-23:
+  12k tokens, ~87 GB at 16k, against an estimated ~55 GB free per B200 beside the weights; the rehearsal's server had
+  ~17 GiB free per GPU (2026-10-27). Vlad's 72,145 valid eval episodes reached 7,541 tokens (none above 8k), and the
+  training episodes of Vlad's runs stay under ~7.5k too; a policy pushed to evade a probe may write longer. Since
+  2026-10-23:
   - an episode that runs out of memory alone is retried with its attention in query chunks (~6 GB of attention
-    transients up to ~22k tokens); whatever fits runs exactly as before. Not yet run on a GPU: the rehearsal's
-    8k/12k/16k-token episodes are its first test there;
+    transients up to ~22k tokens); whatever fits runs exactly as before. On the rehearsal's 4× B200 (2026-10-27):
+    8,012 tokens scored in 3 s; 12,012 and 16,012 ran out of memory even in query chunks and were answered 413. On
+    that server the limit lies between 8,012 and 12,012 tokens;
   - one that doesn't fit even so is answered 413 and aborts its run, which the supervisor resumes; a repeat fails it
     after its attempts. Not turned into a score (e.g. 1.0, as a judge's parse error): that would be a penalty the
     probe never gave, and leaving the rollout out would pay for length (docs/MONITORS.md);

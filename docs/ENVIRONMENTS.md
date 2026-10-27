@@ -51,10 +51,10 @@ to call concurrently — a pure function of the rollout plus its own subprocess 
 is capped across all runs on the box by `globalsem.code_exec_slot`, oracle LLM calls by the OpenRouter
 slot.
 
-> **The live setting is #2, MBPP-Honeypot reward-hacking** (the headline matrix runs here). Sycophancy
-> (#1) + MASK deception were the earlier derisking settings. **ImpossibleBench (#3) is now built** as a
-> single-step env (no monitors wired into a matrix yet); LiveCodeBench (#4) is still unbuilt.
-> **Terminal-verifier (#5) is built** — the repo's first multi-turn / tool-use env.
+> **The live setting is #5, the terminal-verifier** (the repo's first multi-turn / tool-use env): the TerminalEnv
+> matrix on Inkling-Small, Vlad's judge rows and the v2 probe rows (`STATUS.md`). **MBPP-Honeypot (#2)** ran the earlier
+> Qwen3-8B matrix. Sycophancy (#1) + MASK deception were the earlier derisking settings. **ImpossibleBench (#3) is
+> built** as a single-step env (no monitors wired into a matrix yet); LiveCodeBench (#4) is still unbuilt.
 
 ## 1. Sycophancy (Anthropic) — *derisking setting (historical)*
 
@@ -67,7 +67,7 @@ slot.
 - **Role now:** the cheap early derisk (no code execution) — surfaced the "setting matters more than
   monitor strength" finding; superseded as the headline by the coding env below.
 
-## 2. Coding — MBPP-Honeypot hardcode reward hacking (Obfuscation-Atlas style) — **LIVE HEADLINE**
+## 2. Coding — MBPP-Honeypot hardcode reward hacking (Obfuscation-Atlas style) — *the earlier headline (Qwen3-8B)*
 
 - **Source:** `envs/mbpp_honeypot.py` over `taufeeque/mbpp-hardcode` (MBPP tasks; the Obfuscation Atlas
   honeypot). Prompt = task + one **visible** test (answer shown); held-out tests grade the hack.
@@ -129,7 +129,7 @@ slot.
 - **Why:** the "possible" control for ImpossibleBench (shared task lineage). Lets us compare
   obfuscation dynamics when honesty *is* on the table vs. when it isn't.
 
-## 5. Terminal-verifier — *multi-turn terminal, read-the-grader hack* (rg_obfuscation) — **BUILT**
+## 5. Terminal-verifier — *multi-turn terminal, read-the-grader hack* (rg_obfuscation) — **LIVE HEADLINE**
 
 - **Source:** `envs/terminal_verifier.py`, a port of the multi-turn terminal setting in
   [`luke-marks0/rg_obfuscation`](https://github.com/luke-marks0/rg_obfuscation), the code behind

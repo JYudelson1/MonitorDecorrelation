@@ -54,10 +54,10 @@ sessions:
 | --- | --- |
 | [`docs/RESEARCH_CONTEXT.md`](docs/RESEARCH_CONTEXT.md) | Research framing, related work, the two senses of "decorrelation", links. |
 | [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) | Concrete experiment designs, metrics, the degradation matrix. |
-| [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md) | The RL environment catalog (sycophancy, coding reward-hacking, ImpossibleBench, LiveCodeBench). |
+| [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md) | The RL environment catalog (sycophancy, coding reward-hacking, ImpossibleBench, LiveCodeBench, the terminal-verifier). |
 | [`docs/MONITORS.md`](docs/MONITORS.md) | The generic monitor abstraction (black-box + white-box) and the tinker-activations question. |
 | [`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md) | The Inkling-Small TerminalEnv probes: data, readers, the pre-registered fitting, results, caveats, and how to serve them. |
-| [`docs/INFRA.md`](docs/INFRA.md) | RL backend abstraction (tinker now, verl later), GRPO, and local-wandb logging. |
+| [`docs/INFRA.md`](docs/INFRA.md) | RL backend abstraction (tinker now, verl later), GRPO, local-wandb logging, the GPU machines (Nebius VMs, vast.ai instances) and the Hugging Face buckets. |
 | [`USAGE.md`](USAGE.md) | The runnable scripts (entrypoints) and how to run them. |
 | [`STATUS.md`](STATUS.md) | Living implementation checklist — what's built, tested, and correct. |
 | [`CLAUDE.md`](CLAUDE.md) | Orientation + conventions for anyone (incl. future Claude sessions) picking this up. |
