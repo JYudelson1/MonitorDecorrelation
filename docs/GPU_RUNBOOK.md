@@ -375,12 +375,12 @@ export NEBIUS_REGIONS_FILE=../bin/nebius-regions.json NEBIUS_BIN=~/.local/bin/ne
 python3 scripts/rl_batch.py plan --roster experiments/rl_batches/probe_rows_v2.json     # pins, estimate, prices
 # Vlad's runs, slim (eval_rollouts.jsonl + run_info.json, hard links; strong-cot-seed-207 cut at step 90, line 7,936)
 VLAD=../scratch/posthoc_inputs/vlad15
-# the owner's own W&B entity, the key's default (W&B's viewer), for the rehearsal
-OWN_WANDB_ENTITY=...
 # the rehearsal: the same batch, 2 steps with an eval at each, and the checklist (~1.6 h of machines, ~$100), logged
-# to the owner's own W&B space, not the team's; its compare on two of Vlad's runs tests the compare's plumbing
-nohup python3 scripts/rl_batch.py start --rehearsal --rehearsal-entity "$OWN_WANDB_ENTITY" \
-    --roster experiments/rl_batches/probe_rows_v2.json --out ../output/gpu_jobs/{stamp}-{name} \
+# to its own project in the team's space (<project>-rehearsal); its compare on two of Vlad's runs tests the compare's
+# plumbing. Not --rehearsal-entity with the owner's own space: W&B refused this key there (2026-10-27, "the provided
+# API key cannot access this resource", at wandb.init; every run of that rehearsal failed at its start)
+nohup python3 scripts/rl_batch.py start --rehearsal --roster experiments/rl_batches/probe_rows_v2.json \
+    --out ../output/gpu_jobs/{stamp}-{name} \
     --compare-runs $VLAD/weak-out-seed-200 $VLAD/strong-cot-seed-203 > rehearsal.out 2>&1 &
 # the batch (90 steps, amendment 3)
 nohup python3 scripts/rl_batch.py start --roster experiments/rl_batches/probe_rows_v2.json \
