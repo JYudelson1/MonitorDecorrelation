@@ -18,14 +18,18 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
 | Why / prior art / links | [`docs/RESEARCH_CONTEXT.md`](docs/RESEARCH_CONTEXT.md) |
 | Concrete experiments + metrics | [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) |
 | RL environments | [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md) |
-| The monitor abstraction + activations risk | [`docs/MONITORS.md`](docs/MONITORS.md) |
+| The monitor abstraction (judges, probes, judge re-scoring) + activations risk | [`docs/MONITORS.md`](docs/MONITORS.md) |
 | RL backends / GRPO / logging | [`docs/INFRA.md`](docs/INFRA.md) |
 | What's actually built/tested | [`STATUS.md`](STATUS.md) |
-| How to run the scripts | [`USAGE.md`](USAGE.md) |
+| How to run the scripts | [`USAGE.md`](USAGE.md) (the RL batch, matrix, judge re-scorer and text baselines: their docstrings and the docs below) |
+| The TerminalEnv degradation matrix: catch rates at a fixed false-alarm rate, text baselines, a first run on 7 of Vlad's runs | [`docs/MATRIX.md`](docs/MATRIX.md); older metric notes (d′, coupling β, split-half): [`docs/DEGRADATION_METRICS.md`](docs/DEGRADATION_METRICS.md) |
 | Inkling-Small probes: design, results, caveats, pipeline | [`docs/INKLING_PROBES.md`](docs/INKLING_PROBES.md) |
-| The deployed Inkling probe monitors (which to use, thresholds, files) | [`data/probes/Inkling-Small/README.md`](data/probes/Inkling-Small/README.md) |
-| GPU VMs (Nebius) and the Hugging Face buckets | [`docs/INFRA.md`](docs/INFRA.md) (GPU VMs, Storage), [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md) |
-| Original source docs | `docs/Original Project Proposal.md`, `docs/Joey Research Ideas.md` |
+| The deployed Inkling probe monitors (which to use, thresholds, files) | v2, the ones runs use: [`data/probes/Inkling-Small/v2/README.md`](data/probes/Inkling-Small/v2/README.md); v1: [`data/probes/Inkling-Small/README.md`](data/probes/Inkling-Small/README.md) |
+| The probes' pre-registered rules (hash-pinned: never edit) | [`docs/inkling_probes_preregistration.md`](docs/inkling_probes_preregistration.md); amendments [1](docs/inkling_probes_amendment_1.md) (the IID probe v2's puzzles), [2](docs/inkling_probes_amendment_2.md) (v2 on the full-precision reader alone), [3](docs/inkling_probes_amendment_3.md) (the probe rows of the TerminalEnv matrix) |
+| The RL batch of the probe rows: roster → machines, servers, tunnels, runs, rehearsal | `scripts/rl_batch.py` (its docstring); [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md), "v2 probe rows: the RL batch" |
+| GPU machines (Nebius VMs; vast.ai instances via `scripts/nebius_job.py --provider vast`) and the Hugging Face buckets | [`docs/INFRA.md`](docs/INFRA.md) (GPU VMs, vast.ai, Storage), [`docs/GPU_RUNBOOK.md`](docs/GPU_RUNBOOK.md) (probe serving, post-hoc scoring, the v2 extraction, the RL batch). Machine names start with `dennis-` (`NEBIUS_JOB_NAME_PREFIX`); no key ever goes to a vast.ai instance |
+| The Qwen probes of the MBPP / sycophancy era; seed ideas for the LessWrong note | [`docs/PROBES.md`](docs/PROBES.md), [`docs/COT_VS_NOCOT_PROBE.md`](docs/COT_VS_NOCOT_PROBE.md); [`docs/LW_NOTE_SEEDS.md`](docs/LW_NOTE_SEEDS.md) |
+| Original source docs | `docs/Original Project Proposal.md`, `docs/Joey Research Ideas.md` (gitignored; not in this checkout) |
 
 ## Conventions
 
@@ -54,11 +58,17 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
   rather than *stop*. A monitor's accuracy alone is ambiguous. See docs/EXPERIMENT_PLAN.md.
 - **Package:** code lives under `src/monitordecorrelation/`. Use `uv` for everything
   (`uv run python ...`, `uv add ...`).
-- **Secrets:** `TINKER_API_KEY` and monitor API keys go in `.env` (gitignored). Never commit keys.
+- **Only committed code goes to a VM or instance** (`scripts/nebius_job.py` refuses a dirty tree unless
+  `--allow-dirty`); the probe-row batch starts only from a pushed commit (amendment 3's gates).
+- **Run folders from elsewhere are untrusted data** (e.g. Vlad's archive): `experiments/build_matrix.py` and
+  `experiments/text_baselines.py` run under `python -I` (docs/MATRIX.md).
+- **Secrets:** `TINKER_API_KEY` and monitor API keys go in `.env` (gitignored). Never commit keys. On hub the owner
+  places keys in `~/.secrets/NAME` (`hub-secret set NAME`); never print them. `nebius_job.py --secret` / `rl_batch.py`
+  send them to Nebius VMs only (a RAM-disk file, deleted after use); no key ever goes to a vast.ai instance.
 
 ## The reward-hacking label seam (MBPP-Honeypot — read before touching the oracle)
 
-The current experiment grades **reward-hacking**, and "hacks the visible test" is subtler than it
+The MBPP experiment grades **reward-hacking**, and "hacks the visible test" is subtler than it
 looks. `envs/hacking_labels.py` computes a deterministic three-way label per rollout:
 - **`loose_rh`** — passes the visible test but NOT all held-out tests (broad + noisy: includes
   honest-but-buggy attempts).
@@ -71,37 +81,46 @@ Always chart `behavior_rate` (=strict), `loose_rate`, and `hardcoding_rate` toge
 strict dipping then climbing as the policy learns to *hide* the hack. Never let any of these enter a
 monitor or the reward.
 
-## Top open risk (mostly retired for v1)
+## Top open risk (sidestepped by original-model probing)
 
-White-box probes need activations and **tinker doesn't expose them**. v1 sidesteps this: probes run on
-the **original base model** over the policy's generated text (Atlas "original-model probing"), so no
-weight download is needed. Both Qwen3-8B probes (`probe_ood` = diverse_deception, `probe_iid` =
-mbpp_honeypot) are trained and committed under `data/probes/Qwen3-8B/`. The tinker-weight-download path
-(for the obfuscated-*activations* decomposition) stays a deferred v2. Details in `docs/MONITORS.md`.
+White-box probes need activations and **tinker doesn't expose them**. The tinker runs sidestep this: their probes
+run on a frozen copy of the **original base model** over the policy's generated text (Atlas "original-model
+probing"), so no weight download is needed. Both Qwen3-8B probes (`probe_ood` = diverse_deception, `probe_iid` =
+mbpp_honeypot) are committed under `data/probes/Qwen3-8B/`; the Inkling-Small ones are below. Probing the RL'd
+policy itself (base + the run's LoRA via tinker's weight download: the obfuscated-*activations* decomposition) stays
+deferred (STATUS.md: unimplemented); for Inkling it needs the full-precision reader, as the 4-bit loader can't apply
+a LoRA (one reason for amendment 2). Details in `docs/MONITORS.md`.
 
 ## Current focus
 
-**The MBPP-Honeypot cross-method degradation matrix is running on a rented GPU** (Qwen3-8B). One run per
-monitor trains the policy to reward-hack while evading that monitor; the rest are held out and scored
-into `eval_metrics.jsonl`. Monitors (6): `{weak,strong} × {CoT judge, output judge}` + `probe_ood` +
-`probe_iid`, plus a no-monitor control = 7 rows, fanned across seeds by `scripts/queue_runs.sh`.
-Headline outputs: the AUROC-drop and suspiciousness-gap-drop matrices (`eval/degradation.py`).
-Sycophancy + MASK were the earlier derisking settings and remain available. See `STATUS.md`.
+**The TerminalEnv degradation matrix** (terminal-verifier env, Inkling-Small policy; as of 2026-10-27 the probe-row
+batch is built and its plumbing tested, but neither its rehearsal nor the batch has run: `STATUS.md`). Its rows:
+- **Vlad's 15 runs of 2026-10-01** (seeds 200–218; W&B `jyudel-redwood-research/terminal-env-inkling-small`; copies
+  in `../scratch/vlad-batch-oct1/runs/`): four judge rows, {weak `Qwen/Qwen3-30B-A3B-FP8` (`q3_*`), strong
+  `Qwen/Qwen3.5-35B-A3B-FP8` (`q35_*`)} × {CoT (thinking + output), output-only} vLLM judges, each run trained against
+  one and holding out the other three (`experiments/configs/terminal_verifier_q{3,35}_{cot,out}.json`), 3 seeds each;
+  plus 3 controls (seeds 216–218, all four held out). Each run's commit and early stop: `docs/GPU_RUNBOOK.md`.
+- **The v2 probe rows**, 6 runs (roster `experiments/rl_batches/probe_rows_v2.json`): trained against `probe_iid`
+  (seeds 219–221) or `probe_ood` (222–224); the four judges held out and scored live, the other probe post hoc.
+  **Fixed by amendment 3:** run, scored and read as Vlad's runs (Vlad's judge-row config with only the
+  trained-against monitor changed: λ = 1, 90 steps, early stop off); Vlad's three controls are the control row. Run
+  by `scripts/rl_batch.py`, one command: a Nebius CPU VM runs every run as root; kept vast.ai instances serve the
+  probes (4× B200, BF16 reader) and the judges (4× H200, on vLLM 0.30.0 as in Vlad's runs), through SSH tunnels;
+  failed runs resume (`save_every` 9); a 2-step `--rehearsal` with a fault checklist comes first.
+- **After the batch,** both probes score every eval episode of all 21 runs
+  (`experiments/eval_inkling_probes_on_runs.py`, after the golden check). Our judge servers are not the ones that
+  scored Vlad's runs, so while the batch runs a seeded sample of Vlad's eval episodes (4 hacks + 4 non-hacks per run
+  and eval step) is re-scored on ours, twice (`experiments/rescore_terminal_judges.py compare`).
+- **What is read** (amendment 3): each monitor's mean score on hacks per eval step
+  (`monitor/<name>/mean_score_reward_hacking`), as Vlad's runs log it. Anything else is exploratory, including the
+  catch-rate matrix (`eval/matrix.py`, `experiments/build_matrix.py`; it replaces `eval/degradation.py` here).
 
-**Also available (new, not part of the matrix yet): ImpossibleBench** — `envs/impossiblebench.py`, a
-single-step (one assistant message) env over Impossible-LiveCodeBench where the tests are
-unsatisfiable, so *passing ⇒ cheating* is the oracle. Note it breaks the usual reward/oracle
-separation by construction (the reward IS the cheat measurement) — read the module docstring and
-docs/ENVIRONMENTS.md #3 before comparing it to MBPP numbers. Runs on **Inkling-Small** via the new
-`rl/renderers.py` seam (Inkling has no HF chat template; TML rendering + structured thinking).
-Launch: `uv run python experiments/run_experiment.py --config experiments/configs/impossiblebench_inkling_small.json`.
-
-**Also available: Terminal-verifier (multi-turn)** — `envs/terminal_verifier.py`, a port of the terminal
+**The env: terminal-verifier (multi-turn)** — `envs/terminal_verifier.py`, a port of the terminal
 setting from *Output Supervision Can Obfuscate the CoT* (`rg_obfuscation`): the policy (Inkling-Small in the current configs) in a directory with
 a `verifier.py` whose embedded answer is perturbed, so the only route to reward is reading/tampering
 with the grader. `env_options.verifier_mode` ∈ `possible` / `corrupted` (the paper's) /
 `corrupted_negative` / `verifier_bug`. `behavior_present` = modified ∨ (impossible ∧ passed), from the
-transcript (`used_verifier` — read it AND submitted its value — is logged, not part of it).
+transcript (`used_verifier` — read it AND submitted its value, the IID probe's label — is logged, not part of it).
 `submit_possible` / `submit_corrupted` / `submit_corrupted_negative`: same `verifier.py`, but the prompt
 sanctions any use of it and a `<submit>` tool is graded (last submission == verifier's value); needs
 `env_options.submission_ends` ∈ `first` / `correct`; there `behavior_present` = impossible ∧ passed.
@@ -115,12 +134,32 @@ acts). Baseline: `experiments/eval_terminal_baseline.py`; RL: `run_experiment.py
 experiments/configs/terminal_verifier_*.json`.
 See docs/ENVIRONMENTS.md #5.
 
-**Inkling-Small probe monitors for the terminal runs** — 8 logistic-regression probes in
-`data/probes/Inkling-Small/`: {IID `terminal_prerl`, OOD `diverse_deception`} × {with, without reasoning} ×
-{`followup`, `mean`}, trained on the full-precision reader and served on the 4-bit one
-(`experiments/inkling_probe_server.py`). `probe_iid` = `terminal_prerl/with_reasoning/followup`, `probe_ood` =
-`diverse_deception/with_reasoning/followup`; the rest are for comparison (see the README there). Held-out probes can be
-scored after a run (`experiments/eval_inkling_probes_on_runs.py`); a run that trains against a probe needs the live
-server. The pre-registration, `docs/inkling_probes_preregistration.md`, is pinned by its sha256
-(`tests/test_preregistration.py`, and every probe's `meta.json`): never edit it. Results and caveats:
-`docs/INKLING_PROBES.md`.
+**Inkling-Small probe monitors** — logistic regressions on a frozen Inkling-Small reader's activations over the
+policy's episode. **Deployed: v2**, `data/probes/Inkling-Small/v2/`: {IID `terminal_prerl_v2`, OOD
+`diverse_deception`} × {with, without reasoning} × {`followup`, `mean`}; `probe_iid` =
+`v2/terminal_prerl_v2/with_reasoning/followup`, `probe_ood` = `v2/diverse_deception/with_reasoning/followup`, the
+rest for comparison. Amendment 1 refits the IID probe on `terminal_prerl_v2`, a pre-RL run on puzzles no RL run with
+seed 0–10,000 trains or evaluates on (keep RL seeds in that range; `rl_batch.py` refuses others); under amendment 2
+every v2 monitor is fitted and served on the full-precision (BF16) reader alone, one episode per forward. v1 (IID on
+`terminal_prerl`; trained on full precision, served on the 4-bit reader) stays one folder up, unchanged. Held-out
+probes are scored after a run (`experiments/eval_inkling_probes_on_runs.py`); a run that trains against a probe needs
+the live server (`experiments/inkling_probe_server.py`). Never redeploy into `v2/` while runs use it (`rl_batch.py`
+pins the committed files by sha256). The pre-registration and amendments 1–3 are pinned by their sha256s
+(`tests/test_preregistration.py`, `tests/test_probe_v2_puzzles.py`; each probe's `meta.json` records those it was
+fitted under): never edit them. Results and caveats: `docs/INKLING_PROBES.md` (v1; v2's test numbers: the v2 README).
+
+**Earlier: the MBPP-Honeypot cross-method degradation matrix** (Qwen3-8B; batches in `data/runs/mbpp_matrix_*/`,
+`data/runs/README.md`). One run per monitor trains the policy to reward-hack while evading that monitor; the rest are
+held out and scored into `eval_metrics.jsonl`. Monitors (6): `{weak,strong} × {CoT judge, output judge}` +
+`probe_ood` + `probe_iid`, plus a no-monitor control = 7 rows, fanned across seeds by `scripts/queue_runs.sh`.
+Outputs: the AUROC-drop and suspiciousness-gap-drop matrices (`eval/degradation.py`), the directed coupling
+(`experiments/analyze_coupling.py`; docs/DEGRADATION_METRICS.md). Sycophancy + MASK were the earlier derisking
+settings and remain available. See `STATUS.md`.
+
+**Also available (not part of a matrix yet): ImpossibleBench** — `envs/impossiblebench.py`, a
+single-step (one assistant message) env over Impossible-LiveCodeBench where the tests are
+unsatisfiable, so *passing ⇒ cheating* is the oracle. Note it breaks the usual reward/oracle
+separation by construction (the reward IS the cheat measurement) — read the module docstring and
+docs/ENVIRONMENTS.md #3 before comparing it to MBPP numbers. Runs on **Inkling-Small** via the
+`rl/renderers.py` seam (Inkling has no HF chat template; TML rendering + structured thinking).
+Launch: `uv run python experiments/run_experiment.py --config experiments/configs/impossiblebench_inkling_small.json`.
