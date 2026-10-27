@@ -22,7 +22,7 @@
 # - VLLM_RESTART=1: a server that dies is restarted, the others keep serving: its process group (with any engine
 #   process that outlived it) is killed, its log kept as <name>.log.<n>, and it starts again, at most
 #   VLLM_RESTART_MAX times (default 10) each. Unset: the first death stops everything.
-# The v2 probe rows' batch runs VLLM_VERSION=0.32.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 (scripts/rl_batch.py,
+# The v2 probe rows' batch runs VLLM_VERSION=0.30.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 (scripts/rl_batch.py,
 # docs/GPU_RUNBOOK.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."

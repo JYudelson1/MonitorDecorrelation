@@ -117,7 +117,7 @@ JUDGE_URLS = {"http://localhost:8001/v1": 8001, "http://localhost:8002/v1": 8002
 JUDGE_REVISIONS = {"Qwen/Qwen3-30B-A3B-FP8": "d206ba732169f29bb77fbf80fc2c4b81d4d30782",
                    "Qwen/Qwen3.5-35B-A3B-FP8": "9d1823d2dee688a6b25e77009dc727688c44936e",
                    "AngelSlim/Qwen3-a3B_eagle3": "266a50ea8c9dbedb729d7c18a98dd79f5b39b5c2"}
-VLLM_VERSION = "0.32.0"  # the newest release on 2026-10-23; accepts every flag of Vlad's commands (docs/GPU_RUNBOOK.md)
+VLLM_VERSION = "0.30.0"  # Vlad's: "the latest version" during his batch (2026-09-30 to 10-02); 0.31.0 came out 10-05
 READER = "thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a"  # the v2 probes' reader, BF16
 READER_DIR = "/mnt/ram/Inkling-Small"
 PROBE_URL = f"http://127.0.0.1:{PROBE_PORT}"

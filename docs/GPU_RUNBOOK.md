@@ -349,11 +349,12 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
   identity of a probe: a server without it answers 409, fatal to a run) is taken from the committed files, checked on
   the probe instance before the server starts (also before every restart), on the RL machine before the runs start,
   and in the server's `/v1/meta` at every health check.
-- **vLLM:** 0.32.0, the newest release (2026-10-18), installed by `scripts/setup_vllm.sh` into `.venv-vllm/`
-  (`VLLM_VERSION=0.32.0`; the env's packages in `logs/vllm/freeze.txt`). Its source accepts every flag of Vlad's
+- **vLLM:** 0.30.0, the version Vlad's judges ran on: he used "the latest version", and his batch ran from
+  2026-09-30 to 10-02, between 0.30.0 (09-22) and 0.31.0 (10-05). Installed by `scripts/setup_vllm.sh` into
+  `.venv-vllm/` (`VLLM_VERSION=0.30.0`; the env's packages in `logs/vllm/freeze.txt`), with every flag of his
   commands (`--reasoning-parser qwen3`, `--scheduling-policy priority`, `--kv-cache-dtype fp8`, eagle3 and mtp
-  `--speculative-config`, `max_cudagraph_capture_size`) and `thinking_token_budget` in requests; his version is
-  unknown (before 0.31.0, 2026-10-05). Every engine on 127.0.0.1 (`VLLM_HOST`), and a dead one is started again alone,
+  `--speculative-config`, `max_cudagraph_capture_size`) and `thinking_token_budget` in requests. His runs extended
+  past step 90 (207, 215) may have resumed on a later release. Every engine on 127.0.0.1 (`VLLM_HOST`), and a dead one is started again alone,
   its log kept (`VLLM_RESTART`). The judges' Hugging Face revisions (main on 2026-10-23, unchanged since before his
   batch) are in `rl_batch.JUDGE_REVISIONS`.
 
@@ -477,8 +478,7 @@ Vlad's seven local runs, ~5,600 calls, against the batch's judges) once that scr
   are rendered by vLLM's own environment. His resumed 206 and 215 already ran on transformers 5.18.0 / torch 2.14.1.
 - **Run settings:** his; early stop null where his judge rows had it (his controls and 214 had 16, stated per run in
   the roster); `save_every` 9 instead of 999 (no effect on training: `tests/test_resume.py`).
-- **Judges:** the same engines, flags and models (HF main, unchanged since before his batch); vLLM 0.32.0 for his
-  unknown version; `--disable-uvicorn-access-log` and `--host 127.0.0.1` (logging and binding only); H200 NVL if no
+- **Judges:** the same engines, flags and models (HF main, unchanged since before his batch); vLLM 0.30.0, his; `--disable-uvicorn-access-log` and `--host 127.0.0.1` (logging and binding only); H200 NVL if no
   H200 is offered (the same GH100 chip and 141 GB, PCIe, lower power); through SSH tunnels (latency only); a third of
   his load. The rehearsal's judge-consistency compare measures what is left.
 - **The RL machine:** root, Ubuntu 24.04 (glibc 2.39, dash as /bin/sh), CPython 3.11.16, as his; 32 vCPUs for six runs

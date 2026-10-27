@@ -255,7 +255,7 @@ def test_the_probe_server_starts_only_with_the_pinned_probes(tmp_path):
 
 
 def test_the_judges_run_pinned_on_localhost_and_restart_on_their_own():
-    assert rb.JUDGES_COMMAND == ("VLLM_VERSION=0.32.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 exec bash "
+    assert rb.JUDGES_COMMAND == ("VLLM_VERSION=0.30.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 exec bash "
                                  "scripts/setup_vllm.sh")
     for port, model in ((8001, "Qwen/Qwen3-30B-A3B-FP8"), (8004, "Qwen/Qwen3.5-35B-A3B-FP8"),
                         (8002, "Qwen/Qwen3.5-35B-A3B-FP8")):
