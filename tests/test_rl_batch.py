@@ -251,6 +251,35 @@ def test_leases_keep_half_a_lease_and_stop_at_72_hours():
     assert rb.lease_hours_for({**row, "ended": now}, 4.0, now) is None
 
 
+VAST_BANNER = (b"Warning: Permanently added '[210.157.233.86]:14438' (ED25519) to the list of known hosts.\r\n"
+               b"Welcome to vast.ai. If authentication fails, try again after a few seconds, and double check your "
+               b"ssh key.\nHave fun!\n")  # what ssh to a vast.ai instance wrote to stderr on 2026-10-27
+
+
+def test_ssh_s_own_lines_never_reach_what_a_command_answered(monkeypatch):
+    """vast.ai's login banner (stderr, every connection) followed the JSON of every curl on an instance: the watch read
+    "not JSON" for healthy servers and would have restarted them. The command's own stderr stays."""
+    class Remote:
+        def __init__(self, out: bytes, err: bytes):
+            self.out, self.err = out, err
+
+        def run(self, command, timeout, check, stdin=None):
+            return subprocess.CompletedProcess(["ssh"], 0, self.out, self.err)
+
+    models = json.dumps({"data": [{"id": "Qwen/Qwen3.5-35B-A3B-FP8"}]}).encode()
+    assert rb.run_text(Remote(models, VAST_BANNER), "curl …") == (0, models.decode())
+    assert rb.curl_json(Remote(models, VAST_BANNER), "http://127.0.0.1:8004/v1/models") == (
+        True, {"data": [{"id": "Qwen/Qwen3.5-35B-A3B-FP8"}]})
+    assert rb.judges_ok(Remote(models, VAST_BANNER), (8004,)) is None
+    assert rb.run_text(Remote(b"", VAST_BANNER + b"curl: (7) Failed to connect\n"), "curl …") == (
+        0, "curl: (7) Failed to connect\n")
+    report = '{"ok": true, "end_to_end": {"x": {"ok": true}}}'
+    assert rb.json_in(report + "\n" + VAST_BANNER.decode()) == {"ok": True, "end_to_end": {"x": {"ok": True}}}
+    assert rb.json_in('[{"tokens": 8012, "status": 200}]\nHave fun!\n') == [{"tokens": 8012, "status": 200}]
+    with pytest.raises(ValueError):
+        rb.json_in(VAST_BANNER.decode())
+
+
 def test_the_tunnel_key_opens_the_servers_ports_and_nothing_else():
     line = rb.authorized_line("ssh-ed25519 AAAAkey rl-batch x", [8002, 8001])
     assert line == ('restrict,port-forwarding,permitopen="127.0.0.1:8001",permitopen="127.0.0.1:8002",'

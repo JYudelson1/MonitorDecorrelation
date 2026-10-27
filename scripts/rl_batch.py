@@ -633,8 +633,15 @@ class Ops:
         self._remotes.pop(role, None)
 
 
+# What ssh itself writes to stderr on a connection, not the command: vast.ai's login banner (every connection,
+# 2026-10-27) and the first connection's known-hosts warning. Left in, it followed the command's JSON and every
+# curl_json on a vast.ai instance read "not JSON": the watch would have taken healthy servers for dead.
+SSH_NOISE = re.compile(r"^(Welcome to vast\.ai\. |Have fun!\s*$|Warning: Permanently added )")
+
+
 def run_text(remote: nj.Remote, command: str, timeout: float = 120, stdin_text: str | None = None) -> tuple[int, str]:
-    """``command`` on ``remote``: (exit code, stdout and stderr). An SSH timeout is (255, ...)."""
+    """``command`` on ``remote``: (exit code, stdout and stderr, without ssh's own lines: ``SSH_NOISE``). An SSH
+    timeout is (255, ...)."""
     try:
         if stdin_text is None:
             cp = remote.run(command, timeout=timeout, check=False)
@@ -643,7 +650,20 @@ def run_text(remote: nj.Remote, command: str, timeout: float = 120, stdin_text: 
                 cp = remote.run(command, timeout=timeout, check=False, stdin=fh)
     except subprocess.TimeoutExpired:
         return nj.SSH_DOWN, "ssh timed out"
-    return cp.returncode, (cp.stdout + cp.stderr).decode(errors="replace")
+    err = "".join(line for line in cp.stderr.decode(errors="replace").splitlines(keepends=True)
+                  if not SSH_NOISE.match(line))
+    return cp.returncode, cp.stdout.decode(errors="replace") + err
+
+
+def json_in(text: str):
+    """The first JSON object or array in ``text`` that decodes, whatever follows it: a report ``cat`` on a vast.ai
+    instance, where ssh's banner may surround it (run_text drops the lines it knows: ``SSH_NOISE``)."""
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            with contextlib.suppress(ValueError):
+                return decoder.raw_decode(text, i)[0]
+    raise ValueError("no JSON value in the text")
 
 
 @contextlib.contextmanager
@@ -1844,7 +1864,7 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
                                                "--tokens 8000,12000,16000 --out results/long_episodes.json", 3600)
         rc2, report = run_text(ops.vast("probe"), f"cat {nj.REMOTE_REPO}/results/long_episodes.json", 60)
         try:
-            long = json.loads(report)
+            long = json_in(report)
         except ValueError:
             long = {"error": out[-1500:]}
         put("synthetic 8k/12k/16k-token episodes on the probe server (16k: out of memory expected)", rc == 0,
@@ -1853,7 +1873,7 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
         rc2, gpu_log = run_text(ops.vast("probe"), f"tail -n 40 {nj.REMOTE_REPO}/results/check_probe_server_v2.log",
                                 60)
         try:
-            gpu = json.loads(gpu_report)
+            gpu = json_in(gpu_report)
         except ValueError:
             gpu = {"ok": False, "error": gpu_report[-500:]}
         put("check_probe_server.py on the serving GPUs, before the server", gpu.get("ok") is True,
