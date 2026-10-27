@@ -449,7 +449,7 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
 | a run aborts on a fatal monitor answer (a judge's 400, a probe 409/422) | the same: resumed from its last save; a repeat fails it after its attempts |
 | the RL machine's supervisor dies | the runs go on (sessions of their own); the watch starts a new supervisor, which takes them over |
 | this driver dies (pod restart, SIGTERM) | nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the RL machine powers off; `resume --out DIR` takes the batch back, `down --out DIR` ends it now |
-| a run's judge calls fail with EMFILE ("Too many open files") at an eval | the run aborts (a monitor that cannot score stops it) and resumes from its last save. Seen 2026-10-27 at the default soft limit of 1024 (3 of 6 runs); fixed live with `prlimit --pid … --nofile=65536:1048576` on the runs and the supervisor, and since 8a1aa03 every run raises its own limit at start |
+| a run's judge calls fail with EMFILE ("Too many open files") at an eval | the run aborts (a monitor that cannot score stops it) and resumes from its last save. Seen 2026-10-27 at the default soft limit of 1024 (3 of 6 runs); fixed live with `prlimit --pid … --nofile=65536:1048576` on the runs and the supervisor, and since ce78927 every run raises its own limit at start |
 | an episode too long for the GPU | retried with its attention in query chunks; if even that doesn't fit, a 413: the run aborts and is resumed from its last save (the rehearsal, 2026-10-27: 8,012 tokens scored, 12,012 and 16,012 a 413; Vlad's valid episodes stay under ~7.5k) |
 
 - By hand: `restart-server probe|judges --out DIR [--new-instance]`, `restart-run|stop-run RUN --out DIR`,
