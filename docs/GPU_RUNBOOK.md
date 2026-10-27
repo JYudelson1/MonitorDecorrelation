@@ -360,7 +360,7 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
 1. The v2 monitors deployed and committed at `data/probes/Inkling-Small/v2/{terminal_prerl_v2,diverse_deception}/
    with_reasoning/followup` (`plan` refuses otherwise), this branch merged, a clean tree.
 2. The keys: `hub-secret set tinker_api_key`, `hub-secret set wandb_api_key` (the owner, in this project's terminal).
-   W&B: the key's default entity is `denizhan`, so the runs get `WANDB_ENTITY=jyudel-redwood-research` and
+   W&B: the key's default entity is the owner's own, so the runs get `WANDB_ENTITY=jyudel-redwood-research` and
    `WANDB_MODE=online`; the supervisor refuses to start a run without the key or with another entity, and stops a run
    whose W&B URL names another entity or project.
 3. hub-gpu: 8 GPUs free at once (4× B200 + 4× H200 is exactly the project's 8: the v2 extraction instance must have
@@ -375,9 +375,11 @@ export NEBIUS_REGIONS_FILE=../bin/nebius-regions.json NEBIUS_BIN=~/.local/bin/ne
 python3 scripts/rl_batch.py plan --roster experiments/rl_batches/probe_rows_v2.json     # pins, estimate, prices
 # Vlad's runs, slim (eval_rollouts.jsonl + run_info.json, hard links; strong-cot-seed-207 cut at step 90, line 7,936)
 VLAD=../scratch/posthoc_inputs/vlad15
+# the owner's own W&B entity, the key's default (W&B's viewer), for the rehearsal
+OWN_WANDB_ENTITY=...
 # the rehearsal: the same batch, 2 steps with an eval at each, and the checklist (~1.6 h of machines, ~$100), logged
 # to the owner's own W&B space, not the team's; its compare on two of Vlad's runs tests the compare's plumbing
-nohup python3 scripts/rl_batch.py start --rehearsal --rehearsal-entity denizhan \
+nohup python3 scripts/rl_batch.py start --rehearsal --rehearsal-entity "$OWN_WANDB_ENTITY" \
     --roster experiments/rl_batches/probe_rows_v2.json --out ../output/gpu_jobs/{stamp}-{name} \
     --compare-runs $VLAD/weak-out-seed-200 $VLAD/strong-cot-seed-203 > rehearsal.out 2>&1 &
 # the batch (90 steps, amendment 3)
@@ -490,7 +492,7 @@ judge compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes 
   his load. The batch's `judge-compare` (amendment 3) measures what is left.
 - **The RL machine:** root, Ubuntu 24.04 (glibc 2.39, dash as /bin/sh), CPython 3.11.16, as his; 32 vCPUs for six runs
   where his box had 112 for twelve plus the judges.
-- **W&B:** `WANDB_ENTITY=jyudel-redwood-research` (his key's default; Dennis's is `denizhan`).
+- **W&B:** `WANDB_ENTITY=jyudel-redwood-research` (the default of Vlad's key; the owner's key defaults to the owner's own).
 
 **The plumbing test** (`scripts/rl_batch.py tunnel-test`, 2026-10-23; no model, no vLLM, no tinker, no key on the GPU):
 a Nebius cpu-d3 2vcpu-8gb ($0.07/h) and a vast.ai 1× GTX 1660 S ($0.065/h, `up --provider vast` with a dummy HTTP

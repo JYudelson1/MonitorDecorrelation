@@ -140,16 +140,16 @@ def test_the_rehearsal_logs_to_its_own_wandb_entity_and_project(repo, tmp_path, 
     reh = rb.rehearsal_roster(roster, None, None)
     assert (reh.wandb_entity, reh.wandb_project) == ("jyudel-redwood-research", "terminal-env-inkling-small-rehearsal")
     assert rb.rehearsal_roster(roster, "md-rehearsal", None).wandb_entity == "jyudel-redwood-research"
-    assert rb.rehearsal_roster(roster, None, "denizhan") == rb.dataclasses.replace(reh, wandb_entity="denizhan")
-    own = rb.rehearsal_roster(roster, "md-rehearsal", "denizhan")
-    assert own == rb.dataclasses.replace(reh, wandb_entity="denizhan", wandb_project="md-rehearsal")
+    assert rb.rehearsal_roster(roster, None, "own-entity") == rb.dataclasses.replace(reh, wandb_entity="own-entity")
+    own = rb.rehearsal_roster(roster, "md-rehearsal", "own-entity")
+    assert own == rb.dataclasses.replace(reh, wandb_entity="own-entity", wandb_project="md-rehearsal")
     vm = rb.vm_plan(type("B", (), {"settings": rb.Settings()})(), rb.build_plan(own, True))
-    assert (vm["entity"], vm["project"]) == ("denizhan", "md-rehearsal")  # what the supervisor checks the runs against
-    assert rb.main(["plan", "--roster", str(f), "--offline", "--rehearsal", "--rehearsal-entity", "denizhan"]) == 0
-    assert "W&B denizhan/terminal-env-inkling-small-rehearsal (REHEARSAL)" in capsys.readouterr().out
+    assert (vm["entity"], vm["project"]) == ("own-entity", "md-rehearsal")  # what the supervisor checks the runs against
+    assert rb.main(["plan", "--roster", str(f), "--offline", "--rehearsal", "--rehearsal-entity", "own-entity"]) == 0
+    assert "W&B own-entity/terminal-env-inkling-small-rehearsal (REHEARSAL)" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("extra", [["--rehearsal-entity", "denizhan"], ["--rehearsal-project", "md-rehearsal"]])
+@pytest.mark.parametrize("extra", [["--rehearsal-entity", "own-entity"], ["--rehearsal-project", "md-rehearsal"]])
 def test_the_rehearsals_options_are_refused_without_it(repo, tmp_path, extra):
     """Given without --rehearsal they would be dropped silently, and the ~$750 batch would start instead."""
     with pytest.raises(SystemExit, match="give --rehearsal too"):
@@ -478,7 +478,7 @@ def test_the_supervisor_stops_a_run_logging_to_another_wandb_entity(sup_env):
 
 @pytest.mark.parametrize("env, error", [({"WANDB_API_KEY": ""}, "WANDB_API_KEY not set"),
                                         ({"TINKER_API_KEY": ""}, "TINKER_API_KEY"),
-                                        ({"WANDB_ENTITY": "denizhan"}, "not the roster's"),
+                                        ({"WANDB_ENTITY": "own-entity"}, "not the roster's"),
                                         ({"WANDB_MODE": "offline"}, "not online")])
 def test_the_supervisor_refuses_without_the_keys_the_entity_or_online_wandb(sup_env, monkeypatch, env, error):
     repo, script, behave = sup_env
@@ -541,8 +541,8 @@ def test_a_new_supervisor_takes_over_the_runs_still_running(sup_env):
 def test_wandb_check_reads_the_runs_url():
     assert rb.wandb_check("wandb: 🚀 View run at https://wandb.ai/e/p/runs/ab12\n", "e", "p") == (
         "https://wandb.ai/e/p/runs/ab12", None)
-    url, why = rb.wandb_check("https://wandb.ai/denizhan/p/runs/x1", "e", "p")
-    assert why == "W&B logs to denizhan/p, not e/p"
+    url, why = rb.wandb_check("https://wandb.ai/own-entity/p/runs/x1", "e", "p")
+    assert why == "W&B logs to own-entity/p, not e/p"
     assert rb.wandb_check("wandb: W&B syncing is set to `offline` in this directory.", "e", "p")[1].startswith(
         "W&B is offline")
     assert rb.wandb_check("nothing yet", "e", "p") == (None, None)
