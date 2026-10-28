@@ -5,8 +5,9 @@
 #   2 GPUs:  GPU0 → Qwen3 :8001;  GPU1 → Qwen3.5 :8002
 #   4 GPUs:  GPU0 → Qwen3 :8001;  GPU{1,2,3} → Qwen3.5 :{8003,8004,8005};
 #            load balancer on :8002 → those three backends
+# (GPU0..3: the GPUs it uses, in order: every GPU nvidia-smi lists, or those VLLM_GPUS names, below.)
 #
-# Requires exactly 2 or 4 visible GPUs, each an H200 (or ≥80 GiB so either FP8 MoE
+# Requires exactly 2 or 4 GPUs, each an H200 (or ≥80 GiB so either FP8 MoE
 # judge fits on one card with the concurrency settings below). Ctrl-C / exit kills every child.
 # Quiet: server output goes to logs/vllm/<name>.log; the terminal shows readiness + any server death.
 #
@@ -22,6 +23,9 @@
 # - VLLM_RESTART=1: a server that dies is restarted, the others keep serving: its process group (with any engine
 #   process that outlived it) is killed, its log kept as <name>.log.<n>, and it starts again, at most
 #   VLLM_RESTART_MAX times (default 10) each. Unset: the first death stops everything.
+# - VLLM_GPUS=4,5,6,7: the GPUs to use, by nvidia-smi's index, in that order (2 or 4 of them): on a machine with more,
+#   or beside another server; each server gets its own (Qwen3 the first). Unset, a CUDA_VISIBLE_DEVICES of GPU
+#   indices is taken instead (nvidia-smi ignores that variable, so the count would see every GPU), else every GPU.
 # The v2 probe rows' batch runs VLLM_VERSION=0.30.0 VLLM_HOST=127.0.0.1 VLLM_RESTART=1 (scripts/rl_batch.py,
 # docs/GPU_RUNBOOK.md).
 set -euo pipefail
@@ -50,11 +54,24 @@ CTK_EXTRAS="nvcc,crt,cccl,cudart,nvvm"
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found; need a GPU box"; exit 1; }
 command -v uv >/dev/null || { echo "uv not on PATH; need uv to install/run vllm"; exit 1; }
 
+# Triton (vLLM's JIT) compiles C against the venv Python's Python.h. A system Python without its headers (the Nebius
+# image's python3.12, 2026-10-28: "Python.h: No such file or directory", then every Qwen3.5 server died at its start)
+# can't serve, so the venv is made on uv's own Python (--managed-python), which ships them, and one without is made
+# again.
+has_headers() {
+  "$1" -c 'import os, sys, sysconfig; sys.exit(not os.path.exists(os.path.join(sysconfig.get_paths()["include"], "Python.h")))' \
+    2>/dev/null
+}
+
 ensure_vllm() {
   if command -v vllm >/dev/null; then
     VLLM=$(command -v vllm)
     echo "using vllm on PATH: $VLLM"
     return
+  fi
+  if [[ -x "$VLLM_VENV/bin/vllm" ]] && ! has_headers "$VLLM_VENV/bin/python"; then
+    echo "$VLLM_VENV's Python has no Python.h (vLLM's Triton JIT needs it): making it again on uv's own Python"
+    rm -rf "$VLLM_VENV"
   fi
   if [[ -x "$VLLM_VENV/bin/vllm" ]]; then
     VLLM="$VLLM_VENV/bin/vllm"
@@ -63,8 +80,8 @@ ensure_vllm() {
       || echo "WARNING: $VLLM_VENV has unsatisfied requirements (uv pip check --no-config --python $VLLM_VENV); consider rm -rf $VLLM_VENV and rerunning" >&2
     return
   fi
-  echo "vllm not found; installing vllm${VLLM_VERSION:+==$VLLM_VERSION} into $VLLM_VENV/ (python 3.12, --torch-backend=auto)"
-  uv venv --no-config --python 3.12 --seed "$VLLM_VENV"
+  echo "vllm not found; installing vllm${VLLM_VERSION:+==$VLLM_VERSION} into $VLLM_VENV/ (uv's python 3.12, --torch-backend=auto)"
+  uv venv --no-config --managed-python --python 3.12 --seed "$VLLM_VENV"
   uv pip install --no-config --python "$VLLM_VENV" "vllm${VLLM_VERSION:+==$VLLM_VERSION}" --torch-backend=auto
   # now that torch has pinned cuda-toolkit, add the matching compiler pieces
   ctk=$("$VLLM_VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("cuda-toolkit"))' 2>/dev/null || true)
@@ -209,15 +226,40 @@ ensure_cuda_toolkit() {
 ensure_cuda_toolkit
 
 mapfile -t GPU_ROWS < <(nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits)
+gpu_index() { cut -d',' -f1 <<<"$1" | tr -d ' '; }
+VLLM_GPUS="${VLLM_GPUS:-}"
+if [[ -z "$VLLM_GPUS" && "${CUDA_VISIBLE_DEVICES:-}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  VLLM_GPUS=$CUDA_VISIBLE_DEVICES
+fi
+if [[ -n "$VLLM_GPUS" ]]; then
+  [[ "$VLLM_GPUS" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "VLLM_GPUS=$VLLM_GPUS is not a comma list of GPU indices" >&2; exit 1; }
+  IFS=',' read -ra WANT <<<"$VLLM_GPUS"
+  PICKED=()
+  for want in "${WANT[@]}"; do
+    row=""
+    for r in "${GPU_ROWS[@]}"; do
+      if [[ "$(gpu_index "$r")" == "$want" ]]; then row=$r; fi
+    done
+    if [[ -z "$row" ]]; then echo "VLLM_GPUS=$VLLM_GPUS: nvidia-smi lists no GPU $want" >&2; exit 1; fi
+    for p in "${PICKED[@]+"${PICKED[@]}"}"; do
+      if [[ "$(gpu_index "$p")" == "$want" ]]; then echo "VLLM_GPUS=$VLLM_GPUS names GPU $want twice" >&2; exit 1; fi
+    done
+    PICKED+=("$row")
+  done
+  GPU_ROWS=("${PICKED[@]}")
+  echo "the GPUs of VLLM_GPUS=$VLLM_GPUS, in that order"
+fi
 NGPU=${#GPU_ROWS[@]}
 case "$NGPU" in
   2|4) ;;
-  *) echo "need exactly 2 or 4 GPUs, found $NGPU"; exit 1 ;;
+  *) echo "need exactly 2 or 4 GPUs, found $NGPU (VLLM_GPUS picks them on a machine with more)"; exit 1 ;;
 esac
 
+GPU_IDS=()  # nvidia-smi's index of GPU0..GPU3 above: each server's own CUDA_VISIBLE_DEVICES
 for row in "${GPU_ROWS[@]}"; do
   # csv: index, name, memory.total (MiB) — name may contain spaces
-  idx=$(cut -d',' -f1 <<<"$row" | tr -d ' ')
+  idx=$(gpu_index "$row")
+  GPU_IDS+=("$idx")
   name=$(cut -d',' -f2 <<<"$row" | sed 's/^ *//;s/ *$//')
   mem=$(cut -d',' -f3 <<<"$row" | tr -d ' ' | cut -d. -f1)
   if [[ "$name" == *H200* ]]; then
@@ -281,10 +323,10 @@ launch() {
 HOST_ARGS=()
 [[ -z "$VLLM_HOST" ]] || HOST_ARGS=(--host "$VLLM_HOST")
 
-# Qwen3-30B always on GPU 0 → :8001 (clients hardcode this).
+# Qwen3-30B always on GPU0 (the first GPU) → :8001 (clients hardcode this).
 serve_q3() {
   RELAUNCH=serve_q3
-  launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES=0 "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
+  launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
     --port 8001 \
     --reasoning-parser qwen3 \
     --scheduling-policy priority \
@@ -319,11 +361,11 @@ serve_lb() {
 
 serve_q3
 if [[ "$NGPU" -eq 2 ]]; then
-  serve_q35 1 8002
+  serve_q35 "${GPU_IDS[1]}" 8002
 else
-  serve_q35 1 8003
-  serve_q35 2 8004
-  serve_q35 3 8005
+  serve_q35 "${GPU_IDS[1]}" 8003
+  serve_q35 "${GPU_IDS[2]}" 8004
+  serve_q35 "${GPU_IDS[3]}" 8005
   serve_lb
 fi
 

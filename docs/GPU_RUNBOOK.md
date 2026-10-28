@@ -294,8 +294,10 @@ uv run python experiments/compare_readers.py --probes PROBES --features FEATURES
 
 ### 3. Serving on full precision
 
-The server takes every GPU it can see (`device_map="auto"`). The RL batch serves one copy on a vast.ai 4× B200
-(below). Two copies on one 8× B300 VM:
+The server takes every GPU it can see (`device_map="auto"`). The RL batch serves one copy on a vast.ai 4× B200, or
+two on a Nebius 8× B200 behind `load_balancer.py` (below, `--probe-provider nebius`). B300 doesn't reproduce the v2
+probes' golden logits (2026-10-28: a mean |Δlogit| of 0.25–0.35 against B200): serve them on B200. Two copies on one
+8-GPU VM, by hand:
 
 ```bash
 python3 scripts/nebius_job.py up --platform gpu-b300-sxm --preset 8gpu-192vcpu-2768gb --on-demand --hours 12 \
@@ -340,23 +342,35 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
 - `n_steps`: 90 as his rows, or `--n-steps 360`: in his batch only the 360-step strong-cot-seed-207 shows its
   trained-against judge falling (q35_cot on hacks down to 0.76).
 
-**The machines** (names start with `dennis-`; tags `owner=dennis`, `experiment=probes-v2-rl`, `step=…`):
+**The machines** (names start with `dennis-`; tags `owner=dennis`, `experiment=probes-v2-rl`, `step=…` on vast.ai).
+Each server runs on vast.ai (the default) or on a Nebius VM of its own (`--probe-provider nebius`,
+`--judges-provider nebius`, 2026-10-28):
 
-| role | what | where | $/h (2026-10-23) |
+| role | what | vast.ai (default) | Nebius (`--<role>-provider nebius`) |
 |---|---|---|---|
-| rl | every run, one process each, as root (the read-only verifier) | Nebius cpu-d3 32vcpu-128gb, on demand | 1.06 |
-| probe | `inkling_probe_server.py`, both v2 probes, one episode per forward, 127.0.0.1:8178 | vast.ai 4× B200 (one BF16 copy) | 42.04 |
-| judges | Vlad's four vLLM engines: Qwen3-30B-A3B-FP8 on GPU 0 at :8001, three Qwen3.5-35B-A3B-FP8 at :8003–8005 behind `load_balancer.py` at :8002 | vast.ai 4× H200 (`--judge-gpu`: H200, else H200 NVL) | 16.08 (H200 NVL; no 4× H200 was offered) |
+| rl | every run, one process each, as root (the read-only verifier) | – | cpu-d3 32vcpu-128gb, on demand, $1.06/h, in one of `--rl-regions` (default eu-west2, uk-south1, uk-south2, eu-west1: not us-north1, whose 3 public IPv4 the GPU VMs need, nor us-central1/eu-north1, without CPU quota) |
+| probe | `inkling_probe_server.py`, both v2 probes, one episode per forward, 127.0.0.1:8178 | 4× B200, one BF16 copy ($42.04/h, 2026-10-23) | 8× B200 spot (`gpu-b200-sxm-a` in me-west1, `gpu-b200-sxm` in us-central1; $30–34/h on 2026-10-28; bid $4.5/GPU-h), two copies: GPUs 0–3 at :8179, 4–7 at :8180, `load_balancer.py` at :8178 |
+| judges | Vlad's four vLLM engines: Qwen3-30B-A3B-FP8 on the first GPU at :8001, three Qwen3.5-35B-A3B-FP8 at :8003–8005 behind `load_balancer.py` at :8002 | 4× H200 (`--judge-gpu`: H200, else H200 NVL; $16.08/h for H200 NVL) | 8× H200 spot (`gpu-h200-sxm`, bid $2.5/GPU-h), on GPUs 0–3 (`setup_vllm.sh`'s `VLLM_GPUS`), 4–7 idle |
 
+- **A Nebius server's settings** (per role, saved in batch.json): `--probe-platform`/`--judges-platform` (one, or a
+  comma list: a GPU's platform is named per region, each priced where it is offered), `--*-preset`, `--*-max-gpu-price`
+  (the spot bid per GPU-hour, NEBIUS_MAX_GPU_PRICE's kind; the bid × GPUs caps the VM's price, ~$1/GPU-h above the
+  market price is a margin), `--*-on-demand`, `--*-regions` (default every region of the regions file), `--*-gpu-ids`;
+  `--probe-copies` (default one on vast.ai, one per 4 GPUs on Nebius). The B300 is not the probe server's GPU: the v2
+  probes' golden logits match on B200 only (2026-10-28: B300 off by a mean |Δlogit| of 0.25–0.35 against B200).
+  Judges on another GPU: e.g. `--judges-platform gpu-b300-sxm --judges-preset 8gpu-192vcpu-2768gb --judges-regions
+  us-north1`. The disks are the roles' own (`--probe-disk-gib` 650, `--judge-disk-gib` 250).
 - **Tunnels:** the runs reach the servers at 127.0.0.1:8178 and :8001/:8002, as the configs say, through one
   `scripts/tunnel.sh` loop per server machine on the RL machine: `ssh -N -L` with ExitOnForwardFailure and keepalives
   (10 s × 3), reconnecting forever (2 s, doubling to 30 s). A dead link ends its ssh within ~30 s, which closes the
-  forwarded connections; the probe client and the judge client both retry forever, so the runs wait, then go on.
+  forwarded connections; the probe client and the judge client both retry forever, so the runs wait, then go on. The
+  tunnels cross regions (a probe or judge request is a few kB; the latency is nothing next to its seconds).
 - **Keys:** the tunnel key is made for the batch on the RL machine, in its RAM disk; only its public key reaches the
-  vast.ai instances, appended to root's authorized_keys as `restrict,port-forwarding,permitopen="127.0.0.1:<port>",
-  command="/bin/false"`: it opens the server's ports and nothing else. hub-gpu's key stays on this machine. The runs'
-  keys (`tinker_api_key`, `wandb_api_key` in `~/.secrets`) go to the RL machine only, over SSH into its RAM disk, read
-  by the supervisor's root shell as it starts and deleted at once; nothing ever goes to a vast.ai instance.
+  servers' machines, appended to the login user's authorized_keys (root on vast.ai, md on Nebius) as
+  `restrict,port-forwarding,permitopen="127.0.0.1:<port>",command="/bin/false"`: it opens the server's ports and
+  nothing else. hub-gpu's key stays on this machine. The runs' keys (`tinker_api_key`, `wandb_api_key` in
+  `~/.secrets`) go to the RL machine only, over SSH into its RAM disk, read by the supervisor's root shell as it starts
+  and deleted at once; no key ever goes to a server's machine.
 - **Pinned probes:** the v2 monitor folders must be committed. Their sha256 (probe.npz + meta.json, the server's own
   identity of a probe: a server without it answers 409, fatal to a run) is taken from the committed files, checked on
   the probe instance before the server starts (also before every restart), on the RL machine before the runs start,
@@ -379,10 +393,14 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
    W&B: the key's default entity is the owner's own, so the runs get `WANDB_ENTITY=jyudel-redwood-research` and
    `WANDB_MODE=online`; the supervisor refuses to start a run without the key or with another entity, and stops a run
    whose W&B URL names another entity or project.
-3. hub-gpu: 8 GPUs free at once (4× B200 + 4× H200 is exactly the project's 8: the v2 extraction instance must have
-   ended), and the daily limit raised for the batch (below); the driver shortens the leases to the room left, never
-   under 2 h.
-4. Nebius: bin/gpu-job's settings in the environment.
+3. Servers on vast.ai: hub-gpu with 8 GPUs free at once (4× B200 + 4× H200 is exactly the project's 8: the v2
+   extraction instance must have ended), and the daily limit raised for the batch (below); the driver shortens the
+   leases to the room left, never under 2 h.
+4. Nebius: bin/gpu-job's settings in the environment. Servers on Nebius: room in the ledger (`output/gpu_jobs/
+   budget.json`'s `limit_usd`) for their worst case, each server's bid × GPUs × the batch's cap (`plan` prints it;
+   `start` refuses otherwise): 8× B200 at $4.5 and 8× H200 at $2.5 for an 8 h cap reserve $288 + $160. A kept VM's spot
+   price is sampled every 15 min, so its entry settles near what it cost; replacements reserve again, for the hours
+   left. Each region has 3 public IPv4: the RL machine stays out of the GPU VMs' us-north1.
 
 ```bash
 cd /srv/agents/projects/monitor-correlation-probes/MonitorDecorrelation
@@ -404,15 +422,25 @@ nohup python3 scripts/rl_batch.py start --roster experiments/rl_batches/probe_ro
 python3 scripts/rl_batch.py status --out DIR          # machines, leases, runs (steps, s/step), the probe queue
 # amendment 3's judge check, while the batch runs: Vlad's 15 runs, 4 + 4 episodes per eval step, scored twice
 nohup python3 scripts/rl_batch.py judge-compare --out DIR --runs $VLAD/* --workers 128 > judge_compare.out 2>&1 &
+# the servers on Nebius spot VMs (8× B200 probe, two copies; 8× H200 judges), the runs resumed from an earlier batch's
+# folders (each from its newest save: refused without one, unless --allow-fresh)
+nohup python3 scripts/rl_batch.py start --roster experiments/rl_batches/probe_rows_v2.json \
+    --probe-provider nebius --judges-provider nebius --runs-from ../output/gpu_jobs/OLD/runs \
+    --out ../output/gpu_jobs/{stamp}-{name} > batch.out 2>&1 &
 ```
 
-**What `start` does:** the three `up`s at once (the probe instance downloads the reader, ~3 min, and starts the
-server after the sha check; the judges install vLLM and start the engines, ~15 min); the tunnels; the supervisor on the
-RL machine, which starts each run once every server answers through them; then the watch, every minute: syncs of the
-run folders into `DIR/runs/` every 10 minutes (the boot disk goes with the VM), health on each instance and through each
-tunnel every 5, the leases every 10. At the end, or on a fatal start, Ctrl-C or the RL machine gone for 30 min: a last
-sync, then every machine ended and verified gone. Everything is in `DIR`: `batch.json`, `driver.log`, `launch/*.log`
-(each launcher's own log), `runs/`, `vm/` (the supervisor's status and log), `rehearsal.json`.
+**What `start` does:** it writes `output/gpu_jobs/CURRENT_BATCH` (the batch's folder, absolute; the watchdog's job
+reads it; `--current-batch`), refused while it names another batch that has not ended; the three `up`s at once (the
+probe's machine downloads the reader, ~3 min, and starts the server after the sha check; the judges install vLLM and
+start the engines, ~15 min; on Nebius the VM itself first: ~4 min from RUNNING to SSH for 8 GPUs, a spot VM preempted
+while it boots gets a new one after a backoff); with `--runs-from`, the run folders onto the RL machine; the tunnels;
+the supervisor on the RL machine, which starts each run once every server answers through them (resuming those with a
+save); then the watch, every minute: syncs of the run folders into `DIR/runs/` every 10 minutes (the boot disk goes with
+the VM), health on each machine and through each tunnel every 5, the leases every 10, the Nebius servers' prices every
+15. At the end, or on a fatal start, Ctrl-C or the RL machine gone for 30 min: a last sync, then every machine ended and
+verified gone, and CURRENT_BATCH removed. Everything is in `DIR`: `batch.json`, `driver.log`, `launch/*.log` (each
+launcher's own log; a role's k-th new VM in `launch/<role>-r<k>.log`), `runs/`, `vm/` (the supervisor's status and log),
+`rehearsal.json`.
 
 **Costs and hours** (`plan` prints them for the roster; 2026-10-23 prices; the probe server one episode per forward,
 ~0.36 s per episode on 4× B200, measured on the v2 extraction):
@@ -441,14 +469,15 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
 
 | what fails | what happens |
 |---|---|
-| a tunnel's ssh dies (link, host) | its loop reconnects (≤ 30 s between tries); the clients retry; the watch repairs a dead loop and authorizes the key again |
-| the probe server dies or hangs | the runs wait (the probe client retries forever); after 10 min down the watch restarts it on its instance (`serve`, the shas checked first), at most 3 times |
+| a tunnel's ssh dies (link, host) | its loop reconnects (≤ 30 s between tries); the clients retry; the watch repairs a dead loop and authorizes the key again when two health rounds in a row (5 min apart, 60 s per check) find the server up on its machine but down through the tunnel: an eval burst slowed single checks past their old 10–20 s (2026-10-27, false repairs) |
+| the probe server dies or hangs | the runs wait (the probe client retries forever); after 10 min down the watch restarts it on its machine (`serve`, the shas checked first), at most 3 times. With two copies, one that dies stops the other and the balancer: the whole server is restarted |
 | one judge engine dies | setup_vllm.sh starts it again alone (its log kept); the balancer sends its calls to the others meanwhile; judge calls retry forever |
-| an instance goes away | the watch starts a new one (once per server), moves its tunnel there and ends the old one; by hand: `restart-server ROLE --new-instance` |
+| a vast.ai instance goes away | the watch starts a new one (once per server; the judges on the first of `--judge-gpu`'s names with an offer, each asked again while it waits), moves its tunnel there and ends the old one; by hand: `restart-server ROLE --new-instance` |
+| a Nebius server VM is preempted (stopped), stopped or deleted | the watch reads its state with the Nebius CLI every health round: it ends the VM (`down`, verified: its disk and public IP freed, the ledger settled), then makes a new one after every preemption, after 1, 2, 4, … min (at most 30), up to 8 per role (`--max-replacements`), for the hours left of the batch's cap, its tunnel moved there; the runs wait. Its `up` runs on its own, so the watch goes on, and a later driver or the watchdog takes it over. One stopped at its own `--hours` is the batch's end. By hand: `restart-server ROLE --new-instance` (one more, whatever the count) |
 | a run fails | the supervisor starts it again with `--resume` from its last save (every 9 steps), after a backoff, up to 8 failed attempts |
 | a run aborts on a fatal monitor answer (a judge's 400, a probe 409/422) | the same: resumed from its last save; a repeat fails it after its attempts |
 | the RL machine's supervisor dies | the runs go on (sessions of their own); the watch starts a new supervisor, which takes them over |
-| this driver dies (pod restart, SIGTERM) | nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the RL machine powers off; `resume --out DIR` takes the batch back, `down --out DIR` ends it now |
+| this driver dies (pod restart, SIGTERM) | the watchdog (below) keeps the batch going; without it nothing extends the leases: the vast.ai instances end within `--lease-hours` (4), the Nebius VMs power off within a lease; `resume --out DIR` takes the batch back, `down --out DIR` ends it now. A start that died ("starting", no driver) is ended by the watchdog |
 | a run's judge calls fail with EMFILE ("Too many open files") at an eval | the run aborts (a monitor that cannot score stops it) and resumes from its last save. Seen 2026-10-27 at the default soft limit of 1024 (3 of 6 runs); fixed live with `prlimit --pid … --nofile=65536:1048576` on the runs and the supervisor, and since ce78927 every run raises its own limit at start |
 | an episode too long for the GPU | retried with its attention in query chunks; if even that doesn't fit, a 413: the run aborts and is resumed from its last save (the rehearsal, 2026-10-27: 8,012 tokens scored, 12,012 and 16,012 a 413; Vlad's valid episodes stay under ~7.5k) |
 
@@ -456,14 +485,23 @@ engines; W&B timings), with the same per-call work (his eval episodes' judge cal
   `sync|extend --out DIR` (a running driver takes them as requests within a minute), `down --out DIR` (stops the
   runs, syncs, ends every machine and verifies), `watchdog --out DIR` (one check: extend and sync, or end a batch that
   is over; for cron, or a hub scheduled job the owner approves).
+- **The watchdog:** hub's `rl-watchdog` job (`.hub/jobs/rl-watchdog/run`, hourly, approved 2026-10-28) runs
+  `rl_batch.py watchdog` on the batch `output/gpu_jobs/CURRENT_BATCH` names, which `start` writes and the verified end
+  removes. It acts only if no driver holds the batch: one round of the watch (every Nebius VM's shutdown timer moved,
+  the vast.ai leases extended, a sync, the servers' health, a preempted Nebius server's new VM started, or taken up
+  by the next run once made), or the end of it all if the runs are over, the RL machine is gone or the start died.
+  A run of it is short (the job's limit is 30 minutes): a new VM's `up` runs on its own.
 
-**The rehearsal's checklist** (`DIR/rehearsal.json`, each item ok or not): check_probe_server.py on the serving GPUs
-before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (`experiments/
-check_probe_long_episodes.py`); W&B in the rehearsal's entity (`--rehearsal-entity`, default the roster's); `nobody`
-unable to read the keys' files or the supervisor's environment on the RL machine; the probe server stopped and
-restarted, a judge engine killed, each
-tunnel's ssh killed, with the runs waiting, not failing; a run killed after its step-0 save and resumed; every run
-done with no failed attempt; the per-step wall time and the probe queue's depth with every run at once; and the
+**The rehearsal's checklist** (`DIR/rehearsal.json`, each item ok or not; the rehearsal saves at every step,
+`save_every=1`): check_probe_server.py on the serving GPUs (each copy's) before the server starts; W&B in the
+rehearsal's entity (`--rehearsal-entity`, default the roster's); `nobody` unable to read the keys' files or the
+supervisor's environment on the RL machine; first, a run killed while it runs, after a save, and resumed from it (it
+came last before, and the 2-step runs had ended); synthetic 8k/12k/16k-token episodes sent to the server (`experiments/
+check_probe_long_episodes.py`); the probe server stopped and restarted, a judge engine killed, each tunnel's ssh
+killed, with the runs waiting, not failing; with a server on Nebius, its VM stopped as a preemption stops it (the
+probe's, else the judges'): the watch's health rounds must end it, make a new one and move its tunnel there, the runs
+waiting; every run done with no failed attempt; the per-step wall time and the probe queue's depth with every run at
+once; and the
 judge compare (`experiments/rescore_terminal_judges.py compare`, 4 + 4 episodes per run and eval step) on the runs
 `--compare-runs` names, against the rehearsal's judges: a test of its plumbing. Amendment 3's judge check is
 `judge-compare` against the batch's own judges while it runs: Vlad's 15 runs, ~2,300 episodes, two passes into

@@ -310,6 +310,12 @@ python3 scripts/nebius_job.py down --provider vast --name dennis-judges-ab12cd  
 - **The RL batch** (2026-10-27: its rehearsal, then the batch) keeps its probe server (4× B200) and judges (4× H200)
   this way. vast.ai's SSH prints a login banner on stderr at every connection: read a command's answer from its stdout,
   or drop ssh's own lines as `rl_batch.py` does (`SSH_NOISE`, since 5fa2f0c).
+- **On Nebius** (2026-10-28, offline tests only): `up --hours H … --health CHECK -- SERVER` keeps a Nebius VM with its
+  server the same way (a preemption or a server that never gets healthy deletes the VM, verified); `serve --host md@IP
+  --ssh-key KEY --free-gpus` restarts it; its `--hours` shutdown is its lease (move it with `sudo shutdown -h +MIN`,
+  never past `--hours`, the ledger's reservation); `down --name` ends it and settles its entry. `--platform` may be a
+  comma list (B200: `gpu-b200-sxm-a` in me-west1, `gpu-b200-sxm` in us-central1). The RL batch's
+  `--probe-provider`/`--judges-provider nebius` use it ([`GPU_RUNBOOK.md`](GPU_RUNBOOK.md#v2-probe-rows-the-rl-batch)).
 
 ### Spot VMs: how they behave
 

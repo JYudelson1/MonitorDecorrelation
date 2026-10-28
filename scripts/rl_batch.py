@@ -3,6 +3,7 @@
 
     python3 scripts/rl_batch.py plan  --roster experiments/rl_batches/probe_rows_v2.json      # checks and costs only
     python3 scripts/rl_batch.py start --roster ROSTER --out DIR [--rehearsal]   # machines, servers, tunnels, runs, end
+    python3 scripts/rl_batch.py start ... --probe-provider nebius --judges-provider nebius --runs-from OLD/runs
     python3 scripts/rl_batch.py status|sync|extend|down|watchdog --out DIR
     python3 scripts/rl_batch.py restart-server probe|judges --out DIR [--new-instance]
     python3 scripts/rl_batch.py restart-run|stop-run RUN --out DIR
@@ -18,22 +19,33 @@ wandb_project n_steps stop_after_zero_behavior_steps`` and the sets. The probe's
 business (monitors/inkling_probe_monitor.py): a roster row can change it with a set, nothing here assumes it.
 
 **Machines** (scripts/nebius_job.py ``up``; names start with ``dennis-``, ``NEBIUS_JOB_NAME_PREFIX``):
-- **rl:** a Nebius CPU VM on demand (cpu-d3 32vcpu-128gb, Ubuntu 24.04), set up for root jobs (``--root-job``: the
-  terminal env's read-only verifier runs the policy's commands as ``nobody``). It runs every run, one process each.
-- **probe:** a vast.ai 4× B200 with the full-precision reader and ``experiments/inkling_probe_server.py`` serving every
-  inkling_probe monitor of the roster on 127.0.0.1:8178, one episode per forward. Its probe folders are pinned: their
-  sha256 (probe.npz + meta.json, the server's own probe identity) is taken from the committed files, checked on the
-  instance before the server starts, on the RL machine before the runs start, and in the server's ``/v1/meta``.
-- **judges:** a vast.ai 4× H200 with Vlad's four vLLM engines (scripts/setup_vllm.sh: Qwen3-30B-A3B-FP8 on GPU 0 at
-  :8001, three Qwen3.5-35B-A3B-FP8 at :8003-8005 behind the balancer at :8002), vLLM pinned, every server on
-  127.0.0.1 and restarted on its own when it dies (``VLLM_RESTART``).
-No key ever goes to a vast.ai instance. The runs' keys (tinker, W&B) go to the Nebius VM only, over SSH into its RAM
-disk, read by the job as it starts and deleted at once.
+- **rl:** a Nebius CPU VM on demand (cpu-d3 32vcpu-128gb, Ubuntu 24.04) in one of ``--rl-regions`` (default eu-west2,
+  uk-south1, uk-south2, eu-west1: not us-north1, whose 3 public IPv4 the GPU VMs need, nor the regions without CPU
+  quota), set up for root jobs (``--root-job``: the terminal env's read-only verifier runs the policy's commands as
+  ``nobody``). It runs every run, one process each.
+- **probe:** the full-precision reader and ``experiments/inkling_probe_server.py`` serving every inkling_probe monitor
+  of the roster on 127.0.0.1:8178, one episode per forward. ``--probe-provider vast`` (the default): a vast.ai 4×
+  B200, one copy. ``nebius``: a Nebius spot VM, 8× B200 by default (B200 alone reproduces the probes' golden logits;
+  its platform is gpu-b200-sxm-a in me-west1, gpu-b200-sxm in us-central1; bid $4.5/GPU-h), two copies of the reader
+  (GPUs 0-3 at :8179, 4-7 at :8180) behind scripts/load_balancer.py at :8178 (``--probe-copies``, ``--probe-gpu-ids``).
+  Its probe folders are pinned: their sha256 (probe.npz + meta.json, the server's own probe identity) is taken from
+  the committed files, checked on the machine before the server starts, on the RL machine before the runs start, and
+  in ``/v1/meta`` of each copy and the balancer; each copy runs its own golden check as it starts.
+- **judges:** Vlad's four vLLM engines (scripts/setup_vllm.sh: Qwen3-30B-A3B-FP8 on its first GPU at :8001, three
+  Qwen3.5-35B-A3B-FP8 at :8003-8005 behind the balancer at :8002), vLLM pinned, every server on 127.0.0.1 and restarted
+  on its own when it dies (``VLLM_RESTART``). ``--judges-provider vast`` (the default): a vast.ai 4× H200. ``nebius``:
+  a Nebius spot VM, 8× H200 by default (bid $2.5/GPU-h), the same layout on GPUs 0-3 (setup_vllm.sh's ``VLLM_GPUS``,
+  ``--judges-gpu-ids``), 4-7 idle.
+A Nebius server's platform (a comma list: each priced where it is offered), preset, bid (or ``--*-on-demand``) and
+regions are its role's settings (``--probe-*``, ``--judges-*``); the launcher puts it in the cheapest region with
+capacity, under the bid. No key ever goes to a vast.ai instance, nor to a server's VM. The runs' keys (tinker, W&B) go
+to the RL machine only, over SSH into its RAM disk, read by the job as it starts and deleted at once.
 
 **Tunnels:** the runs reach the servers at 127.0.0.1 (8178 the probe, 8001/8002 the judges, as the configs say)
 through SSH tunnels from the RL machine (scripts/tunnel.sh: keepalives, reconnect forever). Their key is made for the
-batch on the RL machine, in its RAM; only its public key reaches the vast.ai instances, appended to root's
-authorized_keys with ``restrict,port-forwarding,permitopen=…``: it opens nothing but the server's ports.
+batch on the RL machine, in its RAM; only its public key reaches the servers' machines, appended to the login user's
+authorized_keys (root on vast.ai, md on Nebius) with ``restrict,port-forwarding,permitopen=…``: it opens nothing but
+the server's ports.
 
 **The run:** on the RL machine, ``vm-supervise`` (this file, as root) starts every run as soon as the servers answer,
 and restarts a run that fails with ``--resume`` from its last saved state (``save_every``), up to ``--max-attempts``.
@@ -41,28 +53,47 @@ A run counts as done once its final checkpoint and its final resume state are wr
 the W&B key and the roster's entity (W&B would go offline quietly), and stops a run whose W&B URL names another entity
 or project. Control files from this driver restart or stop one run, or all.
 
+**Resuming runs of an earlier batch** (``start --runs-from DIR``): before the supervisor starts, each roster run's folder
+DIR/<run_name>/ goes to the RL machine's data/runs/<run_name>/, and the supervisor resumes it from its newest
+resume_states/step_*.json (logged for each run; a finished one is done). A run without a save there is refused unless
+``--allow-fresh`` (it starts fresh then), a save of another run (run_name, seed) always; the estimate, and so the
+machines' hours, count only the steps left.
+
 **The driver** (``start``, then its watch, ``resume`` after it died):
-- **Health:** every few minutes, each server on its own machine (the probe's shas, each judge engine) and through the
-  tunnels on the RL machine. A tunnel that is down is restarted (its key authorized again); a server that is down for
-  ``--server-dead-minutes`` is restarted on its instance (``nebius_job.py serve``), at most ``--max-server-restarts``
-  times; an instance that went away is replaced, at most once each (``--no-replace`` turns that off).
+- **Health:** every few minutes, each server on its own machine (the probe's shas on every copy's port and the
+  balancer's, each judge engine) and through the tunnels on the RL machine (60 s each: an eval burst slows them). A
+  tunnel down two rounds in a row is restarted (its key authorized again); a server that is down for
+  ``--server-dead-minutes`` is restarted on its machine (``nebius_job.py serve``), at most ``--max-server-restarts``
+  times. A vast.ai instance that went away is replaced, at most once (``--no-replace`` turns that off). A Nebius
+  server VM that is preempted, stopped or deleted (its state, by the Nebius CLI) is ended (its disk and public IP
+  freed, the ledger settled) and a new VM made, after every preemption: after a backoff (``--replace-backoff-minutes``
+  × 2^(k-1), at most 30 min), up to ``--max-replacements`` per role, for the hours left of the batch's cap; its ``up``
+  runs on its own while the watch goes on (batch.json records it, so a later driver or the watchdog takes it over),
+  then its tunnel moves there. The runs wait meanwhile: their clients retry. One stopped at its own ``--hours`` is the
+  batch's end, not replaced. At the start, a Nebius server whose ``up`` failed gets a new VM the same way.
 - **Sync:** the run folders come back into ``DIR/runs/`` every ``--sync-minutes`` (rsync), and at the end.
 - **Leases:** a vast.ai instance starts for ``--lease-hours`` and is extended while the batch runs, so that it always
-  has at least half a lease left; the RL VM's shutdown is moved the same way. If this driver dies, nothing extends
-  them: they stop within a lease. ``watchdog`` (a one-shot, e.g. from cron or a hub scheduled job) does what the watch
-  does once: extend, or end everything if the batch is over or its RL machine is gone; it acts only if no driver holds
-  the batch's lock.
+  has at least half a lease left. A Nebius VM (the RL machine, a Nebius server) starts with the batch's cap as its
+  ``--hours`` (``--rl-hours``, else from the estimate: what the ledger reserves) and its shutdown is moved to a lease
+  from now, never past that cap. Every 15 minutes each kept Nebius spot server's price is sampled into its job.json,
+  so the ledger settles it from its prices, not its bid. If this driver dies, nothing extends them: they stop within a
+  lease. ``watchdog`` (a one-shot: the hourly hub scheduled job, on the batch output/gpu_jobs/CURRENT_BATCH names,
+  which ``start`` writes and the verified end removes; ``--current-batch``) does what the watch does once: extend,
+  sync, health (a preempted Nebius server's new VM started, or taken up once made), or end everything if the batch is
+  over, its RL machine is gone or its start died; it acts only if no driver holds the batch's lock.
 - **The end:** once every run is done or failed (or the RL machine is gone): a last sync, then every machine ended and
-  verified gone (``nebius_job.py down``). Ctrl-C ends everything too; SIGTERM or SIGHUP (this machine going away)
-  leave the machines to their leases and say how to ``resume`` or ``down``.
+  verified gone (``nebius_job.py down``, with the ledger): a new VM still being made too (its ``up`` stopped first),
+  and a replaced one whose end was not verified then. Ctrl-C ends everything too; SIGTERM or SIGHUP (this machine
+  going away) leave the machines to their leases and say how to ``resume`` or ``down``.
 
-**Rehearsal** (``start --rehearsal``): the same batch, each run named ``rehearsal-…`` with ``n_steps`` 2 and an eval
-at every step, logged to W&B in ``--rehearsal-entity`` (default the roster's) and ``--rehearsal-project`` (default
-<project>-rehearsal), plus the checklist, whose results go to ``DIR/rehearsal.json``: check_probe_server.py on the
-serving GPUs before the server starts; synthetic 8k/12k/16k-token episodes sent to the server (experiments/
-check_probe_long_episodes.py); the per-step wall time and the probe queue's depth with every run at once; the server,
-one judge engine and a tunnel killed, with the runs going on; a run killed after a save and resumed; the W&B entity
-of every run; ``nobody`` unable to read the keys on the RL machine; and, if the repo has
+**Rehearsal** (``start --rehearsal``): the same batch, each run named ``rehearsal-…`` with ``n_steps`` 2, an eval and
+a save at every step, logged to W&B in ``--rehearsal-entity`` (default the roster's) and ``--rehearsal-project``
+(default <project>-rehearsal), plus the checklist, whose results go to ``DIR/rehearsal.json``: check_probe_server.py
+on the serving GPUs (each copy's) before the server starts; a run killed while it runs, after a save, and resumed from
+it; synthetic 8k/12k/16k-token episodes sent to the server (experiments/check_probe_long_episodes.py); the per-step
+wall time and the probe queue's depth with every run at once; the server, one judge engine and a tunnel killed, with
+the runs going on; on Nebius, a server's VM stopped as a preemption would (a new one must serve, the runs waiting); the
+W&B entity of every run; ``nobody`` unable to read the keys on the RL machine; and, if the repo has
 experiments/rescore_terminal_judges.py and ``--compare-runs`` names run folders, its compare mode against the judges.
 
 Stdlib only, like scripts/nebius_job.py, whose machinery it uses (``Remote``, ``HubGpu``, the keys' transport).
@@ -108,7 +139,8 @@ nj = _load_launcher()
 
 # ------------------------------------------------------------------------------------------------- constants
 
-PROBE_PORT = 8178  # the probe server, on its instance and (copy 0) on the RL machine
+PROBE_PORT = 8178  # the probe server (or the balancer before its copies), on its machine and on the RL machine
+GPUS_PER_COPY = 4  # one copy of the BF16 reader: 4 B200s, 3-4 B300s (experiments/inkling_probe_server.py)
 JUDGE_PORTS = (8001, 8002)  # q3, and the q35 balancer: as the configs' base_urls say
 Q35_BACKENDS = (8003, 8004, 8005)
 JUDGE_MODELS = {8001: "Qwen/Qwen3-30B-A3B-FP8", 8002: "Qwen/Qwen3.5-35B-A3B-FP8", 8003: "Qwen/Qwen3.5-35B-A3B-FP8",
@@ -243,12 +275,13 @@ def load_roster(path: str | Path) -> Roster:
 
 
 def rehearsal_roster(roster: Roster, project: str | None, entity: str | None) -> Roster:
-    """The rehearsal of ``roster``: every run renamed rehearsal-<name>, 2 steps with an eval at each, in its own W&B
-    project (``project``, default <project>-rehearsal) and entity (``entity``, default the roster's), everything else
-    the batch's."""
+    """The rehearsal of ``roster``: every run renamed rehearsal-<name>, 2 steps with an eval and a save at each (so the
+    kill-and-resume drill resumes from a save), in its own W&B project (``project``, default <project>-rehearsal) and
+    entity (``entity``, default the roster's), everything else the batch's."""
     rows = [dataclasses.replace(r, run_name=f"rehearsal-{r.run_name}") for r in roster.rows]
     return dataclasses.replace(roster, name=f"{roster.name}-rehearsal"[:41], n_steps=2, sets=[*roster.sets,
-                               "eval_every=1"], rows=rows, wandb_project=project or f"{roster.wandb_project}-rehearsal",
+                               "eval_every=1", "save_every=1"], rows=rows,
+                               wandb_project=project or f"{roster.wandb_project}-rehearsal",
                                wandb_entity=entity or roster.wandb_entity)
 
 
@@ -367,18 +400,22 @@ def build_plan(roster: Roster, rehearsal: bool = False, manifest: str = V2_MANIF
     return Plan(roster, runs, dict(sorted(probes.items())), judges, rehearsal)
 
 
-def estimate(plan: Plan, copies: int = 1) -> dict:
+def estimate(plan: Plan, copies: int = 1, done: dict | None = None) -> dict:
     """How long and how loaded, from the roster and the measurements above: probe-server hours (one episode per forward,
-    every valid train episode of a probe row and every valid eval episode, ~97%), judge calls per hour against what Vlad's
-    engines served, and the batch's hours: the probe server's, or the runs' own pace if that is slower."""
+    every valid train episode of a probe row and every valid eval episode, ~97%; ``copies`` of the reader share
+    them), judge calls per hour against what Vlad's engines served, and the batch's hours: the probe server's, or the
+    runs' own pace if that is slower. ``done``: the steps a run has done already (``--runs-from``), not counted."""
     cfg = {r.row.config: json.loads((REPO / r.row.config).read_text()) for r in plan.runs}
     n = plan.roster.n_steps
     probe_s, judge_calls, slowest = 0.0, {8001: 0, 8002: 0}, 0.0
     for r in plan.runs:
         c = cfg[r.row.config]
+        start = int((done or {}).get(r.row.run_name, 0))
+        if start >= n:  # finished already
+            continue
         every = 1 if plan.rehearsal else int(c.get("eval_every", 3))
-        evals = n // every + (0 if n % every == 0 else 1) + 1
-        train_eps = n * c.get("batch_size", 8) * c.get("group_size", 16) * 0.97
+        evals = sum(1 for step in range(0, n, every) if step >= start) + 1  # every eval_every steps, and the final one
+        train_eps = (n - start) * c.get("batch_size", 8) * c.get("group_size", 16) * 0.97
         eval_eps = evals * c.get("eval_size", 64) * c.get("eval_samples_per_prompt", 4) * 0.97
         inkling, vllm = config_monitors(c)
         for m in inkling:  # a train-against monitor scores every train episode too
@@ -386,7 +423,7 @@ def estimate(plan: Plan, copies: int = 1) -> dict:
         for m in vllm:
             judge_calls[JUDGE_URLS[m["base_url"].rstrip("/")]] += eval_eps + (
                 train_eps if m.get("role") == "train_against" else 0)
-        slowest = max(slowest, n * CONTROL_STEP_MINUTES / 60)
+        slowest = max(slowest, (n - start) * CONTROL_STEP_MINUTES / 60)
     probe_h = probe_s / 3600 / max(1, copies)
     hours = max(probe_h, slowest)
     per_h = {p: (c / hours if hours else 0.0) for p, c in judge_calls.items()}
@@ -414,6 +451,30 @@ class Settings:
     judge_gpus: int = 4
     judge_disk_gib: int = 250
     judge_max_price: float | None = 30.0  # 4× H200 NVL $16-20, 8× H200 $40 on 2026-10-23
+    # Where the servers run: vast.ai (the instances above), or a Nebius VM each (spot by default, under its bid per
+    # GPU-hour; the cheapest of its platforms and regions with capacity), probe_disk_gib / judge_disk_gib of disk. The
+    # probe server on B200, the only GPU its golden logits match on (2026-10-28: B300 off by a mean |Δlogit| of
+    # 0.25-0.35), whose platform is gpu-b200-sxm-a in me-west1 and gpu-b200-sxm in us-central1 (8× $30-34/h spot).
+    probe_provider: str = "vast"
+    judges_provider: str = "vast"
+    probe_platform: str = "gpu-b200-sxm-a,gpu-b200-sxm"  # a comma list: each where it is offered
+    probe_preset: str = "8gpu-160vcpu-1792gb"
+    judges_platform: str = "gpu-h200-sxm"
+    judges_preset: str = "8gpu-128vcpu-1600gb"
+    probe_on_demand: bool = False
+    judges_on_demand: bool = False
+    probe_max_gpu_price: float = 4.5  # USD per GPU-hour, NEBIUS_MAX_GPU_PRICE's kind: Nebius never charges more
+    judges_max_gpu_price: float = 2.5
+    probe_regions: str | None = None  # a comma list (None: every region of the regions file)
+    judges_regions: str | None = None
+    # The RL machine's regions, cpu-d3 $1.06/h in each (2026-10-28): not us-north1, whose 3 public IPs the GPU VMs
+    # need, nor us-central1 and eu-north1 (no non-GPU vCPU quota there).
+    rl_regions: str | None = "eu-west2,uk-south1,uk-south2,eu-west1"
+    probe_copies: int = 0  # 0: one on vast.ai; on Nebius one per 4 GPUs (2 on an 8-GPU VM), behind a balancer
+    probe_gpu_ids: str | None = None  # the probe server's GPUs, split between its copies (None: all of its machine's)
+    judges_gpu_ids: str | None = None  # setup_vllm.sh's 2 or 4 GPUs (None: a 2- or 4-GPU machine's, else GPUs 0-3)
+    max_replacements: int = 8  # Nebius server VMs: new ones per role (a vast.ai instance is replaced once)
+    replace_backoff_minutes: float = 1.0  # before the k-th new VM of a role: this × 2^(k-1), at most 30 min
     lease_hours: float = 4.0
     sync_minutes: float = 10.0
     health_minutes: float = 5.0
@@ -426,6 +487,89 @@ class Settings:
     rsync: str = "rsync"
     budget_file: str | None = None
     hub_gpu: str = "hub-gpu"
+
+
+SERVER_ROLES = ("probe", "judges")
+PROVIDERS = ("vast", "nebius")
+
+
+def provider_of(s: Settings, role: str) -> str:
+    """Where ``role`` runs: the RL machine on Nebius, each server on vast.ai or Nebius (``--probe-provider``,
+    ``--judges-provider``)."""
+    if role == "rl":
+        return "nebius"
+    return s.probe_provider if role.startswith("probe") else s.judges_provider
+
+
+def nebius_machine(s: Settings, role: str) -> dict:
+    """A Nebius server VM: its platform, preset, pricing (spot with a bid per GPU-hour, or on demand), regions, disk."""
+    if role.startswith("probe"):
+        return {"platform": s.probe_platform, "preset": s.probe_preset, "on_demand": s.probe_on_demand,
+                "bid": s.probe_max_gpu_price, "regions": s.probe_regions, "disk_gib": s.probe_disk_gib}
+    return {"platform": s.judges_platform, "preset": s.judges_preset, "on_demand": s.judges_on_demand,
+            "bid": s.judges_max_gpu_price, "regions": s.judges_regions, "disk_gib": s.judge_disk_gib}
+
+
+def role_gpus(s: Settings, role: str) -> int:
+    """The GPUs of ``role``'s machine: its vast.ai count, or its Nebius preset's."""
+    if provider_of(s, role) == "nebius":
+        return nj.gpu_count(nebius_machine(s, role)["preset"])
+    return s.probe_gpus if role.startswith("probe") else s.judge_gpus
+
+
+def probe_copies(s: Settings) -> int:
+    """Reader copies on the probe server's machine: ``--probe-copies``, else one on vast.ai and one per
+    ``GPUS_PER_COPY`` GPUs on Nebius (2 on an 8-GPU VM)."""
+    if s.probe_copies:
+        return s.probe_copies
+    return max(1, role_gpus(s, "probe") // GPUS_PER_COPY) if provider_of(s, "probe") == "nebius" else 1
+
+
+def gpu_ids(value: str | None) -> list[int] | None:
+    """A comma list of GPU indices (None: none given)."""
+    if not value:
+        return None
+    try:
+        return [int(g) for g in value.split(",") if g.strip()]
+    except ValueError:
+        raise SystemExit(f"GPU indices, a comma list like 0,1,2,3: got {value!r}") from None
+
+
+def probe_gpus_of(s: Settings) -> list[int] | None:
+    """The probe server's GPUs, split between its copies: ``probe_gpu_ids``, else every GPU of its machine with several
+    copies (None with one: the server takes what it sees)."""
+    return gpu_ids(s.probe_gpu_ids) or (list(range(role_gpus(s, "probe"))) if probe_copies(s) > 1 else None)
+
+
+def judges_gpus_of(s: Settings) -> list[int] | None:
+    """setup_vllm.sh's GPUs: ``judges_gpu_ids``, else GPUs 0-3 of a machine with more than 4 (None: its 2 or 4)."""
+    return gpu_ids(s.judges_gpu_ids) or ([0, 1, 2, 3] if role_gpus(s, "judges") > 4 else None)
+
+
+def check_settings(s: Settings) -> None:
+    """SystemExit on settings no machine can serve: an unknown provider, a Nebius server without GPUs or without a bid,
+    copies that don't split the probe server's GPUs evenly, judges on other than 2 or 4 GPUs (setup_vllm.sh's
+    layouts), GPU indices the machine doesn't have."""
+    for role in SERVER_ROLES:
+        p = provider_of(s, role)
+        if p not in PROVIDERS:
+            raise SystemExit(f"--{role}-provider: one of {', '.join(PROVIDERS)}, got {p!r}")
+        if p == "nebius":
+            vm = nebius_machine(s, role)
+            if any(nj.is_cpu_platform(x) for x in nj.platforms_of(vm["platform"])) or not re.match(r"\d+gpu-",
+                                                                                                    vm["preset"]):
+                raise SystemExit(f"--{role}-platform/--{role}-preset: a GPU VM, got {vm['platform']}/{vm['preset']}")
+            if not vm["on_demand"] and not (vm["bid"] or 0) > 0:
+                raise SystemExit(f"--{role}-max-gpu-price: a spot bid in USD per GPU-hour, got {vm['bid']!r}")
+    for role, ids in (("probe", probe_gpus_of(s)), ("judges", judges_gpus_of(s))):
+        if ids is not None and (len(set(ids)) != len(ids) or not all(0 <= g < role_gpus(s, role) for g in ids)):
+            raise SystemExit(f"--{role}-gpu-ids {ids}: distinct GPUs of its machine's {role_gpus(s, role)}")
+    copies, gpus = probe_copies(s), len(probe_gpus_of(s) or range(role_gpus(s, "probe")))
+    if copies < 1 or gpus % copies:
+        raise SystemExit(f"--probe-copies {copies}: the probe server's {gpus} GPUs must split evenly between copies")
+    if len(judges_gpus_of(s) or range(role_gpus(s, "judges"))) not in (2, 4):
+        raise SystemExit(f"the judges on {judges_gpus_of(s) or role_gpus(s, 'judges')} GPU(s): setup_vllm.sh serves on "
+                         "2 or 4 (--judges-gpu-ids; GPUs 0-3 of a machine with more by default)")
 
 
 class Batch:
@@ -516,35 +660,98 @@ def launch(args: list[str], logfile: Path, wait: bool = True):
         raise
 
 
-def probe_server_command(probes: dict, rehearsal: bool) -> str:
+PROBE_CHECK = ('check() { have=$(cat "$1/probe.npz" "$1/meta.json" | sha256sum | cut -d" " -f1); '
+               'if [ "$have" = "$2" ]; then echo "probe $1: $2, the pinned one"; else '
+               'echo "probe $1: sha256 $have, NOT the pinned $2: refusing to serve it"; exit 1; fi; }')
+
+
+def probe_server_command(probes: dict, rehearsal: bool, copies: int = 1, gpus: list[int] | None = None) -> str:
     """The probe server's step: refuse a probe folder that isn't the pinned one, then (rehearsal) the GPU check on the
     serving GPUs, then the server: every probe, one episode per forward. PyTorch's expandable segments are the
-    server's own default (experiments/inkling_probe_server.py), so they aren't set here."""
-    lines = ['check() { have=$(cat "$1/probe.npz" "$1/meta.json" | sha256sum | cut -d" " -f1); '
-             'if [ "$have" = "$2" ]; then echo "probe $1: $2, the pinned one"; else '
-             'echo "probe $1: sha256 $have, NOT the pinned $2: refusing to serve it"; exit 1; fi; }']
-    lines += [f"check {shlex.quote(p)} {sha}" for p, sha in probes.items()]
-    lines.append("mkdir -p results")
+    server's own default (experiments/inkling_probe_server.py), so they aren't set here. ``gpus``: the GPUs it may use
+    (CUDA_VISIBLE_DEVICES; None: every GPU it sees).
+
+    With ``copies`` > 1 the ``gpus`` are split between them: copy k on its own GPUs and port (``probe_ports``),
+    scripts/load_balancer.py on 127.0.0.1:8178 before them. The folders are checked once (the copies serve the same
+    ones); each copy runs its own golden check as it starts (the server refuses to start otherwise), the rehearsal's GPU
+    check runs on each copy's GPUs at once. The step ends, and stops the rest, when any of its processes does: the
+    health checks then find it down, and it is restarted whole."""
+    lines = [PROBE_CHECK, *(f"check {shlex.quote(p)} {sha}" for p, sha in probes.items()), "mkdir -p results"]
+
+    def serve(port: int) -> str:
+        return (f".venv/bin/python experiments/inkling_probe_server.py --model {READER_DIR} --port {port} "
+                f"--max-batch-tokens 1 --probes {shlex.quote(','.join(probes))}")
+
+    def gpu_check(suffix: str) -> str:
+        return (f".venv/bin/python experiments/check_probe_server.py --model {READER_DIR} --probes-root "
+                f"data/probes/Inkling-Small/v2 --out results/check_probe_server_v2{suffix}.json "
+                f"> results/check_probe_server_v2{suffix}.log 2>&1")
+
+    if copies == 1:
+        env = f"CUDA_VISIBLE_DEVICES={','.join(map(str, gpus))} " if gpus else ""
+        if rehearsal:
+            lines.append(env + gpu_check("") + '; echo "check_probe_server.py exited $?"')
+        lines.append(f"{env}exec " + serve(PROBE_PORT))
+        return "\n".join(lines)
+    gpus = gpus or list(range(GPUS_PER_COPY * copies))
+    per = len(gpus) // copies
+    devices = [",".join(str(g) for g in gpus[k * per:(k + 1) * per]) for k in range(copies)]
+    ports = probe_ports(copies)
     if rehearsal:
-        lines.append(f".venv/bin/python experiments/check_probe_server.py --model {READER_DIR} --probes-root "
-                     "data/probes/Inkling-Small/v2 --out results/check_probe_server_v2.json "
-                     '> results/check_probe_server_v2.log 2>&1; echo "check_probe_server.py exited $?"')
-    lines.append(f"exec .venv/bin/python experiments/inkling_probe_server.py --model {READER_DIR} --port {PROBE_PORT} "
-                 f"--max-batch-tokens 1 --probes {shlex.quote(','.join(probes))}")
+        lines += [f'( CUDA_VISIBLE_DEVICES={d} {gpu_check(f"-{k}")}; echo "check_probe_server.py on GPUs {d} exited '
+                  '$?" ) &' for k, d in enumerate(devices)]
+        lines.append("wait")
+    lines.append("pids=()")
+    lines += [f"CUDA_VISIBLE_DEVICES={d} {serve(ports[k])} > >(sed -u 's/^/[copy {k} :{ports[k]}] /') 2>&1 & "
+              "pids+=($!)" for k, d in enumerate(devices)]
+    lines.append(f".venv/bin/python scripts/load_balancer.py --listen-port {PROBE_PORT} --backend-ports "
+                 f"{' '.join(map(str, ports[:-1]))} --listen-host 127.0.0.1 "
+                 f"> >(sed -u 's/^/[balancer :{PROBE_PORT}] /') 2>&1 & pids+=($!)")
+    lines += ['wait -n "${pids[@]}"; rc=$?',
+              'echo "a probe server process exited ($rc): stopping the others"',
+              'kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null; exit $(( rc ? rc : 1 ))']
     return "\n".join(lines)
 
 
-PROBE_HEALTH = f"curl -sf -m 20 http://127.0.0.1:{PROBE_PORT}/v1/meta > /dev/null"
+def probe_ports(copies: int) -> list[int]:
+    """The probe server's ports on its machine: 8178 alone, or each copy's (8179, 8180, …) then the balancer's."""
+    return [PROBE_PORT] if copies == 1 else [*(PROBE_PORT + 1 + k for k in range(copies)), PROBE_PORT]
+
+
+def probe_health(copies: int = 1) -> str:
+    """The probe server's ``--health``: every port of ``probe_ports`` answers /v1/meta."""
+    return " && ".join(f"curl -sf -m 20 http://127.0.0.1:{p}/v1/meta > /dev/null" for p in probe_ports(copies))
+
+
+PROBE_HEALTH = probe_health()
 JUDGES_COMMAND = (f"VLLM_VERSION={VLLM_VERSION} VLLM_HOST=127.0.0.1 VLLM_RESTART=1 exec bash scripts/setup_vllm.sh")
 JUDGES_HEALTH = " && ".join(f"curl -sf -m 10 http://127.0.0.1:{p}/v1/models | grep -qF {JUDGE_MODELS[p]}"
                             for p in (8001, *Q35_BACKENDS, 8002))
 
 
+def judges_command(gpus: list[int] | None = None) -> str:
+    """The judges' step: Vlad's layout (setup_vllm.sh: Qwen3-30B on the first GPU, the three Qwen3.5-35B on the next
+    three), on ``gpus`` (setup_vllm.sh's VLLM_GPUS; None: the machine's 2 or 4)."""
+    return f"VLLM_GPUS={','.join(map(str, gpus))} {JUDGES_COMMAND}" if gpus else JUDGES_COMMAND
+
+
+def server_command(role: str, s: Settings, plan: Plan, rehearsal: bool | None = None) -> str:
+    """``role``'s server step on its machine (``rehearsal``: the plan's unless given)."""
+    if role.startswith("probe"):
+        return probe_server_command(plan.probes, plan.rehearsal if rehearsal is None else rehearsal, probe_copies(s),
+                                    probe_gpus_of(s))
+    return judges_command(judges_gpus_of(s))
+
+
+def health_command(s: Settings, role: str) -> str:
+    """``role``'s ``--health`` on its machine."""
+    return probe_health(probe_copies(s)) if role.startswith("probe") else JUDGES_HEALTH
+
+
 def vast_up_args(role: str, s: Settings, out: Path, hours: float, gpu: str, plan: Plan, batch_name: str) -> list[str]:
     """``up --provider vast`` for the probe server or the judges: the instance, kept, with its server started and
-    healthy."""
+    healthy. ``gpu``: a name, or a comma list in order of preference."""
     probe = role.startswith("probe")
-    command = probe_server_command(plan.probes, plan.rehearsal) if probe else JUDGES_COMMAND
     what = "Inkling-Small probe server (v2 probes)" if probe else "vLLM judges (Qwen3-30B, Qwen3.5-35B)"
     args = ["up", "--provider", "vast", "--gpu", gpu, "--gpus", str(s.probe_gpus if probe else s.judge_gpus),
             "--disk-gib", str(s.probe_disk_gib if probe else s.judge_disk_gib), "--hours", f"{hours:g}",
@@ -552,7 +759,7 @@ def vast_up_args(role: str, s: Settings, out: Path, hours: float, gpu: str, plan
             "--purpose", f"MonitorDecorrelation RL batch {batch_name}: {what} for the runs on the Nebius VM",
             "--tag", f"owner={s.owner}", "--tag", f"experiment={s.experiment}",
             "--tag", f"step={'probe-server' if probe else 'judges'}",
-            "--health", PROBE_HEALTH if probe else JUDGES_HEALTH,
+            "--health", health_command(s, role),
             "--health-timeout", str(5400 if plan.rehearsal and probe else 3600), "--wait-hours", "0.5",
             "--rsync", s.rsync, "--hub-gpu", s.hub_gpu]
     price = s.probe_max_price if probe else s.judge_max_price
@@ -562,15 +769,48 @@ def vast_up_args(role: str, s: Settings, out: Path, hours: float, gpu: str, plan
         args += ["--hf", READER]
     if s.budget_file:
         args += ["--budget-file", s.budget_file]
-    return [*args, "--", command]
+    return [*args, "--", server_command(role, s, plan)]
+
+
+def nebius_up_args(role: str, s: Settings, out: Path, hours: float, plan: Plan) -> list[str]:
+    """``up`` for the probe server or the judges on Nebius: the VM in the cheapest of its regions with capacity (spot
+    under its bid, or on demand), kept, with its server started and healthy; ``hours`` its shutdown cap (the
+    ledger's reservation)."""
+    probe, vm = role.startswith("probe"), nebius_machine(s, role)
+    args = ["up", "--platform", vm["platform"], "--preset", vm["preset"], "--disk-gib", str(vm["disk_gib"]),
+            "--hours", f"{hours:g}", "--name", f"{s.prefix}{'probe-srv' if role == 'probe' else role}", "--out",
+            str(out), "--health", health_command(s, role), "--health-timeout",
+            str(5400 if plan.rehearsal and probe else 3600), "--wait-hours", "0.5"]
+    args += ["--on-demand"] if vm["on_demand"] else ["--max-gpu-price", f"{vm['bid']:g}"]
+    if vm["regions"]:
+        args += ["--regions", vm["regions"]]
+    if probe:
+        args += ["--hf", READER]
+    if s.budget_file:
+        args += ["--budget-file", s.budget_file]
+    return [*args, "--", server_command(role, s, plan)]
 
 
 def rl_up_args(s: Settings, out: Path, hours: float) -> list[str]:
-    """``up`` for the RL machine: the pre-RL rollouts' CPU VM (docs/INFRA.md), set up for root jobs, kept."""
+    """``up`` for the RL machine: the pre-RL rollouts' CPU VM (docs/INFRA.md), set up for root jobs, kept, in one of
+    ``rl_regions``."""
     args = ["up", "--platform", "cpu-d3", "--preset", s.rl_preset, "--on-demand", "--image-family",
             "ubuntu24.04-driverless", "--root-job", "--hours", f"{hours:g}", "--name", f"{s.prefix}rl", "--out",
             str(out), "--wait-hours", "0.5"]
+    if s.rl_regions:
+        args += ["--regions", s.rl_regions]
     return args + (["--budget-file", s.budget_file] if s.budget_file else [])
+
+
+def up_args(role: str, s: Settings, out: Path, hours: float, plan: Plan, gpu: str | None = None,
+            lease: float | None = None) -> list[str]:
+    """``role``'s ``up``: the RL machine for ``hours``; a vast.ai server for a ``lease`` on ``gpu``; a Nebius one for
+    ``hours``."""
+    if role == "rl":
+        return rl_up_args(s, out, hours)
+    if provider_of(s, role) == "nebius":
+        return nebius_up_args(role, s, out, hours, plan)
+    return vast_up_args(role, s, out, lease or s.lease_hours, gpu or s.probe_gpu, plan, plan.roster.name)
 
 
 def judge_gpu(hub, s: Settings) -> tuple[str, dict | None]:
@@ -595,23 +835,55 @@ def machine_record(out: Path) -> dict:
         return {}
 
 
+def project_of(region: str | None, *files: str | None) -> str | None:
+    """The Nebius project of ``region``, from the first of the regions ``files`` that names it (None: none does)."""
+    for f in files:
+        if region and f:
+            with contextlib.suppress(OSError, ValueError, KeyError, SystemExit):
+                for r in nj.load_regions(f)[1]:
+                    if r.name == region:
+                        return r.project
+    return None
+
+
 class Ops:
-    """The batch's machines as this driver reaches them: the RL machine over SSH (its ``up``'s address and
-    known_hosts, the Nebius key), the vast.ai instances through hub-gpu (their list rows, hub-gpu's key, which never
-    leaves this machine). Remotes are cached and found again after a failure."""
+    """The batch's machines as this driver reaches them: the Nebius VMs over SSH (their ``up``'s address and
+    known_hosts, the Nebius key) and the Nebius CLI (their state), the vast.ai instances through hub-gpu (their list
+    rows, hub-gpu's key, which never leaves this machine). Remotes are cached and found again after a failure;
+    ``procs`` holds the ``up`` of each new server VM this driver started."""
 
     def __init__(self, batch: Batch) -> None:
         self.batch, self.s = batch, batch.settings
         self.hub = nj.HubGpu(self.s.hub_gpu)
         self._remotes: dict = {}
+        self.procs: dict = {}
+
+    def nebius(self, role: str) -> nj.Remote:
+        m = self.batch.machines[role]
+        if role not in self._remotes:
+            key = self.batch.data.get("ssh_key") or os.environ.get("NEBIUS_SSH_KEY")
+            self._remotes[role] = nj.Remote(m["host"], Path(m["out"]) / "known_hosts",
+                                            str(Path(key).expanduser()) if key else None)
+        return self._remotes[role]
 
     def rl(self) -> nj.Remote:
-        m = self.batch.machines["rl"]
-        if "rl" not in self._remotes:
-            key = self.batch.data.get("ssh_key") or os.environ.get("NEBIUS_SSH_KEY")
-            self._remotes["rl"] = nj.Remote(m["host"], Path(m["out"]) / "known_hosts",
-                                            str(Path(key).expanduser()) if key else None)
-        return self._remotes["rl"]
+        return self.nebius("rl")
+
+    def server(self, role: str, fresh: bool = False) -> nj.Remote:
+        """``role``'s server machine over SSH: its Nebius VM, or its vast.ai instance (VmStopped if that went away)."""
+        if self.batch.machines[role].get("provider") != "nebius":
+            return self.vast(role, fresh)
+        if fresh:
+            self.forget(role)
+        return self.nebius(role)
+
+    def vm(self, role: str) -> nj.Instance | None:
+        """``role``'s Nebius VM as its project lists it (None: not listed: deleted); InfraError if that is unknown."""
+        m = self.batch.machines[role]
+        if not m.get("project"):
+            raise nj.InfraError(f"the project of {role}'s VM {m.get('name')} is unknown (NEBIUS_REGIONS_FILE)")
+        rows = nj.Nebius(os.environ.get("NEBIUS_BIN", "nebius"), m["project"]).instances()
+        return next((i for i in rows if i.id == m.get("instance") or i.name == m.get("name")), None)
 
     def row(self, role: str) -> dict | None:
         """The ``hub-gpu list`` row of ``role``'s instance (None: not listed)."""
@@ -691,7 +963,7 @@ def make_tunnel_key(rl: nj.Remote, batch_name: str) -> str:
 
 
 def authorized_line(pubkey: str, ports: list[int]) -> str:
-    """The tunnel key's authorized_keys line on a vast.ai instance: forwarding to its server's ports and nothing else
+    """The tunnel key's authorized_keys line on a server's machine: forwarding to its server's ports and nothing else
     (no shell, no command, no agent, no pty)."""
     opens = ",".join(f'permitopen="127.0.0.1:{p}"' for p in sorted(ports))
     return f'restrict,port-forwarding,{opens},command="/bin/false" {pubkey}'
@@ -705,15 +977,15 @@ AUTHORIZE = ('umask 077 && mkdir -p "$HOME/.ssh" && f="$HOME/.ssh/authorized_key
 
 
 def authorize(remote: nj.Remote, line: str) -> None:
-    """Append ``line`` to root's authorized_keys on a vast.ai instance, once (sent on stdin)."""
+    """Append ``line`` to the login user's authorized_keys on a server's machine (root on vast.ai), once (on stdin)."""
     rc, out = run_text(remote, AUTHORIZE, 60, stdin_text=line + "\n")
     if rc != 0:
         raise nj.InfraError(f"could not authorize the tunnel key on {remote.host} ({rc}): {out[-300:]}")
 
 
-def tunnel_conf(target: str, port: int, forwards: list[str], known_hosts: str) -> str:
-    """scripts/tunnel.sh's NAME.conf (shell assignments, every value quoted)."""
-    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in (("TARGET", target), ("PORT", str(port)),
+def tunnel_conf(target: str, port: int | None, forwards: list[str], known_hosts: str) -> str:
+    """scripts/tunnel.sh's NAME.conf (shell assignments, every value quoted); ``port`` None: 22 (a Nebius VM)."""
+    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in (("TARGET", target), ("PORT", str(port or 22)),
                                                          ("KEY", TUNNEL_KEY), ("KNOWN_HOSTS", known_hosts),
                                                          ("FORWARDS", " ".join(forwards))))
 
@@ -800,10 +1072,10 @@ def probe_ok(meta: object, pinned: dict, port: int = PROBE_PORT) -> str | None:
     return f"the server at :{port} doesn't serve {missing}" if missing else None
 
 
-def judges_ok(remote: nj.Remote, ports=(8001, *Q35_BACKENDS, 8002)) -> str | None:
-    """Why the judges on ``remote`` are not all up (None: each port serves its model)."""
+def judges_ok(remote: nj.Remote, ports=(8001, *Q35_BACKENDS, 8002), timeout: int = 10) -> str | None:
+    """Why the judges on ``remote`` are not all up (None: each port serves its model within ``timeout`` seconds)."""
     for p in ports:
-        ok, answer = curl_json(remote, f"http://127.0.0.1:{p}/v1/models", 10)
+        ok, answer = curl_json(remote, f"http://127.0.0.1:{p}/v1/models", timeout)
         if not ok:
             return f":{p}: {answer}"
         served = {m.get("id") for m in (answer.get("data") or [])} if isinstance(answer, dict) else set()
@@ -813,12 +1085,22 @@ def judges_ok(remote: nj.Remote, ports=(8001, *Q35_BACKENDS, 8002)) -> str | Non
 
 
 def server_health(ops: Ops, role: str, pinned: dict) -> str | None:
-    """Why ``role``'s server is not healthy on its own instance (None: it is)."""
-    remote = ops.vast(role)
+    """Why ``role``'s server is not healthy on its own machine (None: it is): every probe port (each copy's and the
+    balancer's) serving every pinned sha, or each judge engine its model."""
+    remote = ops.server(role)
     if role.startswith("probe"):
-        ok, meta = curl_json(remote, f"http://127.0.0.1:{PROBE_PORT}/v1/meta")
-        return probe_ok(meta if ok else meta, pinned)
+        for port in probe_ports(probe_copies(ops.s)):
+            ok, meta = curl_json(remote, f"http://127.0.0.1:{port}/v1/meta")
+            if why := probe_ok(meta, pinned, port):
+                return why
+        return None
     return judges_ok(remote)
+
+
+# Through the tunnels: during an eval burst (256 episodes × 4 judges per run at once) /v1/models took over the 10-20 s
+# the checks allowed, and healthy judges read "down through the tunnel (:8001: curl exit 28)" (2026-10-27). So a longer
+# timeout, and a tunnel repaired only when two rounds in a row find it down (health_round).
+TUNNEL_CHECK_SECONDS = 60
 
 
 def through_tunnels(ops: Ops, plan_probes: dict, roles: list[str]) -> dict:
@@ -827,10 +1109,10 @@ def through_tunnels(ops: Ops, plan_probes: dict, roles: list[str]) -> dict:
     for role in roles:
         if role.startswith("probe"):
             port = ops.batch.machines[role].get("local_port", PROBE_PORT)
-            ok, meta = curl_json(rl, f"http://127.0.0.1:{port}/v1/meta")
+            ok, meta = curl_json(rl, f"http://127.0.0.1:{port}/v1/meta", TUNNEL_CHECK_SECONDS)
             out[role] = probe_ok(meta, plan_probes, port)
         else:
-            out[role] = judges_ok(rl, JUDGE_PORTS)
+            out[role] = judges_ok(rl, JUDGE_PORTS, TUNNEL_CHECK_SECONDS)
     return out
 
 
@@ -936,8 +1218,9 @@ def lease_hours_for(row: dict, lease: float, now: float | None = None) -> float 
 
 
 def extend_leases(ops: Ops) -> None:
-    """Every vast.ai instance of the batch kept at least half a lease from its end (``nebius_job.py extend``), and the
-    RL machine's shutdown moved to a lease from now, never past its ``--hours`` (the ledger's reservation)."""
+    """Every vast.ai instance of the batch kept at least half a lease from its end (``nebius_job.py extend``), and
+    every Nebius VM's shutdown (the RL machine's, a Nebius server's) moved to a lease from now, never past its
+    ``--hours`` (the ledger's reservation)."""
     s, b = ops.s, ops.batch
     for role, m in b.machines.items():
         if m.get("provider") != "vast" or m.get("ended"):
@@ -958,18 +1241,41 @@ def extend_leases(ops: Ops) -> None:
         else:
             b.event(f"!!! lease: extending {role} ({m['name']}) to {want:g} h was refused (exit {code}; see "
                     f"launch/{role}-extend.log); it ends at {utc(float(row['deadline']))} unless extended")
-    m = b.machines.get("rl")
-    if m and m.get("host") and not m.get("ended"):
+    for role, m in list(b.machines.items()):
+        if m.get("provider") != "nebius" or not m.get("host") or m.get("ended"):
+            continue
         created = nj._seconds(m["created"]) if m.get("created") else None
         cap = created + float(m.get("hours") or 0) * 3600 if created else None
         until = time.time() + s.lease_hours * 3600
         if cap:
             until = min(until, cap)
         minutes = max(5, int((until - time.time()) / 60))
-        rc, out = run_text(ops.rl(), f"sudo -n shutdown -h +{minutes} > /dev/null 2>&1; echo $?", 60)
+        rc, out = run_text(ops.rl() if role == "rl" else ops.server(role),
+                           f"sudo -n shutdown -h +{minutes} > /dev/null 2>&1; echo $?", 60)
         if rc == 0:
             m["shutdown_at"] = utc(time.time() + minutes * 60)
             b.save()
+
+
+def sample_prices(batch: Batch) -> None:
+    """Each kept Nebius spot server VM's price now (the cost calculator, as its launcher samples it while it runs),
+    appended to its job.json's price_samples: ``down`` settles its ledger entry from those, conservatively, instead of
+    at its bid for all the time after its ``up`` (whose sampler stopped with it)."""
+    for role, m in batch.machines.items():
+        if role == "rl" or m.get("provider") != "nebius" or not m.get("spot") or not m.get("host") or m.get("ended"):
+            continue
+        path = Path(m["out"]) / "job.json"
+        try:
+            rec = json.loads(path.read_text())
+            price = nj.Nebius(os.environ.get("NEBIUS_BIN", "nebius"), m["project"]).estimate_hourly(
+                m["platform"], m["preset"], True)
+        except (OSError, ValueError, KeyError, TypeError, nj.InfraError) as e:
+            log(f"price of {role}'s VM: not sampled ({type(e).__name__}: {e})")
+            continue
+        rec.setdefault("price_samples", []).append([nj.utc(), price])
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rec, indent=1) + "\n")
+        tmp.replace(path)
 
 
 # ---------------------------------------------------------------------------- on the RL machine: the supervisor
@@ -1416,10 +1722,47 @@ def plan_from(batch: Batch) -> Plan:
                 batch.data["plan"].get("rehearsal", False))
 
 
-def preflight(plan: Plan, s: Settings, est: dict) -> dict:
-    """Everything that can refuse before anything is started: the name prefix, the keys, rsync, the Nebius settings,
-    a committed tree, hub-gpu's GPUs and room for the vast.ai leases (the leases shortened to fit, at least 2 h), and
-    the offers. Returns what it found (prices, the judges' GPU, the leases)."""
+def region_names(value: str | None) -> list[str]:
+    return [r.strip() for r in (value or "").split(",") if r.strip()]
+
+
+def nebius_offers(s: Settings, roles: list[str], hours: float) -> dict:
+    """Each Nebius server's cheapest region now (read-only: every region's price and capacity, the launcher's
+    ``survey``) under its bid, and room in the ledger for their worst cases: bid × GPUs × ``hours`` for spot, the
+    on-demand price × ``hours`` otherwise. SystemExit if a server has no region, or the ledger no room."""
+    path = os.environ["NEBIUS_REGIONS_FILE"]
+    tenant, regions = nj.load_regions(path)
+    found = {}
+    for role in roles:
+        vm = nebius_machine(s, role)
+        here = [r for r in regions if not vm["regions"] or r.name in region_names(vm["regions"])]
+        gpus = nj.gpu_count(vm["preset"])
+        cap = None if vm["on_demand"] else vm["bid"] * gpus
+        offers = nj.survey(os.environ.get("NEBIUS_BIN", "nebius"), here, tenant, vm["platform"], vm["preset"],
+                           not vm["on_demand"])
+        order = nj.candidates(offers, cap)
+        if not order:
+            raise SystemExit(f"{role}: no region offers {gpus}× {vm['platform']} ({vm['preset']}) now"
+                             + (f" under its bid (${vm['bid']:g}/GPU-h, ${cap:g}/h)" if cap else "") + ": "
+                             + "; ".join(f"{o.region}: {o.skip_reason(cap)}" for o in offers))
+        found[role] = {"region": order[0].region, "price": order[0].price, "spot": not vm["on_demand"],
+                       "worst_usd": round((cap or order[0].price) * hours, 2),
+                       "regions": [[o.region, o.platform, o.price] for o in offers if o.price is not None]}
+    if s.budget_file and Path(s.budget_file).expanduser().exists():
+        budget = nj.Budget(s.budget_file)
+        need = sum(v["worst_usd"] for v in found.values())
+        if budget.limit is not None and budget.committed() + need > budget.limit + 1e-9:
+            raise SystemExit(f"the ledger {budget.path}: ${budget.committed():.2f} of its ${budget.limit:g} spent or "
+                             f"reserved, and the Nebius servers could cost up to ${need:.2f} over {hours:g} h (bid × "
+                             "GPUs × hours, as each reserves): raise its limit_usd, or give a smaller --rl-hours")
+    return found
+
+
+def preflight(plan: Plan, s: Settings, est: dict, hours: float = 6.0) -> dict:
+    """Everything that can refuse before anything is started: the name prefix, the keys, rsync, the Nebius settings
+    (every region named in the regions file), a committed tree; for vast.ai servers hub-gpu's GPUs and room for their
+    leases (the leases shortened to fit, at least 2 h), and the offers; for Nebius servers a region under the bid and
+    room in the ledger for ``hours``. Returns what it found (prices, the judges' GPU, the leases, Nebius regions)."""
     prefix = os.environ.get("NEBIUS_JOB_NAME_PREFIX", "").strip()
     if prefix and not s.prefix.startswith(prefix):
         raise SystemExit(f"--prefix {s.prefix!r} doesn't start with NEBIUS_JOB_NAME_PREFIX={prefix!r}")
@@ -1431,11 +1774,21 @@ def preflight(plan: Plan, s: Settings, est: dict) -> dict:
     for k in ("NEBIUS_REGIONS_FILE", "NEBIUS_SSH_KEY"):
         if not os.environ.get(k):
             raise SystemExit(f"{k} is not set: run with bin/gpu-job's settings (docs/GPU_RUNBOOK.md, v2 probe rows)")
+    check_settings(s)
+    roles = roles_of(plan)
+    nebius_roles = [r for r in roles if provider_of(s, r) == "nebius"]
+    known = {r.name for r in nj.load_regions(os.environ["NEBIUS_REGIONS_FILE"])[1]}
+    for flag, value in (("--rl-regions", s.rl_regions), *((f"--{r}-regions", nebius_machine(s, r)["regions"])
+                                                           for r in nebius_roles)):
+        if unknown := sorted(set(region_names(value)) - known):
+            raise SystemExit(f"{flag}: {unknown} are not in {os.environ['NEBIUS_REGIONS_FILE']}")
     code = nj.code_version(REPO)
     if problem := nj.code_problem(code):
         raise SystemExit(f"{REPO}: {problem}: every machine gets the committed code, and the probes are pinned to it")
     found = {"code": code}
-    roles = roles_of(plan)
+    if nebius_roles:
+        found["nebius"] = nebius_offers(s, nebius_roles, hours)
+    roles = [r for r in roles if provider_of(s, r) == "vast"]
     if not roles:
         return found
     hub = nj.HubGpu(s.hub_gpu)
@@ -1486,35 +1839,80 @@ def machine_from_record(role: str, provider: str, out: Path) -> dict:
     if provider == "vast":
         m["port"] = ((rec.get("vast") or {}).get("ssh") or {}).get("port")
         m["ends"] = (rec.get("vast") or {}).get("ends_utc")
+    else:  # where it is (its project: the Nebius CLI finds its state there) and what it is
+        flags = rec.get("flags") or {}
+        m.update(region=rec.get("region"), spot=rec.get("spot"), platform=rec.get("platform") or flags.get("platform"),
+                 preset=flags.get("preset"), teardown_verified=rec.get("teardown_verified"),
+                 project=project_of(rec.get("region"), os.environ.get("NEBIUS_REGIONS_FILE"),
+                                    flags.get("regions_file")))
     return m
 
 
+def backoff_seconds(s: Settings, k: int) -> float:
+    """The wait before a role's k-th new Nebius VM: ``replace_backoff_minutes`` × 2^(k-1), at most 30 minutes."""
+    return min(1800.0, s.replace_backoff_minutes * 60 * 2 ** (k - 1))
+
+
+def end_failed_up(batch: Batch, role: str, m: dict) -> None:
+    """What a failed Nebius ``up`` may have left (it deletes its VM and verifies, unless it died first): ended by name
+    (``nebius_job.py down``, verified; a VM that never was is nothing to end)."""
+    if not m.get("name") or m.get("teardown_verified") is True:
+        return
+    s = batch.settings
+    code = launch(["down", "--name", m["name"], *(["--budget-file", s.budget_file] if s.budget_file else [])],
+                  batch.out / "launch" / f"{role}-down-{m['name']}.log")
+    if code != 0:
+        batch.data.setdefault("retired", []).append({**m, "retired": utc(), "why": "a failed up"})
+    batch.event(f"{role}: whatever {m['name']} left " + (
+        "is gone, verified" if code == 0 else f"is NOT verified gone (exit {code}): ended again at the end"))
+
+
 def machines_up(batch: Batch, plan: Plan, s: Settings, found: dict, rl_hours: float) -> None:
-    """The three ``up``s at once, each logging to DIR/launch/<role>.log; their records into batch.json. Any that
-    failed: InfraError (the launcher has ended what it made; the driver ends the others)."""
+    """The ``up``s at once (the RL machine and a Nebius server for ``rl_hours``, a vast.ai server for its lease), each
+    logging to DIR/launch/<role>.log; their records into batch.json. A Nebius server whose ``up`` failed (preempted
+    while it booted, no capacity) gets a new VM after a backoff, up to ``max_replacements``; any other that failed:
+    InfraError (the launcher has ended what it made; the driver ends the others)."""
     roles = ["rl", *roles_of(plan)]
-    procs = {}
-    for role in roles:
-        out = batch.out / "launch" / role
-        if role == "rl":
-            args = rl_up_args(s, out, rl_hours)
-        else:
-            gpu = s.probe_gpu if role == "probe" else found["judge_gpu"]
-            args = vast_up_args(role, s, out, found["lease_hours"], gpu, plan, plan.roster.name)
-        batch.machines[role] = {"role": role, "provider": "nebius" if role == "rl" else "vast", "out": str(out),
-                                "starting": utc()}
+    procs, codes, later = {}, {}, {}
+
+    def up(role: str, k: int = 0) -> None:
+        name = role if k == 0 else f"{role}-r{k}"
+        out = batch.out / "launch" / name
+        args = up_args(role, s, out, rl_hours, plan, gpu=s.probe_gpu if role == "probe" else found.get("judge_gpu"),
+                       lease=found.get("lease_hours"))
+        batch.machines[role] = {"role": role, "provider": provider_of(s, role), "out": str(out), "starting": utc(),
+                                **({"replacements": k} if k else {})}
+        procs[role] = launch(args, batch.out / "launch" / f"{name}.log", wait=False)
+        batch.machines[role]["pid"] = getattr(procs[role], "pid", None)  # if the start dies, end_all stops it
         batch.save()
-        procs[role] = launch(args, batch.out / "launch" / f"{role}.log", wait=False)
-        log(f"{role}: nebius_job.py up started (log: launch/{role}.log)")
-    codes = {}
-    while len(codes) < len(procs):
-        for role, proc in procs.items():
-            if role not in codes and proc.poll() is not None:
-                codes[role] = proc.returncode
-                batch.machines[role] = {**batch.machines[role], **machine_from_record(
-                    role, batch.machines[role]["provider"], Path(batch.machines[role]["out"]))}
-                batch.event(f"{role}: up exited {codes[role]}" + (f", {batch.machines[role]['name']} kept"
-                                                                   if codes[role] == 0 else "; see launch/" + role + ".log"))
+        log(f"{role}: nebius_job.py up started (log: launch/{name}.log)")
+
+    for role in roles:
+        up(role)
+    while len(codes) < len(roles):
+        for role in roles:
+            if role in codes or (role in later and time.time() < later[role][1]):
+                continue
+            if role in later:
+                up(role, later.pop(role)[0])
+                continue
+            proc = procs[role]
+            if proc.poll() is None:
+                continue
+            m = batch.machines[role] = {**batch.machines[role], **machine_from_record(
+                role, batch.machines[role]["provider"], Path(batch.machines[role]["out"]))}
+            code, log_name = proc.returncode, Path(m["out"]).name
+            batch.event(f"{role}: up exited {code}" + (f", {m['name']} kept" if code == 0 else
+                                                       "; see launch/" + log_name + ".log"))
+            k = int(m.get("replacements", 0)) + 1
+            if (code != 0 or not m.get("kept")) and role != "rl" and m["provider"] == "nebius" \
+                    and s.replace and k <= s.max_replacements:
+                end_failed_up(batch, role, m)
+                later[role] = (k, time.time() + backoff_seconds(s, k))
+                batch.event(f"{role}: a new VM in {backoff_seconds(s, k) / 60:g} min (new VM {k} of at most "
+                            f"{s.max_replacements})")
+                continue
+            codes[role] = code
         time.sleep(5)
     bad = [r for r, c in codes.items() if c != 0 or not batch.machines[r].get("kept")]
     if bad:
@@ -1525,19 +1923,19 @@ def machines_up(batch: Batch, plan: Plan, s: Settings, found: dict, rl_hours: fl
 
 
 def wire(batch: Batch, ops: Ops, plan: Plan, roles: list[str] | None = None, timeout: float = 600) -> None:
-    """The tunnels: the batch's key on the RL machine, its public key on each server's instance (restricted to that
+    """The tunnels: the batch's key on the RL machine, its public key on each server's machine (restricted to that
     server's ports), a loop each; then wait until every server answers through them."""
     rl = ops.rl()
     pub = batch.data.get("tunnel_pub") or make_tunnel_key(rl, plan.roster.name)
     batch.data["tunnel_pub"] = pub
     for role in roles or roles_of(plan):
-        remote = ops.vast(role, fresh=True)
+        remote = ops.server(role, fresh=True)
         ports = [PROBE_PORT] if role.startswith("probe") else list(JUDGE_PORTS)
         authorize(remote, authorized_line(pub, ports))
         m = batch.machines[role]
         start_tunnel(rl, role, remote.host, remote.port, tunnel_forwards(role), str(m.get("instance")))
         batch.event(f"tunnel {role}: RL machine 127.0.0.1:{','.join(map(str, ports))} → {remote.host} -p "
-                    f"{remote.port}")
+                    f"{remote.port or 22}")
     t0 = time.time()
     while True:
         bad = {r: why for r, why in through_tunnels(ops, plan.probes, roles or roles_of(plan)).items() if why}
@@ -1550,16 +1948,22 @@ def wire(batch: Batch, ops: Ops, plan: Plan, roles: list[str] | None = None, tim
 
 
 def restart_server(batch: Batch, ops: Ops, plan: Plan, role: str, new_instance: bool = False) -> bool:
-    """``role``'s server started again on its instance (``nebius_job.py serve``: what runs as its step is stopped
-    first; the probe folders checked against their pins first), or on a new instance (``up``), its tunnel moved there
-    and the old one ended. True if healthy after."""
+    """``role``'s server started again on its machine (``nebius_job.py serve``: what runs as its step is stopped
+    first; the probe folders checked against their pins first), or on a new machine: a vast.ai instance (``up``, on the
+    first of ``judge_gpus_names`` with an offer, each asked while it waits), its tunnel moved there and the old one
+    ended; a Nebius VM through ``begin_replacement``, waited for here. True if healthy after."""
     s, m = batch.settings, batch.machines[role]
+    if m.get("provider") == "nebius" and (new_instance or not m.get("host")):
+        begin_replacement(batch, role, "by hand", by_hand=True)
+        while (done := advance_replacement(batch, ops, plan, role)) is None:
+            time.sleep(15)
+        return done
     k = int(m.get("restarts", 0)) + 1
     probe = role.startswith("probe")
-    command = probe_server_command(plan.probes, False) if probe else JUDGES_COMMAND
+    command = server_command(role, s, plan, rehearsal=False)
     if new_instance:
         out = batch.out / "launch" / f"{role}-r{k}"
-        gpu = s.probe_gpu if probe else judge_gpu(ops.hub, s)[0]
+        gpu = s.probe_gpu if probe else s.judge_gpus_names
         code = launch(vast_up_args(role, s, out, s.lease_hours, gpu, dataclasses.replace(plan, rehearsal=False),
                                    plan.roster.name), batch.out / "launch" / f"{role}-r{k}.log")
         old = dict(m)
@@ -1577,17 +1981,202 @@ def restart_server(batch: Batch, ops: Ops, plan: Plan, role: str, new_instance: 
         batch.event(f"{role}: moved to a new instance {batch.machines[role]['name']}; the old one ({old['name']}) ended")
         return True
     out = batch.out / "launch" / f"{role}-serve-{k}"
-    code = launch(["serve", "--provider", "vast", "--name", m["name"], "--out", str(out), "--hub-gpu", s.hub_gpu,
-                   "--health", PROBE_HEALTH if probe else JUDGES_HEALTH, "--health-timeout", "3600", "--", command],
+    if m.get("provider") == "nebius":
+        key = batch.data.get("ssh_key") or os.environ.get("NEBIUS_SSH_KEY")
+        where = ["serve", "--host", m["host"], *(["--ssh-key", key] if key else []), "--free-gpus"]
+    else:
+        where = ["serve", "--provider", "vast", "--name", m["name"]]
+    code = launch([*where, "--out", str(out), *(["--hub-gpu", s.hub_gpu] if m.get("provider") != "nebius" else []),
+                   "--health", health_command(s, role), "--health-timeout", "3600", "--", command],
                   batch.out / "launch" / f"{role}-serve-{k}.log")
     m["restarts"] = k
     batch.event(f"{role}: server restarted on {m['name']} (exit {code}; launch/{role}-serve-{k}.log)")
     return code == 0
 
 
+# --------------------------------------------------------------------------- Nebius server VMs: new ones
+
+# A Nebius server VM that is preempted (stopped: on-preemption stop), stopped at its shutdown timer or deleted is ended
+# (``retire``: a stopped VM still holds its disk and its region's public IP) and a new one made, every time, after a
+# backoff, up to max_replacements per role. The new VM's ``up`` runs on its own (start_new_session) while the watch goes
+# on: batch.json records it (its --out, its pid), so a driver started later, or the watchdog, takes it over.
+
+
+def batch_deadline(batch: Batch) -> float | None:
+    """When the batch's machines stop at the latest: the RL machine's shutdown cap (its creation + ``--hours``)."""
+    m = batch.machines.get("rl") or {}
+    if m.get("created") and m.get("hours"):
+        return nj._seconds(m["created"]) + float(m["hours"]) * 3600
+    return None
+
+
+def at_its_cap(m: dict, now: float | None = None) -> bool:
+    """Whether a Nebius VM that stopped did so at its own ``--hours`` shutdown (not a preemption): the batch's end."""
+    now = time.time() if now is None else now
+    if not (m.get("created") and m.get("hours")):
+        return False
+    return now > nj._seconds(m["created"]) + float(m["hours"]) * 3600 - 300
+
+
+def retire(batch: Batch, role: str, why: str) -> None:
+    """``role``'s VM ended (``nebius_job.py down``, verified, its ledger entry settled) and kept in batch.json's
+    ``retired`` list; ``end_all`` ends it again if that failed."""
+    m = batch.machines[role]
+    if not m.get("name"):
+        return
+    if not m.get("ended"):
+        s = batch.settings
+        code = launch(["down", "--name", m["name"], *(["--budget-file", s.budget_file] if s.budget_file else [])],
+                      batch.out / "launch" / f"{role}-down-{m['name']}.log")
+        if code == 0:
+            m["ended"] = utc()
+        batch.event(f"{role}: {m['name']} " + ("ended, verified" if code == 0 else
+                                               f"NOT verified ended (exit {code}): ended again at the end"))
+    batch.data.setdefault("retired", []).append({**m, "retired": utc(), "why": why})
+
+
+def begin_replacement(batch: Batch, role: str, why: str, by_hand: bool = False) -> None:
+    """``role``'s Nebius VM gone (``why``), or to be moved by hand: it ends (``retire``), and a new VM is due after
+    ``backoff_seconds`` (at once ``by_hand``), the k-th of at most ``max_replacements`` (by hand: one more, whatever
+    the count). ``advance_replacement`` makes it."""
+    s, m = batch.settings, batch.machines[role]
+    k = int(m.get("replacements", 0)) + 1
+    retire(batch, role, why)
+    slot = {"role": role, "provider": "nebius", "replacements": k - 1}
+    batch.data.setdefault("bad_since", {}).pop(f"{role}-server", None)
+    if not by_hand and (not s.replace or k > s.max_replacements):
+        batch.machines[role] = {**slot, "abandoned": why}
+        batch.event(f"!!! {role}: no new VM ({'--no-replace' if not s.replace else f'{k - 1} new ones already'}); the "
+                    f"runs wait for it (restart-server {role} --new-instance --out {batch.out} makes one)")
+        return
+    wait = 0.0 if by_hand else backoff_seconds(s, k)
+    batch.machines[role] = {**slot, "replacing": {"k": k, "why": why, "not_before": time.time() + wait}}
+    batch.event(f"{role}: a new VM in {wait / 60:g} min (new VM {k}" + ("" if by_hand else
+                                                                     f" of at most {s.max_replacements}") + f"): {why}")
+
+
+def launcher_running(pid, out) -> bool:
+    """Is ``pid`` a live nebius_job.py with ``out`` in its command line (an ``up`` an earlier driver started)?"""
+    try:
+        cmd = Path(f"/proc/{int(pid)}/cmdline").read_bytes().split(b"\0")
+    except (OSError, TypeError, ValueError):
+        return False
+    return not pid_ended(int(pid)) and any(a.endswith(b"nebius_job.py") for a in cmd) and str(out).encode() in cmd
+
+
+def up_exited(ops: Ops, role: str, r: dict) -> int | None:
+    """The exit code of the ``up`` making ``role``'s new VM (None: it still runs). One started by an earlier driver is
+    read from its job.json once it is gone: 0 if it kept the VM, else 2."""
+    proc = ops.procs.get(role)
+    if proc is not None:
+        return proc.poll()
+    if launcher_running(r.get("pid"), r.get("out")):
+        return None
+    return 0 if machine_record(Path(r["out"])).get("kept") else 2
+
+
+def advance_replacement(batch: Batch, ops: Ops, plan: Plan, role: str) -> bool | None:
+    """One step of ``role``'s new Nebius VM (``begin_replacement``): once its backoff is over, its ``up`` started for
+    the hours left of the batch's cap (none if under half an hour is left); once that has exited, the VM taken (its
+    tunnel moved there) or, if it failed, what it left ended and the next one due. True once the new VM serves, False
+    if given up, None meanwhile."""
+    s, m = batch.settings, batch.machines[role]
+    r, now = m["replacing"], time.time()
+    k, name = int(r["k"]), f"{role}-r{r['k']}"
+    if "out" not in r:
+        if now < float(r["not_before"]):
+            return None
+        deadline = batch_deadline(batch)
+        left = (deadline - now) / 3600 if deadline else float(batch.data.get("hours") or s.lease_hours)
+        if left < 0.5:
+            batch.machines[role] = {**m, "replacing": None, "abandoned": f"{r['why']}; the batch's cap is near"}
+            batch.event(f"!!! {role}: no new VM: the batch's cap is {left * 60:.0f} min away")
+            return False
+        hours = max(1.0, math.ceil(left * 4) / 4)
+        out = batch.out / "launch" / name
+        ops.procs[role] = proc = launch(nebius_up_args(role, s, out, hours, dataclasses.replace(plan, rehearsal=False)),
+                                        batch.out / "launch" / f"{name}.log", wait=False)
+        r.update(out=str(out), pid=getattr(proc, "pid", None), started=utc(), hours=hours)
+        batch.event(f"{role}: new VM {k}: nebius_job.py up started for {hours:g} h (log: launch/{name}.log)")
+        return None
+    code = up_exited(ops, role, r)
+    if code is None:
+        return None
+    ops.procs.pop(role, None)
+    rec = machine_from_record(role, "nebius", Path(r["out"]))
+    if code == 0 and rec.get("kept"):
+        batch.machines[role] = {**rec, "replacements": k}
+        ops.forget(role)
+        batch.event(f"{role}: moved to a new VM {rec['name']} in {rec.get('region')} (new VM {k}, "
+                    f"{(now - nj._seconds(r['started'])) / 60:.0f} min after its up started)")
+        if (want := (batch.data.get("code") or {}).get("commit")) and rec.get("code") and rec["code"] != want:
+            batch.event(f"!!! {role}: the new VM got commit {rec['code'][:12]}, not the batch's {want[:12]} (a commit "
+                        "since the start; its probe folders were checked against their pins all the same)")
+        try:
+            wire(batch, ops, plan, [role])
+        except Exception as e:  # noqa: BLE001 — the health rounds repair a tunnel
+            batch.event(f"!!! tunnel {role}: no answer through it yet ({type(e).__name__}: {e}); the health rounds "
+                        "repair it")
+        return True
+    batch.event(f"!!! {role}: new VM {k}: up exited {code} (launch/{name}.log)")
+    end_failed_up(batch, role, rec)
+    batch.machines[role] = {"role": role, "provider": "nebius", "replacements": k}
+    if not s.replace or k + 1 > s.max_replacements:
+        batch.machines[role]["abandoned"] = f"{r['why']}; {k} new VMs failed or went"
+        batch.event(f"!!! {role}: no new VM after {k}; the runs wait for it (restart-server {role} --new-instance "
+                    f"--out {batch.out} makes one)")
+        return False
+    batch.machines[role]["replacing"] = {"k": k + 1, "why": r["why"], "not_before": now + backoff_seconds(s, k + 1)}
+    batch.event(f"{role}: a new VM in {backoff_seconds(s, k + 1) / 60:g} min (new VM {k + 1} of at most "
+                f"{s.max_replacements})")
+    return None
+
+
+def replacements_round(batch: Batch, ops: Ops, plan: Plan) -> None:
+    """``advance_replacement`` for every role waiting for a new Nebius VM."""
+    for role in roles_of(plan):
+        if (batch.machines.get(role) or {}).get("replacing"):
+            advance_replacement(batch, ops, plan, role)
+
+
+def nebius_gone(ops: Ops, role: str) -> str | None:
+    """Why ``role``'s Nebius VM can't serve (None: it can): its state (STOPPED after a preemption or its shutdown
+    timer, …) or not listed (deleted). InfraError if the Nebius CLI can't tell."""
+    inst = ops.vm(role)
+    if inst is None:
+        return "not listed in its project (deleted)"
+    return None if inst.state in nj.ALIVE_STATES else inst.state
+
+
+def stop_pending_up(batch: Batch, ops: Ops | None, role: str, grace: float = 900) -> None:
+    """An ``up`` still running as the batch ends (a new Nebius VM's, or one of a start that died): SIGTERM to it (its
+    session: the launcher deletes what it made, verified), waited for; the machine its job.json names is then ended
+    with the rest (``end_all``)."""
+    m = batch.machines[role]
+    r = m.get("replacing") or ({"out": m["out"], "pid": m.get("pid")} if m.get("out") and not m.get("name") else {})
+    if not r.get("out"):
+        return
+    proc = ops.procs.get(role) if ops is not None else None
+
+    def running() -> bool:
+        return proc.poll() is None if proc is not None else launcher_running(r.get("pid"), r["out"])
+
+    if running():
+        log(f"{role}: stopping the up of its new VM (pid {r.get('pid')}): it deletes what it made")
+        with contextlib.suppress(ProcessLookupError, PermissionError, TypeError, ValueError):
+            os.killpg(int(r["pid"]), signal.SIGTERM)
+        t0 = time.time()
+        while running() and time.time() - t0 < grace:
+            time.sleep(5)
+    if name := machine_record(Path(r["out"])).get("name"):
+        m["name"] = name
+
+
 def end_all(batch: Batch, ops: Ops | None, plan: Plan | None, why: str) -> bool:
     """The end: the supervisor told to stop (if it still runs), a last sync, the VM's logs, then every machine ended and
-    verified gone (``nebius_job.py down``). True if every machine is verified gone."""
+    verified gone (``nebius_job.py down``): a new VM still being made too (its ``up`` stopped first), and a replaced
+    one whose end could not be verified then. True if every machine is verified gone; then CURRENT_BATCH no longer
+    names the batch."""
     batch.event(f"ending the batch: {why}")
     batch.set_phase("ending")
     s = batch.settings
@@ -1605,7 +2194,10 @@ def end_all(batch: Batch, ops: Ops | None, plan: Plan | None, why: str) -> bool:
             nj.fetch_rsync(ops.rl(), f"~/{nj.REMOTE_LOGS}", batch.out / "vm", s.rsync, timeout=600)
             nj.fetch_rsync(ops.rl(), f"~/{TUNNEL_DIR}", batch.out / "vm", s.rsync, timeout=600)
     ok = True
-    for role, m in batch.machines.items():
+    for role in list(batch.machines):
+        stop_pending_up(batch, ops, role)
+    retired = [(m.get("role", "retired"), m) for m in batch.data.get("retired", []) if m.get("name")]
+    for role, m in [*batch.machines.items(), *retired]:
         if m.get("ended") or not m.get("name"):
             continue
         args = (["down", "--provider", "vast", "--name", m["name"], "--hub-gpu", s.hub_gpu] if m["provider"] == "vast"
@@ -1623,9 +2215,41 @@ def end_all(batch: Batch, ops: Ops | None, plan: Plan | None, why: str) -> bool:
         batch.event(f"{role}: {m['name']} " + ("ended, verified" if code == 0 else
                                                f"NOT verified ended (exit {code}): see launch/{role}-down.log"))
     batch.set_phase("ended" if ok else "end-failed")
-    if not ok:
+    if ok:
+        release_pointer(batch)
+    else:
         log("!!! a machine may still bill: python3 scripts/rl_batch.py down --out " + str(batch.out))
     return ok
+
+
+def check_pointer(pointer: Path, out: Path) -> None:
+    """SystemExit if CURRENT_BATCH (``pointer``) names another batch than ``out`` that has not ended: the watchdog's
+    scheduled job watches the one it names."""
+    with contextlib.suppress(OSError):
+        other = Path((pointer.read_text().splitlines() or [""])[0].strip())
+        if str(other) not in ("", ".") and other != out.resolve() and (other / "batch.json").exists() and \
+                (phase := Batch(other).phase) not in ("ended", "new"):
+            raise SystemExit(f"{pointer} names {other}, a batch that has not ended ({phase}): end it (rl_batch.py down "
+                             f"--out {other}), or give this one --current-batch FILE")
+
+
+def claim_pointer(batch: Batch, pointer: Path) -> None:
+    """CURRENT_BATCH (``pointer``, beside the batch folders: output/gpu_jobs/), which the watchdog's scheduled job
+    reads: this batch's folder, absolute, from its start until every machine of it is verified gone."""
+    check_pointer(pointer, batch.out)
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(f"{batch.out.resolve()}\n")
+    batch.data["pointer"] = str(pointer.resolve())
+    batch.event(f"{pointer} names this batch (the watchdog's)")
+
+
+def release_pointer(batch: Batch) -> None:
+    """CURRENT_BATCH removed, if it still names this batch."""
+    pointer = Path(batch.data["pointer"]) if batch.data.get("pointer") else None
+    with contextlib.suppress(OSError):
+        if pointer and (pointer.read_text().splitlines() or [""])[0].strip() == str(batch.out.resolve()):
+            pointer.unlink()
+            log(f"{pointer} removed: the batch has ended")
 
 
 def requests(batch: Batch) -> list[str]:
@@ -1677,7 +2301,11 @@ def watch_round(batch: Batch, ops: Ops, plan: Plan, last: dict) -> str | None:
         if what.startswith("restart-server-"):
             restart_server(batch, ops, plan, what[len("restart-server-"):], new_instance=False)
         elif what.startswith("replace-server-"):
-            restart_server(batch, ops, plan, what[len("replace-server-"):], new_instance=True)
+            role = what[len("replace-server-"):]
+            if (batch.machines.get(role) or {}).get("provider") == "nebius":  # made while the watch goes on
+                begin_replacement(batch, role, "by hand", by_hand=True)
+            else:
+                restart_server(batch, ops, plan, role, new_instance=True)
         elif what == "sync":
             last["sync"] = 0
         elif what == "extend":
@@ -1712,12 +2340,16 @@ def watch_round(batch: Batch, ops: Ops, plan: Plan, last: dict) -> str | None:
         done = sync(ops, runs)
         log("sync: " + ", ".join(f"{p.rsplit('/', 1)[-1]}={v if len(str(v)) < 40 else 'error'}"
                                  for p, v in done.items()))
+    replacements_round(batch, ops, plan)
     if now - last["health"] >= s.health_minutes * 60:
         last["health"] = now
         health_round(batch, ops, plan, roles, bad_since)
     if now - last["lease"] >= 600:
         last["lease"] = now
         extend_leases(ops)
+    if now - last.setdefault("price", 0.0) >= nj.PRICE_RECHECK_SECONDS:
+        last["price"] = now
+        sample_prices(batch)
     if now - last["say"] >= 900 and status:
         last["say"] = now
         log(status_line(status))
@@ -1747,25 +2379,46 @@ def stalled(batch: Batch, status: dict, now: float) -> bool:
 
 
 def health_round(batch: Batch, ops: Ops, plan: Plan, roles: list[str], bad_since: dict) -> None:
-    """Each server on its instance and through its tunnel; repairs. Down through the tunnel but up on the instance: the
-    tunnel (its loop started again, the key authorized again, its ssh killed for a fresh one). Down on the instance for
-    ``server_dead_minutes``: the server restarted there, at most ``max_server_restarts`` times; its instance gone:
-    replaced (``replace``), once."""
+    """Each server on its machine and through its tunnel; repairs. Down through the tunnel two rounds in a row but up
+    on its machine: the tunnel (its loop started again, the key authorized again, its ssh killed for a fresh one).
+    Down on its machine for ``server_dead_minutes``: the server restarted there, at most ``max_server_restarts`` times.
+    Its machine gone: a vast.ai instance replaced (``replace``), once; a Nebius VM preempted, stopped or deleted (its
+    state, by the Nebius CLI) ended and a new one made, every time (``begin_replacement``: a backoff, at most
+    ``max_replacements``), the runs waiting meanwhile; one stopped at its own ``--hours`` is the batch's end."""
     s = batch.settings
-    seen = through_tunnels(ops, plan.probes, roles)
-    for role in roles:
+    live = [r for r in roles if not (batch.machines[r].get("replacing") or batch.machines[r].get("abandoned"))]
+    seen = through_tunnels(ops, plan.probes, live) if live else {}
+    strikes = batch.data.setdefault("tunnel_strikes", {})
+    for role in live:
         m = batch.machines[role]
-        try:
-            row = ops.row(role)
-        except nj.InfraError as e:
-            log(f"health {role}: could not list the instances ({e})")
-            continue
-        gone = nj.vast_gone(row)
-        if gone:
-            batch.event(f"!!! {role}: its instance {m.get('name')} is {gone}")
-            if s.replace and int(m.get("replacements", 0)) < 1:
-                restart_server(batch, ops, plan, role, new_instance=True)
-            continue
+        if m.get("provider") == "nebius":
+            try:
+                gone = nebius_gone(ops, role)
+            except nj.InfraError as e:
+                log(f"health {role}: could not read its VM's state ({e})")
+                gone = None
+            if gone and at_its_cap(m):
+                if not m.get("capped"):
+                    m["capped"] = utc()
+                    batch.event(f"!!! {role}: its VM {m.get('name')} is {gone} at its --hours cap: not replaced")
+                continue
+            if gone:
+                batch.event(f"!!! {role}: its VM {m.get('name')} is {gone}")
+                ops.forget(role)
+                begin_replacement(batch, role, f"{m.get('name')} {gone}")
+                continue
+        else:
+            try:
+                row = ops.row(role)
+            except nj.InfraError as e:
+                log(f"health {role}: could not list the instances ({e})")
+                continue
+            gone = nj.vast_gone(row)
+            if gone:
+                batch.event(f"!!! {role}: its instance {m.get('name')} is {gone}")
+                if s.replace and int(m.get("replacements", 0)) < 1:
+                    restart_server(batch, ops, plan, role, new_instance=True)
+                continue
         try:
             here = server_health(ops, role, plan.probes)
         except (nj.InfraError, nj.VmStopped) as e:
@@ -1774,19 +2427,28 @@ def health_round(batch: Batch, ops: Ops, plan: Plan, roles: list[str], bad_since
         key = f"{role}-server"
         if here is None:
             bad_since.pop(key, None)
-            if seen.get(role):
-                batch.event(f"tunnel {role}: down through the tunnel ({seen[role]}) but up on its instance: repairing")
-                with contextlib.suppress(Exception):
-                    authorize(ops.vast(role), authorized_line(batch.data["tunnel_pub"],
-                                                              [PROBE_PORT] if role.startswith("probe")
-                                                              else list(JUDGE_PORTS)))
-                    st = tunnel_state(ops.rl(), role)
-                    remote = ops.vast(role)
-                    if not st.get("loop"):
-                        start_tunnel(ops.rl(), role, remote.host, remote.port, tunnel_forwards(role),
-                                     str(m.get("instance")))
-                    else:
-                        kick_tunnel(ops.rl(), role)
+            if not seen.get(role):
+                strikes.pop(role, None)
+                continue
+            strikes[role] = int(strikes.get(role, 0)) + 1
+            if strikes[role] < 2:
+                log(f"tunnel {role}: down through the tunnel ({seen[role]}) but up on its machine: repaired if it is "
+                    "still so next round")
+                continue
+            strikes.pop(role)
+            batch.event(f"tunnel {role}: down through the tunnel ({seen[role]}) but up on its machine, two rounds in a "
+                        "row: repairing")
+            with contextlib.suppress(Exception):
+                authorize(ops.server(role), authorized_line(batch.data["tunnel_pub"],
+                                                            [PROBE_PORT] if role.startswith("probe")
+                                                            else list(JUDGE_PORTS)))
+                st = tunnel_state(ops.rl(), role)
+                remote = ops.server(role)
+                if not st.get("loop"):
+                    start_tunnel(ops.rl(), role, remote.host, remote.port, tunnel_forwards(role),
+                                 str(m.get("instance")))
+                else:
+                    kick_tunnel(ops.rl(), role)
             continue
         first = bad_since.setdefault(key, time.time())
         log(f"health {role}: {here} (for {(time.time() - first) / 60:.0f} min)")
@@ -1827,11 +2489,64 @@ def wait_for(what: str, test, timeout: float, every: float = 15.0):
     return None
 
 
+def kill_and_resume(ops: Ops, plan: Plan, put) -> None:
+    """The rehearsal's drill: the first run killed (``restart-<run>``) while it runs, once it has a save (the
+    rehearsal saves at every step); it must start again with ``--resume`` from that save."""
+    victim = next((r.row.run_name for r in plan.runs), None)
+    if victim is None:
+        return
+
+    def running_with_a_save():
+        if ((vm_status(ops) or {}).get("runs") or {}).get(victim, {}).get("state") != "running":
+            return None
+        rc, out = run_text(ops.rl(), f"ls {nj.REMOTE_REPO}/data/runs/{victim}/resume_states/", 60)
+        saves = sorted(w for w in out.split() if w.startswith("step_"))
+        return saves[-1] if rc == 0 and saves else None
+
+    newest = wait_for(f"{victim} running with a save", running_with_a_save, 1800, 10)
+    if newest:
+        control(ops, f"restart-{victim}")
+    resumed = bool(newest) and wait_for(f"{victim} resumed", lambda: ((vm_status(ops) or {}).get("runs") or {}).get(
+        victim, {}).get("modes", [])[-1:] == ["resume"], 600)
+    put("a run killed while it ran, after a save, and resumed from it (--resume)", bool(newest and resumed), run=victim,
+        resumed_from=newest)
+
+
+def preemption_drill(batch: Batch, ops: Ops, plan: Plan, put, timeout: float = 3 * 3600) -> None:
+    """The rehearsal's drill on Nebius: a server's VM (the probe's, else the judges') stopped as a spot preemption
+    stops it; the health rounds must find it gone, end it and make a new VM, its tunnel moved there, the runs waiting
+    meanwhile, not failing."""
+    role = next((r for r in roles_of(plan) if batch.machines[r].get("provider") == "nebius"), None)
+    if role is None:
+        return
+    old = dict(batch.machines[role])
+    nj.Nebius(os.environ.get("NEBIUS_BIN", "nebius"), old["project"]).stop_instance(old["instance"])
+    batch.event(f"rehearsal: {role}'s VM {old['name']} stopped, as a preemption stops it; the runs must wait")
+    t0, bad_since = time.time(), batch.data.setdefault("bad_since", {})
+
+    def replaced():
+        health_round(batch, ops, plan, [role], bad_since)
+        replacements_round(batch, ops, plan)
+        m = batch.machines[role]
+        if m.get("abandoned"):
+            return "abandoned"
+        if m.get("name") and m["name"] != old["name"] and not m.get("replacing"):
+            return m["name"] if through_tunnels(ops, plan.probes, [role])[role] is None else None
+        return None
+
+    new = wait_for(f"a new VM for {role}", replaced, timeout, 60)
+    st = vm_status(ops) or {}
+    put(f"{role}'s Nebius VM stopped (a simulated preemption), a new one made and serving, the runs waiting",
+        bool(new) and new != "abandoned" and not any(r["attempts"] for r in (st.get("runs") or {}).values()),
+        old=old["name"], new=new, minutes=round((time.time() - t0) / 60), runs=st.get("runs"))
+
+
 def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: list[str]) -> dict:
     """The rehearsal's checklist, run while its runs run (results: DIR/rehearsal.json; every item says ok or not).
-    The faults go in one at a time: the probe server stopped and started again, one judge engine killed (setup_vllm.sh
-    starts it again), the tunnels' ssh killed, a run killed after its step-0 save (``--resume``). Then the runs must
-    finish with no failed attempt but that one restart."""
+    The faults go in one at a time: a run killed after a save while it runs (``--resume``), the probe server stopped
+    and started again, one judge engine killed (setup_vllm.sh starts it again), the tunnels' ssh killed, a Nebius
+    server's VM stopped (a simulated preemption: a new VM). Then the runs must finish with no failed attempt but that
+    one restart."""
     rec = {"started": utc(), "items": {}}
     items = rec["items"]
 
@@ -1856,29 +2571,38 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
     code = out.strip().splitlines()[-1] if out.strip() else "?"
     put("nobody cannot read the supervisor's environment (where the keys are once their files are gone)",
         bool(pid) and code not in ("0", "?"), exit_code=code, pid=pid)
+    kill_and_resume(ops, plan, put)  # first: the 2-step runs ended before it when it came last (2026-10-27)
     if "probe" in roles_of(plan):
         iid = next(iter(plan.probes))
-        rc, out = run_text(ops.vast("probe"), f"cd {nj.REMOTE_REPO} && .venv/bin/python "
-                                               "experiments/check_probe_long_episodes.py --url "
-                                               f"http://127.0.0.1:{PROBE_PORT} --probe {shlex.quote(iid)} "
-                                               "--tokens 8000,12000,16000 --out results/long_episodes.json", 3600)
-        rc2, report = run_text(ops.vast("probe"), f"cat {nj.REMOTE_REPO}/results/long_episodes.json", 60)
+        rc, out = run_text(ops.server("probe"), f"cd {nj.REMOTE_REPO} && .venv/bin/python "
+                                                 "experiments/check_probe_long_episodes.py --url "
+                                                 f"http://127.0.0.1:{PROBE_PORT} --probe {shlex.quote(iid)} "
+                                                 "--tokens 8000,12000,16000 --out results/long_episodes.json", 3600)
+        rc2, report = run_text(ops.server("probe"), f"cat {nj.REMOTE_REPO}/results/long_episodes.json", 60)
         try:
             long = json_in(report)
         except ValueError:
             long = {"error": out[-1500:]}
         put("synthetic 8k/12k/16k-token episodes on the probe server (16k: out of memory expected)", rc == 0,
             results=long)
-        rc, gpu_report = run_text(ops.vast("probe"), f"cat {nj.REMOTE_REPO}/results/check_probe_server_v2.json", 60)
-        rc2, gpu_log = run_text(ops.vast("probe"), f"tail -n 40 {nj.REMOTE_REPO}/results/check_probe_server_v2.log",
-                                60)
-        try:
-            gpu = json_in(gpu_report)
-        except ValueError:
-            gpu = {"ok": False, "error": gpu_report[-500:]}
-        put("check_probe_server.py on the serving GPUs, before the server", gpu.get("ok") is True,
-            report={k: gpu.get(k) for k in ("ok", "throughput", "end_to_end")}, log_tail=gpu_log[-2000:])
-        nj.stop_step(ops.vast("probe"), nj.SERVE_STEP, free_gpus=True)
+        copies = probe_copies(batch.settings)
+        gpus = {}
+        for sfx in [""] if copies == 1 else [f"-{k}" for k in range(copies)]:
+            rc, gpu_report = run_text(ops.server("probe"),
+                                      f"cat {nj.REMOTE_REPO}/results/check_probe_server_v2{sfx}.json", 60)
+            rc2, gpu_log = run_text(ops.server("probe"),
+                                    f"tail -n 40 {nj.REMOTE_REPO}/results/check_probe_server_v2{sfx}.log", 60)
+            try:
+                gpu = json_in(gpu_report)
+            except ValueError:
+                gpu = {"ok": False, "error": gpu_report[-500:]}
+            gpus[sfx] = ({k: gpu.get(k) for k in ("ok", "throughput", "end_to_end")}, gpu_log[-2000:])
+        put("check_probe_server.py on the serving GPUs, before the server"
+            + (f" (each of the {copies} copies' GPUs)" if copies > 1 else ""),
+            all(g["ok"] is True for g, _ in gpus.values()),
+            report=gpus[""][0] if copies == 1 else {f"copy{s}": g for s, (g, _) in gpus.items()},
+            log_tail=gpus[""][1] if copies == 1 else {f"copy{s}": t for s, (_, t) in gpus.items()})
+        nj.stop_step(ops.server("probe"), nj.SERVE_STEP, free_gpus=True)
         batch.event("rehearsal: the probe server stopped; the runs must wait for it, not fail")
         time.sleep(120)
         ok = restart_server(batch, ops, plan, "probe")
@@ -1886,7 +2610,7 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
         put("the probe server killed and started again, the runs waiting", ok and not any(
             r["attempts"] for r in (st.get("runs") or {}).values()), runs=st.get("runs"))
     if "judges" in roles_of(plan):
-        remote = ops.vast("judges")
+        remote = ops.server("judges")
         rc, out = run_text(remote, "pid=$(ss -Hltnp 'sport = :8004' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); "
                                    'pg=$(ps -o pgid= -p "$pid" | tr -d " "); echo "engine pid $pid group $pg"; '
                                    'kill -TERM -- "-$pg"', 60)
@@ -1898,14 +2622,7 @@ def rehearse(batch: Batch, ops: Ops, plan: Plan, checks: dict, compare_runs: lis
         back = wait_for(f"the {role} tunnel back", lambda: through_tunnels(ops, plan.probes, [role])[role] is None,
                         300, 10)
         put(f"the {role} tunnel's ssh killed and reconnected", bool(back), state=tunnel_state(ops.rl(), role))
-    victim = next((r.row.run_name for r in plan.runs), None)
-    if victim:
-        saved = wait_for(f"{victim}'s step-0 save", lambda: run_text(
-            ops.rl(), f"ls {nj.REMOTE_REPO}/data/runs/{victim}/resume_states/")[1].count("step_") >= 1, 1800)
-        control(ops, f"restart-{victim}")
-        resumed = wait_for(f"{victim} resumed", lambda: ((vm_status(ops) or {}).get("runs") or {}).get(victim, {}).get(
-            "modes", [])[-1:] == ["resume"], 600)
-        put("a run killed after a save and resumed (--resume)", bool(saved and resumed), run=victim)
+    preemption_drill(batch, ops, plan, put)
     final = wait_for("every rehearsal run to end", lambda: (s := vm_status(ops)) and s.get("phase") in (
         "done", "failed") and s, 7200, 30) or vm_status(ops) or {}
     rs = final.get("runs") or {}
@@ -1979,7 +2696,72 @@ def settings_from(args) -> Settings:
         (p for p in (shutil.which("rsync"), str(Path("~/.local/bin/rsync").expanduser())) if p and Path(p).exists()),
         s.rsync))
     s.budget_file = s.budget_file or os.environ.get("NEBIUS_BUDGET_FILE")
+    check_settings(s)
     return s
+
+
+def cap_hours(s: Settings, est: dict) -> float:
+    """The batch's cap: every Nebius VM's ``--hours`` (the RL machine's, a Nebius server's; what the ledger reserves),
+    ``--rl-hours``, else the estimate × 1.5 + 2 h, 6 to 100."""
+    return s.rl_hours or min(100.0, max(6.0, math.ceil(est["batch_hours"] * 1.5 + 2)))
+
+
+def runs_from(plan: Plan, folder: str | Path, allow_fresh: bool = False) -> dict:
+    """``start --runs-from DIR``: each roster run's folder, DIR/<run_name>/, and what it resumes from: its newest
+    resume_states/step_*.json (its steps done; a finished run's final one). A run without one (no folder, or a folder
+    without a save) is refused unless ``allow_fresh`` (it starts fresh then); a save naming another run (its config's
+    run_name or seed) is refused. SystemExit with every problem, before anything is started."""
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        raise SystemExit(f"--runs-from {folder}: not a folder")
+    found, problems = {}, []
+    for r in plan.runs:
+        name, d = r.row.run_name, folder / r.row.run_name
+        saves = sorted((d / "resume_states").glob("step_*.json")) if d.is_dir() else []
+        if not saves:
+            why = "no folder" if not d.is_dir() else "no resume_states/step_*.json in its folder"
+            if allow_fresh:
+                found[name] = {"fresh": True, "why": why}
+            else:
+                problems.append(f"{name}: {why}")
+            continue
+        try:
+            state = json.loads(saves[-1].read_text())
+            steps = int(state["steps_done"])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            problems.append(f"{name}: {saves[-1]} unreadable ({type(e).__name__}: {e})")
+            continue
+        cfg = state.get("config") or {}
+        if off := [f"its {k} is {cfg[k]!r}" for k, want in (("run_name", name), ("seed", r.row.seed))
+                   if k in cfg and cfg[k] != want]:
+            problems.append(f"{name}: {saves[-1]} is another run's ({', '.join(off)})")
+            continue
+        found[name] = {"from": str(d), "resume_state": saves[-1].name, "steps_done": steps,
+                       "eval_done": bool(state.get("eval_done")), "done": run_done(d)}
+    if problems:
+        raise SystemExit(f"--runs-from {folder}: " + "; ".join(problems)
+                         + ("" if allow_fresh else " (--allow-fresh starts a run without a save fresh)"))
+    for name, v in found.items():
+        log(f"--runs-from: {name} " + (f"starts fresh ({v['why']})" if v.get("fresh") else
+                                       f"is done ({v['resume_state']})" if v["done"] else
+                                       f"resumes from {v['resume_state']} ({v['steps_done']} steps done)"))
+    return found
+
+
+def push_runs(batch: Batch, ops: Ops, found: dict) -> None:
+    """Each ``runs_from`` folder onto the RL machine as data/runs/<run_name>/, before the supervisor starts (it resumes
+    a run with a save from its newest, and takes a finished one as done); each checked there, InfraError if not."""
+    rl = ops.rl()
+    for name, v in found.items():
+        if v.get("fresh"):
+            continue
+        nj.push_path(rl, v["from"], f"data/runs/{name}")
+        rc, out = run_text(rl, f"ls {nj.REMOTE_REPO}/data/runs/{shlex.quote(name)}/resume_states/", 60)
+        if rc != 0 or v["resume_state"] not in out.split():
+            raise nj.InfraError(f"--runs-from: {name}'s {v['resume_state']} is not on the RL machine after its push "
+                                f"({rc}: {out[-300:]})")
+        batch.event(f"--runs-from: {name} on the RL machine; it " + (
+            "is done" if v["done"] else f"resumes from {v['resume_state']} ({v['steps_done']} steps done)"))
 
 
 def print_plan(plan: Plan, est: dict, found: dict | None, s: Settings) -> None:
@@ -2000,7 +2782,16 @@ def print_plan(plan: Plan, est: dict, found: dict | None, s: Settings) -> None:
         print(f"== vast.ai now: {found['prices']} $/h ({found.get('judge_gpu')} for the judges); ~${found['hourly']}/h "
               f"together, ~${found['vast_total_usd']:,} for the batch; hub-gpu: ${found['room_usd']:.2f} left in any 24 "
               f"hours of ${found.get('usd_per_day')}; leases of {found['lease_hours']:g} h, extended while it runs")
-    print(f"== the RL machine: Nebius cpu-d3/{s.rl_preset} on demand (~$1.06/h for 32vcpu-128gb)")
+    for role, v in ((found or {}).get("nebius") or {}).items():
+        vm = nebius_machine(s, role)
+        print(f"== {role} on Nebius: {vm['platform']} ({vm['preset']}), "
+              + (f"spot under a bid of ${vm['bid']:g}/GPU-h" if v["spot"] else "on demand")
+              + f"; the cheapest now {v['region']}, ${v['price']:.2f}/h (priced: "
+              + ", ".join(f"{r} {p} ${price:.2f}" for r, p, price in v["regions"])
+              + f"); the ledger reserves up to ${v['worst_usd']:,.2f}"
+              + (f"; {probe_copies(s)} reader copies" if role.startswith("probe") else ""))
+    print(f"== the RL machine: Nebius cpu-d3/{s.rl_preset} on demand (~$1.06/h for 32vcpu-128gb)"
+          + (f", in one of {s.rl_regions}" if s.rl_regions else ""))
 
 
 def batch_from(args) -> Batch:
@@ -2039,11 +2830,11 @@ def cmd_plan(args) -> int:
         roster = dataclasses.replace(roster, n_steps=args.n_steps)
     plan = build_plan(roster, args.rehearsal)
     s = settings_from(args)
-    est = estimate(plan)
+    est = estimate(plan, probe_copies(s))
     found = None
     if not args.offline:
         try:
-            found = preflight(plan, s, est)
+            found = preflight(plan, s, est, cap_hours(s, est))
         except SystemExit as e:
             print(f"!! a start would refuse now: {e}")
     print_plan(plan, est, found, s)
@@ -2064,25 +2855,32 @@ def cmd_start(args) -> int:
     batch = Batch(out)
     if batch.path.exists():
         raise SystemExit(f"{out} holds a batch already ({batch.phase}): resume it, or give another --out")
+    pointer = Path(args.current_batch).expanduser() if args.current_batch else out.parent / "CURRENT_BATCH"
+    check_pointer(pointer, out)
+    if args.allow_fresh and not args.runs_from:
+        raise SystemExit("--allow-fresh: a run of --runs-from without a save starts fresh; give --runs-from DIR")
+    pushes = runs_from(plan, args.runs_from, args.allow_fresh) if args.runs_from else {}
     out.mkdir(parents=True, exist_ok=True)
     Driver.log_file = out / "driver.log"
-    est = estimate(plan)
-    found = preflight(plan, s, est)
+    est = estimate(plan, probe_copies(s), {n: v["steps_done"] for n, v in pushes.items() if "steps_done" in v})
+    rl_hours = cap_hours(s, est)
+    found = preflight(plan, s, est, rl_hours)
     print_plan(plan, est, found, s)
-    rl_hours = s.rl_hours or min(100.0, max(6.0, math.ceil(est["batch_hours"] * 1.5 + 2)))
     batch.data.update(roster=dataclasses.asdict(roster), settings=dataclasses.asdict(s), estimate=est,
                       found={k: v for k, v in found.items() if k != "code"}, code=found["code"],
                       ssh_key=os.environ.get("NEBIUS_SSH_KEY"), rehearsal=bool(args.rehearsal),
                       plan={"runs": [dataclasses.asdict(r) for r in plan.runs], "probes": plan.probes,
                             "judges": plan.judges, "rehearsal": plan.rehearsal},
-                      compare_runs=args.compare_runs or [])
-    batch.set_phase("starting")
-    with batch_lock(out):
+                      compare_runs=args.compare_runs or [], hours=rl_hours, runs_from=pushes)
+    with batch_lock(out):  # from its first save: a "starting" batch no driver holds is a start that died (watchdog)
+        batch.set_phase("starting")
+        claim_pointer(batch, pointer)
         install_driver_signals()
         ops = None
         try:
             machines_up(batch, plan, s, found, rl_hours)
             ops = Ops(batch)
+            push_runs(batch, ops, pushes)
             wire(batch, ops, plan)
             (out / "plan.json").write_text(json.dumps(vm_plan(batch, plan), indent=1) + "\n")
             checks = start_job(ops, out / "plan.json", 1, check_nobody=bool(args.rehearsal))
@@ -2092,8 +2890,12 @@ def cmd_start(args) -> int:
                 rehearse(batch, ops, plan, checks, args.compare_runs or [])
             why = watch(batch, ops, plan)
         except Detach as e:
+            if batch.phase == "starting":
+                batch.event(f"driver stopped by {e} during the start: the watchdog ends what it started (or now: "
+                            f"python3 scripts/rl_batch.py down --out {out})")
+                return 75
             batch.event(f"driver stopped by {e}: the machines are left to their leases (vast.ai instances end within "
-                        f"{s.lease_hours:g} h, the RL machine powers off then); resume: python3 scripts/rl_batch.py "
+                        f"{s.lease_hours:g} h, the Nebius VMs power off then); resume: python3 scripts/rl_batch.py "
                         f"resume --out {out}; end now: python3 scripts/rl_batch.py down --out {out}")
             return 75
         except KeyboardInterrupt:
@@ -2160,9 +2962,20 @@ def cmd_status(args) -> int:
                 line += (f" {row.get('state')}, ${float(row.get('usd_per_hour') or 0):.2f}/h, ends "
                          f"{utc(float(row['deadline'])) if row.get('deadline') else '?'}, ~${nj.vast_cost(row) or 0:.2f}"
                          " so far")
+        elif (r := m.get("replacing")) and r.get("out"):
+            line += f" a new VM {r['k']}: its up started {r['started']} (launch/{Path(r['out']).name}.log)"
+        elif r:
+            line += f" a new VM {r['k']}: due {utc(float(r['not_before']))} ({r['why']})"
+        elif m.get("abandoned"):
+            line += f" NO VM: {m['abandoned']}"
         else:
-            line += f" {m.get('host')}, shutdown {m.get('shutdown_at', '?')}"
+            line += (f" {m.get('host')}" + (f" in {m['region']}" if m.get("region") else "")
+                     + f", shutdown {m.get('shutdown_at', '?')}"
+                     + (f", new VM {m['replacements']}" if m.get("replacements") else ""))
         print(line)
+    for m in batch.data.get("retired") or []:
+        print(f"  {m.get('role') or '-':7} {m.get('name') or '-':26} {m.get('provider') or '-':6} retired "
+              f"{m.get('retired')} ({m.get('why')})" + ("" if m.get("ended") else "; NOT verified ended"))
     status = None
     with contextlib.suppress(Exception):
         status = vm_status(ops) if batch.machines.get("rl", {}).get("host") and not batch.machines["rl"].get(
@@ -2228,8 +3041,10 @@ def cmd_down(args) -> int:
 
 
 def cmd_watchdog(args) -> int:
-    """One check, for cron or a hub scheduled job: nothing if a driver watches the batch; else extend its leases and
-    sync, or end it all if its runs are over or its RL machine has been gone for ``vm_dead_minutes``."""
+    """One check, for cron or a hub scheduled job (it reads output/gpu_jobs/CURRENT_BATCH, which ``start`` writes):
+    nothing if a driver watches the batch; else one round of the watch (the leases: the vast.ai instances' and every
+    Nebius VM's shutdown timer; a sync; the servers' health, a preempted Nebius VM's new one started or taken up), or
+    the end of it all if its runs are over, its RL machine has been gone for ``vm_dead_minutes``, or its start died."""
     batch = batch_from(args)
     if batch.phase in ("ended", "new"):
         return 0
@@ -2238,6 +3053,9 @@ def cmd_watchdog(args) -> int:
             log("watchdog: a driver watches the batch; nothing to do")
             return 0
         plan, ops = plan_from(batch), Ops(batch)
+        if batch.phase == "starting":  # its start holds the lock until it is running or ended: the start died
+            return 0 if end_all(batch, ops if batch.machines.get("rl", {}).get("host") else None, plan,
+                                "watchdog: its start died (no driver holds it)") else 2
         why = watch(batch, ops, plan, once=True)
         if why in ("done", "failed", "rl-gone"):
             return 0 if end_all(batch, ops, plan, f"watchdog: the batch is over ({why})") else 2
@@ -2396,6 +3214,32 @@ def add_settings(p: argparse.ArgumentParser) -> None:
     p.add_argument("--judge-gpus", type=int, help=f"their count (default {d.judge_gpus}: setup_vllm.sh's 4-GPU layout)")
     p.add_argument("--judge-disk-gib", type=int, help=f"their disk (default {d.judge_disk_gib})")
     p.add_argument("--judge-max-price", type=float, help=f"USD/h cap for their instance (default {d.judge_max_price:g})")
+    for role in SERVER_ROLES:
+        dflt = nebius_machine(d, role)
+        p.add_argument(f"--{role}-provider", choices=PROVIDERS,
+                       help=f"where the {role} server runs: vast (default), or nebius (a VM of its own, spot by "
+                            "default; its shutdown timer is its lease; a new VM after every preemption)")
+        p.add_argument(f"--{role}-platform", help=f"Nebius: its platform, or a comma list (each where it is offered; "
+                                                  f"default {dflt['platform']})")
+        p.add_argument(f"--{role}-preset", help=f"Nebius: its preset (default {dflt['preset']})")
+        p.add_argument(f"--{role}-on-demand", action="store_const", const=True, default=None,
+                       help="Nebius: on demand instead of spot (no bid)")
+        p.add_argument(f"--{role}-max-gpu-price", type=float, metavar="USD",
+                       help=f"Nebius: the spot bid per GPU-hour, NEBIUS_MAX_GPU_PRICE's kind (default {dflt['bid']:g})")
+        p.add_argument(f"--{role}-regions", help="Nebius: a comma list of its regions (default: every region of the "
+                                                 "regions file)")
+        p.add_argument(f"--{role}-gpu-ids", dest=f"{role}_gpu_ids",
+                       help="the GPUs it uses on its machine, e.g. 4,5,6,7 (default: the probe server all, split "
+                            "between its copies; the judges a 2- or 4-GPU machine's, else 0-3)")
+    p.add_argument("--rl-regions", help=f"the RL machine's Nebius regions (default {d.rl_regions})")
+    p.add_argument("--probe-copies", type=int,
+                   help="reader copies on the probe server's machine, behind a balancer at :8178 (default: one on "
+                        f"vast.ai, one per {GPUS_PER_COPY} GPUs on Nebius)")
+    p.add_argument("--max-replacements", type=int,
+                   help=f"Nebius servers: new VMs per role, after preemptions (default {d.max_replacements})")
+    p.add_argument("--replace-backoff-minutes", type=float,
+                   help=f"before a role's k-th new VM: this × 2^(k-1), at most 30 (default "
+                        f"{d.replace_backoff_minutes:g})")
     p.add_argument("--lease-hours", type=float, help=f"each vast.ai lease (default {d.lease_hours:g})")
     p.add_argument("--sync-minutes", type=float, help=f"between run-folder syncs (default {d.sync_minutes:g})")
     p.add_argument("--health-minutes", type=float, help=f"between health checks (default {d.health_minutes:g})")
@@ -2403,7 +3247,8 @@ def add_settings(p: argparse.ArgumentParser) -> None:
                    help=f"a server down this long is restarted (default {d.server_dead_minutes:g})")
     p.add_argument("--max-server-restarts", type=int, help=f"per server (default {d.max_server_restarts})")
     p.add_argument("--no-replace", dest="replace", action="store_const", const=False, default=None,
-                   help="never replace an instance that went away (default: once each)")
+                   help="never replace a machine that went away (default: a vast.ai instance once, a Nebius VM every "
+                        "time, up to --max-replacements)")
     p.add_argument("--max-attempts", type=int, help=f"failed attempts per run (default {d.max_attempts})")
     p.add_argument("--vm-dead-minutes", type=float,
                    help=f"the RL machine unreachable this long ends the batch (default {d.vm_dead_minutes:g})")
@@ -2431,6 +3276,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["start"].add_argument("--out", required=True, help="the batch's folder ({name}, {stamp} expand)")
     sub.choices["start"].add_argument("--compare-runs", nargs="*", default=[],
                                       help="rehearsal: run folders for rescore_terminal_judges.py compare")
+    sub.choices["start"].add_argument("--runs-from", metavar="DIR",
+                                      help="each run's folder DIR/<run_name>/ to the RL machine before the supervisor "
+                                           "starts: it resumes from its newest resume_states/step_*.json (refused "
+                                           "without one)")
+    sub.choices["start"].add_argument("--allow-fresh", action="store_true",
+                                      help="with --runs-from: a run without a save there starts fresh instead")
+    sub.choices["start"].add_argument("--current-batch", metavar="FILE",
+                                      help="the file naming the batch for the watchdog's scheduled job (default: "
+                                           "CURRENT_BATCH beside the batch's folder, output/gpu_jobs/)")
     for name, func, hlp in (("resume", cmd_resume, "watch a batch again after its driver died"),
                             ("status", cmd_status, "machines, runs, last sync"),
                             ("sync", cmd_sync, "the run folders now"),

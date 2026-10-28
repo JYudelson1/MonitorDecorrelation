@@ -701,6 +701,42 @@ def test_setup_vllm_without_restart_stops_everything_and_refuses_another_version
     assert proc.returncode == 1 and "vllm 0.31.0 is not VLLM_VERSION=0.32.0" in out
 
 
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_setup_vllm_makes_its_venv_on_uvs_own_python_with_its_headers(vllm_box):
+    """Triton (vLLM's JIT) compiles against the venv Python's Python.h: on the Nebius image uv took the system
+    python3.12, which has none, and every Qwen3.5 server died at its start (2026-10-28). The venv is made with
+    --managed-python; one whose Python lacks the headers is made again; one that has them is used as it is."""
+    repo, env, calls = vllm_box
+    fake = Path(env["PATH"].split(":")[0])
+    (fake / "vllm").unlink()  # no vllm on PATH: setup_vllm.sh uses its own .venv-vllm
+    tpl = repo.parent / "tpl"
+    _fake_bin(tpl, "python", FAKE_VLLM_PY)  # uv's own: Python.h there (the fake answers the check with 0)
+    _fake_bin(tpl, "vllm", FAKE_VLLM)
+    _fake_bin(fake, "uv", f'echo "uv $*" >> "$FAKE_CALLS"\ncase "$1 $2" in\n'
+                          f'  "venv "*) mkdir -p .venv-vllm/bin && cp {tpl}/python .venv-vllm/bin/python ;;\n'
+                          f'  "pip install") cp {tpl}/vllm .venv-vllm/bin/vllm ;;\n'
+                          '  "pip freeze") echo "vllm==0.32.0" ;;\n'
+                          '  run*) echo "lb $*" >> "$FAKE_CALLS"; exec sleep 300 ;;\nesac')
+    venv = repo / ".venv-vllm" / "bin"
+    _fake_bin(venv, "vllm", FAKE_VLLM)
+    _fake_bin(venv, "python", 'case "$*" in *sysconfig*) exit 1 ;; esac\n' + FAKE_VLLM_PY)  # the system's: none
+
+    def run() -> str:
+        calls.unlink(missing_ok=True)
+        proc = _setup_vllm(repo, env)
+        try:
+            assert _wait(lambda: calls.exists() and "8005 " in calls.read_text(), 40, 0.5)
+        finally:
+            os.killpg(proc.pid, signal.SIGTERM)
+        return proc.communicate(timeout=30)[0]
+
+    out = run()
+    assert "has no Python.h (vLLM's Triton JIT needs it): making it again on uv's own Python" in out
+    assert "uv venv --no-config --managed-python --python 3.12 --seed .venv-vllm" in calls.read_text()
+    out = run()  # its Python has the headers now: used as it is
+    assert "using vllm from .venv-vllm/bin/vllm" in out and "uv venv" not in calls.read_text()
+
+
 def test_setup_vllm_gives_up_on_a_server_that_keeps_dying(vllm_box):
     repo, env, calls = vllm_box
     proc = _setup_vllm(repo, {**env, "VLLM_RESTART": "1", "VLLM_RESTART_MAX": "1", "DIE_PORT": "8003",
@@ -984,3 +1020,620 @@ def test_a_manual_request_waits_for_the_driver_that_holds_the_batch(repo, tmp_pa
         assert not done and (batch.out / "requests" / "sync").exists()
     assert rb.requests(batch) == ["sync"] and not (batch.out / "requests" / "sync").exists()
     assert rb.ask_or_do(args, "sync", lambda b: done.append(1) or 0) == 0 and done == [1]  # no driver: done at once
+
+
+# ---------------------------------------------------------------------- Nebius servers, the launcher faked (2026-10-28)
+
+NEBIUS = {"probe_provider": "nebius", "judges_provider": "nebius"}
+
+
+def test_a_nebius_server_comes_up_spot_on_a_vm_of_its_own_with_its_server(repo, tmp_path):
+    """--probe-provider / --judges-provider nebius: up of a kept GPU VM (no vast.ai flag), spot under its role's bid,
+    its server started and healthy: the probe server on 8× B200 as two reader copies (GPUs 0-3 and 4-7, behind the
+    balancer at :8178, each port in its health check), the judges in Vlad's layout on GPUs 0-3 of 8× H200 (VLLM_GPUS);
+    the RL machine kept out of us-north1 and the regions without CPU quota. vast.ai stays the default, unchanged."""
+    plan = rb.build_plan(rb.load_roster(_roster_file(tmp_path)))
+    s = rb.Settings(**NEBIUS, probe_regions="me-west1,us-central1", budget_file="/ledger.json")
+    probe = rb.up_args("probe", s, tmp_path / "p", 8, plan)
+    assert probe[:2] == ["up", "--platform"] and "--provider" not in probe and "--tag" not in probe
+    for flag, value in (("--platform", "gpu-b200-sxm-a,gpu-b200-sxm"), ("--preset", "8gpu-160vcpu-1792gb"),
+                        ("--disk-gib", "650"), ("--hours", "8"), ("--name", "dennis-probe-srv"),
+                        ("--max-gpu-price", "4.5"), ("--regions", "me-west1,us-central1"), ("--hf", rb.READER),
+                        ("--budget-file", "/ledger.json"), ("--health-timeout", "3600"), ("--wait-hours", "0.5")):
+        assert probe[probe.index(flag) + 1] == value, flag
+    assert probe[probe.index("--health") + 1] == " && ".join(
+        f"curl -sf -m 20 http://127.0.0.1:{p}/v1/meta > /dev/null" for p in (8179, 8180, 8178))
+    cmd = probe[-1]
+    assert probe[-2] == "--" and "CUDA_VISIBLE_DEVICES=0,1,2,3 .venv/bin/python experiments/inkling_probe_server.py" \
+        in cmd and "CUDA_VISIBLE_DEVICES=4,5,6,7 " in cmd and "--port 8179" in cmd and "--port 8180" in cmd
+    assert "scripts/load_balancer.py --listen-port 8178 --backend-ports 8179 8180 --listen-host 127.0.0.1" in cmd
+    judges = rb.up_args("judges", s, tmp_path / "j", 8, plan)
+    for flag, value in (("--platform", "gpu-h200-sxm"), ("--preset", "8gpu-128vcpu-1600gb"), ("--disk-gib", "250"),
+                        ("--max-gpu-price", "2.5"), ("--health", rb.JUDGES_HEALTH), ("--name", "dennis-judges")):
+        assert judges[judges.index(flag) + 1] == value, flag
+    assert judges[-1] == f"VLLM_GPUS=0,1,2,3 {rb.JUDGES_COMMAND}" and "--regions" not in judges and "--hf" not in judges
+    on_demand = rb.up_args("judges", rb.dataclasses.replace(s, judges_on_demand=True, judges_gpu_ids="4,5,6,7"),
+                           tmp_path / "j", 8, plan)
+    assert "--on-demand" in on_demand and "--max-gpu-price" not in on_demand
+    assert on_demand[-1] == f"VLLM_GPUS=4,5,6,7 {rb.JUDGES_COMMAND}"
+    rl = rb.rl_up_args(s, tmp_path / "rl", 8)
+    assert rl[rl.index("--regions") + 1] == "eu-west2,uk-south1,uk-south2,eu-west1"
+    vast = rb.Settings()  # the default: both on vast.ai, as before
+    assert rb.up_args("probe", vast, tmp_path / "p", 8, plan, gpu="B200", lease=4)[-1] == rb.probe_server_command(
+        plan.probes, False) and rb.up_args("judges", vast, tmp_path / "j", 8, plan, gpu="H200")[-1] == rb.JUDGES_COMMAND
+    assert rb.probe_copies(vast) == 1 and rb.probe_copies(s) == 2
+    one = rb.estimate(plan, 1)
+    assert rb.estimate(plan, 2)["probe_server_hours"] == pytest.approx(one["probe_server_hours"] / 2, abs=0.1)
+    for bad, error in (({"probe_copies": 3}, "split evenly"), ({"judges_gpu_ids": "0"}, "serves on 2 or 4"),
+                       ({"probe_gpu_ids": "0,1,2,9"}, "distinct GPUs"), ({"judges_platform": "cpu-d3"}, "a GPU VM"),
+                       ({"probe_provider": "aws"}, "one of vast, nebius")):
+        with pytest.raises(SystemExit, match=error):
+            rb.check_settings(rb.dataclasses.replace(s, **bad))
+    rb.check_settings(rb.dataclasses.replace(s, probe_copies=1, probe_gpu_ids="0,1,2,3"))  # a copy on GPUs 0-3
+    assert rb.probe_server_command(plan.probes, False, 1, [0, 1, 2, 3]).splitlines()[-1].startswith(
+        "CUDA_VISIBLE_DEVICES=0,1,2,3 exec .venv/bin/python experiments/inkling_probe_server.py")
+
+
+FAKE_PROBE_PY = r'''#!/bin/bash
+# .venv/bin/python, faked: what each probe server process would be, recorded with its GPUs
+echo "$CUDA_VISIBLE_DEVICES|$*" >> "$CALLS"
+port=""; out=""; prev=""
+for a in "$@"; do [ "$prev" = "--port" ] && port=$a; [ "$prev" = "--out" ] && out=$a; prev=$a; done
+case "$1" in
+  experiments/check_probe_server.py) echo '{"ok": true}' > "$out"; exit 0 ;;
+  experiments/inkling_probe_server.py) echo $$ > "pid.$port"; echo "golden check passed; serving on :$port"
+    if [ "$port" = "$DIE_PORT" ]; then sleep 1; echo "out of memory"; exit 5; fi; exec sleep 60 ;;
+  scripts/load_balancer.py) echo $$ > pid.balancer; echo "[lb] listening"; exec sleep 60 ;;
+esac
+'''
+
+
+def test_the_two_copy_probe_server_runs_both_copies_behind_the_balancer_and_stops_with_any(tmp_path):
+    """The probe server's step with two copies, run in a local bash with a fake python: the pinned shas checked once
+    before anything starts; (rehearsal) check_probe_server.py on each copy's GPUs, a report each; copy 0 on GPUs 0-3 at
+    :8179, copy 1 on GPUs 4-7 at :8180, the balancer at :8178 before both, each line of theirs in the step's log; when
+    one dies, the others are stopped and the step exits with its code (the health checks then restart it whole)."""
+    md = tmp_path / "md"
+    d = md / IID
+    d.mkdir(parents=True)
+    (d / "probe.npz").write_bytes(b"npz")
+    (d / "meta.json").write_text("{}")
+    _fake_bin(md / ".venv" / "bin", "python", FAKE_PROBE_PY.split("\n", 1)[1])
+    calls = tmp_path / "calls"
+    env = {**os.environ, "CALLS": str(calls), "DIE_PORT": "8180"}
+    cmd = rb.probe_server_command({IID: rb.probe_sha(d)}, True, 2, list(range(8)))
+    t0 = time.time()
+    cp = subprocess.run(["bash", "-c", cmd], cwd=md, env=env, capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 5 and time.time() - t0 < 30, cp.stdout + cp.stderr
+    lines = calls.read_text().splitlines()
+    checks = sorted(line for line in lines if "check_probe_server.py" in line)
+    assert [c.split("|")[0] for c in checks] == ["0,1,2,3", "4,5,6,7"]
+    assert all(json.loads((md / "results" / f"check_probe_server_v2-{k}.json").read_text())["ok"] for k in (0, 1))
+    servers = {line.split("--port ")[1].split()[0]: line.split("|")[0] for line in lines if "inkling_probe" in line}
+    assert servers == {"8179": "0,1,2,3", "8180": "4,5,6,7"}
+    assert any("load_balancer.py --listen-port 8178 --backend-ports 8179 8180" in line for line in lines)
+    assert "[copy 1 :8180] out of memory" in cp.stdout and "[balancer :8178] [lb] listening" in cp.stdout
+    assert "a probe server process exited (5): stopping the others" in cp.stdout
+    for f in ("pid.8179", "pid.balancer"):  # stopped with it
+        assert _wait(lambda f=f: rb.pid_ended(int((md / f).read_text())), 10), f
+    (d / "meta.json").write_text('{"x": 1}')  # not the pinned probe: refused before any of them starts
+    calls.unlink()
+    cp = subprocess.run(["bash", "-c", cmd], cwd=md, env=env, capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 1 and "NOT the pinned" in cp.stdout and not calls.exists()
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_setup_vllm_serves_on_the_gpus_vllm_gpus_names(vllm_box):
+    """nvidia-smi ignores CUDA_VISIBLE_DEVICES, so an 8-GPU VM was refused ("need exactly 2 or 4 GPUs, found 8", the
+    B300 judges check, 2026-10-28). VLLM_GPUS (else a CUDA_VISIBLE_DEVICES of indices) picks the GPUs, in order: Qwen3
+    on the first, the three Qwen3.5 on the next; each checked; every engine on its own; any other GPU left alone."""
+    repo, env, calls = vllm_box
+    fake = Path(env["PATH"].split(":")[0])
+    _fake_bin(fake, "nvidia-smi", 'case "$*" in *query-gpu*) for i in 0 1 2 3 4 5 6 7; do echo "$i, NVIDIA H200, '
+                                  '143771"; done ;; *) echo "| CUDA Version: 13.0 |" ;; esac')
+    _fake_bin(fake, "vllm", 'case "$1" in --version) echo 0.32.0; exit 0 ;; esac\nport=""; prev=""\n'
+                            'for a in "$@"; do [ "$prev" = "--port" ] && port=$a; prev=$a; done\n'
+                            'echo "$port gpu=$CUDA_VISIBLE_DEVICES" >> "$FAKE_CALLS"\nexec sleep 300')
+
+    def served(extra: dict, engines: int) -> dict:
+        calls.unlink(missing_ok=True)
+        proc = _setup_vllm(repo, {**env, **extra})
+        try:
+            assert _wait(lambda: calls.exists() and sum(" gpu=" in x for x in calls.read_text().splitlines())
+                         >= engines, 40, 0.5), proc.stdout.read() if proc.poll() is not None else "still waiting"
+            return dict(x.split(" gpu=") for x in calls.read_text().splitlines() if " gpu=" in x)
+        finally:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.communicate(timeout=30)
+
+    assert served({"VLLM_GPUS": "4,5,6,7"}, 4) == {"8001": "4", "8003": "5", "8004": "6", "8005": "7"}
+    assert any(x.startswith("lb ") for x in calls.read_text().splitlines())  # and the balancer before :8003-8005
+    assert served({"CUDA_VISIBLE_DEVICES": "0,1,2,3"}, 4) == {"8001": "0", "8003": "1", "8004": "2", "8005": "3"}
+    assert served({"VLLM_GPUS": "6,7"}, 2) == {"8001": "6", "8002": "7"}
+    for extra, error in (({}, "need exactly 2 or 4 GPUs, found 8"), ({"VLLM_GPUS": "1,9"}, "lists no GPU 9"),
+                         ({"VLLM_GPUS": "1,1,2,3"}, "names GPU 1 twice"), ({"VLLM_GPUS": "a"}, "not a comma list")):
+        proc = _setup_vllm(repo, {**env, **extra})
+        out = proc.communicate(timeout=60)[0]
+        assert proc.returncode == 1 and error in out, out
+
+
+NEBIUS_REGIONS = {"tenant": "tenant-t", "regions": {
+    r: {"project": f"project-{r}", "subnet": f"vpcsubnet-{r}", "image_project": f"images-{r}"}
+    for r in ("us-north1", "me-west1", "us-central1", "eu-west2", "uk-south1", "uk-south2", "eu-west1")}}
+
+
+class NebiusWorld:
+    """The launcher and the Nebius CLI faked together. Each ``up`` makes a VM of its own (a new name, address and
+    instance id, in us-north1) and keeps it, unless its role still has failures in ``fail`` (then exit 3: preempted
+    while it booted, nothing left); a ``down`` deletes it; ``state`` is what the CLI lists for a VM (RUNNING unless
+    set); every call recorded; the clock is the test's."""
+
+    def __init__(self):
+        self.calls, self.vms, self.state, self.fail, self.n, self.wired = [], {}, {}, {}, 0, []
+
+    def launch(self, args, logfile, wait=True):
+        self.calls.append(list(args))
+        code = 0
+        if args[0] == "up":
+            out = Path(args[args.index("--out") + 1])
+            role, nebius = out.name.split("-r")[0], "--provider" not in args
+            self.n += 1
+            failing = self.fail.get(role, 0) > 0
+            self.fail[role] = self.fail.get(role, 0) - 1
+            name = f"dennis-{role}-{self.n:06x}"
+            flag = lambda f: args[args.index(f) + 1] if f in args else None  # noqa: E731
+            rec = {"name": name, "instance_id": f"computeinstance-{self.n}" if nebius else str(9000 + self.n),
+                   "host": f"md@203.0.113.{self.n}" if nebius else "root@ssh5.vast.ai", "kept": not failing,
+                   "hours": float(flag("--hours")), "times": {"create_start": rb.utc()}, "code": {"commit": "c0de"},
+                   "region": "us-north1" if nebius else "Texas, US", "spot": nebius and "--on-demand" not in args,
+                   "platform": (flag("--platform") or "").split(",")[0] or None,
+                   "flags": {"platform": flag("--platform"), "preset": flag("--preset")},
+                   "teardown_verified": True if failing else None,
+                   "vast": {"ssh": {"host": "root@ssh5.vast.ai", "port": 31000}}}
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "job.json").write_text(json.dumps(rec))
+            code = 3 if failing else 0
+            if not failing:
+                self.vms[name] = rec
+        elif args[0] == "down":
+            self.vms.pop(args[args.index("--name") + 1], None)
+        if wait:
+            return code
+        return type("P", (), {"poll": lambda self: code, "returncode": code, "wait": lambda self: code, "pid": None})()
+
+    def nebius(self, binary, project):
+        world = self
+
+        class Client:
+            def instances(self):
+                return [nj.Instance(v["instance_id"], n, world.state.get(n, "RUNNING"), v["host"].split("@")[1])
+                        for n, v in world.vms.items()]
+
+            def stop_instance(self, iid):
+                world.calls.append(["stop", iid])
+                world.state.update({n: "STOPPED" for n, v in world.vms.items() if v["instance_id"] == iid})
+
+            def estimate_hourly(self, platform, preset, spot):
+                return 30.4
+
+        return Client()
+
+
+@pytest.fixture
+def nebius_world(tmp_path, monkeypatch):
+    """The launcher, the Nebius CLI, the tunnels and the servers' own health faked (``NebiusWorld``); a clock of the
+    test's (time.sleep moves it); the regions file in NEBIUS_REGIONS_FILE. ``world.real`` keeps what was faked."""
+    regions = tmp_path / "regions.json"
+    regions.write_text(json.dumps(NEBIUS_REGIONS))
+    monkeypatch.setenv("NEBIUS_REGIONS_FILE", str(regions))
+    monkeypatch.setenv("NEBIUS_JOB_NAME_PREFIX", "dennis-")
+    world = NebiusWorld()
+    world.real = {"server_health": rb.server_health, "through_tunnels": rb.through_tunnels, "wire": rb.wire}
+    monkeypatch.setattr(rb, "launch", world.launch)
+    monkeypatch.setattr(rb.nj, "Nebius", world.nebius)
+    monkeypatch.setattr(rb, "wire", lambda batch, ops, plan, roles=None, timeout=600: world.wired.append(list(roles)))
+    monkeypatch.setattr(rb, "server_health", lambda ops, role, pinned: None)
+    monkeypatch.setattr(rb, "through_tunnels", lambda ops, probes, roles: {r: None for r in roles})
+    world.clock = {"t": 1_800_000_000.0}
+    monkeypatch.setattr(rb.time, "time", lambda: world.clock["t"])
+    monkeypatch.setattr(rb.time, "sleep", lambda s: world.clock.update(t=world.clock["t"] + s))
+    return world
+
+
+def _nebius_batch(tmp_path: Path, repo: Path, **settings) -> tuple:
+    roster = rb.load_roster(_roster_file(tmp_path))
+    plan = rb.build_plan(roster)
+    s = rb.Settings(**{**NEBIUS, **settings})
+    batch = rb.Batch(tmp_path / "batch")
+    batch.data.update(roster=rb.dataclasses.asdict(roster), settings=rb.dataclasses.asdict(s), hours=8.0,
+                      plan={"runs": [rb.dataclasses.asdict(r) for r in plan.runs], "probes": plan.probes,
+                            "judges": plan.judges, "rehearsal": False})
+    batch.save()
+    return batch, plan, s
+
+
+def _events(batch) -> list[str]:
+    return [e["what"] for e in batch.data["events"]]
+
+
+def test_a_nebius_server_whose_up_fails_at_the_start_gets_a_new_vm(repo, tmp_path, nebius_world):
+    """A Nebius server VM preempted while it boots (2 of 2 8-GPU VMs on 2026-10-10) fails its up: the start tries a
+    new VM after a backoff (1 min, then 2), up to max_replacements, instead of ending the batch; one that never comes
+    up fails the start."""
+    world = nebius_world
+    world.fail = {"probe": 2}
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, rl_hours=8)
+    probe_ups = [Path(c[c.index("--out") + 1]).name for c in world.calls
+                 if c[0] == "up" and "probe-srv" in c[c.index("--name") + 1]]
+    assert probe_ups == ["probe", "probe-r1", "probe-r2"]
+    m = batch.machines["probe"]
+    assert m["kept"] and m["replacements"] == 2 and (m["provider"], m["project"]) == ("nebius", "project-us-north1")
+    assert all(batch.machines[r]["kept"] and batch.machines[r]["provider"] == "nebius" for r in ("rl", "judges"))
+    assert [e for e in _events(batch) if "a new VM in" in e] == [
+        "probe: a new VM in 1 min (new VM 1 of at most 8)", "probe: a new VM in 2 min (new VM 2 of at most 8)"]
+    assert not [c for c in world.calls if c[0] == "down"]  # each failed up deleted its own VM (verified)
+    world.fail = {"probe": 99}
+    batch, plan, s = _nebius_batch(tmp_path, repo, max_replacements=2)
+    with pytest.raises(nj.InfraError, match="up failed for probe"):
+        rb.machines_up(batch, plan, s, {}, rl_hours=8)
+
+
+def test_a_preempted_nebius_server_gets_a_new_vm_every_time_up_to_its_cap(repo, tmp_path, nebius_world):
+    """The health round finds a Nebius server's VM STOPPED (a spot preemption: on-preemption stop) by the Nebius CLI:
+    it is ended (down, verified; the ledger settles it), a new VM is due after a backoff, its up runs on its own while
+    the watch goes on, and once it has kept the VM the tunnel moves there. Again at the next preemption (not "at most
+    once"), up to max_replacements; then no new VM, said loudly. The other server is never touched."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo, max_replacements=2, budget_file="/ledger.json")
+    rb.machines_up(batch, plan, s, {}, 8)
+    ops, bad_since = rb.Ops(batch), batch.data.setdefault("bad_since", {})
+    judges = batch.machines["judges"]["name"]
+    for k in (1, 2):
+        old = batch.machines["probe"]["name"]
+        world.state[old] = "STOPPED"
+        rb.health_round(batch, ops, plan, ["probe", "judges"], bad_since)
+        assert world.calls[-1] == ["down", "--name", old, "--budget-file", "/ledger.json"]
+        assert batch.machines["probe"]["replacing"]["k"] == k and batch.data["retired"][-1]["name"] == old
+        rb.replacements_round(batch, ops, plan)  # its backoff isn't over: nothing yet
+        assert len(world.wired) == k - 1
+        world.clock["t"] += rb.backoff_seconds(s, k) + 1
+        rb.replacements_round(batch, ops, plan)  # its up started, on its own
+        up = world.calls[-1]
+        assert up[0] == "up" and Path(up[up.index("--out") + 1]).name == f"probe-r{k}"
+        assert up[up.index("--hours") + 1] == "8"  # the hours left of the batch's cap, the RL machine's
+        rb.replacements_round(batch, ops, plan)  # it exited: the new VM taken, its tunnel moved there
+        m = batch.machines["probe"]
+        assert m["name"] != old and m["kept"] and not m.get("replacing") and m["replacements"] == k
+        assert world.wired[-1] == ["probe"] and len(world.wired) == k
+    world.state[batch.machines["probe"]["name"]] = "STOPPED"
+    rb.health_round(batch, ops, plan, ["probe", "judges"], bad_since)
+    assert batch.machines["probe"].get("abandoned") and any("!!! probe: no new VM (2 new ones already)" in e
+                                                             for e in _events(batch))
+    rb.health_round(batch, ops, plan, ["probe", "judges"], bad_since)  # nothing more is tried
+    assert [c[0] for c in world.calls].count("up") == 3 + 2 and judges in world.vms
+
+
+def test_a_nebius_vm_stopped_at_its_own_hours_is_the_batchs_end_not_a_preemption(repo, tmp_path, nebius_world):
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    world.clock["t"] += 8 * 3600
+    world.state[batch.machines["probe"]["name"]] = "STOPPED"
+    rb.health_round(batch, rb.Ops(batch), plan, ["probe", "judges"], {})
+    assert batch.machines["probe"]["capped"] and not batch.machines["probe"].get("replacing")
+    assert any("at its --hours cap: not replaced" in e for e in _events(batch))
+
+
+def test_the_leases_of_nebius_servers_are_their_shutdown_timers(repo, tmp_path, nebius_world, monkeypatch):
+    """Like the RL machine's: every Nebius VM's shutdown moved to a lease from now, never past its --hours (the
+    ledger's reservation); a VM being replaced, or ended, has none."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    sent = []
+    monkeypatch.setattr(rb, "run_text", lambda remote, command, timeout=120, stdin_text=None: sent.append(
+        (remote.host, command)) or (0, "0"))
+    rb.extend_leases(rb.Ops(batch))
+    assert sorted(h for h, _ in sent) == sorted(m["host"] for m in batch.machines.values())
+    assert {c for _, c in sent} == {"sudo -n shutdown -h +240 > /dev/null 2>&1; echo $?"}
+    assert all(m["shutdown_at"] for m in batch.machines.values())
+    world.clock["t"] += 7.9 * 3600
+    sent.clear()
+    batch.machines["judges"]["ended"] = rb.utc()
+    rb.extend_leases(rb.Ops(batch))
+    assert {h for h, _ in sent} == {batch.machines[r]["host"] for r in ("rl", "probe")}
+    assert {c for _, c in sent} == {"sudo -n shutdown -h +5 > /dev/null 2>&1; echo $?"}  # its cap: the reservation
+
+
+def test_the_end_ends_every_nebius_vm_one_being_made_and_what_a_replacement_left(repo, tmp_path, nebius_world,
+                                                                                   monkeypatch):
+    """The end: an up still making a new VM is stopped first (SIGTERM: it deletes what it made), then every machine
+    ended with the launcher's Nebius down and the ledger (the VM that up named too, and a replaced one whose end was
+    not verified then), and CURRENT_BATCH no longer names the batch."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo, budget_file="/ledger.json")
+    rb.machines_up(batch, plan, s, {}, 8)
+    pointer = tmp_path / "gpu_jobs" / "CURRENT_BATCH"
+    rb.claim_pointer(batch, pointer)
+    assert pointer.read_text() == f"{batch.out.resolve()}\n"
+    ops = rb.Ops(batch)
+    batch.data["retired"] = [{"role": "probe", "provider": "nebius", "name": "dennis-probe-srv-old", "why": "STOPPED"},
+                             {"role": "probe", "provider": "nebius", "name": "dennis-probe-srv-older", "ended": "x"}]
+    pending = batch.out / "launch" / "probe-r1"
+    pending.mkdir(parents=True)
+    (pending / "job.json").write_text(json.dumps({"name": "dennis-probe-srv-new"}))  # its VM being made
+    proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    ops.procs["probe"] = proc
+    batch.machines["probe"] = {"role": "probe", "provider": "nebius", "replacements": 1, "replacing": {
+        "k": 1, "out": str(pending), "pid": proc.pid, "started": rb.utc(), "not_before": 0, "why": "STOPPED"}}
+    monkeypatch.setattr(rb, "job_exit", lambda ops: 0)
+    monkeypatch.setattr(rb, "sync", lambda ops, runs: {})
+    monkeypatch.setattr(rb.nj, "fetch_rsync", lambda *a, **k: "ok")
+    assert rb.end_all(batch, ops, plan, "test") is True
+    assert proc.wait(timeout=10) == -signal.SIGTERM
+    downs = [c for c in world.calls if c[0] == "down"]
+    assert sorted(c[c.index("--name") + 1] for c in downs) == sorted(
+        [batch.machines["rl"]["name"], batch.machines["judges"]["name"], "dennis-probe-srv-new", "dennis-probe-srv-old"])
+    assert all("--provider" not in c and c[-2:] == ["--budget-file", "/ledger.json"] for c in downs)
+    assert batch.phase == "ended" and not pointer.exists()
+
+
+def test_the_watchdog_keeps_nebius_servers_up_replaces_a_preempted_one_and_ends_them_with_the_batch(
+        repo, tmp_path, nebius_world, monkeypatch):
+    """`watchdog` (the hourly scheduled job on CURRENT_BATCH's batch) with no driver: a round of the watch. It moves
+    every Nebius VM's shutdown timer (the servers' too) and samples their spot price into their job.json (for the
+    ledger); a preempted server VM is ended and its new one's up started on its own, then taken up by the next run;
+    once the supervisor is done, every VM is ended and the pointer removed. A driver holding the batch: nothing."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    batch.set_phase("running")
+    pointer = tmp_path / "CURRENT_BATCH"
+    rb.claim_pointer(batch, pointer)
+    sent, state = [], {"exit": None, "status": {"phase": "running", "runs": {}}}
+    monkeypatch.setattr(rb, "run_text", lambda remote, command, timeout=120, stdin_text=None: sent.append(
+        (remote.host, command)) or (0, "0"))
+    monkeypatch.setattr(rb, "vm_status", lambda ops: state["status"])
+    monkeypatch.setattr(rb, "job_exit", lambda ops: state["exit"])
+    monkeypatch.setattr(rb, "sync", lambda ops, runs: {})
+    monkeypatch.setattr(rb.nj, "fetch_rsync", lambda *a, **k: "ok")
+    watchdog = ["watchdog", "--out", str(batch.out)]
+    assert rb.main(watchdog) == 0
+    hosts = {m["host"] for m in rb.Batch(batch.out).machines.values()}
+    assert {h for h, c in sent if c.startswith("sudo -n shutdown -h +")} == hosts
+    for role in ("probe", "judges"):
+        samples = json.loads((Path(batch.machines[role]["out"]) / "job.json").read_text())["price_samples"]
+        assert [p for _, p in samples] == [30.4]
+    with rb.batch_lock(batch.out):  # a driver watches: the watchdog leaves it alone
+        sent.clear()
+        assert rb.main(watchdog) == 0 and not sent
+    old = batch.machines["probe"]["name"]
+    world.state[old] = "STOPPED"
+    world.clock["t"] += 3600
+    assert rb.main(watchdog) == 0  # found preempted: ended, a new VM due
+    assert ["down", "--name", old] in world.calls and rb.Batch(batch.out).machines["probe"]["replacing"]
+    world.clock["t"] += 3600
+    assert rb.main(watchdog) == 0  # its up started, on its own (this run ends before it does)
+    assert Path(world.calls[-1][world.calls[-1].index("--out") + 1]).name == "probe-r1"
+    world.clock["t"] += 3600
+    assert rb.main(watchdog) == 0  # the next run finds it done: the new VM taken, the tunnel moved there
+    new = rb.Batch(batch.out).machines["probe"]
+    assert new["name"] != old and new["kept"] and world.wired == [["probe"]]
+    state.update(exit=0, status={"phase": "done", "runs": {}})
+    assert rb.main(watchdog) == 0
+    downs = {c[c.index("--name") + 1] for c in world.calls if c[0] == "down"}
+    assert downs >= {m["name"] for m in rb.Batch(batch.out).machines.values()} and not world.vms
+    assert rb.Batch(batch.out).phase == "ended" and not pointer.exists()
+
+
+def test_the_watchdog_ends_a_batch_whose_start_died(repo, tmp_path, nebius_world, monkeypatch):
+    """A "starting" batch that no driver holds: its start died (hub restarted the sandbox); nothing can finish it, so
+    the watchdog ends what it started, an up still running included."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    batch.set_phase("starting")
+    monkeypatch.setattr(rb, "job_exit", lambda ops: 0)
+    monkeypatch.setattr(rb, "sync", lambda ops, runs: {})
+    monkeypatch.setattr(rb.nj, "fetch_rsync", lambda *a, **k: "ok")
+    assert rb.main(["watchdog", "--out", str(batch.out)]) == 0
+    assert not world.vms and rb.Batch(batch.out).phase == "ended"
+    assert any("its start died" in e for e in _events(rb.Batch(batch.out)))
+
+
+def test_runs_from_pushes_each_runs_folder_and_refuses_one_without_a_save(repo, tmp_path, monkeypatch, capsys):
+    """start --runs-from DIR: each roster run's folder DIR/<run_name>/ resumes from its newest resume state (logged),
+    a finished run is taken as done; a run without a save is refused unless --allow-fresh (then it starts fresh,
+    nothing pushed), a save of another run always; each folder pushed to the RL machine's data/runs/ and checked
+    there before the supervisor starts; the estimate counts only the steps left."""
+    plan = rb.build_plan(rb.load_roster(_roster_file(tmp_path)))
+    rows, src = [r.row for r in plan.runs], tmp_path / "old-runs"
+
+    def run(row, *steps, seed=None, done=False):
+        d = src / row.run_name / "resume_states"
+        d.mkdir(parents=True)
+        for k in steps:
+            (d / f"step_{k:06d}.json").write_text(json.dumps({"steps_done": k, "eval_done": done and k == steps[-1],
+                                                               "config": {"run_name": row.run_name,
+                                                                          "seed": row.seed if seed is None else seed}}))
+
+    run(rows[0], 54, 63)
+    run(rows[1], 81, 90, done=True)
+    (src / rows[1].run_name / "final_checkpoint.txt").write_text("tinker://x/final\n")
+    run(rows[2], 45)
+    (src / rows[3].run_name).mkdir()  # a folder without a save; rows[4]: no folder
+    run(rows[5], 9, seed=999)
+    with pytest.raises(SystemExit) as e:
+        rb.runs_from(plan, src)
+    msg = str(e.value)
+    assert f"{rows[3].run_name}: no resume_states/step_*.json in its folder" in msg and "--allow-fresh" in msg
+    assert f"{rows[4].run_name}: no folder" in msg and "is another run's (its seed is 999)" in msg
+    with pytest.raises(SystemExit, match="another run's"):
+        rb.runs_from(plan, src, allow_fresh=True)
+    shutil.rmtree(src / rows[5].run_name)
+    run(rows[5], 9)
+    found = rb.runs_from(plan, src, allow_fresh=True)
+    assert found[rows[0].run_name] == {"from": str(src / rows[0].run_name), "resume_state": "step_000063.json",
+                                       "steps_done": 63, "eval_done": False, "done": False}
+    assert found[rows[1].run_name]["done"] and found[rows[4].run_name] == {"fresh": True, "why": "no folder"}
+    out = capsys.readouterr().out
+    assert f"{rows[0].run_name} resumes from step_000063.json (63 steps done)" in out and "starts fresh" in out
+    pushed = []
+    monkeypatch.setattr(rb.nj, "push_path", lambda remote, local, dest: pushed.append((local, dest)))
+    monkeypatch.setattr(rb, "run_text", lambda remote, command, timeout=120, stdin_text=None: (
+        0, "step_000054.json\nstep_000063.json\nstep_000081.json\nstep_000090.json\nstep_000045.json\nstep_000009.json"))
+    batch = rb.Batch(tmp_path / "b")
+    batch.machines["rl"] = {"host": "md@203.0.113.9", "out": str(tmp_path)}
+    rb.push_runs(batch, rb.Ops(batch), found)
+    assert pushed == [(str(src / r.run_name), f"data/runs/{r.run_name}") for r in (rows[0], rows[1], rows[2], rows[5])]
+    done = {n: v["steps_done"] for n, v in found.items() if "steps_done" in v}
+    # steps left 27, 0, 45, 90, 90, 81 (with their evals): 7.0 of the 11.3 probe-server hours from scratch
+    assert rb.estimate(plan, 1)["probe_server_hours"] == 11.3 and rb.estimate(plan, 1, done)["probe_server_hours"] == 7.0
+    monkeypatch.setattr(rb, "run_text", lambda remote, command, timeout=120, stdin_text=None: (0, ""))
+    with pytest.raises(nj.InfraError, match="not on the RL machine"):
+        rb.push_runs(batch, rb.Ops(batch), {rows[0].run_name: found[rows[0].run_name]})
+    for extra, error in ((["--allow-fresh"], "give --runs-from"), (["--runs-from", str(tmp_path / "none")],
+                                                                    "not a folder")):
+        with pytest.raises(SystemExit, match=error):  # refused before anything is made
+            rb.main(["start", "--roster", str(_roster_file(tmp_path)), "--out", str(tmp_path / "b2"), *extra])
+    assert not (tmp_path / "b2").exists()
+
+
+def test_a_judges_replacement_on_vast_asks_for_every_judge_gpu_name(repo, tmp_path, monkeypatch):
+    """A new judges instance asks the launcher for every name of --judge-gpu, in order (it used to pass the first
+    name alone whenever none had an offer at that moment, and the launcher then waited for it alone)."""
+    fake = FakeLaunch()
+    monkeypatch.setattr(rb, "launch", fake)
+    monkeypatch.setattr(rb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(rb, "wire", lambda *a, **k: None)
+    batch, plan = _batch(tmp_path, repo)
+    rb.machines_up(batch, plan, rb.Settings(), {"judge_gpu": "H200", "lease_hours": 4.0}, 20)
+    ops = rb.Ops(batch)
+    ops.hub = None  # no offers asked here: the launcher asks for each name itself, also while it waits
+    assert rb.restart_server(batch, ops, plan, "judges", new_instance=True)
+    up = [c for c in fake.calls if c[0] == "up"][-1]
+    assert up[up.index("--gpu") + 1] == "H200,H200 NVL" and Path(up[up.index("--out") + 1]).name == "judges-r1"
+    assert ["down", "--provider", "vast", "--name", "dennis-judges-abc123", "--hub-gpu", "hub-gpu"] in fake.calls
+
+
+def test_a_tunnel_down_once_is_repaired_only_if_still_down_a_round_later(repo, tmp_path, nebius_world, monkeypatch):
+    """Healthy judges read "down through the tunnel (:8001: curl exit 28)" during eval bursts (2026-10-27): the checks
+    through the tunnels now wait 60 s, and a tunnel is repaired only when two rounds in a row find it down."""
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    batch.data["tunnel_pub"] = "ssh-ed25519 AAAAtunnel rl-batch x"
+    down, repairs = {"judges": ":8001: curl exit 28"}, []
+    monkeypatch.setattr(rb, "through_tunnels", lambda ops, probes, roles: {r: down.get(r) for r in roles})
+    monkeypatch.setattr(rb, "authorize", lambda remote, line: repairs.append(("authorize", remote.host)))
+    monkeypatch.setattr(rb, "tunnel_state", lambda rl, name: {"loop": True})
+    monkeypatch.setattr(rb, "kick_tunnel", lambda rl, name: repairs.append(("kick", name)))
+    ops, roles = rb.Ops(batch), ["probe", "judges"]
+    rb.health_round(batch, ops, plan, roles, {})
+    assert not repairs
+    rb.health_round(batch, ops, plan, roles, {})
+    assert repairs == [("authorize", batch.machines["judges"]["host"]), ("kick", "judges")]
+    down.clear()
+    rb.health_round(batch, ops, plan, roles, {})
+    down["judges"] = ":8002: curl exit 28"
+    rb.health_round(batch, ops, plan, roles, {})  # once again, after a good round: not yet
+    assert len(repairs) == 2
+    asked = []
+    monkeypatch.setattr(rb, "curl_json", lambda remote, url, timeout=20: asked.append((url, timeout)) or (True, {}))
+    world.real["through_tunnels"](ops, plan.probes, roles)
+    assert [u for u, _ in asked] == ["http://127.0.0.1:8178/v1/meta", "http://127.0.0.1:8001/v1/models"]
+    assert {t for _, t in asked} == {rb.TUNNEL_CHECK_SECONDS} == {60}
+
+
+def test_the_probe_servers_health_on_its_machine_asks_each_copy_and_the_balancer(repo, tmp_path, nebius_world,
+                                                                                monkeypatch):
+    """Two copies behind the balancer: on its machine each copy's port and the balancer's must serve every pinned sha
+    (a copy that lost one is down), through the tunnel the balancer's."""
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    every = {"probes": {sha: {} for sha in plan.probes.values()}}
+    answers, asked = {8179: every, 8180: {"probes": {}}, 8178: every}, []
+
+    def curl(remote, url, timeout=20):
+        port = int(url.split(":")[2].split("/")[0])
+        asked.append((remote.host, port))
+        return True, answers[port]
+
+    monkeypatch.setattr(rb, "curl_json", curl)
+    host = batch.machines["probe"]["host"]
+    why = nebius_world.real["server_health"](rb.Ops(batch), "probe", plan.probes)
+    assert why.startswith("the server at :8180 doesn't serve") and asked == [(host, 8179), (host, 8180)]
+    answers[8180] = every
+    assert nebius_world.real["server_health"](rb.Ops(batch), "probe", plan.probes) is None
+    assert asked[2:] == [(host, 8179), (host, 8180), (host, 8178)]
+
+
+def test_the_rehearsal_saves_every_step_and_stops_a_nebius_server_vm_for_a_new_one(repo, tmp_path, nebius_world,
+                                                                                  monkeypatch):
+    """The rehearsal saves at every step (its kill-and-resume drill resumes from a save), and on Nebius stops a server
+    VM as a preemption would: the health rounds must end it, make a new VM and move the tunnel there, while the runs
+    wait (no failed attempt)."""
+    reh = rb.rehearsal_roster(rb.load_roster(_roster_file(tmp_path)), None, None)
+    assert reh.sets[-2:] == ["eval_every=1", "save_every=1"]
+    world = nebius_world
+    batch, plan, s = _nebius_batch(tmp_path, repo)
+    rb.machines_up(batch, plan, s, {}, 8)
+    old = dict(batch.machines["probe"])
+    monkeypatch.setattr(rb, "vm_status", lambda ops: {"phase": "running", "runs": {"a": {"attempts": 0}}})
+    items = {}
+    rb.preemption_drill(batch, rb.Ops(batch), plan, lambda name, ok, **info: items.update({name: (ok, info)}))
+    ((name, (ok, info)),) = items.items()
+    assert ok and info["old"] == old["name"] and info["new"] == batch.machines["probe"]["name"] != old["name"]
+    assert ["stop", old["instance"]] in world.calls and ["down", "--name", old["name"]] in world.calls
+    assert world.wired == [["probe"]] and old["name"] not in world.vms
+
+
+def test_the_kill_and_resume_drill_kills_a_run_while_it_runs_after_a_save(monkeypatch):
+    """The drill restarts the first run once it runs with a save, and needs it back with --resume; a run that is no
+    longer running (it ended before the drill, as in the 2026-10-27 rehearsal) is not killed, and the item fails."""
+    plan = type("P", (), {"runs": [type("R", (), {"row": rb.Row("rehearsal-a", "c.json", 1, None)})()]})()
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rb.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(rb.time, "sleep", lambda s: clock.update(t=clock["t"] + s))
+    for running, want in ((True, True), (False, False)):
+        st = {"state": "running" if running else "done", "modes": ["fresh"]}
+        restarted, items = [], {}
+        monkeypatch.setattr(rb, "vm_status", lambda ops, st=st: {"runs": {"rehearsal-a": st}})
+        monkeypatch.setattr(rb, "run_text", lambda remote, command, timeout=120, stdin_text=None: (
+            0, "step_000000.json\nstep_000001.json\n"))
+
+        def control(ops, what, st=st, restarted=restarted):
+            restarted.append(what)
+            st["modes"].append("resume")
+
+        monkeypatch.setattr(rb, "control", control)
+        ops = type("O", (), {"rl": lambda self: "rl"})()
+        rb.kill_and_resume(ops, plan, lambda name, ok, **info: items.update(ok=ok, **info))
+        assert items["ok"] is want and restarted == (["restart-rehearsal-a"] if running else [])
+        assert items["resumed_from"] == ("step_000001.json" if running else None)
+
+
+def test_current_batch_names_the_batch_from_its_start_until_its_machines_are_gone(repo, tmp_path):
+    """output/gpu_jobs/CURRENT_BATCH (the watchdog's scheduled job reads it): the batch's folder, absolute, written as
+    it starts; another start is refused while it names a batch that has not ended; removed only by its own batch."""
+    jobs = tmp_path / "gpu_jobs"
+    pointer = jobs / "CURRENT_BATCH"
+    a, b = rb.Batch(jobs / "a"), rb.Batch(jobs / "b")
+    a.data["phase"] = "running"
+    a.save()
+    rb.claim_pointer(a, pointer)
+    assert pointer.read_text() == f"{a.out.resolve()}\n" and a.data["pointer"] == str(pointer.resolve())
+    with pytest.raises(SystemExit, match=r"has not ended \(running\)"):
+        rb.check_pointer(pointer, b.out)
+    with pytest.raises(SystemExit, match="has not ended"):  # start refuses before anything
+        rb.main(["start", "--roster", str(_roster_file(tmp_path)), "--out", str(jobs / "c")])
+    assert not (jobs / "c").exists()
+    a.data["phase"] = "ended"
+    a.save()
+    b.save()
+    rb.claim_pointer(b, pointer)
+    rb.release_pointer(a)  # it names b now: left alone
+    assert pointer.read_text() == f"{b.out.resolve()}\n"
+    rb.release_pointer(b)
+    assert not pointer.exists()
