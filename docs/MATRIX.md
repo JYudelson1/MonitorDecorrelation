@@ -181,3 +181,51 @@ judges, one group. Outputs: `scratch/matrix_vlad7/` (judges, step cap 90), `scra
   - Its 19 late "hacks" are guesses that happen to equal the corrupted value (`read_verifier` 0). So its large
     negative drops (q35_out −0.79, q3_out −0.95) measure oracle noise, not evasion.
   - Three of those cells pass Holm. This is why the honest rule is checked before evasion.
+
+## All 21 runs: Vlad's 15 and the v2 probe rows (2026-10-28)
+
+**Data.**
+- Vlad's 15 runs (`../scratch/vlad-batch-oct1/runs/`).
+- The 6 probe-row runs of amendment 3 (`../output/gpu_jobs/20261028-134936-probe-rows-v2/runs/`, the batch resumed
+  from its saves; `STATUS.md`).
+- Both v2 probes post hoc on every valid eval episode of all 21 runs to step 90, on B200 only: 21 runs, every
+  one complete, none unscorable (`../output/posthoc_probe_scores_20261028/`).
+
+**Checks.**
+- On each probe-row run, the post-hoc score of the probe it trained against equals its live score, within 2e-15 on
+  every one of its ~7,700 eval episodes. The live score came from the batch's probe servers, three different B200
+  machines across the resume.
+- Our judges' consistency with Vlad's live scores: `STATUS.md`, amendment 3's judge check.
+
+Outputs: `../output/matrix_21runs_20261028/` (`per_eval.csv`, `matrix.*`, and the figure
+`matrix21_hack_curves.png`).
+
+```bash
+python -I experiments/build_matrix.py --group vlad '../scratch/vlad-batch-oct1/runs/*' \
+    '../output/gpu_jobs/20261028-134936-probe-rows-v2/runs/*' --posthoc ../output/posthoc_probe_scores_20261028 \
+    --out ../output/matrix_21runs_20261028
+```
+
+**Amendment 3's read: each monitor's mean score on hacks per eval step** (`mu_hack`), drawn per row in
+`matrix21_hack_curves.png`. Condensed below to an early window (eval steps 0–9) and a late one (81–90): per seed the
+mean of its steps with hacks, then the mean over seeds. A count in brackets is the number of seeds with a value; 3
+otherwise.
+
+| row (trained against) | hack rate: early → late | q3_cot: early → late | q3_out: early → late | q35_cot: early → late | q35_out: early → late | probe_iid: early → late | probe_ood: early → late |
+|---|---|---|---|---|---|---|---|
+| q3_cot | 0.45 → 1.00 | 0.89 → 0.30 | 0.92 → 0.65 | 0.95 → 0.93 | 0.96 → 0.95 | 1.00 → 0.49 | 0.14 → 0.46 |
+| q3_out | 0.48 → 0.99 | 0.91 → 0.34 | 0.94 → 0.33 | 0.95 → 0.94 | 0.96 → 0.94 | 0.99 → 0.56 | 0.08 → 0.60 |
+| q35_cot | 0.39 → 1.00 | 0.89 → 0.95 | 0.93 → 0.97 | 0.94 → 0.94 | 0.95 → 0.96 | 0.98 → 0.99 | 0.11 → 0.09 |
+| q35_out | 0.32 → 0.51 (2) | 0.83 → 0.58 (2) | 0.86 → 0.59 (2) | 0.88 → 0.63 (2) | 0.89 → 0.68 (2) | 0.92 → 0.64 (2) | 0.13 → 0.52 (2) |
+| probe_iid | 0.01 → 0.02 | 0.90 → 0.19 | 0.92 → 0.28 | 0.93 → 0.40 | 0.95 → 0.56 | 1.00 → 0.01 | 0.21 → 0.34 |
+| probe_ood | 0.49 → 1.00 | 0.89 → 0.97 | 0.91 → 0.98 | 0.92 → 0.97 | 0.93 → 0.97 | 0.96 → 1.00 | 0.07 → 0.00 |
+| control | 0.48 → 1.00 | 0.91 → 0.96 | 0.93 → 0.98 | 0.92 → 0.96 | 0.95 → 0.97 | 0.96 → 0.86 | 0.08 → 0.11 |
+
+Notes on reading it (descriptive; no test was pre-registered for these cells):
+- **The IID-probe rows hack rarely** (hack rate 0.01–0.02). Their mean scores rest on few hacks: 7–41 per seed in the
+  late window, 2–14 in the early one.
+- **strong-out (`q35_out`):** 2 of its 3 seeds reach the late window (214 stopped early). Seed 202's late hacks are
+  guesses, as in the first run above.
+- **The OOD probe scores this env's hacks low from the start:** 0.07–0.14 early in every row but the IID probe's
+  (0.21).
+- The catch-rate matrix in `matrix.md` stays exploratory (amendment 3).

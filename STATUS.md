@@ -61,7 +61,10 @@ build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe
 
     Our 2026-10-27 H200 judges came out the same. What to do about a difference beyond the noise is still the owner's
     call (amendment 3); none stands out.
-  - **Post-hoc probe scoring** of all 21 runs is under way, on B200 only.
+  - **Post-hoc probe scoring is complete:** both v2 probes on every valid eval episode of all 21 runs to step 90,
+    on B200 only. The probe rows' trained-against probe, post hoc, equals its live score within 2e-15 on every
+    episode. Amendment 3's read for all 21 runs (each monitor's mean score on hacks per eval step): docs/MATRIX.md,
+    "All 21 runs".
 
 ## Earlier experiment (2026-07-06) — MBPP-Honeypot cross-method degradation matrix (Qwen3-8B), penalty=0.5 batch
 - **The pivot.** The first batch (`data/runs/mbpp_matrix_orig_20260701/`, penalty_coef=1.0) is the
