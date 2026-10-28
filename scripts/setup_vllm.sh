@@ -363,6 +363,30 @@ serve_lb() {
     ${VLLM_HOST:+--listen-host "$VLLM_HOST"}
 }
 
+# The engines' weights, downloaded before any engine starts: one `hf download` per repo, as scripts/nebius_job.py fetches
+# the probes' reader. On Nebius VMs (2026-10-28) the engines' own downloads, unauthenticated and at once, stalled for
+# good: no bytes coming in, every file .incomplete at or near its size, the engines waiting. A repo that still fails
+# after 3 tries is left to its engine.
+JUDGE_REPOS=(Qwen/Qwen3-30B-A3B-FP8 AngelSlim/Qwen3-a3B_eagle3 Qwen/Qwen3.5-35B-A3B-FP8)
+predownload() {
+  local hf repo try
+  hf="$(dirname "$VLLM")/hf"
+  if [[ ! -x "$hf" ]]; then
+    echo "no hf CLI beside $VLLM: each engine downloads its own weights"
+    return 0
+  fi
+  for repo in "${JUDGE_REPOS[@]}"; do
+    for try in 1 2 3; do
+      if HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 timeout 1200 "$hf" download "$repo" >/dev/null; then
+        echo "weights: $repo"
+        break
+      fi
+      echo "hf download $repo failed (try $try of 3)"
+    done
+  done
+}
+predownload
+
 serve_q3
 if [[ "$NGPU" -eq 2 ]]; then
   serve_q35 "${GPU_IDS[1]}" 8002

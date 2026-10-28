@@ -763,6 +763,29 @@ def test_setup_vllm_starts_each_server_with_the_vllm_envs_tools_on_its_path(vllm
     assert set(found) == {"8001", "8003", "8004", "8005"} and set(found.values()) == {str(venv / "ninja")}
 
 
+def test_setup_vllm_downloads_every_judge_repo_before_any_engine_starts(vllm_box):
+    """On Nebius VMs the engines' own concurrent downloads stalled for good (2026-10-28): each judge repo (both models
+    and q3's draft) is fetched once by the vLLM env's hf CLI before the first engine starts; a failing one is tried 3
+    times, then left to its engine."""
+    repo, env, calls = vllm_box
+    fake = Path(env["PATH"].split(":")[0])
+    _fake_bin(fake, "hf", 'echo "hf $*" >> "$FAKE_CALLS"\n[ "$2" = "AngelSlim/Qwen3-a3B_eagle3" ] && exit 1\nexit 0')
+    proc = _setup_vllm(repo, env)
+    try:
+        assert _wait(lambda: calls.exists() and sum(x.split()[0] in {"8001", "8003", "8004", "8005"}
+                                                    for x in calls.read_text().splitlines()) >= 4, 40, 0.5)
+    finally:
+        os.killpg(proc.pid, signal.SIGTERM)
+        out = proc.communicate(timeout=30)[0]
+    lines = calls.read_text().splitlines()
+    hf = [x for x in lines if x.startswith("hf ")]
+    assert hf == ["hf download Qwen/Qwen3-30B-A3B-FP8", *["hf download AngelSlim/Qwen3-a3B_eagle3"] * 3,
+                  "hf download Qwen/Qwen3.5-35B-A3B-FP8"]
+    first_engine = min(i for i, x in enumerate(lines) if not x.startswith("hf "))
+    assert all(i < first_engine for i, x in enumerate(lines) if x.startswith("hf "))
+    assert "weights: Qwen/Qwen3-30B-A3B-FP8" in out and "hf download AngelSlim/Qwen3-a3B_eagle3 failed (try 3 of 3)" in out
+
+
 def test_setup_vllm_gives_up_on_a_server_that_keeps_dying(vllm_box):
     repo, env, calls = vllm_box
     proc = _setup_vllm(repo, {**env, "VLLM_RESTART": "1", "VLLM_RESTART_MAX": "1", "DIE_PORT": "8003",
