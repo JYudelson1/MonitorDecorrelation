@@ -2780,13 +2780,15 @@ def test_vast_up_refuses_what_a_kept_server_cannot_do(tmp_path, fake_hub, argv, 
     assert not FakeHubGpu.started
 
 
-def test_nebius_up_takes_no_server_and_no_vast_flags(tmp_path, fake_cloud):
-    with pytest.raises(SystemExit, match="up takes no job command"):
-        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--", "srv"])
-    with pytest.raises(SystemExit, match="only with up --provider vast"):
-        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--health", "true"])
-    with pytest.raises(SystemExit, match="only with --provider vast"):
-        nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), "--gpu", "B200"])
+def test_nebius_up_refuses_what_a_kept_server_cannot_do_and_vast_flags(tmp_path, fake_cloud):
+    """Nebius up -- CMD starts CMD as a server, as up --provider vast does: it needs --health, --health needs a
+    command, --step a step name; vast.ai's own flags stay refused. All before anything is asked of the cloud."""
+    for argv, error in ((["--", "srv"], "give --health"), (["--health", "true"], "give its command after --"),
+                        (["--step", "Bad Step", "--health", "true", "--", "srv"], "--step wants"),
+                        (["--gpu", "B200"], "only with --provider vast")):
+        with pytest.raises(SystemExit, match=error):
+            nj.main(["up", "--hours", "1", "--out", str(tmp_path / "o"), *argv])
+    assert not FakeNebius.clouds
 
 
 def test_vast_up_dry_run_shows_the_server_its_health_check_and_that_it_is_kept(tmp_path, fake_hub, capsys):
@@ -2940,3 +2942,176 @@ def test_serve_on_a_kept_vast_instance_restarts_its_server(tmp_path, monkeypatch
     with pytest.raises(SystemExit, match="looks like a key"):
         nj.main(["serve", "--provider", "vast", "--name", row["name"], "--out", str(tmp_path / "s3"), "--health",
                  "true", "--env", "HF_TOKEN=hf_aaaaaaaaaaaaaaaaaaaaaaaa", "--", "srv"])
+
+
+# ------------------------------------------------------------------------- Nebius: kept VMs with a server (2026-10-28)
+
+
+def test_nebius_up_keeps_the_vm_with_its_server_running(tmp_path, monkeypatch, regions_file):
+    """up -- CMD on Nebius, as on vast.ai: the VM set up (its --hf downloads too), CMD started as the server step (the
+    VM is its own: a restart frees its GPUs) and waited for until --health passes, then kept with its ledger entry
+    reserved. A server that never gets healthy, or a preemption while it starts, deletes the VM, verified."""
+    seen = {}
+
+    def steps(remote, job, rec, check_vm=None):
+        check_vm()  # alive: nothing raised
+        seen.update(serve=job.serve, step=job.step, health=job.health, command=job.command,
+                    timeout=job.health_timeout, free_gpus=job.free_gpus, provider=job.provider, host=remote.host,
+                    hf=job.hf)
+        return 0
+
+    monkeypatch.setattr(nj, "remote_steps", steps)
+    ledger = _ledger(tmp_path, 0.0)
+    up = ["up", *_region_args(tmp_path, regions_file, "--max-gpu-price", "2.5", "--budget-file", str(ledger),
+                              "--health", "curl -sf http://127.0.0.1:8178/v1/meta", "--health-timeout", "600",
+                              "--hf", "org/reader@abc")]
+    assert nj.main([*up, "--", "python3 -m http.server 8178"]) == 0
+    assert seen == {"serve": True, "step": "serve", "health": "curl -sf http://127.0.0.1:8178/v1/meta",
+                    "command": "python3 -m http.server 8178", "timeout": 600.0, "free_gpus": True,
+                    "provider": "nebius", "host": "md@1.2.3.4", "hf": [("org/reader", "abc", "reader")]}
+    cloud = FakeNebius.clouds["project-u02"]  # us-north1: the cheapest under the bid
+    assert cloud.alive and not cloud.deleted
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert rec["kept"] and rec["mode"] == "up" and (rec["region"], rec["platform"]) == ("us-north1", "gpu-b300-sxm")
+    entry = next(e for e in json.loads(ledger.read_text())["entries"] if e.get("job") == rec["name"])
+    assert entry["kind"] == "reserved" and entry["kept"] is True
+    for failure, code in ((nj.InfraError("the server (serve) exited 1 before its health check passed"), nj.EXIT_INFRA),
+                          (nj.VmStopped("STOPPED"), nj.EXIT_STOPPED)):
+        def broken(remote, job, rec, check_vm=None, failure=failure):
+            raise failure
+
+        monkeypatch.setattr(nj, "remote_steps", broken)
+        FakeNebius.clouds.clear()
+        assert nj.main([*up, "--", "srv"]) == code
+        cloud = FakeNebius.clouds["project-u02"]
+        assert not cloud.alive and cloud.deleted
+        rec = json.loads((tmp_path / "out" / "job.json").read_text())
+        assert not rec["kept"] and rec["teardown_verified"] is True
+        assert next(e for e in json.loads(ledger.read_text())["entries"]
+                    if e.get("job") == rec["name"])["kind"] == "spent"
+
+
+def test_a_platform_list_is_priced_where_each_is_offered_and_each_vm_gets_its_own(tmp_path, monkeypatch, capsys,
+                                                                                  regions_file):
+    """--platform gpu-b200-sxm-a,gpu-b200-sxm (B200's names in me-west1 and us-central1, 2026-10-28): each priced where
+    the capacity advice offers it, the cheapest of all tried first on its own platform and pricing policy, the next one
+    if its creation fails; job.json records the platform the VM got. CPU and GPU platforms don't mix."""
+    data = json.loads(regions_file.read_text())
+    data["regions"]["me-west1"] = {"project": "project-m01", "subnet": "vpcsubnet-m01",
+                                   "image_project": "project-m01public-images"}
+    regions_file.write_text(json.dumps(data))
+    b200 = "8gpu-160vcpu-1792gb"
+    monkeypatch.setattr(FakeNebius, "PRICES", {**FakeNebius.PRICES, "project-m01": 30.4, "project-u00": 33.6})
+    monkeypatch.setattr(FakeNebius, "CAPACITY", [_advice("me-west1", "gpu-b200-sxm-a", b200, "MEDIUM"),
+                                                 _advice("us-central1", "gpu-b200-sxm", b200, "LOW")])
+    monkeypatch.setattr(nj, "remote_steps", lambda remote, job, rec, check_vm=None: 0)
+    run = ["run", *_region_args(tmp_path, regions_file, "--platform", "gpu-b200-sxm-a,gpu-b200-sxm", "--preset",
+                                b200, "--max-gpu-price", "4.5"), "--", "true"]
+    assert nj.main(run) == 0
+    me = FakeNebius.clouds["project-m01"]
+    assert _flag(me.create_argv, "--resources-platform") == "gpu-b200-sxm-a" and me.deleted
+    assert [p["spec"]["compute_instance_spec"]["v1"]["platform"] for p in me.policies] == ["gpu-b200-sxm-a"]
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert (rec["region"], rec["platform"]) == ("me-west1", "gpu-b200-sxm-a")
+    priced = {(o["region"], o["platform"]): o["price"] for o in rec["offers"] if o["price"] is not None}
+    assert priced == {("me-west1", "gpu-b200-sxm-a"): 30.4, ("us-central1", "gpu-b200-sxm"): 33.6}
+    assert "gpu-b200-sxm-a" in capsys.readouterr().out  # the table names each line's platform
+    monkeypatch.setattr(FakeNebius, "FAIL_CREATE", {"project-m01"})  # no room in me-west1 after all
+    assert nj.main(run) == 0
+    central = FakeNebius.clouds["project-u00"]
+    assert _flag(central.create_argv, "--resources-platform") == "gpu-b200-sxm"
+    assert [p["spec"]["compute_instance_spec"]["v1"]["platform"] for p in central.policies] == ["gpu-b200-sxm"]
+    rec = json.loads((tmp_path / "out" / "job.json").read_text())
+    assert (rec["region"], rec["platform"]) == ("us-central1", "gpu-b200-sxm")
+    assert [(c["region"], c["platform"]) for c in rec["creates"]] == [("me-west1", "gpu-b200-sxm-a"),
+                                                                     ("us-central1", "gpu-b200-sxm")]
+    with pytest.raises(SystemExit, match="GPU platforms, or CPU ones"):
+        nj.main(["run", *_region_args(tmp_path, regions_file, "--platform", "cpu-d3,gpu-b200-sxm"), "--", "true"])
+
+
+def test_serve_on_a_kept_nebius_vm_frees_its_gpus_only_when_told(tmp_path, monkeypatch):
+    """serve --host (a kept Nebius VM): --free-gpus, the VM being the server's own, kills every GPU process left once
+    the step is stopped, as on vast.ai; without it (any box) only the step's own session goes."""
+    seen, serve_step = [], nj.serve_step
+    monkeypatch.setattr(nj, "serve_step", lambda remote, job, rec, check_vm=None: seen.append(
+        (remote.host, remote.key, job.free_gpus, job.provider)) or 0)
+    base = ["serve", "--host", "md@203.0.113.9", "--ssh-key", "/k", "--health", "true"]
+    assert nj.main([*base, "--free-gpus", "--out", str(tmp_path / "s1"), "--", "srv"]) == 0
+    assert nj.main([*base, "--out", str(tmp_path / "s2"), "--", "srv"]) == 0
+    assert seen == [("md@203.0.113.9", "/k", True, "nebius"), ("md@203.0.113.9", "/k", False, "nebius")]
+    freed = []
+    monkeypatch.setattr(nj, "stop_step", lambda remote, step, grace=60, free_gpus=False: freed.append(free_gpus) or "")
+    monkeypatch.setattr(nj, "start", lambda remote, step, script, cwd=None: None)
+    monkeypatch.setattr(nj, "wait_healthy", lambda remote, job, check_vm=None: 0.0)
+    for free in (True, False):
+        job = nj.JobSpec(out=tmp_path, command="srv", serve=True, health="true", free_gpus=free)
+        assert serve_step(nj.Remote("md@h", tmp_path / "kh"), job, nj.Record(mode="serve")) == 0
+    assert freed == [True, False]
+
+
+def test_vast_gpu_names_are_each_asked_in_order_whenever_the_offers_are_checked(tmp_path, monkeypatch, fake_hub):
+    """--gpu 'H200,H200 NVL' (the driver's judges replacement, 2026-10-28): the first name with a qualifying offer wins,
+    even if dearer; while none has one, every name is asked again at each check of the wait (it used to wait for the
+    first name only)."""
+    def offer(n, gpu, price):
+        return {"offer": n, "gpu": gpu, "gpus": 4, "gpu_ram_gb": 141.0, "usd_per_hour": price, "reliability": 0.99,
+                "where": "Texas, US", "cpu_cores": 64.0, "ram_gb": 512.0, "cuda": 13.0, "down_mbps": 1000.0,
+                "up_mbps": 1000.0, "datacenter": True}
+
+    nvl, h200 = offer(301, "H200 NVL", 16.08), offer(302, "H200", 24.0)
+    args = ["run", *_vast_args(tmp_path, "--gpu", "H200,H200 NVL", "--gpus", "4", "--wait-hours", "1"), "--", "true"]
+    FakeHubGpu.OFFERS = [nvl]
+    assert nj.main(args) == 0 and FakeHubGpu.started[-1]["offer"] == 301
+    FakeHubGpu.OFFERS = [nvl, h200]
+    assert nj.main(args) == 0 and FakeHubGpu.started[-1]["offer"] == 302  # the first name, though dearer
+    FakeHubGpu.OFFERS = []
+    waits = []
+
+    def sleep(s):
+        if s == nj.PRICE_RECHECK_SECONDS:
+            waits.append(s)
+            FakeHubGpu.OFFERS[:] = [nvl]  # an H200 NVL comes during the wait: the second name
+
+    monkeypatch.setattr(nj.time, "sleep", sleep)
+    FakeHubGpu.calls.clear()
+    assert nj.main(args) == 0 and FakeHubGpu.started[-1]["offer"] == 301 and waits == [nj.PRICE_RECHECK_SECONDS]
+    assert FakeHubGpu.calls.count("offers") == 4  # both names before the wait and both after (H200 has none)
+
+
+def test_the_end_of_a_pending_start_with_no_number_is_asked_by_name_and_never_spins(monkeypatch):
+    """A start still pending is listed without an instance number: its end is asked by name (hub-gpu takes either),
+    once a minute, a refusal included (it used to ask hub-gpu to end "None" every 5 s until the timeout); another job's
+    pending row is left alone; one without a number in a dead state never got an instance and is gone; one that never
+    ends is given up on at the timeout, naming it."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(nj.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(nj.time, "sleep", lambda s: clock.update(t=clock["t"] + s))
+    calls = []
+
+    class Hub:
+        def __init__(self, rows, ends_at=None):
+            self.rows, self.ends_at = rows, ends_at
+
+        def instances(self):
+            return [dict(r) for r in self.rows]
+
+        def end(self, ident):
+            calls.append((clock["t"], ident))
+            if self.ends_at is None or len(calls) < self.ends_at:
+                raise nj.InfraError("hub-gpu end failed (1): no such instance yet")
+            for r in self.rows:
+                if ident in (r["instance"], r["name"]):
+                    r.update(ended=clock["t"], state="exited")
+
+    rows = [{"instance": None, "name": "md-x-1", "state": "pending", "ended": None},
+            {"instance": None, "name": "md-other-2", "state": "pending", "ended": None}]
+    assert nj.vast_teardown(Hub(rows, ends_at=3), "md-x-1")["ended"] is not None
+    assert [i for _, i in calls] == ["md-x-1"] * 3 and all(b - a >= 60 for (a, _), (b, _) in zip(calls, calls[1:]))
+    assert rows[1]["ended"] is None  # another job's pending row: untouched
+    calls.clear()
+    with pytest.raises(nj.InfraError, match=r"end it by hand \(hub-gpu end md-y-1\).*None, 'pending'"):
+        nj.vast_teardown(Hub([{"instance": None, "name": "md-y-1", "state": "pending", "ended": None}]), "md-y-1")
+    assert 3 <= len(calls) <= 6  # once a minute over the 300 s, not every 5 s
+    calls.clear()
+    gone = nj.vast_teardown(Hub([{"instance": None, "name": "md-z-1", "state": "failed", "ended": None}]), "md-z-1")
+    assert gone["state"] == "failed" and not calls

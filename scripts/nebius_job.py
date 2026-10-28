@@ -9,6 +9,8 @@ B300), so a GPU job is a single command:
         --hf thinkingmachines/Inkling-Small-NVFP4 --push ../episodes.jsonl:data/episodes.jsonl \\
         --fetch results -- uv run python experiments/some_job.py --out results
     python3 scripts/nebius_job.py up --hours 4 --out runs/{stamp}-{name}     # keep the VM, print ssh
+    python3 scripts/nebius_job.py up --hours 8 --out DIR --health CHECK -- SERVER  # kept, with a server on it
+    python3 scripts/nebius_job.py serve --host md@1.2.3.4 --free-gpus --out DIR --health CHECK -- SERVER  # restart it
     python3 scripts/nebius_job.py exec --host md@1.2.3.4 --out runs/x -- CMD  # any SSH box, no Nebius
     python3 scripts/nebius_job.py down --name md-job-3fa9c1                   # delete + verify, any region
     python3 scripts/nebius_job.py list                                        # every region
@@ -30,6 +32,9 @@ Where the VM goes: ``--regions-file`` (env NEBIUS_REGIONS_FILE) lists the candid
   try the next.
 - ``--regions a,b`` narrows the list. ``--project-id`` / ``--subnet-id`` / ``--image-project`` instead pin
   one project.
+- ``--platform`` may be a comma list: a GPU type's name differs by region (2026-10-28: B200 is ``gpu-b200-sxm-a`` in
+  me-west1, ``gpu-b200-sxm`` in us-central1). Each is priced in every region that offers it, and the cheapest of
+  them all is tried first; ``job.json`` records the one the VM got (``platform``).
 - Spot prices move every 15 minutes, and on 2026-10-09 the same B300 cost $0.99/h in us-north1 and $7.69/h in
   uk-south1. So ``job.json`` records every region's quote, the chosen region, the price every 15 minutes
   while the VM exists, and an estimated cost. The CLI cannot show what a VM actually cost; the console's
@@ -146,6 +151,16 @@ Kept vast.ai instances and servers (``up --provider vast``, 2026-10-23, for the 
 - ``status --provider vast`` lists the live instances: state, price, deadline and time left, SSH address, tags.
 - ``down --provider vast --name N`` ends one, verified in hub-gpu list, and settles its ledger entry at its price × the
   time from its start to its verified end. vast.ai destroys a timed instance at its end anyway.
+- ``--gpu`` may be a comma list in order of preference (``H200,H200 NVL``): each check of the offers, a wait's too,
+  takes the first that has a qualifying one.
+
+Kept Nebius VMs with a server (2026-10-28, the RL batch's servers on Nebius spot): ``up -- CMD --health CHECK`` is the
+same on a Nebius VM. The VM is created, set up and its ``--hf`` downloads done, then CMD starts as the server step and
+is waited for until CHECK passes; a preemption meanwhile (the VM's state, checked whenever SSH fails) or a server that
+never gets healthy deletes the VM, verified, as a run does. A healthy one is kept: its ledger entry stays reserved
+until ``down`` settles it, its ``--hours`` shutdown stops it unless moved (``sudo shutdown -h +MINUTES``, never past
+``--hours``: the reservation). ``serve --host md@IP --free-gpus`` restarts its server (the VM is the server's own, so
+every GPU process left is killed too, as on vast.ai).
 
 Relaunching (``run --attempts N``, default 3): after a spot preemption, or a job that exits 75 (it stopped early,
 e.g. at its deadline, and can resume), a fresh VM runs the job again, in whichever region is cheapest then. That
@@ -228,7 +243,7 @@ REPO = Path(__file__).resolve().parents[1]
 RAM_DIR = "/mnt/ram"
 REMOTE_REPO = "md"  # relative to the remote $HOME, where every ssh command starts
 REMOTE_LOGS = "nebius_job"  # ditto: <step>.log / <step>.exit for the detached steps
-SERVE_STEP = "serve"  # a long-lived server's step (up --provider vast -- CMD, serve): also <step>.pid, its group
+SERVE_STEP = "serve"  # a long-lived server's step (up -- CMD, serve): also <step>.pid, its group
 STEP_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 SEP = "---nebius-job-sep---"
 EXIT_INFRA, EXIT_STOPPED, EXIT_INTERRUPTED = 2, 3, 130
@@ -886,6 +901,10 @@ class Nebius:
     def delete_instance(self, instance_id: str) -> None:
         self._run(["compute", "instance", "delete", "--id", instance_id], timeout=1800)
 
+    def stop_instance(self, instance_id: str) -> None:
+        """Stop the VM, as a spot preemption does (on-preemption: stop): the RL batch rehearsal's simulated one."""
+        self._run(["compute", "instance", "stop", "--id", instance_id], timeout=900)
+
     def delete_disk(self, disk_id: str) -> None:
         self._run(["compute", "disk", "delete", "--id", disk_id], timeout=900)
 
@@ -948,6 +967,7 @@ class Offer:
     level: str | None = None  # capacity advice: HIGH / MEDIUM / LOW / LIMIT_REACHED (None: unknown)
     available: int | None = None  # quota left for this preset (None: unknown)
     note: str = ""  # why there is no price, or that the region does not offer the platform
+    platform: str = ""  # which of --platform's (a GPU type's names differ by region)
 
     def skip_reason(self, max_price: float | None) -> str | None:
         if self.note:
@@ -977,9 +997,16 @@ def capacity_of(items: list[dict], region: str, platform: str, preset: str, spot
     return False, None, None
 
 
+def platforms_of(platform: str) -> list[str]:
+    """``--platform``: one, or a comma list of them: a GPU type's name may differ by region (2026-10-28: B200 is
+    gpu-b200-sxm-a in me-west1, gpu-b200-sxm in us-central1)."""
+    return [p.strip() for p in platform.split(",") if p.strip()]
+
+
 def survey(nebius: str, regions: list[Region], tenant: str | None, platform: str, preset: str,
            spot: bool) -> list[Offer]:
-    """Price and capacity of the VM in every region. Read-only: the cost calculator and capacity advice.
+    """Price and capacity of the VM in every region, for each of ``platform``'s platforms (a comma list: each where
+    it is offered). Read-only: the cost calculator and capacity advice.
 
     The advice covers GPU presets only: a CPU preset it doesn't list is still priced, its capacity and quota left
     unknown (a region without the platform fails the calculator or the creation, and is skipped)."""
@@ -990,19 +1017,20 @@ def survey(nebius: str, regions: list[Region], tenant: str | None, platform: str
         except InfraError as e:
             log(f"capacity advice unavailable, choosing by price alone: {e}")
     offers = []
-    for region in regions:
-        offer = Offer(region.name)
-        if capacity is not None:
-            offered, offer.level, offer.available = capacity_of(capacity, region.name, platform, preset, spot)
-            if not offered and not is_cpu_platform(platform):
-                offer.note = f"{platform}/{preset} not offered here"
-                offers.append(offer)
-                continue
-        try:
-            offer.price = Nebius(nebius, region.project).estimate_hourly(platform, preset, spot)
-        except (InfraError, ValueError, KeyError, TypeError) as e:
-            offer.note = f"no price ({str(e)[:120]})"
-        offers.append(offer)
+    for plat in platforms_of(platform):
+        for region in regions:
+            offer = Offer(region.name, platform=plat)
+            if capacity is not None:
+                offered, offer.level, offer.available = capacity_of(capacity, region.name, plat, preset, spot)
+                if not offered and not is_cpu_platform(plat):
+                    offer.note = f"{plat}/{preset} not offered here"
+                    offers.append(offer)
+                    continue
+            try:
+                offer.price = Nebius(nebius, region.project).estimate_hourly(plat, preset, spot)
+            except (InfraError, ValueError, KeyError, TypeError) as e:
+                offer.note = f"no price ({str(e)[:120]})"
+            offers.append(offer)
     return offers
 
 
@@ -1013,13 +1041,18 @@ def candidates(offers: list[Offer], max_price: float | None) -> list[Offer]:
     return sorted(ok, key=lambda o: (o.price, rank.get(o.level or "", 3)))
 
 
-def offer_table(offers: list[Offer], max_price: float | None, chosen: str | None) -> str:
-    lines = [f"  {'region':12} {'$/hour':>8}  {'capacity':13} {'quota':>5}  note"]
+def offer_table(offers: list[Offer], max_price: float | None, chosen: str | Offer | None) -> str:
+    """The offers, one line each; ``chosen`` (an offer, or a region) is marked. With several platforms, each line
+    names its own."""
+    several = len({o.platform for o in offers}) > 1
+    lines = [f"  {'region':12} " + (f"{'platform':16} " if several else "") + f"{'$/hour':>8}  {'capacity':13} "
+             f"{'quota':>5}  note"]
     for o in offers:
         price = f"{o.price:.2f}" if o.price is not None else "-"
-        note = "<- cheapest, tried first" if o.region == chosen else (o.skip_reason(max_price) or "")
-        lines.append(f"  {o.region:12} {price:>8}  {o.level or '?':13} "
-                     f"{o.available if o.available is not None else '?':>5}  {note}")
+        mine = o is chosen if isinstance(chosen, Offer) else o.region == chosen
+        note = "<- cheapest, tried first" if mine else (o.skip_reason(max_price) or "")
+        lines.append(f"  {o.region:12} " + (f"{o.platform:16} " if several else "") + f"{price:>8}  "
+                     f"{o.level or '?':13} {o.available if o.available is not None else '?':>5}  {note}")
     return "\n".join(lines)
 
 
@@ -1368,10 +1401,11 @@ class JobSpec:
     ends: float | None = None  # vast.ai: when the instance is destroyed (epoch s), whatever runs on it
     reserve: float = 0.0  # vast.ai: seconds before ``ends`` kept for the fetch: the job's deadline is ends - reserve
     rsync: str = "rsync"  # vast.ai: this machine's rsync, for the fetch
-    serve: bool = False  # the command is a server (up --provider vast -- CMD, serve): started, then left running
+    serve: bool = False  # the command is a server (up -- CMD, serve): started, then left running
     step: str = SERVE_STEP  # the server's step name: ~/nebius_job/<step>.log, .pid, .exit
     health: str | None = None  # a shell command on the machine that exits 0 once the server answers
     health_timeout: float = 2700.0  # seconds from the server's start to a passing health check
+    free_gpus: bool = False  # a machine of its own: a server's restart frees every GPU (vast.ai always does)
 
 
 def job_setup_script(job: JobSpec) -> str:
@@ -1407,6 +1441,7 @@ class Record:
     kept: bool = False
     teardown_verified: bool | None = None
     region: str | None = None
+    platform: str | None = None  # the VM's platform: of --platform's comma list, the one it was created on
     max_price: float | None = None
     offers: list = field(default_factory=list)  # every region's price/capacity at launch
     price_samples: list = field(default_factory=list)  # [utc, $/hour] while the VM existed
@@ -1776,7 +1811,7 @@ def remote_steps(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> in
     rec.save(job.out)
     if job.command is None:
         return None
-    if job.serve:  # a server (up --provider vast -- CMD): started detached, and left running once it is healthy
+    if job.serve:  # a server (up -- CMD): started detached, and left running once it is healthy
         return serve_step(remote, job, rec, check_vm)
     if job.uploads:  # before the job, so it can save its progress as it goes; removed when the upload step ends
         send_token(remote, job.hf_token_file)
@@ -1894,7 +1929,7 @@ def signals_held():
 
 
 # ------------------------------------------------------------------------- long-lived servers (serve steps)
-# A server (``up --provider vast -- CMD``, ``serve``) is a detached step like a job, ~/nebius_job/<step>.log and .exit,
+# A server (``up -- CMD``, ``serve``) is a detached step like a job, ~/nebius_job/<step>.log and .exit,
 # that is not waited for to its end: the launcher waits for its health check instead, then leaves it running. Its
 # session leader writes its pid to <step>.pid first, so a restart can stop its whole session (vLLM's engines and a
 # wrapper's children, whatever process groups they are in) before it starts the new one.
@@ -2015,7 +2050,7 @@ def wait_healthy(remote: Remote, job: JobSpec, check_vm=None, interval: float | 
 def serve_step(remote: Remote, job: JobSpec, rec: Record, check_vm=None) -> int:
     """Start ``job.command`` as the server step ``job.step`` (stopping one already there first: a restart) and wait
     until ``job.health`` passes (``wait_healthy``). The server is left running. Returns 0; InfraError otherwise."""
-    said = stop_step(remote, job.step, free_gpus=job.provider == "vast")
+    said = stop_step(remote, job.step, free_gpus=job.free_gpus or job.provider == "vast")
     for line in said.splitlines():
         print(f"  stop| {line}", flush=True)
     fallback = int(job.ends - job.reserve) if job.ends is not None else None
@@ -2326,9 +2361,10 @@ def vast_wait_ssh(hub: HubGpu, remote: Remote, instance, attached: bool, until: 
 
 def vast_teardown(hub: HubGpu, name: str, instance=None, timeout: float = 300) -> dict | None:
     """End the instance (by number, and by name in case its start failed before its number was known), then verify
-    that ``hub-gpu list`` shows it ended, or not at all. Every call is retried until ``timeout``, an end that the list
-    doesn't show yet asked again each minute; InfraError if the instance is still there then. Returns its last list
-    row (None: never listed)."""
+    that ``hub-gpu list`` shows it ended, or not at all. Every call is retried until ``timeout``, each end (or a refused
+    one) asked again once a minute; InfraError if the instance is still there then. A row listed without a number (a
+    start still pending) is ended by its name, as hub-gpu takes either; one without a number in a dead state never got
+    an instance and is gone already. Returns its last list row (None: never listed)."""
     deadline, ids, asked = time.time() + timeout, {instance} - {None}, {}
     while True:
         try:
@@ -2340,8 +2376,9 @@ def vast_teardown(hub: HubGpu, name: str, instance=None, timeout: float = 300) -
             time.sleep(15)
             continue
         mine = [r for r in rows if r.get("instance") in ids or r.get("name") == name]
-        ids |= {r.get("instance") for r in mine}
-        left = [r for r in mine if not r.get("ended")]
+        ids |= {r.get("instance") for r in mine} - {None}
+        left = [r for r in mine if not r.get("ended") and not (r.get("instance") is None and str(
+            r.get("state") or "").lower() in VAST_DEAD)]
         if not left:
             log(f"verified: instance {name!r} " + (f"ended ({', '.join(str(r.get('state')) for r in mine)})" if mine
                                                      else "not listed"))
@@ -2350,15 +2387,15 @@ def vast_teardown(hub: HubGpu, name: str, instance=None, timeout: float = 300) -
             raise InfraError(f"end incomplete; end it by hand (hub-gpu end {name}): "
                              f"{[(r.get('instance'), r.get('state')) for r in left]}")
         for r in left:
-            if r.get("instance") in asked and time.time() - asked[r.get("instance")] < 60:
+            ident = r.get("instance") if r.get("instance") is not None else r.get("name")
+            if ident in asked and time.time() - asked[ident] < 60:
                 continue
-            log(f"ending instance {r.get('instance')} ({r.get('name')})")
-            asked[r.get("instance")] = time.time()
+            log(f"ending instance {ident} ({r.get('name')}, {r.get('state')})")
+            asked[ident] = time.time()
             try:
-                hub.end(r.get("instance"))
+                hub.end(ident)
             except InfraError as e:
-                log(f"  end failed, retrying: {e}")
-                asked.pop(r.get("instance"))
+                log(f"  end failed; asked again in a minute: {e}")
         time.sleep(5)
 
 
@@ -2455,6 +2492,8 @@ def vm_spec(args) -> VmSpec:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", args.name):
         raise SystemExit(f"--name must be lowercase letters, digits and dashes, got {args.name!r}")
     check_name_prefix(args.name)
+    if len({is_cpu_platform(p) for p in platforms_of(args.platform)}) != 1:
+        raise SystemExit(f"--platform: one or more GPU platforms, or CPU ones, got {args.platform!r}")
     if is_cpu_platform(args.platform) and not args.on_demand:
         raise SystemExit(f"{args.platform} is a CPU platform: CPU VMs run --on-demand here (the spot bid, "
                          "--max-gpu-price, is per GPU-hour)")
@@ -2781,13 +2820,16 @@ def vm_attempts(args, cmd: list[str]) -> int:
     """``cmd_vm`` inside its signal handlers."""
     if given := changed_flags(args) & set(VAST_ONLY):
         raise SystemExit(f"{flag_names(given)}: only with --provider vast")
-    if args.cmd == "up" and (args.health or args.step != SERVE_STEP):
-        raise SystemExit("--health / --step: a server on a kept instance, only with up --provider vast")
+    if args.cmd == "up":
+        server_flags(args, cmd)
     if args.attempts is None:
         args.attempts = 3
     base = vm_spec(args)
     args.max_gpu_price = spot_bid(args)  # the flag, else the environment's (spot only); job.json records this one
     first_job = job_spec(args, cmd, base.name)
+    if args.cmd == "up" and cmd:  # a server on the kept VM, as up --provider vast starts one: the VM is its own
+        first_job = replace(first_job, serve=True, step=args.step, health=args.health,
+                            health_timeout=args.health_timeout, free_gpus=True)
     check_code(first_job.allow_dirty)  # before anything is priced, reaped or created
     if args.cmd == "run" and not args.keep:
         first_job = replace(first_job, poweroff_minutes=POWEROFF_AFTER_JOB_MINUTES)
@@ -2855,7 +2897,7 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         + (f"; bid ${bid:g}/GPU-h" if bid else ""))
     offers = survey(args.nebius, regions, tenant, spec.platform, spec.preset, spec.spot)
     order = candidates(offers, cap)
-    print(offer_table(offers, cap, order[0].region if order else None), flush=True)
+    print(offer_table(offers, cap, order[0] if order else None), flush=True)
     checks = 0 if args.dry_run else max(0, round(args.wait_hours * 3600 / PRICE_RECHECK_SECONDS))
     while not order and checks > 0:
         log(f"no region qualifies now (cap, capacity, quota or price); checking again in "
@@ -2865,11 +2907,12 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
         offers = survey(args.nebius, regions, tenant, spec.platform, spec.preset, spec.spot)
         order = candidates(offers, cap)
         if order:
-            print(offer_table(offers, cap, order[0].region), flush=True)
+            print(offer_table(offers, cap, order[0]), flush=True)
     worst_hourly = None
     if budget is not None and order:
         worst_hourly = bid * gpu_count(spec.preset) if bid else \
-            Nebius(args.nebius, by_name[order[0].region].project).estimate_hourly(spec.platform, spec.preset, False)
+            Nebius(args.nebius, by_name[order[0].region].project).estimate_hourly(order[0].platform or spec.platform,
+                                                                                  spec.preset, False)
     worst = worst_hourly * spec.hours if worst_hourly is not None else None
     what = f"{spec.name} ({machine_label(spec)}, ≤{spec.hours:g} h)"
     if budget is not None:
@@ -2885,12 +2928,14 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
             print(f"== attempts: up to {args.attempts} VMs (relaunch after a spot preemption or a job exit of "
                   f"{EXIT_UNFINISHED}) ==")
         if bid:
-            print(f"== pricing: spot with a max bid of ${bid:g}/GPU-h (policy {policy_name(spec.platform, bid)}, "
+            print(f"== pricing: spot with a max bid of ${bid:g}/GPU-h (policy "
+                  f"{policy_name(order[0].platform or spec.platform, bid)}, "
                   f"reused or created in the chosen region) ==")
         elif not spec.spot:
             print(f"== pricing: on-demand, ${order[0].price:.2f}/h in {order[0].region} (a fixed price: no bid) ==")
         pubkey = pub.read_text() if pub.is_file() else f"<missing {pub}>"
-        return dry_run(args.nebius, in_region(spec, by_name[order[0].region]), job, pubkey,
+        return dry_run(args.nebius, replace(in_region(spec, by_name[order[0].region]),
+                                            platform=order[0].platform or spec.platform), job, pubkey,
                        keep=args.cmd == "up" or args.keep), None
     if budget is not None and order:
         budget.check(worst, what)
@@ -2928,16 +2973,17 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
     try:
         cloud_init = render_cloud_init(spec.user, pub.read_text(), spec.hours)
         for offer in order:
-            spec = in_region(spec, by_name[offer.region])
+            spec = replace(in_region(spec, by_name[offer.region]), platform=offer.platform or spec.platform)
             nb = Nebius(args.nebius, spec.project_id)
             if bid:
                 spec = replace(spec, pricing_policy_id=ensure_policy(nb, spec.platform, bid))
             log(f"creating {spec.name} in {offer.region} at ${offer.price:.2f}/h: {spec.platform}/{spec.preset}, "
                 f"{'spot price' if spec.spot else 'on-demand'}, {spec.disk_gib} GiB disk, "
                 f"auto-shutdown after {spec.hours:g} h")
-            rec.region = offer.region
+            rec.region, rec.platform = offer.region, spec.platform
             rec.times["create_start"] = utc()
-            rec.creates.append({"region": offer.region, "price": offer.price, "start": rec.times["create_start"]})
+            rec.creates.append({"region": offer.region, "platform": spec.platform, "price": offer.price,
+                                "start": rec.times["create_start"]})
             rec.save(job.out)
             t_create = time.time()
             try:
@@ -3004,6 +3050,10 @@ def vm_attempt(args, spec: VmSpec, job: JobSpec, key: str, pub: Path, tenant: st
                 if budget is not None:
                     budget.annotate(spec.name, kept=True)
                 log(f"VM kept. ssh -i {key} -o UserKnownHostsFile={job.out / 'known_hosts'} {rec.host}")
+                if job.serve:
+                    log(f"server '{job.step}' running (log ~/{REMOTE_LOGS}/{job.step}.log); restart it: python3 "
+                        f"scripts/nebius_job.py serve --host {rec.host} --ssh-key {key} --free-gpus --out DIR --health "
+                        f"{shlex.quote(job.health or '')} -- {shlex.quote(job.command or '')}")
                 log(f"auto-shutdown {spec.hours:g} h after boot stops it but does NOT delete it "
                     f"(extend: ssh … 'sudo shutdown -h +MINUTES'); "
                     f"delete: python3 scripts/nebius_job.py down --name {spec.name}"
@@ -3078,6 +3128,18 @@ VAST_ONLY = ("gpu", "gpus", "offer", "min_cuda", "max_cost", "purpose", "tag", "
              "rsync")
 
 
+def server_flags(args, cmd: list[str]) -> None:
+    """``up``'s server flags, on either provider: a command after -- is a server and needs ``--health``; ``--health``
+    needs that command; ``--step`` is a step name. SystemExit otherwise."""
+    if cmd and not args.health:
+        raise SystemExit("up -- CMD starts CMD as a server: give --health, a shell command on the machine that exits 0 "
+                         "once it answers (e.g. 'curl -sf http://127.0.0.1:8178/v1/meta')")
+    if args.health and not cmd:
+        raise SystemExit("--health checks a server: give its command after --")
+    if not STEP_NAME.fullmatch(args.step):
+        raise SystemExit(f"--step wants lowercase letters, digits, _ and -, starting with a letter, got {args.step!r}")
+
+
 def changed_flags(args) -> set[str]:
     """The ``run`` flags whose value is not their default (with the same environment): those given on the command
     line, unless given their default value."""
@@ -3099,13 +3161,8 @@ def vast_run(args, cmd: list[str]) -> int:
     if up and args.fetch:
         raise SystemExit("up --provider vast keeps the instance and fetches nothing: copy results off with rsync "
                          "(hub-gpu list has the address), or use run")
-    if up and cmd and not args.health:
-        raise SystemExit("up --provider vast -- CMD starts CMD as a server: give --health, a shell command on the "
-                         "instance that exits 0 once it answers (e.g. 'curl -sf http://127.0.0.1:8178/v1/meta')")
-    if up and args.health and not cmd:
-        raise SystemExit("--health checks a server: give its command after --")
-    if up and not STEP_NAME.fullmatch(args.step):
-        raise SystemExit(f"--step wants lowercase letters, digits, _ and -, starting with a letter, got {args.step!r}")
+    if up:
+        server_flags(args, cmd)
     if mixed := changed & set(NEBIUS_ONLY):
         raise SystemExit(f"--provider vast: {flag_names(mixed)} are Nebius's (vast.ai: --gpu, --gpus, --offer, "
                          "--image; no --keep, no --root-job)")
@@ -3148,13 +3205,26 @@ def vast_run(args, cmd: list[str]) -> int:
     return vast_attempt(args, HubGpu(args.hub_gpu), name, job, code, budget)
 
 
+def gpu_names(gpu: str | None) -> list[str | None]:
+    """``--gpu``: a GPU model, or a comma list of them in order of preference ([None]: any GPU)."""
+    return [n.strip() for n in (gpu or "").split(",") if n.strip()] or [None]
+
+
 def vast_survey(hub: HubGpu, args, disk: int, tried: set = frozenset()) -> tuple[list[dict], list[dict]]:
     """The offers for the instance and the ones to try, in order: those that qualify, cheapest first, but the
-    ``tried`` ones; or ``--offer``."""
-    offers = hub.offers(gpu=args.gpu, gpus=args.gpus, disk_gb=disk, max_price=args.max_price)
+    ``tried`` ones, of the first ``--gpu`` (in order of preference) that has any; or ``--offer``. Every name is asked
+    each time, so a wait (``--wait-hours``) takes whichever comes first."""
+    offers, mine = [], None
+    for gpu in gpu_names(args.gpu):
+        offers = hub.offers(gpu=gpu, gpus=args.gpus, disk_gb=disk, max_price=args.max_price)
+        if args.offer is None:
+            order = [o for o in vast_candidates(offers, args.min_cuda, args.max_price) if o["offer"] not in tried]
+            if order:
+                return offers, order
+        elif mine := next((o for o in offers if o["offer"] == args.offer), None):
+            break
     if args.offer is None:
-        return offers, [o for o in vast_candidates(offers, args.min_cuda, args.max_price) if o["offer"] not in tried]
-    mine = next((o for o in offers if o["offer"] == args.offer), None)
+        return offers, []
     if mine is None:
         raise SystemExit(f"--offer {args.offer} is not among the 50 cheapest offers now for {args.gpus}× "
                          f"{args.gpu or 'any GPU'} with {disk} GB of disk" + (f" under ${args.max_price:g}/h" if
@@ -3526,7 +3596,8 @@ def cmd_serve(args, cmd: list[str]) -> int:
             raise SystemExit(f"--provider vast: no secret goes to a vast.ai instance: --env {k} looks like a key")
         env.append((k, v))
     job = JobSpec(out=expand_out(args.out, args.name or "serve"), command=job_command(cmd), env=env, serve=True,
-                  step=args.step, health=args.health, health_timeout=args.health_timeout, provider=args.provider)
+                  step=args.step, health=args.health, health_timeout=args.health_timeout, provider=args.provider,
+                  free_gpus=args.free_gpus)
     job.out.mkdir(parents=True, exist_ok=True)
     rec = Record(mode="serve", provider=args.provider, command=job.command,
                  flags={k: v for k, v in vars(args).items() if k != "func"})
@@ -3798,7 +3869,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     machine = argparse.ArgumentParser(add_help=False)
     machine.add_argument("--platform", default="gpu-b300-sxm",
-                         help="gpu-b300-sxm (default), or a CPU-only one, e.g. cpu-d3 (with --on-demand)")
+                         help="gpu-b300-sxm (default), or a CPU-only one, e.g. cpu-d3 (with --on-demand); or a comma "
+                              "list, each priced where it is offered (a GPU's name differs by region: "
+                              "gpu-b200-sxm-a,gpu-b200-sxm)")
     machine.add_argument("--preset", default="1gpu-24vcpu-346gb",
                          help="1gpu-24vcpu-346gb (default); cpu-d3: e.g. 16vcpu-64gb, 32vcpu-128gb")
     pricing = machine.add_mutually_exclusive_group()
@@ -3879,7 +3952,9 @@ def build_parser() -> argparse.ArgumentParser:
     vast = argparse.ArgumentParser(add_help=False)
     vast.add_argument("--provider", choices=("nebius", "vast"), default="nebius",
                       help="nebius (default), or vast: a vast.ai instance through hub-gpu (the vast.ai flags below)")
-    vast.add_argument("--gpu", help="vast.ai: the GPU model, as hub-gpu offers names it, e.g. B200 (default: any)")
+    vast.add_argument("--gpu", help="vast.ai: the GPU model, as hub-gpu offers names it, e.g. B200 (default: any), or "
+                                    "a comma list in order of preference, e.g. 'H200,H200 NVL' (the first with a "
+                                    "qualifying offer, each time the offers are checked)")
     vast.add_argument("--gpus", type=int, help="vast.ai: how many GPUs (default 1)")
     vast.add_argument("--offer", type=int,
                       help="vast.ai: start this offer of hub-gpu offers, not the cheapest (give its --gpu and --gpus)")
@@ -3923,8 +3998,8 @@ def build_parser() -> argparse.ArgumentParser:
     server.add_argument("--step", default=SERVE_STEP,
                         help=f"the server's step name (default {SERVE_STEP}): ~/{REMOTE_LOGS}/<step>.log, .pid, .exit")
     p = sub.add_parser("up", parents=[nebius, machine, vm, remote, vast, server],
-                       help="cheapest region → create + set up (+ downloads), keep the VM; --provider vast: an instance, "
-                            "and -- CMD starts a server on it")
+                       help="cheapest region → create + set up (+ downloads), keep the VM, and -- CMD starts a "
+                            "server on it (--health); --provider vast: an instance")
     p.set_defaults(func=cmd_vm, keep=True, attempts=1)
 
     provider = argparse.ArgumentParser(add_help=False)
@@ -3939,6 +4014,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", help="any other box: USER@HOST")
     p.add_argument("--port", type=int, help="with --host: its SSH port")
     p.add_argument("--ssh-key", default=os.environ.get("NEBIUS_SSH_KEY"), help="with --host: the private key")
+    p.add_argument("--free-gpus", action="store_true",
+                   help="with --host: the box is the server's own (e.g. a kept Nebius VM): every GPU process left once "
+                        "the step is stopped is killed, as on vast.ai")
     p.add_argument("--out", required=True, help="local output dir (the server's log, job.json); {name} is expanded")
     p.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="exported for the server")
     p.set_defaults(func=cmd_serve)
@@ -3991,9 +4069,6 @@ def main(argv: list[str] | None = None) -> int:
         i = argv.index("--")
         argv, cmd = argv[:i], argv[i + 1:]
     args = build_parser().parse_args(argv)
-    if args.cmd == "up" and cmd and args.provider != "vast":
-        raise SystemExit("up takes no job command (use run, or exec against the kept VM); with --provider vast, the "
-                         "command after -- is a server, started and left running")
     if args.cmd == "run" and not cmd:
         raise SystemExit("run needs a job command after --")
     return args.func(args, cmd)
