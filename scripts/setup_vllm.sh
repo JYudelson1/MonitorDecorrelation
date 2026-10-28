@@ -91,6 +91,10 @@ ensure_vllm() {
   echo "installed vllm → $VLLM"
 }
 ensure_vllm
+# The folder of $VLLM, absolute: first on every server's PATH, so the tools its env installed are found. FlashInfer
+# JIT-compiles kernels as an engine starts (sm_103, 2026-10-28) and runs the env's ninja, by name, from its build folder:
+# "No such file or directory: 'ninja'" when the servers started as .venv-vllm/bin/vllm without it on PATH.
+VLLM_BIN=$(cd "$(dirname "$VLLM")" && pwd)
 
 # The python behind $VLLM: a sibling `python` in its venv, else its shebang.
 VLLM_PY="$(dirname "$VLLM")/python"
@@ -326,7 +330,7 @@ HOST_ARGS=()
 # Qwen3-30B always on GPU0 (the first GPU) → :8001 (clients hardcode this).
 serve_q3() {
   RELAUNCH=serve_q3
-  launch qwen3-30b-8001 8001 env CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
+  launch qwen3-30b-8001 8001 env PATH="$VLLM_BIN:$PATH" CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "$VLLM" serve Qwen/Qwen3-30B-A3B-FP8 \
     --port 8001 \
     --reasoning-parser qwen3 \
     --scheduling-policy priority \
@@ -340,7 +344,7 @@ serve_q3() {
 serve_q35() {
   local gpu=$1 port=$2
   RELAUNCH="serve_q35 $gpu $port"
-  launch "qwen3.5-35b-$port" "$port" env CUDA_VISIBLE_DEVICES="$gpu" "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
+  launch "qwen3.5-35b-$port" "$port" env PATH="$VLLM_BIN:$PATH" CUDA_VISIBLE_DEVICES="$gpu" "$VLLM" serve Qwen/Qwen3.5-35B-A3B-FP8 \
     --port "$port" \
     --reasoning-parser qwen3 \
     --scheduling-policy priority \

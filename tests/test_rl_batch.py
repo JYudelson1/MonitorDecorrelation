@@ -737,6 +737,32 @@ def test_setup_vllm_makes_its_venv_on_uvs_own_python_with_its_headers(vllm_box):
     assert "using vllm from .venv-vllm/bin/vllm" in out and "uv venv" not in calls.read_text()
 
 
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_setup_vllm_starts_each_server_with_the_vllm_envs_tools_on_its_path(vllm_box):
+    """FlashInfer JIT-compiles kernels as an engine starts (sm_103, 2026-10-28) and runs its env's ninja by name: the
+    servers, started as .venv-vllm/bin/vllm without that folder on their PATH, failed ("No such file or directory:
+    'ninja'"). Each server gets the vLLM env's bin folder first on its PATH, absolute (ninja runs from a build folder)."""
+    repo, env, calls = vllm_box
+    fake = Path(env["PATH"].split(":")[0])
+    (fake / "vllm").unlink()  # vLLM from its own env, as on a fresh machine
+    venv = repo / ".venv-vllm" / "bin"
+    _fake_bin(venv, "python", FAKE_VLLM_PY)  # its headers there (the fake says so): the env is used as it is
+    _fake_bin(venv, "ninja", "exit 0")
+    _fake_bin(venv, "vllm", 'case "$1" in --version) echo 0.32.0; exit 0 ;; esac\nport=""; prev=""\n'
+                            'for a in "$@"; do [ "$prev" = "--port" ] && port=$a; prev=$a; done\n'
+                            'cd /  # FlashInfer runs ninja from its build folder\n'
+                            'echo "$port ninja=$(command -v ninja)" >> "$FAKE_CALLS"\nexec sleep 300')
+    proc = _setup_vllm(repo, env)
+    try:
+        assert _wait(lambda: calls.exists() and sum(" ninja=" in x for x in calls.read_text().splitlines()) >= 4,
+                     40, 0.5)
+    finally:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.communicate(timeout=30)
+    found = dict(x.split(" ninja=") for x in calls.read_text().splitlines() if " ninja=" in x)
+    assert set(found) == {"8001", "8003", "8004", "8005"} and set(found.values()) == {str(venv / "ninja")}
+
+
 def test_setup_vllm_gives_up_on_a_server_that_keeps_dying(vllm_box):
     repo, env, calls = vllm_box
     proc = _setup_vllm(repo, {**env, "VLLM_RESTART": "1", "VLLM_RESTART_MAX": "1", "DIE_PORT": "8003",
