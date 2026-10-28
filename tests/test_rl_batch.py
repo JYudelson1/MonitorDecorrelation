@@ -1084,6 +1084,18 @@ def test_a_nebius_server_comes_up_spot_on_a_vm_of_its_own_with_its_server(repo, 
     assert on_demand[-1] == f"VLLM_GPUS=4,5,6,7 {rb.JUDGES_COMMAND}"
     rl = rb.rl_up_args(s, tmp_path / "rl", 8)
     assert rl[rl.index("--regions") + 1] == "eu-west2,uk-south1,uk-south2,eu-west1"
+    cache = tmp_path / "cache"
+    (cache / "flashinfer").mkdir(parents=True)  # no vllm/: only what is there goes
+    cached = rb.up_args("judges", rb.dataclasses.replace(s, judges_cache=str(cache)), tmp_path / "j", 8, plan)
+    pushes = [cached[i + 1] for i, a in enumerate(cached) if a == "--push"]
+    assert pushes == [f"{cache.resolve() / 'flashinfer'}:~/.cache/flashinfer"]
+    assert cached.index("--push") < cached.index("--")
+    assert "--push" not in rb.up_args("probe", rb.dataclasses.replace(s, judges_cache=str(cache)), tmp_path / "p", 8,
+                                      plan)
+    rb.check_settings(rb.dataclasses.replace(s, judges_cache=str(cache)))
+    for bad in (rb.Settings(judges_cache=str(cache)), rb.dataclasses.replace(s, judges_cache=str(tmp_path / "none"))):
+        with pytest.raises(SystemExit, match="--judges-cache"):  # vast.ai judges, or nothing to push
+            rb.check_settings(bad)
     vast = rb.Settings()  # the default: both on vast.ai, as before
     assert rb.up_args("probe", vast, tmp_path / "p", 8, plan, gpu="B200", lease=4)[-1] == rb.probe_server_command(
         plan.probes, False) and rb.up_args("judges", vast, tmp_path / "j", 8, plan, gpu="H200")[-1] == rb.JUDGES_COMMAND

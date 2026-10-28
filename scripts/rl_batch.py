@@ -473,6 +473,10 @@ class Settings:
     probe_copies: int = 0  # 0: one on vast.ai; on Nebius one per 4 GPUs (2 on an 8-GPU VM), behind a balancer
     probe_gpu_ids: str | None = None  # the probe server's GPUs, split between its copies (None: all of its machine's)
     judges_gpu_ids: str | None = None  # setup_vllm.sh's 2 or 4 GPUs (None: a 2- or 4-GPU machine's, else GPUs 0-3)
+    # Nebius judges: a folder whose flashinfer/ and vllm/ go to the VM's ~/.cache/ before its servers start. A first
+    # start on B300 JIT-compiles FlashInfer's MoE kernels for sm_103a, ~15 min (2026-10-28); a cache from an earlier
+    # VM of the same GPU and vLLM skips that, and one that doesn't match is only compiled again.
+    judges_cache: str | None = None
     max_replacements: int = 8  # Nebius server VMs: new ones per role (a vast.ai instance is replaced once)
     replace_backoff_minutes: float = 1.0  # before the k-th new VM of a role: this × 2^(k-1), at most 30 min
     lease_hours: float = 4.0
@@ -490,6 +494,7 @@ class Settings:
 
 
 SERVER_ROLES = ("probe", "judges")
+JUDGES_CACHE_DIRS = ("flashinfer", "vllm")  # of --judges-cache: each to the judges VM's ~/.cache/<name>
 PROVIDERS = ("vast", "nebius")
 
 
@@ -549,7 +554,7 @@ def judges_gpus_of(s: Settings) -> list[int] | None:
 def check_settings(s: Settings) -> None:
     """SystemExit on settings no machine can serve: an unknown provider, a Nebius server without GPUs or without a bid,
     copies that don't split the probe server's GPUs evenly, judges on other than 2 or 4 GPUs (setup_vllm.sh's
-    layouts), GPU indices the machine doesn't have."""
+    layouts), GPU indices the machine doesn't have, a judges cache that nothing would use."""
     for role in SERVER_ROLES:
         p = provider_of(s, role)
         if p not in PROVIDERS:
@@ -570,6 +575,10 @@ def check_settings(s: Settings) -> None:
     if len(judges_gpus_of(s) or range(role_gpus(s, "judges"))) not in (2, 4):
         raise SystemExit(f"the judges on {judges_gpus_of(s) or role_gpus(s, 'judges')} GPU(s): setup_vllm.sh serves on "
                          "2 or 4 (--judges-gpu-ids; GPUs 0-3 of a machine with more by default)")
+    if s.judges_cache and (provider_of(s, "judges") != "nebius" or not any(
+            (Path(s.judges_cache).expanduser() / sub).is_dir() for sub in JUDGES_CACHE_DIRS)):
+        raise SystemExit(f"--judges-cache {s.judges_cache}: for Nebius judges, a folder with "
+                         f"{' or '.join(d + '/' for d in JUDGES_CACHE_DIRS)}")
 
 
 class Batch:
@@ -786,6 +795,10 @@ def nebius_up_args(role: str, s: Settings, out: Path, hours: float, plan: Plan) 
         args += ["--regions", vm["regions"]]
     if probe:
         args += ["--hf", READER]
+    elif s.judges_cache:
+        for sub in JUDGES_CACHE_DIRS:
+            if (Path(s.judges_cache).expanduser() / sub).is_dir():
+                args += ["--push", f"{Path(s.judges_cache).expanduser().resolve() / sub}:~/.cache/{sub}"]
     if s.budget_file:
         args += ["--budget-file", s.budget_file]
     return [*args, "--", server_command(role, s, plan)]
@@ -3231,6 +3244,9 @@ def add_settings(p: argparse.ArgumentParser) -> None:
         p.add_argument(f"--{role}-gpu-ids", dest=f"{role}_gpu_ids",
                        help="the GPUs it uses on its machine, e.g. 4,5,6,7 (default: the probe server all, split "
                             "between its copies; the judges a 2- or 4-GPU machine's, else 0-3)")
+    p.add_argument("--judges-cache", metavar="DIR",
+                   help="Nebius judges: DIR/flashinfer and DIR/vllm go to the VM's ~/.cache/ before the servers start "
+                        "(compiled kernels of an earlier VM: a B300's first start compiles for ~15 min)")
     p.add_argument("--rl-regions", help=f"the RL machine's Nebius regions (default {d.rl_regions})")
     p.add_argument("--probe-copies", type=int,
                    help="reader copies on the probe server's machine, behind a balancer at :8178 (default: one on "

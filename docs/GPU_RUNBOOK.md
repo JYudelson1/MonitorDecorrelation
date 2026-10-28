@@ -359,7 +359,10 @@ Each server runs on vast.ai (the default) or on a Nebius VM of its own (`--probe
   `--probe-copies` (default one on vast.ai, one per 4 GPUs on Nebius). The B300 is not the probe server's GPU: the v2
   probes' golden logits match on B200 only (2026-10-28: B300 off by a mean |Δlogit| of 0.25–0.35 against B200).
   Judges on another GPU: e.g. `--judges-platform gpu-b300-sxm --judges-preset 8gpu-192vcpu-2768gb --judges-regions
-  us-north1`. The disks are the roles' own (`--probe-disk-gib` 650, `--judge-disk-gib` 250).
+  us-north1`; the B300 passed the judges' compare against Vlad's live scores on 2026-10-28, but its first start
+  JIT-compiles FlashInfer's MoE kernels for sm_103a (~15 min), so give `--judges-cache DIR`, a folder with an earlier
+  VM's `flashinfer/` and `vllm/` (its `~/.cache/`), pushed to each new judges VM. The disks are the roles' own
+  (`--probe-disk-gib` 650, `--judge-disk-gib` 250).
 - **Tunnels:** the runs reach the servers at 127.0.0.1:8178 and :8001/:8002, as the configs say, through one
   `scripts/tunnel.sh` loop per server machine on the RL machine: `ssh -N -L` with ExitOnForwardFailure and keepalives
   (10 s × 3), reconnecting forever (2 s, doubling to 30 s). A dead link ends its ssh within ~30 s, which closes the
