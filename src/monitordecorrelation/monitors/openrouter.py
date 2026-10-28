@@ -39,7 +39,7 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _FATAL_STATUS = frozenset({400, 401, 402, 403})
 
 # The one 402 that IS transient. OpenRouter reserves your remaining credit against every in-flight
-# request, and when a burst of concurrent judge calls (uncapped within a run: one thread per call)
+# request, and when a burst of concurrent judge calls (up to rl.train.JUDGE_MAX_CONCURRENT per judge per run)
 # would together exceed the balance it rejects the newcomers with 402 and this reason code — its own
 # remedy hint is "Retry after in-flight requests settle". That is a rate limit wearing a 402, not
 # "no credits" (which also comes back as 402 and stays fatal). It crashed a full run: 33/128 judge

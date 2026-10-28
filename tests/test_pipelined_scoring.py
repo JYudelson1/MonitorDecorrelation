@@ -221,7 +221,7 @@ def test_max_concurrent_failures_still_abort_the_run():
 
 
 # --------------------------------------------------------------------------------------------
-# EnvScorer: each rollout graded (env.score) the moment it exists, no cap
+# EnvScorer: each rollout graded (env.score) the moment it exists, no cap by default
 # --------------------------------------------------------------------------------------------
 class _GradeEnv:
     """``score`` echoes the prompt; ``barrier`` (optional) makes every grade wait for all the others."""
@@ -246,6 +246,30 @@ def test_env_grades_are_indexed_like_the_rollouts_and_run_all_at_once():
     for i in reversed(range(n)):  # out of order on purpose
         sc.submit(i, rollouts[i])
     assert [er.meta["q"] for er in sc.collect(rollouts)] == [f"q{i}" for i in range(n)]
+
+
+def test_env_max_concurrent_caps_grades_and_still_grades_everything():
+    n, cap = 40, 3
+    live, peak, lock = [0], [0], threading.Lock()
+
+    class _Counting(_GradeEnv):
+        def score(self, rollout):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            time.sleep(0.01)
+            with lock:
+                live[0] -= 1
+            return super().score(rollout)
+
+    rollouts = [_rollout(f"q{i}") for i in range(n)]
+    threads_before = threading.active_count()
+    sc = EnvScorer(_Counting(), max_concurrent=cap)
+    for i in reversed(range(n)):
+        sc.submit(i, rollouts[i])
+    assert threading.active_count() - threads_before <= cap
+    assert [er.meta["q"] for er in sc.collect(rollouts)] == [f"q{i}" for i in range(n)]
+    assert peak[0] == cap
 
 
 def test_a_failed_env_grade_is_raised_not_turned_into_a_reward():
@@ -466,3 +490,62 @@ def test_run_grpo_dispatches_judges_during_sampling():
     finally:
         if run_dir.exists():
             shutil.rmtree(run_dir)
+
+
+def test_run_grpo_caps_judge_and_grade_threads(monkeypatch):
+    """The RL loop bounds its per-rollout threads (``JUDGE_MAX_CONCURRENT`` per judge,
+    ``ENV_SCORE_MAX_CONCURRENT`` per grader), so ``queue_runs.sh -j`` can't exhaust pids.max — and every
+    rollout is still graded and scored."""
+    import monitordecorrelation.rl.train as train_mod
+
+    cap = 2
+    monkeypatch.setattr(train_mod, "JUDGE_MAX_CONCURRENT", cap)
+    monkeypatch.setattr(train_mod, "ENV_SCORE_MAX_CONCURRENT", cap)
+    run_dir = Path("data/runs/smoke_capped_threads")
+    shutil.rmtree(run_dir, ignore_errors=True)
+    lock = threading.Lock()
+
+    class _Peak:
+        def __init__(self):
+            self.live = self.peak = self.n = 0
+
+        def __enter__(self):
+            with lock:
+                self.live += 1
+                self.n += 1
+                self.peak = max(self.peak, self.live)
+            time.sleep(0.02)
+
+        def __exit__(self, *exc):
+            with lock:
+                self.live -= 1
+
+    class _SlowJudge(_TimedJudge):
+        def __init__(self, name):
+            super().__init__(name)
+            self.calls = _Peak()
+
+        def score(self, rollout):
+            with self.calls:
+                return super().score(rollout)
+
+    class _SlowEnv(_FakeEnv):
+        grades = _Peak()
+
+        def score(self, rollout):
+            with self.grades:
+                return super().score(rollout)
+
+    judge, env = _SlowJudge("j_ta"), _SlowEnv()
+    cfg = RunConfig(
+        env="fake_env", backend="fake", base_model="fake/model",
+        batch_size=4, group_size=2, n_steps=1, eval_every=10, eval_size=4,
+        penalty_coef=1.0, kl_coef=0.0, seed=0,
+        logging=LoggingConfig(run_name="smoke_capped_threads", use_wandb=False, log_fraction=1.0),
+    )
+    try:
+        run_grpo(cfg, env, _StreamingBackend(gap=0.0), train_against=[judge], held_out=[])
+        assert judge.calls.n == 4 + 8 + 4 and env.grades.n == 4 + 8 + 4
+        assert judge.calls.peak == cap and env.grades.peak == cap  # saturated, never exceeded
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)

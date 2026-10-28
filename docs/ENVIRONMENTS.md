@@ -45,8 +45,9 @@ Dumps record `invalid_reason` (null / `truncated` / `unparsed` / `no_submission`
 invalid rollouts.
 (MASK has no policy-side parse — its answer is classified by the oracle judge — so only rule (a)
 applies there.)
-The RL loop grades each rollout the moment it lands (`rl/train.py::EnvScorer`: one thread per rollout,
-started from the sampler's `on_rollout` hook next to the judges, no per-run cap), so `score` must be safe
+The RL loop grades each rollout the moment it lands (`rl/train.py::EnvScorer`: a thread per rollout,
+started from the sampler's `on_rollout` hook next to the judges, at most `ENV_SCORE_MAX_CONCURRENT` = 128 at once per
+scorer — a pid budget, the rest queue), so `score` must be safe
 to call concurrently — a pure function of the rollout plus its own subprocess / API call. Executed code
 is capped across all runs on the box by `globalsem.code_exec_slot`, oracle LLM calls by the OpenRouter
 slot.

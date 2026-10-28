@@ -74,7 +74,7 @@ VLLM_JUDGES: dict[str, tuple[str, ...]] = {
 
 # Client-side request timeout. A non-streaming call sends nothing until the whole completion is done,
 # and an unbudgeted thinker can write 16k tokens on a server shared by hundreds of concurrent calls
-# (judge calls are uncapped within a run, and a timed-out call is retried from scratch). Two hours.
+# (rl.train.JUDGE_MAX_CONCURRENT in flight per judge per run, and a timed-out call is retried from scratch). Two hours.
 VLLM_TIMEOUT = 7200.0
 
 # vLLM request priorities (lower = scheduled first; with ``--scheduling-policy priority`` a waiting

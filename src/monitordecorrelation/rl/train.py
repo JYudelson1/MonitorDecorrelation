@@ -234,21 +234,37 @@ class _DaemonPool:
                 fut.set_exception(e)
 
 
+# Per-process caps on the RL loop's per-rollout threads: in-flight calls per judge per scorer
+# (``MonitorScorer``), and in-flight grades per scorer (``EnvScorer``); the rest queue FIFO in memory.
+# A pid budget, not a throughput knob: an uncapped eval is a thread per (monitor, eval rollout) —
+# 4 judges × 64×8 rollouts = 2048, alive as long as their (low-priority, thinking) vLLM calls — and
+# ``queue_runs.sh -j`` multiplies that by the job count, which blew through the container's pids.max
+# ("can't start new thread"). A cap only delays calls, never changes a score (same argument as
+# ``globalsem``); 128 per judge per run keeps a shared vLLM server well fed and sits above the
+# cross-process grading caps. Raise it if a lone run's judge tail gets slow.
+JUDGE_MAX_CONCURRENT = 128
+ENV_SCORE_MAX_CONCURRENT = 128
+
+
 class EnvScorer:
     """Grades each rollout with ``env.score`` the moment it exists — the RL loop hands it every
     rollout through the sampler's ``on_rollout`` hook, next to the judges (``MonitorScorer``) — rather
-    than after the whole batch. One daemon thread per rollout and no per-run cap: the only bounds are
-    the grading's own cross-process ones (``globalsem.code_exec_slot`` around executed code,
-    ``openrouter_slot`` around an LLM oracle call). So ``env.score`` must be safe to call concurrently
-    — every env's is a pure function of the rollout plus a subprocess / API call.
+    than after the whole batch. One daemon thread per rollout by default; the other bounds are the
+    grading's own cross-process ones (``globalsem.code_exec_slot`` around executed code,
+    ``openrouter_slot`` around an LLM oracle call). ``max_concurrent`` (default ``None``: no cap)
+    instead grades at most that many at once, the rest queued FIFO — the RL loop passes
+    ``ENV_SCORE_MAX_CONCURRENT`` so a batch's grades can't exhaust the thread/pid limit. Either way
+    ``env.score`` must be safe to call concurrently — every env's is a pure function of the rollout
+    plus a subprocess / API call.
 
     Usage: ``sc = EnvScorer(env)`` → ``sc.submit(i, rollout)`` per rollout (thread-safe, any order) →
     ``sc.collect(rollouts)`` → the checked ``EnvResult`` list, indexed like ``rollouts``. A grading
     error is re-raised by ``collect`` — never coerced into a reward.
     """
 
-    def __init__(self, env: Env) -> None:
+    def __init__(self, env: Env, max_concurrent: int | None = None) -> None:
         self.env = env
+        self._pool = None if max_concurrent is None else _DaemonPool(max_concurrent)
         self._futs: dict[int, Future] = {}
         self._lock = threading.Lock()
 
@@ -256,7 +272,9 @@ class EnvScorer:
         with self._lock:
             if index in self._futs:
                 raise RuntimeError(f"rollout {index} submitted twice for grading")
-            self._futs[index] = _in_thread(self.env.score, rollout, name=f"env-score-{index}")
+            name = f"env-score-{index}"
+            self._futs[index] = (_in_thread(self.env.score, rollout, name=name) if self._pool is None
+                                 else self._pool.submit(self.env.score, rollout, name=name))
 
     def collect(self, rollouts: Sequence[Rollout]) -> list:
         """Wait for every rollout's grade (re-raising the first failure, in index order), then run
@@ -399,7 +417,8 @@ class MonitorScorer:
       judge calls nobody will read (the normal path waits for all of them in ``collect``).
       ``max_concurrent`` (default ``None``: no cap) instead bounds each judge to that many calls in
       flight — threads, too — with the rest queued FIFO; for a run whose judges fall far behind
-      sampling, where a thread per queued call would exhaust the process's thread/pid limit.
+      sampling, where a thread per queued call would exhaust the process's thread/pid limit. The RL
+      loop passes ``JUDGE_MAX_CONCURRENT``.
     - **White-box probes** (``score_batch``): ONE batched local forward over the whole set, run in
       ``collect`` once every rollout is in. This keeps the batch barrier **on purpose** — a probe is a
       single local torch model, so N one-rollout forwards would be strictly slower than one batched
@@ -808,7 +827,9 @@ def run_grpo(
         # Judge calls are pipelined INTO the sampling: each rollout is handed to the monitors the
         # instant its episode finishes, so `sample_s` already contains most of the scoring and
         # `score_s` is only whatever was still in flight when the last episode landed.
-        scorer, grader = MonitorScorer(all_monitors, skip=is_invalid, priority=EVAL_PRIORITY), EnvScorer(env)
+        scorer = MonitorScorer(all_monitors, skip=is_invalid, max_concurrent=JUDGE_MAX_CONCURRENT,
+                               priority=EVAL_PRIORITY)
+        grader = EnvScorer(env, max_concurrent=ENV_SCORE_MAX_CONCURRENT)
 
         def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
             grader.submit(i, r)
@@ -1030,8 +1051,9 @@ def run_grpo(
         # Held-out monitors are measured on the held-out eval set instead — cleaner and cheaper.
         # As in run_eval, their calls are pipelined into sampling: a rollout is handed to the judges
         # the moment its episode finishes, so t_score below is only the tail still in flight.
-        scorer = MonitorScorer(train_against, skip=is_invalid, priority=TRAIN_PRIORITY)
-        grader = EnvScorer(env)
+        scorer = MonitorScorer(train_against, skip=is_invalid, max_concurrent=JUDGE_MAX_CONCURRENT,
+                               priority=TRAIN_PRIORITY)
+        grader = EnvScorer(env, max_concurrent=ENV_SCORE_MAX_CONCURRENT)
 
         def on_rollout(i: int, r: Rollout) -> None:  # the env grade + the judges, as each rollout lands
             grader.submit(i, r)
