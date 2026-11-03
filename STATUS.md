@@ -5,7 +5,7 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
+_Last updated: 2026-11-03 (amendment 4: the mean-pooled probe rows, their configs and roster.) Prev 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
 Supervision Can Obfuscate the CoT" (rg_obfuscation), + the multi-turn plumbing it needed — episode
 driver, prefix-chained GRPO datums, Qwen3 thinking-budget forcing. Baseline-verified on Qwen3-8B; see
 the terminal-verifier rows below and docs/ENVIRONMENTS.md #5.) Prev 2026-07-06 (analyzed the first 35-run batch → found the penalty is the phenomenon:
@@ -65,6 +65,11 @@ build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe
     on B200 only. The probe rows' trained-against probe, post hoc, equals its live score within 2e-15 on every
     episode. Amendment 3's read for all 21 runs (each monitor's mean score on hacks per eval step): docs/MATRIX.md,
     "All 21 runs".
+- **2026-11-03: amendment 4, the mean-pooled probe rows** (docs/inkling_probes_amendment_4.md; roster
+  `experiments/rl_batches/probe_rows_v2_mean.json`): 6 runs trained against `probe_iid_mean` (seeds 225–227) or
+  `probe_ood_mean` (228–230; inverted on TerminalEnv, test AUROC 0.38, trained against by the owner's decision),
+  otherwise amendment 3's batch (configs `terminal_verifier_probe_{iid,ood}_mean.json`: amendment 3's, with only the
+  trained-against probe changed). The four v2 probes with reasoning score every eval episode of all 27 runs.
 
 ## Earlier experiment (2026-07-06) — MBPP-Honeypot cross-method degradation matrix (Qwen3-8B), penalty=0.5 batch
 - **The pivot.** The first batch (`data/runs/mbpp_matrix_orig_20260701/`, penalty_coef=1.0) is the

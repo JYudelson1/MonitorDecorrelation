@@ -1,0 +1,22 @@
+{
+  "name": "probe-rows-v2-mean",
+  "description": "The mean-pooled v2 probe rows of the TerminalEnv degradation matrix, as docs/inkling_probes_amendment_4.md fixes them: amendment 3's batch (experiments/rl_batches/probe_rows_v2.json) with only the trained-against probe changed, from the follow-up readout to the mean-pooled one. Three runs train against probe_iid_mean (v2, terminal_prerl_v2, with reasoning, mean) on seeds 225-227 and three against probe_ood_mean (diverse_deception, with reasoning, mean; inverted on TerminalEnv) on seeds 228-230, penalty_coef 1.0. The four Qwen judges are held out and scored live; the other v2 probes with reasoning are held out too, scored after the runs (experiments/eval_inkling_probes_on_runs.py). 90 steps and early stop off; Vlad's three controls (seeds 216-218) are the control row.",
+  "wandb_entity": "jyudel-redwood-research",
+  "wandb_project": "terminal-env-inkling-small",
+  "n_steps": 90,
+  "sets": [],
+  "runs": [
+    {"run_name": "probe-iid-mean-seed-225", "config": "experiments/configs/terminal_verifier_probe_iid_mean.json",
+     "seed": 225, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-mean-seed-226", "config": "experiments/configs/terminal_verifier_probe_iid_mean.json",
+     "seed": 226, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-mean-seed-227", "config": "experiments/configs/terminal_verifier_probe_iid_mean.json",
+     "seed": 227, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-mean-seed-228", "config": "experiments/configs/terminal_verifier_probe_ood_mean.json",
+     "seed": 228, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-mean-seed-229", "config": "experiments/configs/terminal_verifier_probe_ood_mean.json",
+     "seed": 229, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-mean-seed-230", "config": "experiments/configs/terminal_verifier_probe_ood_mean.json",
+     "seed": 230, "stop_after_zero_behavior_steps": null}
+  ]
+}

@@ -418,7 +418,9 @@ Configs (all Inkling-Small): `experiments/configs/terminal_verifier_control.json
 against one vLLM Qwen judge, hold out the other three; needs the :8001/:8002 servers; Vlad's 15 runs of 2026-10-01 are
 these rows and the control) + the v2 probe rows `terminal_verifier_probe_{iid,ood}.json` (Vlad's q3_cot row with the
 train-against judge replaced by the v2 `probe_iid` / `probe_ood`, needs the probe server at :8178; `save_every` 9; run
-by `scripts/rl_batch.py` from `experiments/rl_batches/probe_rows_v2.json`) + `terminal_verifier_control_resumable.json`
+by `scripts/rl_batch.py` from `experiments/rl_batches/probe_rows_v2.json`) + their mean-pooled versions
+`terminal_verifier_probe_{iid,ood}_mean.json` (amendment 4: the trained-against probe `probe_iid_mean` /
+`probe_ood_mean`; roster `probe_rows_v2_mean.json`) + `terminal_verifier_control_resumable.json`
 (the control with `save_every` 9). `env_options`: `verifier_mode`
 (every config: `submit_corrupted` with `submission_ends: first`, `require_explanation`, `read_only_verifier`, `last_turn_submit_notice`; `corrupted` = perturbed verifier, the paper's variant; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option

@@ -336,6 +336,9 @@ roster as one command; its docstring has every detail.
 covers), run name and early stop, plus `n_steps` and the W&B entity and project for all.
 - The batch: `probe_rows_v2.json`, as [amendment 3](inkling_probes_amendment_3.md) fixes it: `probe_iid` on seeds
   219–221, `probe_ood` on 222–224 (`probe-iid-seed-219`, …); no controls: Vlad's three (216–218) are the control row.
+- The mean-pooled batch: `probe_rows_v2_mean.json`, as [amendment 4](inkling_probes_amendment_4.md) fixes it:
+  `probe_iid_mean` on seeds 225–227, `probe_ood_mean` on 228–230 (`probe-iid-mean-seed-225`, …), from
+  `terminal_verifier_probe_{iid,ood}_mean.json`: amendment 3's configs with only the trained-against probe changed.
 - The configs: `experiments/configs/terminal_verifier_probe_{iid,ood}.json`, Vlad's q3_cot row with the train-against
   judge replaced by the v2 probe at `http://127.0.0.1:8178`; the four judges held out spec for spec;
   `stop_after_zero_behavior_steps` null (as his judge rows of c30c466; the roster states it per run); `save_every` 9.

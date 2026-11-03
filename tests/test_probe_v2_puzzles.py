@@ -28,6 +28,9 @@ SESSION_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16.j
 AMENDMENT_3 = REPO / "docs" / "inkling_probes_amendment_3.md"
 AMENDMENT_3_SHA256 = "8b6ff8d54a32b04d75165ad80a6453f342b3955ff1e243aceeea0156d409d6a2"
 ROSTER = REPO / "experiments" / "rl_batches" / "probe_rows_v2.json"
+AMENDMENT_4 = REPO / "docs" / "inkling_probes_amendment_4.md"
+AMENDMENT_4_SHA256 = "9361a487dfa2a299e445f6386c0d70e4d33d182c41a251d73f193d2fd72f0822"
+ROSTER_MEAN = REPO / "experiments" / "rl_batches" / "probe_rows_v2_mean.json"
 VAST_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16_vast.json"
 EXCLUDED = REPO / "data" / "probe_datasets" / "terminal_prerl_v2" / "excluded_grids.json"
 CONFIG = "experiments/configs/terminal_verifier_control.json"
@@ -42,6 +45,7 @@ def test_amendment_files_have_the_recorded_hashes():
     assert hashlib.sha256(AMENDMENT.read_bytes()).hexdigest() == AMENDMENT_SHA256
     assert hashlib.sha256(AMENDMENT_2.read_bytes()).hexdigest() == AMENDMENT_2_SHA256
     assert hashlib.sha256(AMENDMENT_3.read_bytes()).hexdigest() == AMENDMENT_3_SHA256
+    assert hashlib.sha256(AMENDMENT_4.read_bytes()).hexdigest() == AMENDMENT_4_SHA256
 
 
 def test_the_rl_batch_is_amendment_3s():
@@ -68,6 +72,30 @@ def test_the_rl_batch_is_amendment_3s():
         assert {k: v for k, v in ta[0].items() if k not in ("name", "kind", "role", "probe_path", "server_url")} == {}
         assert {(m["name"], m["model_id"]) for m in c["monitors"] if m["role"] == "held_out"} == judges
         assert (REPO / path / "probe.npz").exists()
+
+
+def test_the_mean_pooled_batch_is_amendment_4s():
+    """The roster and configs amendment 4 fixes: amendment 3's batch with only the trained-against probe changed, to
+    the mean-pooled readout (probe_iid_mean on seeds 225-227, probe_ood_mean on 228-230). Each config is amendment 3's
+    but for its run_name, its description and that monitor's name and probe folder; no seed is amendment 3's."""
+    roster = json.loads(ROSTER_MEAN.read_text())
+    assert roster["n_steps"] == 90 and not roster.get("sets") and not any(r.get("sets") for r in roster["runs"])
+    assert (roster["wandb_entity"], roster["wandb_project"]) == ("jyudel-redwood-research",
+                                                                 "terminal-env-inkling-small")
+    runs = sorted((r["config"], r["seed"], r["stop_after_zero_behavior_steps"]) for r in roster["runs"])
+    mean = "experiments/configs/terminal_verifier_probe_{}_mean.json"
+    assert runs == sorted([(mean.format("iid"), s, None) for s in (225, 226, 227)]
+                          + [(mean.format("ood"), s, None) for s in (228, 229, 230)])
+    assert not {r["seed"] for r in json.loads(ROSTER.read_text())["runs"]} & {r["seed"] for r in roster["runs"]}
+    for name, dataset in (("iid", "terminal_prerl_v2"), ("ood", "diverse_deception")):
+        old = json.loads((REPO / f"experiments/configs/terminal_verifier_probe_{name}.json").read_text())
+        new = json.loads((REPO / mean.format(name)).read_text())
+        path = f"data/probes/Inkling-Small/v2/{dataset}/with_reasoning/mean"
+        assert old["monitors"][0]["role"] == "train_against" and (REPO / path / "probe.npz").exists()
+        assert new["monitors"][0] == {**old["monitors"][0], "name": f"probe_{name}_mean", "probe_path": path}
+        assert new["monitors"][1:] == old["monitors"][1:]
+        skip = ("run_name", "description", "monitors")
+        assert {k: v for k, v in new.items() if k not in skip} == {k: v for k, v in old.items() if k not in skip}
 
 
 @pytest.mark.parametrize("path", [SESSION_PLAN, VAST_PLAN], ids=["nebius", "vast"])

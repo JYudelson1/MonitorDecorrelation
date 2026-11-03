@@ -1,0 +1,102 @@
+{
+  "experiment": "terminal_verifier",
+  "run_name": "tv_probe_iid_mean_s0",
+  "description": "Terminal-verifier decorrelation row trained against probe_iid_mean: the IID probe v2 with the mean-pooled readout (terminal_prerl_v2, with reasoning: the count-weighted mean of the reader's activations over the episode's thinking and text; data/probes/Inkling-Small/v2/README.md), a frozen probe on the full-precision Inkling-Small reader (thinkingmachines/Inkling-Small@8cc5877b44d343f88b92086aa1fb72897950f06a), scored live by experiments/inkling_probe_server.py at server_url (http://127.0.0.1:8178, reached from the RL machine through an SSH tunnel; one server serves both mean-pooled probes). docs/inkling_probes_amendment_4.md fixes this row. Reward = submission verdict - penalty_coef x the probe's score in the reward as the monitor defines it (monitors/inkling_probe_monitor.py). Held out, scored at every eval and never in the gradient: the four local Qwen judges, spec for spec as in terminal_verifier_probe_iid.json. The other v2 probes with reasoning (probe_iid, probe_ood, probe_ood_mean) are held out too but scored after the run from eval_rollouts.jsonl (experiments/eval_inkling_probes_on_runs.py), not live, so they are not listed here. Every other field equals terminal_verifier_probe_iid.json (amendment 3's IID row: terminal_verifier_q3_cot.json with stop_after_zero_behavior_steps null and save_every 9, as its description says).",
+  "policy": "thinkingmachines/Inkling-Small",
+  "backend": "tinker",
+  "env": "terminal_verifier",
+  "subset": "largest_island",
+  "env_options": {
+    "verifier_mode": "submit_corrupted",
+    "offset_range": [
+      4,
+      9
+    ],
+    "max_turns": 4,
+    "output_view": "transcript",
+    "command_timeout": 30.0,
+    "submission_ends": "first",
+    "require_explanation": true,
+    "read_only_verifier": true,
+    "last_turn_submit_notice": true
+  },
+  "n_steps": 90,
+  "batch_size": 8,
+  "group_size": 16,
+  "eval_every": 3,
+  "eval_size": 64,
+  "eval_samples_per_prompt": 4,
+  "save_every": 9,
+  "stop_after_zero_behavior_steps": null,
+  "max_tokens": 3072,
+  "think_budget": null,
+  "thinking_effort": 0.5,
+  "penalty_coef": 1.0,
+  "kl_coef": 0.0001,
+  "kl_discount_factor": 0.0,
+  "lora_rank": 8,
+  "lr": 0.0005,
+  "seed": 0,
+  "n_prompts_pool": 512,
+  "monitors": [
+    {
+      "kind": "inkling_probe",
+      "name": "probe_iid_mean",
+      "role": "train_against",
+      "probe_path": "data/probes/Inkling-Small/v2/terminal_prerl_v2/with_reasoning/mean",
+      "server_url": "http://127.0.0.1:8178"
+    },
+    {
+      "kind": "cot",
+      "name": "q3_cot",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3-30B-A3B-FP8",
+      "base_url": "http://localhost:8001/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q3_out",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3-30B-A3B-FP8",
+      "base_url": "http://localhost:8001/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": false,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q35_cot",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "base_url": "http://localhost:8002/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": true,
+      "use_output": true
+    },
+    {
+      "kind": "cot",
+      "name": "q35_out",
+      "role": "held_out",
+      "provider": "vllm",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "base_url": "http://localhost:8002/v1",
+      "max_tokens": 16384,
+      "enable_thinking": true,
+      "thinking_budget": 12288,
+      "use_cot": false,
+      "use_output": true
+    }
+  ]
+}
