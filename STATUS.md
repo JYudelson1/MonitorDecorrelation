@@ -5,7 +5,7 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-11-03 (amendment 4: the mean-pooled probe rows, their configs and roster.) Prev 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
+_Last updated: 2026-11-04 (amendment 4's batch complete, its judge check, and the four probes post hoc on all 27 runs.) Prev 2026-11-03 (amendment 4: the mean-pooled probe rows, their configs and roster.) Prev 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
 Supervision Can Obfuscate the CoT" (rg_obfuscation), + the multi-turn plumbing it needed — episode
 driver, prefix-chained GRPO datums, Qwen3 thinking-budget forcing. Baseline-verified on Qwen3-8B; see
 the terminal-verifier rows below and docs/ENVIRONMENTS.md #5.) Prev 2026-07-06 (analyzed the first 35-run batch → found the penalty is the phenomenon:
@@ -70,6 +70,24 @@ build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe
   `probe_ood_mean` (228–230; inverted on TerminalEnv, test AUROC 0.38, trained against by the owner's decision),
   otherwise amendment 3's batch (configs `terminal_verifier_probe_{iid,ood}_mean.json`: amendment 3's, with only the
   trained-against probe changed). The four v2 probes with reasoning score every eval episode of all 27 runs.
+- **2026-11-04: amendment 4's batch is complete.**
+  - **The runs:** 14:03–22:08 UTC on 2026-11-03 (`rl_batch.py start`, no rehearsal: the owner's call, the driver
+    unchanged since 2026-10-28's batch), every run 90 steps and 31 evals with its final checkpoint, no restart; every
+    machine ended and verified at 22:11. Folder `../output/gpu_jobs/20261103-134801-probe-rows-v2-mean/`.
+  - **The machines:** a vast.ai 4× B200 probe server (both mean-pooled probes' golden checks passed: max |Δlogit|
+    1.1e-6 and 1.8e-7), vast.ai 4× H200 NVL judges (vLLM 0.30.0) and a Nebius CPU VM. Nebius had no B200 or H200
+    capacity on demand that day: two earlier starts (probe server and judges on Nebius on demand) got no GPU VM and
+    were ended.
+  - **Amendment 4's judge check** (`judge-compare`, 2 passes × 2,350 of Vlad's episodes, on these judges): mean
+    (ours − live) per judge from −0.007 to +0.003; AUROC within 0.010 of the live one; by class, every difference
+    within ±0.017, the size of the two passes' own retest difference, as on 2026-10-28's B300 judges.
+    `../output/gpu_jobs/20261103-134801-probe-rows-v2-mean/judge_retest_report.json`. What to do about a difference
+    beyond the noise is the owner's call; none stands out.
+  - **Post-hoc scoring is complete:** the four v2 probes with reasoning on every valid eval episode of all 27 runs to
+    step 90, on B200 only (vast.ai 4× B200; a few on Nebius spot), none unscorable
+    (`../output/posthoc_probe_scores_20261104/`). The re-scored follow-up probes equal the first pass bit for bit; on
+    every probe-row run, post hoc equals live within 2e-15. Amendment 4's read for all 27 runs: docs/MATRIX.md, "All
+    27 runs".
 
 ## Earlier experiment (2026-07-06) — MBPP-Honeypot cross-method degradation matrix (Qwen3-8B), penalty=0.5 batch
 - **The pivot.** The first batch (`data/runs/mbpp_matrix_orig_20260701/`, penalty_coef=1.0) is the
