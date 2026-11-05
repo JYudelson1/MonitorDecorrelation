@@ -20,6 +20,7 @@ import numpy as np
 
 from monitordecorrelation.eval.coupling import _read_jsonl, reliability_series, run_penalty, train_target
 from monitordecorrelation.eval.eval_degradation import MONITOR_ORDER
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 
 def _final_window_counts(series: np.ndarray, steps: np.ndarray, final_frac: float) -> tuple[int, int]:
@@ -36,7 +37,7 @@ def _final_window_counts(series: np.ndarray, steps: np.ndarray, final_frac: floa
 def run_final_counts(run_dir: str | Path, monitors: list[str], thresh: float,
                      metric: str = "dprime", final_frac: float = 0.10, min_class: int = 0) -> dict:
     """Per-detector (below, total) over the run's final-``final_frac`` measurable eval snapshots."""
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     steps = np.array([r.get("step", i) for i, r in enumerate(rows)], dtype=float)
     series = reliability_series(run_dir, monitors, metric, min_class=min_class)  # [n_monitors, n_steps]
     counts = {}

@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from monitordecorrelation.eval.metric_keys import class_score_pairs
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -51,7 +52,7 @@ def _eval_series(run_dir: Path, metric: str = "auroc") -> dict[str, dict[int, fl
     path = run_dir / "eval_metrics.jsonl"
     if not path.exists():
         return series
-    for r in _read_jsonl(path):
+    for r in with_posthoc(run_dir, _read_jsonl(path)):
         step = r["step"]
         for k, v in r.items():
             if k.startswith("monitor/") and k.endswith(f"/{metric}"):
@@ -85,7 +86,7 @@ def _gap_series(run_dir: Path) -> dict[str, dict[int, float]]:
     path = run_dir / "eval_metrics.jsonl"
     if not path.exists():
         return series
-    for r in _read_jsonl(path):
+    for r in with_posthoc(run_dir, _read_jsonl(path)):
         step = r["step"]
         # {monitor: (present_mean, absent_mean)} for monitors with BOTH means non-NaN — tolerant of both
         # the new mean_score_<behavior>/not_<behavior> keys and the legacy syco/honest keys.

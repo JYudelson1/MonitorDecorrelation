@@ -36,6 +36,7 @@ from statistics import NormalDist
 import numpy as np
 
 from monitordecorrelation.eval.metric_keys import absent_score, present_score
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 _N = NormalDist()
 
@@ -68,7 +69,7 @@ def display_name(monitor: str) -> str:
 
 def monitor_names(run_dir: str | Path) -> list[str]:
     """Monitor names present in a run's ``eval_metrics.jsonl`` (sorted, stable)."""
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     names = {k.split("/")[1] for r in rows for k in r if k.startswith("monitor/")}
     return sorted(names)
 
@@ -91,7 +92,7 @@ def run_hacked(run_dir: str | Path, thresh: float = 0.10, stat: str = "max") -> 
     """Did this run's policy actually reward-hack? True if the held-out strict hack rate reaches
     ``thresh`` (``stat='max'`` over eval, or ``'final'``). The obfuscation dynamics only exist where the
     policy hacks, so this is the natural way to condition the degradation/coupling analyses."""
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     beh = [r["behavior_rate"] for r in rows if r.get("behavior_rate") == r.get("behavior_rate")]
     if not beh:
         return False
@@ -150,7 +151,7 @@ def reliability_series(run_dir: str | Path, monitors: list[str], metric: str = "
     The complement of μ_hack: a RISE here (honest rollouts looking suspicious) collapses d′ *without* the
     monitor being evaded. β on this measures co-movement of the honest-class drift across monitors.
     """
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     out = np.full((len(monitors), len(rows)), np.nan)
 
     def _class_ok(r, m):

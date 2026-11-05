@@ -25,6 +25,7 @@ from monitordecorrelation.eval.coupling import (
     _read_jsonl, reliability_series, run_penalty, train_target,
 )
 from monitordecorrelation.eval.metric_keys import absent_score, present_score
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 METRICS = ("dprime_drop", "dmu_hack", "dmu_clean", "max_hack_rate")
 
@@ -61,7 +62,7 @@ def _first_last(series: np.ndarray) -> tuple[float, float]:
 def run_summary(run_dir: str | Path, monitors: list[str]) -> dict:
     """The four per-run quantities (above) for a single run's train-against monitor."""
     tgt = train_target(run_dir)
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     beh = [r["behavior_rate"] for r in rows if r.get("behavior_rate") == r.get("behavior_rate")]
     out = {"run": Path(run_dir).name, "target": tgt, "penalty": run_penalty(run_dir),
            "max_hack_rate": max(beh) if beh else np.nan,

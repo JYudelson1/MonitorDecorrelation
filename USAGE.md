@@ -299,6 +299,25 @@ asymmetric coupling. Writes `coupling_pooled.png` (all runs, driver→responder)
 `--metric auroc` (→ d′, resolution-aware clip) or `dprime_margin` (native, non-saturating); `--bootstrap N`
 adds per-cell 90% CIs. Reads `eval_metrics.jsonl` (+ dir name for the target). See `docs/DEGRADATION_METRICS.md`.
 
+### Adding a held-out monitor to finished runs (post-hoc re-scoring)
+
+```bash
+# e.g. the weak judge, once chosen, on a batch that ran without it — dry run first (no judge calls):
+uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
+    --config experiments/configs/posthoc/<judges>.json --dry-run
+uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
+    --config experiments/configs/posthoc/<judges>.json --workers 128   # resumable: re-run to continue
+```
+Scores every VALID rollout in each run's full `eval_rollouts.jsonl` (needs the full dump — it lives on
+the box) with each `held_out` LLM judge of `--config` (`--only a,b` to pick), and writes
+`eval_metrics_posthoc_<name>.jsonl` (the exact columns a live held-out monitor gets, via
+`rl.train.eval_monitor_metrics`) + `posthoc/<name>.{scores.jsonl,info.json}` into the run dir. The run's
+own logs are untouched; every analysis reader (degradation matrix, coupling, plots, …) merges the sidecars
+by step (`eval/posthoc.py`). A step is skipped (and reported) unless the dump holds exactly that step's
+rollouts (valid count = the live monitors' `n_scored`, same behavior rate). vLLM calls go at a lower
+priority than live runs' train and eval calls, so it can share a judge server with a running batch.
+Probes: `eval_probes_on_run.py`.
+
 **W&B syncing is automatic iff you're logged in.** `run_experiment.py` picks `wandb_mode` per run:
 `online` if a credential is configured locally (`wandb login` → `~/.netrc`, or `WANDB_API_KEY` set),
 else `offline`. The check is purely local (no network, never prompts), so it's disconnect-safe. Set

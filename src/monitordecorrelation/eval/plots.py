@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 
 def _load(path: Path) -> list[dict]:
@@ -147,7 +148,7 @@ def plot_run(run_dir: str | Path) -> list[Path]:
                      td / "monitors.png")
 
     # EVAL plots (held-out set — the degradation curves)
-    eval_rows = _load(run_dir / "eval_metrics.jsonl")
+    eval_rows = with_posthoc(run_dir, _load(run_dir / "eval_metrics.jsonl"))
     if eval_rows:
         ed = run_dir / "eval"
         ed.mkdir(exist_ok=True)

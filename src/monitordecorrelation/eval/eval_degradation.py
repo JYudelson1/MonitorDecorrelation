@@ -27,6 +27,7 @@ import numpy as np
 from monitordecorrelation.eval.coupling import (
     _read_jsonl, reliability_series, run_penalty, train_target,
 )
+from monitordecorrelation.eval.posthoc import with_posthoc
 
 # preferred display order (present monitors are filtered to this); control is appended as the last row
 MONITOR_ORDER = ["cot_weak", "cot_strong", "out_weak", "out_strong", "probe_iid", "probe_ood"]
@@ -51,7 +52,7 @@ def run_degradation(run_dir: str | Path, monitors: list[str], method: str = "slo
     """Per-detector degradation D (total DROP in ``metric`` over the run) for one run, plus its
     train-against target and penalty. ``metric`` is any coupling reliability metric — "dprime" (default,
     discrimination), "suspicion_on_hacks" (μ_hack; drop = evasion), "suspicion_on_clean" (μ_clean), …"""
-    rows = _read_jsonl(Path(run_dir) / "eval_metrics.jsonl")
+    rows = with_posthoc(run_dir, _read_jsonl(Path(run_dir) / "eval_metrics.jsonl"))
     steps = np.array([r.get("step", i) for i, r in enumerate(rows)], dtype=float)
     series = reliability_series(run_dir, monitors, metric, min_class=min_class)  # [n_monitors, n_steps]
     return {"run": Path(run_dir).name, "target": train_target(run_dir) or "control",

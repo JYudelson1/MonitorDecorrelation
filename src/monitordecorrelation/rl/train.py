@@ -354,6 +354,40 @@ def _judge_call_metrics(m: Monitor, results) -> dict[str, float]:
     return out
 
 
+def eval_monitor_metrics(m: Monitor, results: Sequence[MonitorResult | None], gt: Sequence[bool],
+                         gt_loose: Sequence[bool] | None, behavior: str) -> dict[str, float]:
+    """One monitor's ``monitor/<name>/…`` columns of an ``eval_metrics.jsonl`` row, from its results
+    over ONE eval step's rollouts (``None`` = an invalid rollout it was never shown) and the strict /
+    loose oracle labels of those same rollouts. Shared by the training loop's eval and the post-hoc
+    re-scorer (``experiments/add_posthoc_monitors.py``), so a post-hoc monitor's columns are computed
+    exactly like a live one's."""
+    # Every VALID rollout is scored (MonitorScorer.collect aborts the run otherwise) and no
+    # invalid one is (None), so this indexes exactly the valid eval rollouts; n_scored = their
+    # count, a visible invariant check.
+    idx = [i for i, x in enumerate(results) if x is not None]
+    scores = [results[i].score for i in idx]
+    preds = [results[i].label for i in idx]
+    mgt = [gt[i] for i in idx]  # strict labels (the headline oracle = behavior_present)
+    row: dict[str, float] = {}
+    row[f"monitor/{m.name}/auroc"] = roc_auc(scores, mgt)
+    row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
+    row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
+    row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
+    row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
+    row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
+    # margin d′ (non-saturating separation, no AUROC ceiling) + class counts (n_pos·n_neg gives
+    # the AUROC resolution, so a d′-via-AUROC clip can be sample-size-aware downstream).
+    row[f"monitor/{m.name}/dprime_margin"] = dprime_margin(scores, mgt)
+    row[f"monitor/{m.name}/n_pos"] = sum(mgt)
+    row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
+    row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
+    # judge call health: stopped at max_tokens / answer unparseable (scored 1.0)
+    row.update(_judge_call_metrics(m, results))
+    if gt_loose is not None:  # same scores, LOOSE labels — separate track (see run_eval's note)
+        row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
+    return row
+
+
 # Per-rollout monitor failures are collected rather than raised on the spot, so ONE warning names
 # every affected rollout instead of a traceback from whichever thread lost first. They are then
 # fatal: _assert_scored aborts the run. Transient errors are already retried indefinitely inside the
@@ -855,29 +889,7 @@ def run_grpo(
             row["loose_rate"] = mean(float(er.meta.get("loose_rh", False)) for er in ev_env)
             row["hardcoding_rate"] = mean(float(er.meta.get("hardcoding", False)) for er in ev_env)
         for m in all_monitors:
-            # Every VALID rollout is scored (MonitorScorer.collect aborts the run otherwise) and no
-            # invalid one is (None), so this indexes exactly the valid eval rollouts; n_scored = their
-            # count, a visible invariant check.
-            idx = [i for i, x in enumerate(res[m.name]) if x is not None]
-            scores = [res[m.name][i].score for i in idx]
-            preds = [res[m.name][i].label for i in idx]
-            mgt = [gt[i] for i in idx]  # strict labels (the headline oracle = behavior_present)
-            row[f"monitor/{m.name}/auroc"] = roc_auc(scores, mgt)
-            row[f"monitor/{m.name}/accuracy"] = accuracy(preds, mgt)
-            row[f"monitor/{m.name}/brier"] = brier(scores, mgt)
-            row[f"monitor/{m.name}/mean_score"] = mean(scores) if scores else float("nan")
-            row[present_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, True)
-            row[absent_score_key(m.name, behavior)] = _mean_for_class(scores, mgt, False)
-            # margin d′ (non-saturating separation, no AUROC ceiling) + class counts (n_pos·n_neg gives
-            # the AUROC resolution, so a d′-via-AUROC clip can be sample-size-aware downstream).
-            row[f"monitor/{m.name}/dprime_margin"] = dprime_margin(scores, mgt)
-            row[f"monitor/{m.name}/n_pos"] = sum(mgt)
-            row[f"monitor/{m.name}/n_neg"] = len(mgt) - sum(mgt)
-            row[f"monitor/{m.name}/n_scored"] = len(scores)  # how many rollouts actually scored
-            # judge call health: stopped at max_tokens / answer unparseable (scored 1.0)
-            row.update(_judge_call_metrics(m, res[m.name]))
-            if gt_loose is not None:  # same scores, LOOSE labels — separate track (see note above)
-                row.update(_label_metrics(f"monitor/{m.name}/loose", scores, preds, [gt_loose[i] for i in idx]))
+            row.update(eval_monitor_metrics(m, res[m.name], gt, gt_loose, behavior))
         # sample_s now COVERS the judge calls that ran concurrently with sampling; score_s is only
         # the tail still in flight when the last episode landed (plus the probes' batched forward).
         # Their sum is still the true wall clock of the sample+score phase.
