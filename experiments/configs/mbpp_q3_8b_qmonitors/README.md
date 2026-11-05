@@ -18,6 +18,11 @@ differ. `lr` 5e-4 as there (tinker-cookbook's estimate for Qwen3-8B LoRA is 4.7e
 
 `row_control` trains against nothing (`penalty_coef: null`).
 
+**No early stop** (`stop_after_zero_behavior_steps: null`, 2026-11-05): with 16 (the q35 batch's value) seed-0
+control stopped at step 16 *before hacking had emerged* (the aborted same-seed run started hacking at steps
+12–14) — the rule ends runs that never start hacking, not just ones that stopped. Early-stopped runs cannot be
+resumed. Rows launched under 16 that never tripped it are identical to null-config runs.
+
 **Weak judge = Qwen3-1.7B** (thinking on), picked by the 2026-11-05 bakeoff on 150+150 Qwen3-8B MBPP
 rollouts — AUROC cot+out / out / cot-only 0.81 / 0.91 / 0.60 vs q35's 1.00 / 1.00 / 0.96; Qwen3-30B-A3B (the
 q35/Inkling batches' "weak") scored 0.99 / 1.00 / 0.96, i.e. not weak here. 0 parse errors in 1800 calls, ~500

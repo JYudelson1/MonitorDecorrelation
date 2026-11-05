@@ -12,7 +12,7 @@
     "eval_size": 64,
     "eval_samples_per_prompt": 8,
     "save_every": 9,
-    "stop_after_zero_behavior_steps": 16,
+    "stop_after_zero_behavior_steps": null,
     "max_tokens": 2048,
     "penalty_coef": null,
     "kl_coef": 0.0001,
