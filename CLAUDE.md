@@ -20,6 +20,7 @@ the crux — do *held-out* detectors Y, Z degrade in lockstep? Headline output i
 | RL environments | [`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md) |
 | The monitor abstraction + activations risk | [`docs/MONITORS.md`](docs/MONITORS.md) |
 | RL backends / GRPO / logging | [`docs/INFRA.md`](docs/INFRA.md) |
+| Weak-judge choice for MBPP (Qwen3-1.7B) + bakeoff numbers | [`docs/WEAK_JUDGE_BAKEOFF.md`](docs/WEAK_JUDGE_BAKEOFF.md) |
 | What's actually built/tested | [`STATUS.md`](STATUS.md) |
 | How to run the scripts | [`USAGE.md`](USAGE.md) |
 | Original source docs | `docs/Original Project Proposal.md`, `docs/Joey Research Ideas.md` |

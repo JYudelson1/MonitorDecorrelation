@@ -1,0 +1,30 @@
+AUROC with parse-error rows dropped (vs repo semantics = scored 1.0):
+  q35_0.8b:cot      n=286 AUROC_dropPE 0.547
+  q35_0.8b:cot+out  n=269 AUROC_dropPE 0.673
+  q35_0.8b:out      n=224 AUROC_dropPE 0.702
+  q35_2b:cot      n=299 AUROC_dropPE 0.783
+  q35_2b:cot+out  n=279 AUROC_dropPE 0.935
+  q35_2b:out      n=291 AUROC_dropPE 0.956
+  q35_2b_r2:cot      n=295 AUROC_dropPE 0.782
+  q35_2b_r2:cot+out  n=289 AUROC_dropPE 0.948
+  q35_2b_r2:out      n=286 AUROC_dropPE 0.946
+  q35_4b:cot+out  n=299 AUROC_dropPE 1.000
+  q3_0.6b:out      n=299 AUROC_dropPE 0.614
+  q3_4b:cot+out  n=296 AUROC_dropPE 0.984
+  q3_4b:out      n=299 AUROC_dropPE 0.998
+
+Test-retest:
+  q3_1.7b:cot+out  n=300 r=0.48 label-flip@0.5 22.0%  AUROC r1 0.811 r2 0.809 mean-of-2 0.865  mean|diff| hack 0.33 clean 0.05
+  q3_1.7b:out      n=300 r=0.60 label-flip@0.5 20.0%  AUROC r1 0.911 r2 0.903 mean-of-2 0.968  mean|diff| hack 0.35 clean 0.02
+  q3_1.7b:cot      n=300 r=0.40 label-flip@0.5 24.7%  AUROC r1 0.597 r2 0.534 mean-of-2 0.587  mean|diff| hack 0.28 clean 0.20
+  q35_2b:cot+out  n=300 r=0.69 label-flip@0.5 15.3%  AUROC r1 0.853 r2 0.915 mean-of-2 0.953  mean|diff| hack 0.20 clean 0.15
+  q35_2b:out      n=300 r=0.73 label-flip@0.5 13.0%  AUROC r1 0.929 r2 0.896 mean-of-2 0.976  mean|diff| hack 0.20 clean 0.13
+  q35_2b:cot      n=300 r=0.65 label-flip@0.5 15.3%  AUROC r1 0.785 r2 0.777 mean-of-2 0.833  mean|diff| hack 0.27 clean 0.05
+
+Within-class test-retest r (systematic share of score variance) for hacks / clean:
+  q3_1.7b:cot+out  hack  r=0.26  q3_1.7b:cot+out  clean r=0.37
+  q3_1.7b:out      hack  r=0.14  q3_1.7b:out      clean r=-0.02
+  q3_1.7b:cot      hack  r=0.34  q3_1.7b:cot      clean r=0.44
+  q35_2b:cot+out  hack  r=0.29  q35_2b:cot+out  clean r=0.16
+  q35_2b:out      hack  r=0.17  q35_2b:out      clean r=0.12
+  q35_2b:cot      hack  r=0.50  q35_2b:cot      clean r=0.03

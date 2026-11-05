@@ -1,0 +1,17 @@
+diff --git a/src/monitordecorrelation/monitors/vllm.py b/src/monitordecorrelation/monitors/vllm.py
+index 7402e6c..edd6441 100644
+--- a/src/monitordecorrelation/monitors/vllm.py
++++ b/src/monitordecorrelation/monitors/vllm.py
+@@ -70,6 +70,12 @@ VLLM_JUDGES: dict[str, tuple[str, ...]] = {
+     "Qwen/Qwen3-30B-A3B-FP8": (),
+     "Qwen/Qwen3.5-35B-A3B-FP8": (),
+     "Qwen/Qwen3.8-27B-FP8": ("low", "medium", "xhigh"),
++    "Qwen/Qwen3-0.6B": (),  # BOX-ONLY weak-judge bakeoff patch
++    "Qwen/Qwen3-1.7B": (),  # BOX-ONLY weak-judge bakeoff patch
++    "Qwen/Qwen3-4B": (),  # BOX-ONLY weak-judge bakeoff patch
++    "Qwen/Qwen3.5-0.8B": (),  # BOX-ONLY weak-judge bakeoff patch
++    "Qwen/Qwen3.5-2B": (),  # BOX-ONLY weak-judge bakeoff patch
++    "Qwen/Qwen3.5-4B": (),  # BOX-ONLY weak-judge bakeoff patch
+ }
+ 
+ # Client-side request timeout. A non-streaming call sends nothing until the whole completion is done,
