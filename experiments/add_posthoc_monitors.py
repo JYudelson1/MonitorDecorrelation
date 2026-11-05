@@ -11,10 +11,10 @@ logs are never rewritten.
 
     # what would be scored, no judge calls
     uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
-        --config experiments/configs/posthoc/weak_judges.json --dry-run
+        --config experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly --dry-run
     # score (resumable: re-run the same command to continue after an interruption)
     uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
-        --config experiments/configs/posthoc/weak_judges.json --workers 128
+        --config experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly --workers 128
 
 ``--config``: any JSON/YAML with a ``monitors`` list (a run config works; ``--only`` picks names). Every
 picked monitor must be ``role: held_out`` and an LLM judge (``kind: cot``) — probes are scored by

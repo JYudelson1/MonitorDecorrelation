@@ -304,9 +304,9 @@ adds per-cell 90% CIs. Reads `eval_metrics.jsonl` (+ dir name for the target). S
 ```bash
 # e.g. the weak judge, once chosen, on a batch that ran without it — dry run first (no judge calls):
 uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
-    --config experiments/configs/posthoc/<judges>.json --dry-run
+    --config experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly --dry-run
 uv run python experiments/add_posthoc_monitors.py 'data/runs/mbpp_q3_8b_qmonitors_*' \
-    --config experiments/configs/posthoc/<judges>.json --workers 128   # resumable: re-run to continue
+    --config experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly --workers 128   # resumable: re-run to continue
 ```
 Scores every VALID rollout in each run's full `eval_rollouts.jsonl` (needs the full dump — it lives on
 the box) with each `held_out` LLM judge of `--config` (`--only a,b` to pick), and writes

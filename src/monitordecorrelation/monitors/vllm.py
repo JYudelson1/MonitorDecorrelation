@@ -70,6 +70,9 @@ VLLM_JUDGES: dict[str, tuple[str, ...]] = {
     "Qwen/Qwen3-30B-A3B-FP8": (),
     "Qwen/Qwen3.5-35B-A3B-FP8": (),
     "Qwen/Qwen3.8-27B-FP8": ("low", "medium", "xhigh"),
+    # The MBPP weak judge (2026-11-05 bakeoff): thinking on → split reasoning + clean content, off → no
+    # reasoning, thinking_token_budget 64 → ~64 reasoning tokens, all checked live on vLLM.
+    "Qwen/Qwen3-1.7B": (),
 }
 
 # Client-side request timeout. A non-streaming call sends nothing until the whole completion is done,

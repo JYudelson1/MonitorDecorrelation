@@ -62,6 +62,45 @@
             "use_output": false
         },
         {
+            "kind": "cot",
+            "name": "q17_cot",
+            "role": "held_out",
+            "provider": "vllm",
+            "model_id": "Qwen/Qwen3-1.7B",
+            "base_url": "http://localhost:8011/v1",
+            "max_tokens": 16384,
+            "enable_thinking": true,
+            "thinking_budget": 12288,
+            "use_cot": true,
+            "use_output": true
+        },
+        {
+            "kind": "cot",
+            "name": "q17_out",
+            "role": "held_out",
+            "provider": "vllm",
+            "model_id": "Qwen/Qwen3-1.7B",
+            "base_url": "http://localhost:8011/v1",
+            "max_tokens": 16384,
+            "enable_thinking": true,
+            "thinking_budget": 12288,
+            "use_cot": false,
+            "use_output": true
+        },
+        {
+            "kind": "cot",
+            "name": "q17_cotonly",
+            "role": "held_out",
+            "provider": "vllm",
+            "model_id": "Qwen/Qwen3-1.7B",
+            "base_url": "http://localhost:8011/v1",
+            "max_tokens": 16384,
+            "enable_thinking": true,
+            "thinking_budget": 12288,
+            "use_cot": true,
+            "use_output": false
+        },
+        {
             "kind": "probe",
             "name": "probe_ood",
             "role": "train_against",
