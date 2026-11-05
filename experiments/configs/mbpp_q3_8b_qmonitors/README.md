@@ -25,12 +25,11 @@ reasoning tokens. Seed-0 `row_control` / `row_cot_strong` started before it was 
 columns post hoc (`experiments/add_posthoc_monitors.py 'data/runs/<run>' --config
 experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly`).
 
-Needs on the box: the q35 judge at `localhost:8002` (`scripts/setup_vllm.sh`), the 1.7B judge at `localhost:8011`
-(GPU 0 next to the probe server: `vllm serve Qwen/Qwen3-1.7B --port 8011 --reasoning-parser qwen3
---scheduling-policy priority --max-num-seqs 256 --kv-cache-dtype fp8 --max-model-len 32768
---gpu-memory-utilization 0.3`, with setup_vllm.sh's vLLM binary/CUDA_HOME) and a GPU for the probes'
-Qwen3-8B forward passes (`queue_runs.sh -P` shares one copy). The probe server and the vLLM judges have
-not been run together on one box before — smoke first:
+Needs on the box (2×H200): `scripts/setup_vllm.sh` once (installs vLLM; stop its servers), then
+`scripts/serve_mbpp_judges_2gpu.sh` — two q35 engines behind the `:8002` load balancer (GPU 1 at 0.9, GPU 0 at
+0.5), the 1.7B judge on `:8011` (GPU 0, 0.15), leaving ~50 GB of GPU 0 for the probe server that
+`queue_runs.sh -P` starts (Qwen3-8B bf16 ~17–20 GB, uncapped). One q35 engine saturates under this batch
+(KV full at ~11.6k tok/s); eval scoring is ~85% of its load. Smoke first:
 
 ```bash
 scripts/queue_runs.sh -c experiments/configs/mbpp_q3_8b_qmonitors -n 1 -j 2 -d          # plan only
