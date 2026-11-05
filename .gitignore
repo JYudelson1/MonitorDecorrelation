@@ -28,6 +28,7 @@ wandb/
 err.log
 logs/
 data/runs/archived/
+data/runs/weak_judge_bakeoff_20261105/
 
 # …but DO track the small per-step metrics (the analysis reads eval_metrics.jsonl; the big
 # rollouts.jsonl / eval_rollouts.jsonl stay excluded above, and archived/ is fully excluded).
