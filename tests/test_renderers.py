@@ -108,6 +108,25 @@ def test_tml_renderer_recovers_from_a_mid_structure_truncation_without_duplicati
     cot, answer, _ = r.parse(ids)
     assert cot == "let me think"  # not "let me thinklet me think"
     assert answer == ""
+    assert r.parse_checked(ids)[3] is False  # the cut-off tool call is in neither cot nor answer
+
+
+def test_tml_parse_checked_flags_a_native_tool_call_the_split_drops():
+    """Inkling's native tool call comes out of the parser as a structured InvokeTool message, not text:
+    cot/answer cannot hold it, so parse_checked must say so (callers then keep raw_text)."""
+    r = TmlRenderer()
+    tok = r.tokenizer
+    plain = _completion_tokens(tok, "let me look", "Looking.")
+    assert r.parse_checked(plain)[3] is True
+    assert r.parse_checked(_completion_tokens(tok, "half a thought", "", complete=False))[3] is True
+    call = [tok.encode_special("message_model")] + list(tok.encode_ordinary("bash"))
+    call += [tok.encode_special("content_invoke_tool_json")]
+    call += list(tok.encode_ordinary('{"name":"bash","args":{"command":"cat /work/main.py"}}'))
+    call += [tok.encode_special("end_message")]
+    ids = plain[:-1] + call + plain[-1:]  # thinking, text, the call, end of sampling
+    cot, answer, raw, complete = r.parse_checked(ids)
+    assert (cot, answer, complete) == ("let me look", "Looking.", False)
+    assert '<|content_invoke_tool_json|>{"name":"bash","args":{"command":"cat /work/main.py"}}' in raw
 
 
 def test_tml_effort_is_conditioning_not_decoration():

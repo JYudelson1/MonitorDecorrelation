@@ -252,19 +252,35 @@ class TmlRenderer:
 
     def parse(self, tokens: list[int]) -> tuple[str, str, str]:
         """-> (cot, answer, raw_text). ``cot`` = the thinking channel, ``answer`` = the text channel."""
+        cot, answer, raw, _ = self.parse_checked(tokens)
+        return cot, answer, raw
+
+    def parse_checked(self, tokens: list[int]) -> tuple[str, str, str, bool]:
+        """``parse`` plus ``complete``: whether ``cot`` and ``answer`` hold EVERYTHING the completion
+        said. False when it also held something else — a native tool call
+        (``<|message_model|>bash<|content_invoke_tool_json|>{…}``, which the parser emits only as a
+        completed ``InvokeTool`` message, never as text), a message addressed to a recipient, any other
+        control token — or when it broke the parser (whatever follows the break is lost). A caller that
+        must not lose output keeps ``raw_text`` (the whole completion, control tokens included) then."""
         tokens = list(tokens)
+        chat = self._chat
         cot: list[str] = []
         answer: list[str] = []
+        complete = True
 
         def _absorb(updates) -> None:
+            nonlocal complete
             for u in updates:
                 up = u.update
                 # StreamingContent deltas only: the parser ALSO emits the completed Message for the
                 # same content, so counting both would duplicate every character.
-                if isinstance(up, self._chat.StreamingContent):
-                    (cot if isinstance(up.content, self._chat.Thinking) else answer).append(
-                        up.content.text
-                    )
+                if isinstance(up, chat.StreamingContent):
+                    (cot if isinstance(up.content, chat.Thinking) else answer).append(up.content.text)
+                elif isinstance(up, chat.StreamingMessageHeader) and up.author.name is not None:
+                    complete = False  # addressed to a recipient (a tool): not plain thinking / text
+                elif isinstance(up, chat.Message) and not isinstance(
+                        up.content, (chat.Thinking, chat.Text, chat.ModelEndSampling)):
+                    complete = False  # e.g. InvokeTool
 
         _, parser = self._renderer.render_for_completion([])
         try:
@@ -273,6 +289,7 @@ class TmlRenderer:
             # Truncation at an unlucky cut point (mid tool-call JSON, mid UTF-8). Re-parse token by
             # token so we keep everything up to the break instead of losing the whole completion.
             # Drop whatever the failed pass already absorbed — the retry starts from token 0.
+            complete = False
             cot.clear()
             answer.clear()
             _, parser = self._renderer.render_for_completion([])
@@ -281,7 +298,10 @@ class TmlRenderer:
                     _absorb(parser.parse_token(tok))
                 except self._v0.ParseError:
                     break
-        return "".join(cot).strip(), "".join(answer).strip(), self.tokenizer.decode(tokens)
+        plain = set(self._sp.values()) - {self._sp["message_user"]}
+        if complete and any(t not in plain and self.tokenizer.is_special_token(t) for t in tokens):
+            complete = False  # a control token outside the thinking/text structure (cut-off tool call…)
+        return "".join(cot).strip(), "".join(answer).strip(), self.tokenizer.decode(tokens), complete
 
 
 def is_tml_policy(model_name: str) -> bool:

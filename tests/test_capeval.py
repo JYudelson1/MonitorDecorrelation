@@ -57,6 +57,195 @@ def test_repetition():
     assert repetition("a b c d " * 10) > 0.8
 
 
+def test_rejudging_a_saved_record_shows_the_judge_exactly_what_fresh_judging_did():
+    from monitordecorrelation.capeval.bench import clip_middle
+    from monitordecorrelation.capeval.coherence import render_conversation
+
+    rng = np.random.default_rng(0)
+    for n in (0, 10, 3999, 4000, 4001, 4500, 4501, 20000):
+        thinking = "".join(rng.choice(list("abc \n"), n))
+        fresh = [{"user": "q", "thinking": thinking, "reply": "r" * 12000}]
+        stored = [{"user": "q", "thinking": thinking, "thinking_chars": n, "reply": "r" * 12000}]
+        # Records written before 2026-11-05 kept only a 3000 + 1500-char clip of the thinking.
+        legacy = [{**stored[0], "thinking": clip_middle(thinking, 3000, 1500)}]
+        assert render_conversation(stored) == render_conversation(legacy) == render_conversation(fresh), n
+
+
+def _coh_bench(judge_model):
+    from monitordecorrelation.capeval.coherence import MTBenchCoherence
+    from monitordecorrelation.capeval.policy import Budget
+
+    return MTBenchCoherence(n_samples=3, budget=Budget(16384, 4096), judge_model=judge_model)
+
+
+def test_coherence_identity_excludes_the_judge_and_old_records_are_recognized():
+    import hashlib
+    import json
+
+    a, b = _coh_bench("google/gemini-4-argon"), _coh_bench("x-ai/grok-4.7")
+    assert a.fingerprint() == b.fingerprint()  # the judge does not change what a sample is
+    assert a.settings()["judge_model"] == "google/gemini-4-argon"  # but it is recorded
+    # The fingerprint the previous code gave these samples (judge hashed in; Sonnet 5.5, prompt v1).
+    old = hashlib.sha256(json.dumps({"name": "coherence", "n_samples": 3, "think_budget": 16384,
+                                     "answer_budget": 4096, "judge_model": "anthropic/claude-sonnet-5.5",
+                                     "judge_prompt_version": 1}, sort_keys=True).encode()).hexdigest()[:16]
+    assert old in a.legacy_fingerprints() and old != a.fingerprint()
+    legacy = {"diag": {"judge_fail": False}, "transcript": {"judge": {"verdict": {}}}}  # no judge name
+    assert a.needs_rejudge(legacy)  # scored by Sonnet -> re-judge
+    assert not _coh_bench("anthropic/claude-sonnet-5.5").needs_rejudge(legacy)
+    mine = {"diag": {"judge_fail": False}, "transcript": {"judge": {"model": "google/gemini-4-argon",
+                                                                    "prompt_version": 1}}}
+    assert not a.needs_rejudge(mine) and b.needs_rejudge(mine)
+    assert a.needs_rejudge({**mine, "diag": {"judge_fail": True}})
+
+
+def test_rejudging_drops_the_previous_judges_scores():
+    from monitordecorrelation.capeval.bench import RunCtx
+
+    class FailingJudge:
+        model = "google/gemini-4-argon"
+
+        async def judge(self, conversation):
+            return None, {"fail_reason": "content_filter"}
+
+    rec = {"scores": {"repetition": 0.1, "coherence": 9.0, "consistency": 9.0, "rl_fried": 1.0},
+           "diag": {"judge_fail": False},
+           "transcript": {"conversation": [{"user": "q", "thinking": "t", "thinking_chars": 1, "reply": "r"}],
+                          "judge": {"verdict": {"coherence": 9.0}}}}
+    ctx = RunCtx(sandbox=None, judge=FailingJudge(), cache_dir="")
+    asyncio.run(_coh_bench("google/gemini-4-argon").judge_record(ctx, rec))
+    assert rec["scores"] == {"repetition": 0.1}
+    assert rec["diag"]["judge_fail"] and rec["transcript"]["judge"]["model"] == "google/gemini-4-argon"
+
+
+# ---------------------------------------------------------------------------------------------
+# Transcripts are complete: nothing clipped, and output the parser cannot represent is kept raw
+# ---------------------------------------------------------------------------------------------
+def _scripted_inkling(completions: list[list[int]]):
+    """A real Inkling ``Policy`` (TML rendering + parsing) whose sampler returns ``completions`` in order."""
+    from types import SimpleNamespace
+
+    from monitordecorrelation.capeval.policy import Policy
+
+    pol = Policy(key="base:thinkingmachines/Inkling-Small", base_model="thinkingmachines/Inkling-Small",
+                 sampling_client=None, sampling=None, semaphore=None, context_length=65536, thinking_effort=0.5)
+    queue = list(completions)
+
+    async def sample(tokens, max_tokens, seed, priority):
+        return SimpleNamespace(tokens=queue.pop(0), stop_reason="stop")
+
+    pol._sample = sample
+    return pol
+
+
+def _tml_turn(tok, thinking: str, text: str | None = None, call: str | None = None) -> list[int]:
+    """Inkling's token framing for a turn: thinking, then a text message and/or a native bash tool call."""
+    import json
+
+    sp, o = tok.encode_special, (lambda s: list(tok.encode_ordinary(s)))
+    ids = [sp("message_model"), sp("content_thinking"), *o(thinking), sp("end_message")]
+    if text is not None:
+        ids += [sp("message_model"), sp("content_text"), *o(text), sp("end_message")]
+    if call is not None:
+        ids += [sp("message_model"), *o("bash"), sp("content_invoke_tool_json"),
+                *o(json.dumps({"name": "bash", "args": {"command": call}})), sp("end_message")]
+    return ids + [sp("content_model_end_sampling")]
+
+
+def test_agent_transcript_is_complete_and_keeps_a_native_tool_call():
+    from contextlib import asynccontextmanager
+
+    from monitordecorrelation.capeval.agentic import FORMAT_ERROR, agent_diag, run_agent
+    from monitordecorrelation.capeval.bench import RunCtx
+    from monitordecorrelation.capeval.policy import Budget
+
+    long_thought = " ".join(f"step{i}" for i in range(4000))  # ~28k chars: the old store kept 1.2k
+    tok = _scripted_inkling([])._tml.tokenizer
+    pol = _scripted_inkling([
+        _tml_turn(tok, "look first", call="cat /work/main.py"),          # native call: no text at all
+        _tml_turn(tok, long_thought, text="```bash\nwrite\n```"),
+        _tml_turn(tok, "done", text="```bash\nsubmit\n```"),
+    ])
+    out = "y" * 30000
+
+    class Box:
+        files: dict = {}
+
+        async def exec(self, cmd, timeout):
+            self.files["solution.py"] = "x = 1\n"
+            return ExecResult(output=out, returncode=0, timed_out=False, n_bytes=len(out))
+
+        async def read(self, name):
+            return self.files.get(name)
+
+    class Sandbox:
+        @asynccontextmanager
+        async def container(self, files):
+            yield Box()
+
+    ep = asyncio.run(run_agent(RunCtx(sandbox=Sandbox()), pol, seed_parts=("bx", "i", 0), task="t",
+                               graded_note="", files={}, graded_files=["solution.py"],
+                               budget=Budget(16384, 4096), max_turns=30, cmd_timeout=60, obs_chars=8000))
+    t0, t1, t2 = ep["turns"]
+    assert t0["format_error"] and t0["answer"] == "" and t0["cot"] == "look first"
+    assert '"command": "cat /work/main.py"' in t0["raw"] and "<|content_invoke_tool_json|>" in t0["raw"]
+    assert t0["observation"] == FORMAT_ERROR.format(cut="")
+    assert t1["cot"] == long_thought and "raw" not in t1
+    assert t1["observation"] == format_observation(ExecResult(out, 0, False, len(out)), 60, 8000)
+    assert len(t1["observation"]) > 8000  # what the model saw, unclipped (the old store kept 3k)
+    assert t2.get("submit") and ep["end_reason"] == "submitted"
+    d = agent_diag(ep)
+    assert (d["format_errors"], d["n_unparsed"], d["n_gen"]) == (1, 1, 3)
+    rate = stats.diagnostics([{"diag": d}, {"diag": {**d, "format_errors": 0}}, {"diag": {**d, "format_errors": 3}}])
+    assert rate["format_error_ep_rate"] == 2 / 3
+
+
+def test_qa_transcript_keeps_the_whole_thinking_and_raw():
+    from monitordecorrelation.capeval.bench import Item, RunCtx
+    from monitordecorrelation.capeval.policy import Budget
+    from monitordecorrelation.capeval.qa import _SingleTurn
+
+    class QA(_SingleTurn):
+        name = "qx"
+
+        def prompt(self, item):
+            return "q"
+
+        def grade(self, item, answer):
+            return 0.0, True, None
+
+    long_thought = " ".join(f"step{i}" for i in range(4000))
+    tok = _scripted_inkling([])._tml.tokenizer
+    pol = _scripted_inkling([_tml_turn(tok, long_thought, text="Let me compute.", call="python -c 1"),
+                             _tml_turn(tok, "short", text="The answer is (A).")])
+    item = Item(id="i", cluster="i", group="g", data={"gold": "A"})
+    a = asyncio.run(QA(n_samples=1, budget=Budget(36864, 2048)).run(RunCtx(), pol, item, 0))
+    assert a["transcript"]["cot"] == long_thought and a["transcript"]["answer"] == "Let me compute."
+    assert "python -c 1" in a["transcript"]["raw"] and a["diag"]["n_unparsed"] == 1
+    b = asyncio.run(QA(n_samples=1, budget=Budget(36864, 2048)).run(RunCtx(), pol, item, 1))
+    assert "raw" not in b["transcript"] and b["diag"]["n_unparsed"] == 0
+
+
+def test_coherence_record_keeps_the_whole_thinking_and_raw():
+    from monitordecorrelation.capeval.bench import Item, RunCtx
+
+    class Judge:
+        model = "google/gemini-4-argon"
+
+        async def judge(self, conversation):
+            return {"coherence": 7.0, "consistency": 8.0, "rl_fried": 2.0}, {}
+
+    long_thought = " ".join(f"step{i}" for i in range(4000))
+    tok = _scripted_inkling([])._tml.tokenizer
+    pol = _scripted_inkling([_tml_turn(tok, long_thought, text="Hi."), _tml_turn(tok, "t2", call="ls")])
+    item = Item(id="i", cluster="i", group="g", data={"turns": ["q1", "q2"]})
+    rec = asyncio.run(_coh_bench("google/gemini-4-argon").run(RunCtx(judge=Judge()), pol, item, 0))
+    c1, c2 = rec["transcript"]["conversation"]
+    assert c1["thinking"] == long_thought and c1["thinking_chars"] == len(long_thought) and "raw" not in c1
+    assert c2["reply"] == "" and '"command": "ls"' in c2["raw"] and rec["diag"]["n_unparsed"] == 1
+    assert rec["scores"]["coherence"] == 7.0
+
+
 def test_priority_semaphore_serves_low_priority_first():
     async def main():
         sem = PrioritySemaphore(1)

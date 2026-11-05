@@ -49,7 +49,7 @@ from dotenv import load_dotenv
 
 from monitordecorrelation.capeval.agentic import CanItEdit, Exercism, LiveCodeBench
 from monitordecorrelation.capeval.bench import Benchmark, Item, RunCtx
-from monitordecorrelation.capeval.coherence import Judge, MTBenchCoherence
+from monitordecorrelation.capeval.coherence import DEFAULT_JUDGE, Judge, MTBenchCoherence
 from monitordecorrelation.capeval.policy import USAGE, Budget, ModelSpec, Policy, PrioritySemaphore, SamplingConfig
 from monitordecorrelation.capeval.qa import GPQADiamond, Math500, MMLUPro
 from monitordecorrelation.capeval.report import aggregate_usage, build_report, iter_sample_lines, render_report
@@ -98,8 +98,10 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--obs-chars", type=int, default=10000)
     g.add_argument("--lcb-test-timeout", type=float, default=10.0)
     g = p.add_argument_group("judge")
-    g.add_argument("--judge-model", default="anthropic/claude-sonnet-5.5")
-    g.add_argument("--judge-concurrency", type=int, default=16)
+    g.add_argument("--judge-model", default=DEFAULT_JUDGE,
+                   help="OpenRouter model of the coherence judge. Changing it on --resume re-judges the saved "
+                        "conversations (no re-sampling).")
+    g.add_argument("--judge-concurrency", type=int, default=32)
     g = p.add_argument_group("parallelism / infra")
     g.add_argument("--max-inflight", type=int, default=768,
                    help="concurrent tinker sampling requests (measured: 256 -> ~39k tok/s, 768 -> ~89k tok/s)")
@@ -352,6 +354,7 @@ async def run_jobs(jobs: list[tuple], benches: dict[str, Benchmark], policies: d
         # line), so summing every line of the samples file counts each request once.
         rec["usage"] = usage
         rec["rejudged"] = True
+        rec["fingerprint"] = benches[rec["bench"]].fingerprint()  # a legacy record is now current
         done(rec)
 
     try:
@@ -426,25 +429,27 @@ async def amain(args) -> None:
         per_bench_jobs = []
         n_reused = n_stale = 0
         for b in benches:
-            fp = b.fingerprint()
+            fps = {b.fingerprint()} | b.legacy_fingerprints()
             jobs = []
             for it in items[b.name]:
                 for k in range(b.n_samples):
                     for s in specs:
                         r = cache.get((s.key, b.name, it.id, k))
-                        if r is not None and r.get("fingerprint") == fp and not r.get("error"):
-                            if r.get("diag", {}).get("judge_fail"):
+                        if r is not None and r.get("fingerprint") in fps and not r.get("error"):
+                            # A failed judgement, or one by another judge: re-judge the saved sample.
+                            if b.needs_rejudge(r):
                                 rejudge.append(r)
                             else:
                                 results[record_key(r)] = r
                             n_reused += 1
                             continue
-                        n_stale += r is not None and r.get("fingerprint") != fp
+                        n_stale += r is not None and r.get("fingerprint") not in fps
                         jobs.append((s.key, b.name, it, k))
             per_bench_jobs.append(jobs)
         jobs = interleave(per_bench_jobs)
         if args.resume:
-            log(f"resume: reusing {n_reused} samples ({len(rejudge)} to re-judge), {n_stale} stale "
+            log(f"resume: reusing {n_reused} samples ({len(rejudge)} to re-judge: judge failed, or another judge "
+                f"scored them), {n_stale} stale "
                 f"(settings changed), {len(jobs)} to run")
         meta = {
             "created": dt.datetime.now().isoformat(timespec="seconds"),
