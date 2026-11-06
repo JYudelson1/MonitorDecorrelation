@@ -5,7 +5,10 @@ Usage:
 
 Works at the TCP level: bytes are piped through untouched (no HTTP parsing, no header rewriting), so
 any request type works, including streaming/SSE. Each incoming *connection* goes to the backend with
-the fewest open connections (ties broken round-robin). An HTTP keep-alive connection therefore stays
+the fewest open connections per unit of ``--weights`` (default all 1: plain least connections; ties broken
+round-robin). Give unequal backends weights proportional to their throughput: plain least connections
+splits a burst of requests evenly, so the slower backend's share finishes last while the faster one
+idles. An HTTP keep-alive connection therefore stays
 on one backend for its lifetime; clients firing many parallel requests open many connections, which
 get spread evenly.
 
@@ -26,9 +29,13 @@ DOWN_COOLDOWN_S = 5.0  # after a failed connect, try a backend only if all other
 
 
 class Balancer:
-    def __init__(self, backend_host: str, backend_ports: list[int]):
+    def __init__(self, backend_host: str, backend_ports: list[int], weights: list[float] | None = None):
         self.backend_host = backend_host
         self.backend_ports = backend_ports
+        weights = weights or [1.0] * len(backend_ports)
+        if len(weights) != len(backend_ports) or any(w <= 0 for w in weights):
+            raise ValueError(f"need one positive weight per backend port, got {weights} for {backend_ports}")
+        self.weight = dict(zip(backend_ports, weights))
         self.active = {p: 0 for p in backend_ports}
         self.total = {p: 0 for p in backend_ports}
         self.failures = {p: 0 for p in backend_ports}
@@ -36,12 +43,13 @@ class Balancer:
         self._rr = itertools.cycle(range(len(backend_ports)))
 
     def _pick_order(self) -> list[int]:
-        """Healthy backends first, then fewest active connections; round-robin start breaks ties."""
+        """Healthy backends first, then fewest active connections per unit weight; round-robin start
+        breaks ties."""
         start = next(self._rr)
         rotated = self.backend_ports[start:] + self.backend_ports[:start]
         now = time.monotonic()
         # Stable sort keeps the rotation for ties.
-        return sorted(rotated, key=lambda p: (self.down_until[p] > now, self.active[p]))
+        return sorted(rotated, key=lambda p: (self.down_until[p] > now, self.active[p] / self.weight[p]))
 
     async def handle(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         _set_nodelay(client_writer)
@@ -135,7 +143,7 @@ def _raise_fd_limit():
 
 
 async def main(args):
-    balancer = Balancer(args.backend_host, args.backend_ports)
+    balancer = Balancer(args.backend_host, args.backend_ports, args.weights)
     server = await asyncio.start_server(
         balancer.handle,
         host=args.listen_host,
@@ -146,7 +154,7 @@ async def main(args):
     )
     print(
         f"[lb] listening on {args.listen_host}:{args.listen_port} -> "
-        f"{args.backend_host}:{args.backend_ports} (fd limit {_raise_fd_limit()})",
+        f"{args.backend_host}:{args.backend_ports} weights {balancer.weight} (fd limit {_raise_fd_limit()})",
         flush=True,
     )
     if args.report_every > 0:
@@ -159,6 +167,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--listen-port", type=int, required=True, help="port clients send requests to")
     parser.add_argument("--backend-ports", type=int, nargs="+", required=True, help="ports to route to")
+    parser.add_argument("--weights", type=float, nargs="+", default=None,
+                        help="one positive weight per backend port (relative throughput); default all 1")
     parser.add_argument("--listen-host", default="0.0.0.0")
     parser.add_argument("--backend-host", default="127.0.0.1")
     parser.add_argument("--backlog", type=int, default=16384, help="listen backlog (capped by net.core.somaxconn)")

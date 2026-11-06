@@ -6,7 +6,9 @@
 #   GPU 0  Qwen3.5-35B-A3B-FP8  engine B  :8004  (0.5 ≈ 72 GB)
 #   GPU 0  Qwen3-1.7B (q17_*)             :8011  (0.15 ≈ 21 GB; weights 3.4 GB)
 #   GPU 0  probe server(s), Qwen3-8B bf16 ~17–20 GB each, NOT capped — the ~30 GB left on GPU 0 is its headroom
-#   :8002  scripts/load_balancer.py over 8003 + 8004 (least connections) — the q35_* configs' base_url
+#   :8002  scripts/load_balancer.py over 8003 + 8004, weighted least connections 2.5 : 1 (measured saturated
+#          throughput ~11.6k vs ~4.7k tok/s; unweighted, each eval burst waited on engine B's half while A
+#          idled — A had a backlog only 30% of the time) — the q35_* configs' base_url
 #
 # One q35 engine saturates at ~11.6k generated tok/s with its KV cache full (2026-11-05), so the second
 # engine is the throughput lever. Flags are setup_vllm.sh's q35 flags with --max-num-seqs 512.
@@ -35,9 +37,9 @@ stop() {  # stop() <pgrep -f pattern>
   for _ in $(seq 1 30); do pgrep -f "$1" >/dev/null || return 0; sleep 2; done
   kill -9 $(pgrep -f "$1") 2>/dev/null || true; sleep 5
 }
-stop "load_balancer.py --listen-port 8002"
-stop "vllm serve Qwen/Qwen3.5-35B-A3B-FP8"
-stop "vllm serve Qwen/Qwen3-1.7B"
+stop "[l]oad_balancer.py --listen-port 8002"
+stop "[v]llm serve Qwen/Qwen3.5-35B-A3B-FP8"
+stop "[v]llm serve Qwen/Qwen3-1.7B"
 
 wait_up() {  # wait_up <name> <port>
   for _ in $(seq 1 180); do
@@ -66,7 +68,7 @@ CUDA_VISIBLE_DEVICES=0 setsid -f "$VLLM" serve Qwen/Qwen3-1.7B --port 8011 --rea
   --gpu-memory-utilization 0.15 --disable-uvicorn-access-log >"$LOG/qwen3-1.7b-8011.log" 2>&1 </dev/null
 wait_up qwen3-1.7b-8011 8011
 echo "starting lb-8002 → 8003 8004"
-setsid -f .venv/bin/python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 \
+setsid -f .venv/bin/python scripts/load_balancer.py --listen-port 8002 --backend-ports 8003 8004 --weights 2.5 1 \
   >"$LOG/lb-8002.log" 2>&1 </dev/null
 wait_up lb-8002 8002
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
