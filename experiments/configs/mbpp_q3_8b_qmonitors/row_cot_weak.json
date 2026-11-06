@@ -5,6 +5,9 @@
     "policy": "Qwen/Qwen3-8B",
     "backend": "tinker",
     "env": "mbpp_honeypot",
+    "env_options": {
+        "length_penalty": 0.006
+    },
     "n_steps": 90,
     "batch_size": 16,
     "group_size": 16,

@@ -89,3 +89,38 @@ if __name__ == "__main__":
     test_unparsed()
     test_holdout_disjoint()
     print("ALL PASS")
+
+
+def _factory_kwargs(monkeypatch, env_options):
+    """What make_env hands MbppHoneypotEnv.from_dataset for a config with these env_options."""
+    from monitordecorrelation.envs import factory
+    from monitordecorrelation.experiment_config import ExperimentConfig
+
+    seen = {}
+    monkeypatch.setattr(MbppHoneypotEnv, "from_dataset", classmethod(lambda cls, **kw: seen.update(kw) or "env"))
+    cfg = ExperimentConfig(run_name="t", env="mbpp_honeypot", env_options=env_options)
+    assert factory.make_env(cfg) == "env"
+    return seen
+
+
+def test_length_penalty_reaches_the_env_through_env_options(monkeypatch):
+    assert _factory_kwargs(monkeypatch, {"length_penalty": 0.006})["length_penalty"] == 0.006
+    assert "length_penalty" not in _factory_kwargs(monkeypatch, {})  # absent → the env default (0.003)
+
+
+def test_mbpp_env_options_refuses_anything_else(monkeypatch):
+    import pytest
+
+    with pytest.raises(ValueError, match="only option is length_penalty"):
+        _factory_kwargs(monkeypatch, {"timeout": 3})
+    for bad in (-0.1, "0.006", True):
+        with pytest.raises(ValueError, match="length_penalty must be a number"):
+            _factory_kwargs(monkeypatch, {"length_penalty": bad})
+
+
+def test_doubling_the_length_penalty_halves_the_length_discount():
+    item = MbppItem(task_id=1, text="Sum a list of numbers.", test_list=_TESTS)
+    code = "def f(a): return sum(a)"
+    e1, e2 = MbppHoneypotEnv([item], length_penalty=0.003), MbppHoneypotEnv([item], length_penalty=0.006)
+    a, b = e1.score(_roll(e1, code)).task_reward, e2.score(_roll(e2, code)).task_reward
+    assert abs((1 - a) * 2 - (1 - b)) < 1e-9

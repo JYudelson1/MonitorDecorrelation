@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 
 def make_env(cfg: "ExperimentConfig"):
     """Construct the environment named by ``cfg.env``. Raises ValueError on an unknown name."""
-    if cfg.env_options and cfg.env not in ("impossiblebench", "terminal_verifier"):
-        raise ValueError(f"env_options is only supported by the impossiblebench / terminal_verifier "
-                         f"envs, not {cfg.env!r}")
+    if cfg.env_options and cfg.env not in ("impossiblebench", "terminal_verifier", "mbpp_honeypot"):
+        raise ValueError(f"env_options is only supported by the impossiblebench / terminal_verifier / "
+                         f"mbpp_honeypot envs, not {cfg.env!r}")
     if cfg.env == "sycophancy":
         from monitordecorrelation.envs.sycophancy import SycophancyQAEnv
 
@@ -37,7 +37,20 @@ def make_env(cfg: "ExperimentConfig"):
     if cfg.env == "mbpp_honeypot":
         from monitordecorrelation.envs.mbpp_honeypot import MbppHoneypotEnv
 
-        return MbppHoneypotEnv.from_dataset(n=cfg.n_prompts_pool, seed=cfg.seed)
+        # MBPP takes one option: length_penalty (reward = 1 − length_penalty·len(code) when the visible
+        # test passes; the env default is the Obfuscation Atlas's 0.003). Anything else is refused, not
+        # passed through to a constructor argument nobody meant to expose.
+        opts = dict(cfg.env_options or {})
+        unknown = set(opts) - {"length_penalty"}
+        if unknown:
+            raise ValueError(f"mbpp_honeypot env_options: unknown {sorted(unknown)}; the only option is "
+                             "length_penalty")
+        if "length_penalty" in opts:
+            lp = opts["length_penalty"]
+            if isinstance(lp, bool) or not isinstance(lp, (int, float)) or lp < 0:
+                raise ValueError(f"mbpp_honeypot env_options.length_penalty must be a number >= 0, got {lp!r}")
+            opts["length_penalty"] = float(lp)
+        return MbppHoneypotEnv.from_dataset(n=cfg.n_prompts_pool, seed=cfg.seed, **opts)
     if cfg.env == "impossiblebench":
         from monitordecorrelation.envs.impossiblebench import ImpossibleBenchEnv
 
