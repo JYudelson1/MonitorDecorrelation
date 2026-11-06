@@ -19,6 +19,12 @@ threaded so many runs can queue concurrently.
 
 from __future__ import annotations
 
+import os
+
+# Before torch is imported: expandable segments cut the allocator fragmentation that made long batches
+# fail with "free 1.5 GB, need 4.1 GB" on a GPU shared with vLLM engines (2026-11-06).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import argparse
 import json
 import threading
@@ -28,6 +34,28 @@ from io import BytesIO
 import numpy as np
 
 from monitordecorrelation.whitebox.model import WhiteBoxModel
+
+
+def extract_with_oom_backoff(wb, items, *, follow_up, batch_size: int, preserve_thinking: bool, log=print):
+    """``wb.extract_activations``, retried at half the batch size (down to 1) after a CUDA out-of-memory
+    error, with the allocator cache released first. The probe server shares its GPU with vLLM engines,
+    so a batch of long rollouts can briefly not fit; answering with a 500 made the calling run abort
+    (a monitor that returns NaN aborts the run). Batch size only changes padding, never which tokens
+    are read, so the activations are the same up to floating-point noise."""
+    import torch
+
+    bs = max(1, int(batch_size))
+    while True:
+        try:
+            return wb.extract_activations(items, follow_up=follow_up, batch_size=bs,
+                                          preserve_thinking=preserve_thinking)
+        except torch.cuda.OutOfMemoryError:
+            if bs == 1:
+                raise
+            torch.cuda.empty_cache()
+            bs = max(1, bs // 2)
+            log(f"[probe_server] CUDA out of memory on {len(items)} items — retrying at batch_size {bs}",
+                flush=True)
 
 
 def main() -> None:
@@ -67,8 +95,8 @@ def main() -> None:
                 items = [tuple(x) for x in req["items"]]
                 fu = tuple(req["follow_up"]) if req.get("follow_up") else None
                 with lock:
-                    acts = wb.extract_activations(
-                        items, follow_up=fu, batch_size=int(req.get("batch_size", 8)),
+                    acts = extract_with_oom_backoff(
+                        wb, items, follow_up=fu, batch_size=int(req.get("batch_size", 8)),
                         preserve_thinking=bool(req.get("preserve_thinking", False)))
                 buf = BytesIO()
                 np.save(buf, acts)

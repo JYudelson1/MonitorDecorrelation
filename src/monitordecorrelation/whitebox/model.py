@@ -198,6 +198,39 @@ def _install_inkling_finalize_guard(*, max_missing_gib: float = 2.0):
     return _restore
 
 
+# How long a remote activation read keeps retrying a probe server that errors (5xx) or is unreachable
+# (restarted, briefly out of memory) before the error reaches the run — which then aborts, since a probe
+# that returns NaN is never treated as data. A 4xx (a malformed request) is never retried.
+PROBE_SERVER_RETRY_S = 1800.0
+
+
+def _post_with_retry(url: str, payload: bytes, *, retry_s: float = PROBE_SERVER_RETRY_S, sleep=None) -> np.ndarray:
+    import time
+    import urllib.error
+    import urllib.request
+    from io import BytesIO
+
+    sleep = sleep or time.sleep
+    deadline = time.monotonic() + retry_s
+    attempt = 0
+    while True:
+        attempt += 1
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=1800) as r:  # generous: big batch on a shared GPU
+                return np.load(BytesIO(r.read()))
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or time.monotonic() > deadline:
+                raise
+            err = f"HTTP {e.code}: {e.read()[:300]!r}"
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            if time.monotonic() > deadline:
+                raise
+            err = f"{type(e).__name__}: {e}"
+        print(f"[WhiteBoxModel] probe server attempt {attempt} failed ({err}); retrying", flush=True)
+        sleep(min(2.0 ** attempt, 60.0))
+
+
 class WhiteBoxModel:
     remote: bool = False  # class default so stubs / __init__-bypassing callers behave as local
     _multimodal: bool = False  # class default for __new__ stubs (CausalLM / Qwen path)
@@ -328,10 +361,7 @@ class WhiteBoxModel:
             return np.empty((0, self.n_layers, self.d_model), dtype=np.float32)
         payload = json.dumps({"items": triples, "follow_up": list(follow_up) if follow_up else None,
                               "batch_size": batch_size, "preserve_thinking": preserve_thinking}).encode()
-        req = urllib.request.Request(f"{self.server_url}/extract_activations", data=payload,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=1800) as r:  # generous: big batch on a shared GPU
-            return np.load(BytesIO(r.read()))
+        return _post_with_retry(f"{self.server_url}/extract_activations", payload)
 
     def _build_messages(
         self, question: str, cot: str, answer: str, follow_up: tuple[str, str] | None
