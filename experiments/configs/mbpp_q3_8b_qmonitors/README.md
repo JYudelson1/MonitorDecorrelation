@@ -3,7 +3,10 @@
 Redo of the Qwen3-8B MBPP matrix (2026-11-05): the earlier 8B batches predate the GRPO group-seeding fix
 (2026-09-22), used API judges whose reasoning we can't read, and older probe configs. Hyperparameters are
 copied from `mbpp_q35_qmonitors/` (Qwen3.5-4B, 2026-10-27); only the policy, the monitors and the names
-differ. `lr` 5e-4 as there (tinker-cookbook's estimate for Qwen3-8B LoRA is 4.7e-4).
+differ — except **`lr` 2.5e-4** (2026-11-06; was 5e-4 as there, ≈ tinker-cookbook's 4.7e-4 estimate for
+Qwen3-8B LoRA): at 5e-4 seed-0 `cot_weak` collapsed at step 82 (loss 37k, then 100% truncated `code code code…`
+loops it could not leave — constant −1 reward, zero advantage), the same failure as 6/9 Sep-3 runs. The 5e-4
+seed-0 runs are archived on the box in `data/runs/_aborted_20261106_lr5e-4/`.
 
 | monitor | what | rows that train against it |
 | --- | --- | --- |
