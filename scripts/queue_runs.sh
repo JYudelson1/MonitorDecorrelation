@@ -15,7 +15,8 @@
 #   scripts/queue_runs.sh -c <config|dir> [-n NUM_SEEDS] [-j MAX_JOBS] [-d] [-s] [-I CKPT -R SUFFIX]
 #                         [-- EXTRA --set k=v ...]
 #
-#   -c PATH   a config file OR a directory of configs (*.json/*.yaml/*.yml). REQUIRED.
+#   -c PATH   a config file OR a directory of configs (*.json/*.yaml/*.yml). REQUIRED; repeatable
+#             (-c a.json -c b.json, or a dir plus files) — the configs of every -c are queued together.
 #   -n N      run seeds 0..N-1 (default: 1).
 #   -j J      max parallel jobs (default: 4).
 #   -d        dry-run: print the plan and exit, launch nothing.
@@ -100,11 +101,11 @@ if [ "${1:-}" = "__worker" ]; then
 fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
-CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""; PROBE_PORT_ARG=""
+CONFIG_ARGS=(); NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""; PROBE_PORT_ARG=""
 INIT_CKPT=""; RUN_SUFFIX=""
 while getopts ":c:n:j:U:p:I:R:dsDPh" opt; do
     case "$opt" in
-        c) CONFIG="$OPTARG" ;;
+        c) CONFIG_ARGS+=("$OPTARG") ;;
         n) NUM_SEEDS="$OPTARG" ;;
         j) MAX_JOBS="$OPTARG" ;;
         U) PROBE_URL="$OPTARG" ;;
@@ -123,7 +124,7 @@ done
 shift $((OPTIND - 1))
 EXTRA_SETS="$*"   # everything after `--` (or any trailing args) → passthrough --set overrides
 
-[ -n "$CONFIG" ] || { echo "error: -c <config|dir> is required (try -h)" >&2; exit 2; }
+[ "${#CONFIG_ARGS[@]}" -gt 0 ] || { echo "error: -c <config|dir> is required (try -h)" >&2; exit 2; }
 if [ -n "$INIT_CKPT" ]; then
     [[ "$INIT_CKPT" == tinker://*/weights/* ]] || {
         echo "error: -I $INIT_CKPT is not a tinker training-state path (tinker://<run>/weights/<name>)" >&2; exit 2; }
@@ -136,17 +137,19 @@ if [ -n "$RUN_SUFFIX" ] && ! [[ "$RUN_SUFFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
     exit 2
 fi
 cd "$REPO_ROOT"
-[ -e "$CONFIG" ] || { echo "error: config path not found: $CONFIG" >&2; exit 2; }
-
-# Collect the config files (a single file, or every *.json/*.yaml/*.yml in a directory).
+# Collect the config files: for each -c, the file itself or every *.json/*.yaml/*.yml in the directory.
 configs=()
-if [ -d "$CONFIG" ]; then
-    while IFS= read -r f; do configs+=("$f"); done < <(find "$CONFIG" -maxdepth 1 -type f \
-        \( -name '*.json' -o -name '*.yaml' -o -name '*.yml' \) | sort)
-    [ "${#configs[@]}" -gt 0 ] || { echo "error: no *.json/*.yaml/*.yml configs in $CONFIG" >&2; exit 2; }
-else
-    configs=("$CONFIG")
-fi
+for CONFIG in "${CONFIG_ARGS[@]}"; do
+    [ -e "$CONFIG" ] || { echo "error: config path not found: $CONFIG" >&2; exit 2; }
+    if [ -d "$CONFIG" ]; then
+        n_before=${#configs[@]}
+        while IFS= read -r f; do configs+=("$f"); done < <(find "$CONFIG" -maxdepth 1 -type f \
+            \( -name '*.json' -o -name '*.yaml' -o -name '*.yml' \) | sort)
+        [ "${#configs[@]}" -gt "$n_before" ] || { echo "error: no *.json/*.yaml/*.yml configs in $CONFIG" >&2; exit 2; }
+    else
+        configs+=("$CONFIG")
+    fi
+done
 
 # Read a config's base run_name (json or yaml) — one uv call per config, not per job.
 read_run_name() {
@@ -213,7 +216,9 @@ if [ "$DRY_RUN" -eq 1 ]; then echo "(dry-run: launching nothing)"; exit 0; fi
 if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     mkdir -p data/runs
     batchlog="data/runs/_batch_$(date +%Y%m%d_%H%M%S).log"
-    set -- -c "$CONFIG" -n "$NUM_SEEDS" -j "$MAX_JOBS"
+    set --
+    for c in "${CONFIG_ARGS[@]}"; do set -- "$@" -c "$c"; done
+    set -- "$@" -n "$NUM_SEEDS" -j "$MAX_JOBS"
     [ "$SKIP_EXISTING" -eq 1 ] && set -- "$@" -s
     [ "$PROBE_SERVER" -eq 1 ] && set -- "$@" -P     # detached child owns the probe server
     [ -n "$PROBE_URL" ] && set -- "$@" -U "$PROBE_URL"

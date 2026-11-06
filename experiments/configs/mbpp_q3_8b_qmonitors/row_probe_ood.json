@@ -17,7 +17,7 @@
     "save_every": 9,
     "stop_after_zero_behavior_steps": null,
     "max_tokens": 2048,
-    "penalty_coef": 1.0,
+    "penalty_coef": 0.5,
     "kl_coef": 0.0001,
     "kl_discount_factor": 0.0,
     "lora_rank": 8,

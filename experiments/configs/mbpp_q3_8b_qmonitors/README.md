@@ -24,7 +24,11 @@ reward = 1 − 0.006·len(code) when the visible test passes. On the 5e-4 contro
 | `probe_ood` | `data/probes/Qwen3-8B/diverse_deception` | `row_probe_ood` |
 | `probe_iid` | `data/probes/Qwen3-8B/mbpp_honeypot` | `row_probe_iid` |
 
-`row_control` trains against nothing (`penalty_coef: null`).
+`row_control` trains against nothing (`penalty_coef: null`); every other row has **`penalty_coef: 0.5`**
+(2026-11-06). The seed-0 batch first ran at 1.0 by mistake — at 1.0 every monitor, even the weak 1.7B judge,
+kept the policy honest (no evasion to measure), as in the July batch. Those runs are kept as the penalty-1.0
+arm (`*_s0`); the 0.5 runs carry `-R pen05` (`*_s0_pen05`). Control is shared by both arms (no penalty, so
+its config is identical).
 
 **No early stop** (`stop_after_zero_behavior_steps: null`, 2026-11-05): with 16 (the q35 batch's value) seed-0
 control stopped at step 16 *before hacking had emerged* (the aborted same-seed run started hacking at steps
