@@ -62,7 +62,7 @@ q35 1 8003 0.9
 q35 0 8004 0.5
 echo "starting qwen3-1.7b-8011 on GPU 0 (mem 0.15)"
 CUDA_VISIBLE_DEVICES=0 setsid -f "$VLLM" serve Qwen/Qwen3-1.7B --port 8011 --reasoning-parser qwen3 \
-  --scheduling-policy priority --max-num-seqs 256 --kv-cache-dtype fp8 --max-model-len 32768 \
+  --scheduling-policy priority --max-num-seqs 512 --kv-cache-dtype fp8 --max-model-len 32768 \
   --gpu-memory-utilization 0.15 --disable-uvicorn-access-log >"$LOG/qwen3-1.7b-8011.log" 2>&1 </dev/null
 wait_up qwen3-1.7b-8011 8011
 echo "starting lb-8002 → 8003 8004"

@@ -1,10 +1,13 @@
 """Background evals in the RL loop (``rl/train.py``: ``_BackgroundEval``).
 
 On an ``async_eval`` backend an eval runs while training continues, but: it samples the weights of the
-step it is labelled with (pinned at launch, whatever training does meanwhile); at most one is in
-flight — launching the next blocks training until the previous is done; any error in it aborts the
-run; the run returns only once every eval is done; and wandb plots every row at its own RL step.
-A backend without ``async_eval`` runs evals inline. All offline (fake backend / env / monitor).
+step it is labelled with (pinned at launch, whatever training does meanwhile); evals run one at a time,
+in step order; any error in one aborts the run; the run returns only once every eval is done; and
+wandb plots every row at its own RL step. With ``checkpoint_sampler`` (a sampler pinned to its step's
+saved weights — tinker) evals QUEUE: launching one never waits for the previous, so training runs ahead
+of its evals. Without it (an eval samples the live weights) launching the next eval blocks training
+until the previous is done. A backend without ``async_eval`` runs evals inline. All offline (fake
+backend / env / monitor).
 """
 
 from __future__ import annotations
@@ -245,3 +248,100 @@ def test_wandb_plots_each_row_at_its_own_rl_step(run_dir, monkeypatch):
     assert order.index(("eval", 0)) > order.index(("train", 1))  # eval 0 really arrived late
     assert sorted(order) == [("eval", 0), ("eval", 3), ("train", 0), ("train", 1), ("train", 2)]
     assert not any("sampler" in k for data, _ in logged for k in data)  # string id: jsonl only
+
+
+class _PinnedBackend(_VersionedBackend):
+    """Like tinker: ``checkpoint_sampler`` pins a sampler to the current weights for good."""
+
+    name = "fake_pinned"
+
+    def checkpoint_sampler(self, label):
+        return f"v{self.version}", f"fake://{label}"
+
+
+def test_with_pinned_samplers_evals_queue_and_training_never_waits(run_dir):
+    """Eval 0 holds its sampling call until training has taken step 5 — past the launches of evals 2
+    and 4 — so training must not wait for any eval; the evals still run in step order, one at a time,
+    each on the weights of its own step, and the run ends with the final eval."""
+    name, d = run_dir
+
+    def slow_first_eval(backend, v):
+        if v == 0:
+            with backend.cond:
+                assert backend.cond.wait_for(lambda: backend.version >= 5, timeout=10), \
+                    "training waited for eval 0 — evals did not queue"
+
+    backend = _PinnedBackend(eval_hook=slow_first_eval)
+    run_grpo(_cfg(name, n_steps=6, eval_every=2), _Env(), backend, train_against=[], held_out=[_Probe()])
+
+    t = backend.timeline
+    at = t.index
+    assert at(("train_start", 4)) < at(("eval_end", 0))       # training ran past two more eval launches
+    starts = [n for what, n in t if what == "eval_start"]
+    ends = [n for what, n in t if what == "eval_end"]
+    assert starts == ends == [0, 2, 4, 6]                      # FIFO …
+    for a, b in zip(ends, starts[1:]):
+        assert at(("eval_end", a)) < at(("eval_start", b))    # … and one at a time
+    evals = _rows(d / "eval_metrics.jsonl")
+    assert [r["step"] for r in evals] == [0, 2, 4, 6]
+    assert [r["sampler"] for r in evals] == ["v0", "v2", "v4", "v6"]  # pinned at launch
+    assert t[-1] == ("eval_end", 6)
+
+
+def test_with_pinned_samplers_a_failed_queued_eval_aborts_the_run(run_dir):
+    name, d = run_dir
+
+    def expire(backend, v):
+        if v == 2:
+            raise RuntimeError("judge exploded")
+
+    backend = _PinnedBackend(eval_hook=expire)
+    with pytest.raises(RuntimeError, match="judge exploded"):
+        run_grpo(_cfg(name, n_steps=8, eval_every=2), _Env(), backend,
+                 train_against=[], held_out=[_Probe()])
+    assert [r["step"] for r in _rows(d / "eval_metrics.jsonl")] == [0]  # nothing after the failure
+
+
+def test_background_eval_queue_is_fifo_and_wait_is_a_barrier():
+    from monitordecorrelation.rl.train import _BackgroundEval
+
+    done: list[int] = []
+    running = []
+    lock = threading.Lock()
+
+    def job(i):
+        with lock:
+            running.append(i)
+            assert len(running) == 1, "two evals ran at once"
+        time.sleep(0.05)
+        with lock:
+            running.remove(i)
+            done.append(i)
+
+    ev = _BackgroundEval()
+    t0 = time.perf_counter()
+    for i in range(4):
+        ev.launch(job, i)
+    assert time.perf_counter() - t0 < 0.1  # launch never waited
+    ev.wait()
+    assert done == [0, 1, 2, 3]
+
+
+def test_background_eval_skips_after_a_failure_and_reraises_on_check():
+    from monitordecorrelation.rl.train import _BackgroundEval
+
+    ran: list[int] = []
+
+    def job(i):
+        if i == 1:
+            raise ValueError("boom")
+        ran.append(i)
+
+    ev = _BackgroundEval()
+    for i in range(3):
+        ev.launch(job, i)
+    with pytest.raises(ValueError, match="boom"):
+        ev.wait()
+    assert ran == [0]
+    with pytest.raises(ValueError, match="boom"):
+        ev.check()

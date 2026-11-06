@@ -33,7 +33,7 @@ experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out
 Needs on the box (2×H200): `scripts/setup_vllm.sh` once (installs vLLM; stop its servers), then
 `scripts/serve_mbpp_judges_2gpu.sh` — two q35 engines behind the `:8002` load balancer (GPU 1 at 0.9, GPU 0 at
 0.5), the 1.7B judge on `:8011` (GPU 0, 0.15), leaving ~50 GB of GPU 0 for the probe server that
-`queue_runs.sh -P` starts (Qwen3-8B bf16 ~17–20 GB, uncapped). One q35 engine saturates under this batch
+`queue_runs.sh -P` starts (Qwen3-8B bf16 ~17–20 GB, uncapped). Every judge runs with `--max-num-seqs 512`. One q35 engine saturates under this batch
 (KV full at ~11.6k tok/s); eval scoring is ~85% of its load. Smoke first:
 
 ```bash

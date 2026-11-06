@@ -548,41 +548,78 @@ def _check_penalty(cfg: RunConfig, train_against: Sequence[Monitor]) -> None:
 
 
 class _BackgroundEval:
-    """At most ONE eval in flight, running in a background thread while training continues.
+    """Evals run in a background worker thread, ONE AT A TIME and IN LAUNCH ORDER, while training
+    continues.
 
-    ``launch`` first waits for the previous eval — blocking the caller, i.e. training — so an eval is
-    never more than ``eval_every`` train steps behind, and the sampling client it was handed is never
-    more than that many refreshes old. Errors are never lost: the eval's exception (anything raised
-    in it, including by the episode and judge threads it waits on) is logged the moment it happens and
-    re-raised in the training thread by the next ``check`` / ``launch`` / ``wait``. The thread is a
-    daemon, so a training-thread crash exits without waiting on an eval nobody will read.
+    ``launch`` queues an eval and returns at once: training never waits for an eval except at ``wait``
+    — the resume snapshots (every ``save_every`` steps) and the end of the run — which blocks until
+    every queued eval is done. Between those barriers evals may fall several ``eval_every`` intervals
+    behind training. That changes nothing an eval measures: each one samples a persistent sampler
+    checkpoint of its own step (``eval_sampler``) with a seed derived from that step, and training
+    reads nothing an eval produces. What it buys: with the judges shared by many runs, a run's next
+    eval is already queued the moment the previous one drains, so judge servers are never left idle
+    waiting for training to reach the next eval step, and training is never held up by judge backlog
+    on held-out monitors. One worker (not one thread per eval) keeps ``eval_metrics.jsonl`` and the
+    dumps in step order.
+
+    Errors are never lost: the first failing eval's exception (anything raised in it, including by the
+    episode and judge threads it waits on) is logged the moment it happens and re-raised in the
+    training thread by the next ``check`` / ``launch`` / ``wait``; evals queued after it are skipped.
+    The worker is a daemon, so a training-thread crash exits without waiting on evals nobody will read.
     """
 
     def __init__(self) -> None:
-        self._fut: Future | None = None
+        self._cv = threading.Condition()
+        self._queue: collections.deque = collections.deque()
+        self._pending = 0  # queued + running
+        self._err: BaseException | None = None
+        self._worker: threading.Thread | None = None
 
     def launch(self, fn: Callable[..., None], *args) -> None:
-        self.wait()
+        self.check()
+        with self._cv:
+            self._queue.append((fn, args))
+            self._pending += 1
+            behind = self._pending - 1
+            if self._worker is None:
+                self._worker = threading.Thread(target=self._run, name="eval", daemon=True)
+                self._worker.start()
+            self._cv.notify_all()
+        if behind:
+            _log(f"  [eval] queued behind {behind} unfinished eval(s)")
 
-        def logged() -> None:
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                if not self._queue:  # idle: exit; the next launch starts a fresh worker
+                    self._worker = None
+                    return
+                fn, args = self._queue.popleft()
+                skip = self._err is not None
             try:
-                fn(*args)
-            except BaseException:  # re-raised in the training thread by wait()
+                if not skip:
+                    fn(*args)
+            except BaseException as e:  # re-raised in the training thread by check / wait
                 _log(f"⚠️  background eval failed; the run aborts at its next check:\n{traceback.format_exc()}")
-                raise
-
-        self._fut = _in_thread(logged, name="eval")
+                with self._cv:
+                    if self._err is None:
+                        self._err = e
+            finally:
+                with self._cv:
+                    self._pending -= 1
+                    self._cv.notify_all()
 
     def wait(self) -> None:
-        """Block until the in-flight eval (if any) is done; re-raise its error."""
-        fut, self._fut = self._fut, None
-        if fut is not None:
-            fut.result()
+        """Block until every queued eval is done; re-raise the first error."""
+        with self._cv:
+            while self._pending:
+                self._cv.wait()
+        self.check()
 
     def check(self) -> None:
-        """Non-blocking: re-raise the in-flight eval's error if it has already failed."""
-        if self._fut is not None and self._fut.done():
-            self.wait()
+        """Non-blocking: re-raise a queued eval's error if one has already failed."""
+        if self._err is not None:
+            raise self._err
 
 
 # ---- Resuming -------------------------------------------------------------------------------------
@@ -958,8 +995,12 @@ def run_grpo(
         return sampler
 
     def launch_eval(step: int, sampler) -> None:
-        """Held-out eval of ``sampler`` labelled ``step``: in the background on an ``async_eval``
-        backend (after the previous one finished — ``launch`` blocks until then), inline otherwise."""
+        """Held-out eval of ``sampler`` labelled ``step``: queued in the background on an ``async_eval``
+        backend (``_BackgroundEval``: training does not wait for it), inline otherwise. Queueing behind
+        unfinished evals needs ``checkpoint_sampler`` — a sampler pinned to its step's weights; without
+        it an eval samples the live weights, so it must start before training moves on."""
+        if not hasattr(backend, "checkpoint_sampler"):
+            evals.wait()
         evals.launch(run_eval, step, sampler)
         if not async_eval:
             evals.wait()
@@ -1008,10 +1049,9 @@ def run_grpo(
         resuming_here = resume is not None and step == start_step
         # (On resume, the state at start_step is the one resumed from — already saved, with its snapshot.)
         if step % cfg.save_every == 0 and hasattr(backend, "save_checkpoint") and not resuming_here:
-            # The snapshot must describe complete logs up to this step, so let an in-flight eval of an
-            # earlier step finish first. Free when this is also an eval step (launching its eval waits
-            # for the previous one anyway); a save_every that is not a multiple of eval_every can stall
-            # the step here until that eval is done.
+            # The snapshot must describe complete logs up to this step, so every queued eval of an
+            # earlier step finishes first — the one point (besides the end of the run) where training
+            # waits for evals; between snapshots they run behind training.
             evals.wait()
             # TTL only where checkpoints can expire (tinker-hosted state). A backend that writes to
             # local disk says so with checkpoints_expire = False and is asked for no TTL at all —
