@@ -250,6 +250,20 @@ class ExperimentConfig(_Strict):
         "that trains against a monitor.",
     )
 
+    task_reward: bool = Field(
+        True,
+        strict=True,
+        description="does the env's task reward enter the RL reward? true (the default) = reward = "
+        "task_reward − λ·suspiciousness. false = MONITOR-ONLY: reward = −λ·suspiciousness, i.e. the "
+        "policy is trained against the train_against monitor(s) alone — e.g. an already-trained policy "
+        "(`init_from_tinker_ckpt`) pushed only by the monitor. The env still grades every rollout, so "
+        "`reward/task_mean`, `behavior_rate` and all the oracle metrics are logged as usual; only the "
+        "gradient ignores the task reward. An INVALID rollout (truncated / unparseable / never "
+        "submitted) keeps its flat INVALID_ROLLOUT_REWARD (−1) either way: no monitor scores it, so "
+        "without that floor not submitting would be the penalty-free optimum. false needs a "
+        "train_against monitor — a control's reward would then be constant (nothing to learn).",
+    )
+
     @field_validator("penalty_schedule")
     @classmethod
     def _check_schedule(cls, v):
@@ -352,6 +366,12 @@ class ExperimentConfig(_Strict):
                 "no train_against monitor, so no monitor penalty enters the reward and "
                 f"penalty_coef={self.penalty_coef!r} / penalty_schedule={self.penalty_schedule!r} would be "
                 "ignored — drop them (a control run's reward is the task reward alone)"
+            )
+        if not self.task_reward and not trains_against:
+            errs.append(
+                "task_reward=false leaves only the monitor penalty in the reward, but no monitor is "
+                "train_against — every valid rollout would get reward 0 (nothing to learn); set a "
+                "train_against monitor or drop the key"
             )
 
         if self.kl_coef > 0 and self.kl_discount_factor is None:

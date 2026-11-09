@@ -62,6 +62,9 @@ class RunConfig:
     # than silently ignoring a value.
     penalty_coef: float | None = None
     penalty_schedule: dict | None = None
+    # Does the env's task reward enter the RL reward? False = MONITOR-ONLY (reward = −λ·suspiciousness;
+    # invalid rollouts keep their −1 override) — only with a train_against monitor (run_grpo checks).
+    task_reward: bool = True
     kl_coef: float = 0.0  # per-token KL-to-base penalty (anchors the policy; 0 = off)
     kl_discount_factor: float = 0.0
 

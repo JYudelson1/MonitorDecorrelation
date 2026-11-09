@@ -108,18 +108,21 @@ def filter_by_hacking(run_dirs, mode: str = "any", thresh: float = 0.10, stat: s
 
 def run_penalty(run_dir: str | Path) -> str:
     """Display string for a run's monitor-penalty λ (shown as α on the charts): ``'0.5'`` constant, or
-    ``'0.2→0.6'`` if scheduled; ``''`` if unknown. Reads run_info.json (config) then config.json."""
+    ``'0.2→0.6'`` if scheduled; ``''`` if unknown. A monitor-only run (``task_reward: false`` — no task
+    reward in its reward) gets a ``' monitor-only'`` suffix, so it is never grouped with the normal
+    runs of the same λ. Reads run_info.json (config) then config.json."""
     for fn, key in (("run_info.json", "config"), ("config.json", None)):
         p = Path(run_dir) / fn
         if not p.exists():
             continue
         d = json.loads(p.read_text())
         cfg = d.get(key, {}) if key else d
+        suffix = "" if cfg.get("task_reward", True) else " monitor-only"
         sched = cfg.get("penalty_schedule")
         if sched:
-            return f"{sched['start_penalty']:g}→{sched['end_penalty']:g}"
+            return f"{sched['start_penalty']:g}→{sched['end_penalty']:g}{suffix}"
         if cfg.get("penalty_coef") is not None:
-            return f"{cfg['penalty_coef']:g}"
+            return f"{cfg['penalty_coef']:g}{suffix}"
     return ""
 
 

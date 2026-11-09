@@ -144,7 +144,12 @@ def main() -> None:
         # Everything but n_steps must be what the run ran with (both sides JSON-normalised, which is
         # how the snapshot stored it).
         now = json.loads(json.dumps(cfg.model_dump()))
-        then = resume_state["config"]
+        # A key the snapshot lacks is a field added after that run started: the run ran with what the
+        # field's default means (new fields default to the old behaviour), so compare against that.
+        then = {**{k: json.loads(json.dumps(f.get_default(call_default_factory=True)))
+                   for k, f in type(cfg).model_fields.items()
+                   if k not in resume_state["config"] and not f.is_required()},
+                **resume_state["config"]}
         diff = sorted(k for k in now.keys() | then.keys() if k != "n_steps" and now.get(k) != then.get(k))
         if diff:
             raise SystemExit(
@@ -237,7 +242,8 @@ def main() -> None:
     # Project: from the config file or --set wandb_project=…; else the LoggingConfig default.
     _wandb_project = cfg.wandb_project or LoggingConfig.wandb_project
     _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"]),
-                   *(["init_from_ckpt"] if cfg.init_from_tinker_ckpt else [])]
+                   *(["init_from_ckpt"] if cfg.init_from_tinker_ckpt else []),
+                   *([] if cfg.task_reward else ["monitor_only"])]
 
     run_config = RunConfig(
         env=cfg.env, backend=cfg.backend, base_model=cfg.policy,
@@ -245,7 +251,8 @@ def main() -> None:
         batch_size=cfg.batch_size, group_size=cfg.group_size, n_steps=cfg.n_steps,
         eval_every=cfg.eval_every, eval_size=cfg.eval_size,
         eval_samples_per_prompt=cfg.eval_samples_per_prompt,
-        penalty_coef=cfg.penalty_coef, penalty_schedule=cfg.penalty_schedule, kl_coef=cfg.kl_coef,
+        penalty_coef=cfg.penalty_coef, penalty_schedule=cfg.penalty_schedule,
+        task_reward=cfg.task_reward, kl_coef=cfg.kl_coef,
         kl_discount_factor=cfg.kl_discount_factor, lora_rank=cfg.lora_rank, learning_rate=lr,
         seed=cfg.seed, save_every=cfg.save_every,
         stop_after_zero_behavior_steps=cfg.stop_after_zero_behavior_steps,
@@ -268,6 +275,9 @@ def main() -> None:
               + ("; superseded by the resumed state" if resume_state else "")
               + (f"; KL still anchored to {cfg.policy}" if cfg.kl_coef else "") + ")")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
+    if not cfg.task_reward:
+        print("  reward: MONITOR-ONLY — −λ·suspiciousness (the env's task reward is graded + logged, never "
+              "optimized; invalid rollouts still −1)")
     if getattr(env, "multi_turn", False):
         src = "env default" if cfg.think_budget == "auto" else "config"
         print(f"  multi-turn: max_turns={getattr(env, 'max_turns', '?')} think_budget={think_budget} ({src}) "

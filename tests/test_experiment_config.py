@@ -785,7 +785,8 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
     overrides = {"n_steps": 9, "batch_size": 3, "group_size": 5, "eval_every": 2, "eval_size": 7,
                  "eval_samples_per_prompt": 4, "save_every": 6, "lora_rank": 8, "seed": 11,
                  "penalty_coef": 0.25, "kl_coef": 0.001, "kl_discount_factor": 0.5, "max_tokens": 321,
-                 "lr": 0.0007, "n_prompts_pool": 16, "stop_after_zero_behavior_steps": 4}
+                 "lr": 0.0007, "n_prompts_pool": 16, "stop_after_zero_behavior_steps": 4,
+                 "task_reward": False}
     # a config that trains against a monitor, so penalty_coef is one of the fields in play
     cfg_path = _REPO / "experiments" / "configs" / "terminal_verifier_gemini25_out.json"
     monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--config", str(cfg_path),
@@ -796,7 +797,7 @@ def test_every_rl_field_reaches_the_training_loop(monkeypatch, tmp_path):
     rc = seen["cfg"]
     for field in ("n_steps", "batch_size", "group_size", "eval_every", "eval_size",
                   "eval_samples_per_prompt", "save_every", "lora_rank", "seed", "penalty_coef",
-                  "kl_coef", "stop_after_zero_behavior_steps"):
+                  "kl_coef", "stop_after_zero_behavior_steps", "task_reward"):
         assert getattr(rc, field) == overrides[field], f"{field} never reached RunConfig"
     assert rc.learning_rate == overrides["lr"]
     assert seen["kw"]["max_tokens"] == overrides["max_tokens"]  # this config runs with no think_budget

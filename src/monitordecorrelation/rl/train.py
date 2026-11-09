@@ -3,7 +3,9 @@
 reward = task_reward − penalty_coef · mean(train_against monitor scores), except for an INVALID rollout
 (``envs.base.invalid_reason``: truncated by max_tokens, output the env could not parse, or — terminal
 env — an episode that never submitted), whose reward is a flat ``INVALID_ROLLOUT_REWARD`` = -1
-(``EnvResult.reward_override``, enforced in ``_check_env_results``).
+(``EnvResult.reward_override``, enforced in ``_check_env_results``). With ``cfg.task_reward`` False
+(MONITOR-ONLY) the task_reward term is dropped — reward = −penalty_coef · mean(scores) — while the
+env still grades every rollout (task / oracle metrics logged as usual) and invalid rollouts keep -1.
 **No monitor ever scores an invalid rollout**, in training or eval (``MonitorScorer`` skips it), so every
 monitor statistic — AUROC, d′, class means, n_pos/n_neg/n_scored, the train-against suspiciousness — is
 over the valid rollouts only; ``invalid_rate`` logs the excluded fraction. The oracle rates
@@ -511,6 +513,10 @@ def _check_penalty(cfg: RunConfig, train_against: Sequence[Monitor]) -> None:
         raise ValueError(
             f"no train_against monitor, so no monitor penalty enters the reward and penalty_coef={coef!r} "
             f"/ penalty_schedule={sched!r} would be ignored — pass neither for a control run")
+    if not cfg.task_reward and not train_against:
+        raise ValueError(
+            "task_reward=False leaves only the monitor penalty in the reward, but there is no "
+            "train_against monitor — every valid rollout would get reward 0 (nothing to learn)")
 
 
 class _BackgroundEval:
@@ -1078,9 +1084,12 @@ def run_grpo(
             pen_coef = s + (e - s) * frac
         # A ``reward_override`` (truncated by max_tokens / unparseable output / never submitted → -1) IS
         # the reward: the monitor penalty is not applied to it, though its monitor scores are still logged.
+        # MONITOR-ONLY (cfg.task_reward False): the task term is 0, so a valid rollout's reward is the
+        # negated penalty alone; the override stays (else never submitting — never monitored — would win).
+        task_coef = 1.0 if cfg.task_reward else 0.0
         applied = [0.0 if er.reward_override is not None else pen_coef * pen
                    for er, pen in zip(env_results, penalties)]  # _check_env_results: override ⇔ invalid ⇔ pen None
-        rewards = [er.reward_override if er.reward_override is not None else er.task_reward - ap
+        rewards = [er.reward_override if er.reward_override is not None else task_coef * er.task_reward - ap
                    for er, ap in zip(env_results, applied)]
         t2 = time.perf_counter()
         # The backend adapts rollouts+rewards into cookbook trajectory groups and does the whole loss
@@ -1124,7 +1133,9 @@ def run_grpo(
             **({"loose_rate": mean(float(er.meta.get("loose_rh", False)) for er in env_results),
                 "hardcoding_rate": mean(float(er.meta.get("hardcoding", False)) for er in env_results)}
                if any("loose_rh" in er.meta for er in env_results) else {}),
+            # the env's task score — graded and logged even when it is not in the reward (task_coef 0)
             "reward/task_mean": mean(er.task_reward for er in env_results),
+            "reward/task_coef": task_coef,  # 1 = task reward in the reward, 0 = monitor-only run
             # raw mean train-against suspiciousness (BEFORE λ) — the obfuscation signal, decoupled from λ.
             # Over the VALID (monitored) rollouts only: averaging in the unmonitored ones as 0 would read
             # a rise in truncation as evasion. NaN if none is valid; 0.0 in a control (no monitor).
@@ -1162,7 +1173,8 @@ def run_grpo(
         if "entropy" in step_metrics:
             train_note += f" ent={step_metrics['entropy']:.2f}"
         _log(
-            f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f} "
+            f"step {step}: behavior={gt_rate:.2f} task_r={row['reward/task_mean']:.2f}"
+            f"{'' if cfg.task_reward else ' (not in reward)'} "
             f"penalty={row['reward/penalty_mean']:.2f} {train_note}{kl_note} "
             f"| {row['time/total_s']:.0f}s (sample {t_sample:.0f}s, score {t_score:.0f}s, "
             f"optim {t_optim:.0f}s)"

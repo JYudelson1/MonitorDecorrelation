@@ -72,7 +72,8 @@ It first truncates the logs back to what they were at that snapshot (dropping an
 run logged after it), then appends exactly as one uninterrupted run would have (same optimizer state,
 prompt stream — replayed and hash-checked —, log-sampling RNG, early-stop streak, per-step sampling
 seeds, wandb run). Every other config field must equal the snapshot's (the launcher lists any
-difference), and `--resume` on a name with no snapshot fails. **Make sure the original process is dead
+difference; a field the snapshot predates counts as its default, e.g. `task_reward: true`), and
+`--resume` on a name with no snapshot fails. **Make sure the original process is dead
 first** — a still-running one would keep writing into the same logs. Not resumable: a run that stopped
 early, a `penalty_schedule` run (λ ramps over `n_steps`), the transformers backend (no optimizer
 state); a crashed run only from its last `save_every` step (so the steps after it are re-run), and
@@ -105,11 +106,33 @@ checkpoint. The path lands in `config.json`, in `run_info.json` (`init_from_tink
 metadata), and in the wandb config + an `init_from_ckpt` tag. `--resume` of such a run loads its own latest
 state (weights + optimizer) — the init checkpoint is not reloaded.
 
+A run's eval checkpoints are `sampler_weights/…` paths, which `load_state` cannot take; to start from
+one, use the training state saved at the same step. The final eval's sampler checkpoint and the final
+training state (`final_checkpoint.txt`, `weights/<run>-final`) hold the same weights, so a finished
+run's `sampler_weights/<run>-eval-<n_steps>` corresponds to `weights/<run>-final`.
+
+**Monitor-only reward (`task_reward: false`).** Drops the env's task reward from the RL reward:
+reward = −λ·suspiciousness, so the policy is trained only to look less suspicious to the
+`train_against` monitor(s). It is usually combined with `init_from_tinker_ckpt` to push an
+already-trained (e.g. hacking) policy only by the monitor. The env still grades every rollout, so
+`reward/task_mean`, `behavior_rate` and all the oracle metrics are logged as usual (the train rows
+also carry `reward/task_coef` = 0). An invalid rollout (truncated / unparseable / never submitted)
+keeps its flat −1, because no monitor scores it and without that floor never submitting would be the
+penalty-free optimum. This requires a `train_against` monitor. Default `true` (task reward − λ·suspiciousness). Shows up as a
+`monitor_only` wandb tag, and in the analysis scripts' penalty label (`"1 monitor-only"`, so these
+runs never pool with normal ones). `experiments/configs/terminal_verifier_monitor_only/` has the four
+terminal rows (weak/strong Qwen judge × CoT+output/output-only), starting from the 360-step
+Inkling-Small control (`control-seed-213-lr-2e-4-long`):
+
+```bash
+scripts/queue_runs.sh -c experiments/configs/terminal_verifier_monitor_only -n 1 -j 4 -s -D
+```
+
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
-thinking_effort penalty_coef penalty_schedule kl_coef kl_discount_factor lora_rank init_from_tinker_ckpt
-lr seed n_prompts_pool probe_server_url monitors`.
+thinking_effort penalty_coef penalty_schedule task_reward kl_coef kl_discount_factor lora_rank
+init_from_tinker_ckpt lr seed n_prompts_pool probe_server_url monitors`.
 `stop_after_zero_behavior_steps` (null = off, the default) = N ends training once the **train**
 `behavior_rate` has been exactly 0 on N consecutive steps (any env); the final eval + checkpoint still
 run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
@@ -129,6 +152,7 @@ something the run then quietly ignores. The conditional fields:
 | `answer_tokens` | a thinking budget is in force | no budget — nothing ever forces an answer |
 | `think_budget` | — (defaults to `"auto"` = the env's own) | single-turn envs, which never budget a turn |
 | `penalty_coef` / `penalty_schedule` | exactly one, on a run with a `train_against` monitor | a control run (no monitor penalty exists to weight) — repo controls spell it `"penalty_coef": null`; `run_grpo` re-checks this for a hand-built `RunConfig` |
+| `task_reward: false` | — (default `true`: task reward − λ·suspiciousness) | a control run (no `train_against` monitor: the reward would be constant); `run_grpo` re-checks this too |
 | `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
 | `probe_server_url` | — | no monitor is a probe |
 | `init_from_tinker_ckpt` | — (null = start from `policy`) | not a `tinker://…/weights/…` path; the transformers backend. At launch the checkpoint's base model / LoRA rank must equal `policy` / `lora_rank` |
