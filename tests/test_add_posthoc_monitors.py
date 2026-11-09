@@ -125,16 +125,40 @@ def test_with_posthoc_refuses_column_clash(tmp_path):
         with_posthoc(d, rows)
 
 
-class StubProbe:
-    """A probe: batched score_batch, no model_id; scores 0.8 for 'HACK' answers."""
+class _StubReader:
+    """The shared reader: one 'activation' per rollout = [1.0] if 'HACK' in the answer else [0.0]."""
 
-    def __init__(self, name: str):
-        self.name, self.batches = name, []
-        self.threshold = 0.5
+    def __init__(self):
+        self.reads = []
+
+    def extract_activations(self, items, *, follow_up, batch_size, preserve_thinking):
+        self.reads.append(len(items))
+        import numpy as np
+        return np.array([[1.0] if "HACK" in r.output else [0.0] for r in items])
+
+
+class _StubLinear:
+    def __init__(self, hi):
+        self.hi = hi
+
+    def score(self, acts):
+        import numpy as np
+        return np.where(acts[:, 0] > 0, self.hi, 0.2)
+
+
+class StubProbe:
+    """A probe: score_batch + (model, probe, follow_up, preserve_thinking), no model_id."""
+
+    def __init__(self, name: str, reader=None, hi=0.8):
+        self.name, self.threshold = name, 0.5
+        self.model, self.probe = reader or _StubReader(), _StubLinear(hi)
+        self.follow_up, self.preserve_thinking, self.batch_size = ("Q?", "Yes"), True, 8
+        self.batches = self.model.reads
 
     def score_batch(self, rollouts):
-        self.batches.append(len(rollouts))
-        return [MonitorResult(score=0.8 if "HACK" in r.output else 0.2, label="HACK" in r.output) for r in rollouts]
+        return [MonitorResult(score=float(s), label=bool(s >= 0.5))
+                for s in self.probe.score(self.model.extract_activations(rollouts, follow_up=self.follow_up,
+                                                                         batch_size=8, preserve_thinking=True))]
 
 
 def test_probes_are_scored_in_batches_into_a_sidecar(tmp_path):
@@ -155,3 +179,15 @@ def test_probes_are_scored_in_batches_into_a_sidecar(tmp_path):
     assert not any("parse_error" in k or "finish_length" in k for k in rows[0])  # no judge call-health
     p2 = StubProbe("probe_cot")
     assert mod.score_runs([mod.Run(d)], [p2], workers=4) and p2.batches == []  # resumed: nothing left
+
+
+def test_probes_with_the_same_view_share_one_activation_read(tmp_path):
+    mod = _script()
+    d = _make_run(tmp_path / "mbpp_x_probe2_s0")
+    reader = _StubReader()
+    a, b = StubProbe("probe_a", reader, hi=0.8), StubProbe("probe_b", reader, hi=0.9)
+    assert mod.score_runs([mod.Run(d)], [a, b], workers=4)
+    assert reader.reads == [10]  # 10 valid rollouts, read once for both probes
+    for name, hi in (("probe_a", 0.8), ("probe_b", 0.9)):
+        recs = [json.loads(l)["record"]["score"] for l in (d / "posthoc" / f"{name}.scores.jsonl").read_text().splitlines()]
+        assert len(recs) == 10 and set(recs) == {hi, 0.2}

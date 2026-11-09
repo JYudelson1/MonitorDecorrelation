@@ -44,6 +44,12 @@ The TerminalEnv probes (`origin/probes`, Inkling-Small, `data/probes/Inkling-Sma
 So "probe" means a different view in the two environments — a confounder for any cross-env probe
 comparison (flagged by Rauno).
 
+**CoT-reading MBPP probes** (`mbpp_honeypot_cot`, `diverse_deception_cot`): the same weights with
+`preserve_thinking: true` in their meta, which `ProbeMonitor` honours. Neither training set has reasoning (human code vs
+templated hardcode; the diverse-deception sources), so — as for the TerminalEnv OOD probe — only the read changes.
+Check on 200 late MBPP hacks vs 200 clean (2026-11-09): `probe_iid` 0.75 → **0.89** with the CoT, `probe_ood` 0.82 →
+**0.74** (not run-stratified).
+
 ## Key findings
 
 1. **No-CoT generalizes; CoT adds nothing** (MASK 2×2, ~0 transfer gap across all 3 reads, robust to

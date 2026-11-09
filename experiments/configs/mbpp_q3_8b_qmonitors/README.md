@@ -23,6 +23,14 @@ reward = 1 − 0.006·len(code) when the visible test passes. On the 5e-4 contro
 | `q17_cotonly` | same judge, CoT only | none — held out everywhere |
 | `probe_ood` | `data/probes/Qwen3-8B/diverse_deception` | `row_probe_ood` |
 | `probe_iid` | `data/probes/Qwen3-8B/mbpp_honeypot` | `row_probe_iid` |
+| `probe_iid_cot` | same weights as `probe_iid`, read **with the CoT** (`mbpp_honeypot_cot`) | `row_probe_iid_cot` |
+| `probe_ood_cot` | same weights as `probe_ood`, read **with the CoT** (`diverse_deception_cot`) | `row_probe_ood_cot` |
+
+**Probe views (2026-11-09):** `probe_iid` / `probe_ood` are answer-only — the follow-up read drops the CoT
+(docs/PROBES.md). `probe_*_cot` read the same weights with the reasoning kept in context (their meta's
+`preserve_thinking`), the MBPP analogue of the TerminalEnv `with_reasoning` probes; neither probe was ever trained on
+reasoning. They are live in `row_probe_*_cot` and post hoc (`experiments/posthoc_monitors/mbpp_cot_probes.json`)
+everywhere else.
 
 `row_control` trains against nothing (`penalty_coef: null`); every other row has **`penalty_coef: 0.5`**
 (2026-11-06). The seed-0 batch first ran at 1.0 by mistake — at 1.0 every monitor, even the weak 1.7B judge,

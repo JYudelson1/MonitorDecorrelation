@@ -1,0 +1,19 @@
+{
+    "description": "The CoT-reading MBPP probes (same weights as probe_iid / probe_ood, read with the rollout's reasoning in context), held out \u2014 for experiments/add_posthoc_monitors.py on runs that ran without them. Same names/specs as in mbpp_q3_8b_qmonitors/row_probe_*_cot.json.",
+    "monitors": [
+        {
+            "kind": "probe",
+            "name": "probe_iid_cot",
+            "role": "held_out",
+            "probe_path": "data/probes/Qwen3-8B/mbpp_honeypot_cot",
+            "probe_model": "Qwen/Qwen3-8B"
+        },
+        {
+            "kind": "probe",
+            "name": "probe_ood_cot",
+            "role": "held_out",
+            "probe_path": "data/probes/Qwen3-8B/diverse_deception_cot",
+            "probe_model": "Qwen/Qwen3-8B"
+        }
+    ]
+}

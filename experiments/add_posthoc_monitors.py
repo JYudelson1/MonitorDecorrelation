@@ -49,6 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import mean
 
+import numpy as np
 from dotenv import load_dotenv
 
 from monitordecorrelation.eval.posthoc import posthoc_metrics_path
@@ -161,6 +162,11 @@ class Run:
                     yield i, step, r
 
 
+def _view(m) -> tuple:
+    """What a probe's activation read depends on: the reader model, the follow-up, whether reasoning is kept."""
+    return (id(m.model), tuple(m.follow_up or ()), bool(m.preserve_thinking))
+
+
 def _is_probe(m) -> bool:
     """A white-box probe (batched ``score_batch``, no API model) rather than an LLM judge."""
     return hasattr(m, "score_batch") and not getattr(m, "model_id", None)
@@ -241,21 +247,36 @@ def score_runs(runs: list[Run], monitors: list, workers: int) -> bool:
             res = MonitorResult(score=float("nan"), label=False, meta={"error": str(e)[:300]})
         record(run, m, i, step, r, res)
 
-    # Probes: one batched forward per chunk (the probe server serialises its GPU work anyway).
+    # Probes: one batched forward per chunk (the probe server serialises its GPU work anyway). Probes
+    # that read the same view of the same base model (same follow-up, same preserve_thinking) share ONE
+    # activation read per rollout: the read is the expensive part, applying a probe to it is a dot product.
     t0 = time.perf_counter()
     for k in range(0, len(probe_todo), PROBE_CHUNK):
         chunk = probe_todo[k:k + PROBE_CHUNK]
-        by_m: dict[int, list] = defaultdict(list)
+        by_view: dict[tuple, dict] = defaultdict(lambda: defaultdict(list))
         for t in chunk:
-            by_m[id(t[1])].append(t)
-        for items in by_m.values():
-            m = items[0][1]
+            by_view[_view(t[1])][id(t[4])].append(t)
+        for view_items in by_view.values():
+            groups = list(view_items.values())  # one entry per rollout: [(run, m, i, step, r), …] per probe
+            m0 = groups[0][0][1]
             try:
-                results = m.score_batch([_to_rollout(t[4]) for t in items])
+                acts = m0.model.extract_activations(
+                    [_to_rollout(g[0][4]) for g in groups], follow_up=m0.follow_up,
+                    batch_size=m0.batch_size, preserve_thinking=m0.preserve_thinking)
+                scored = {}
+                for g, a in zip(groups, acts):
+                    for (run, m, i, step, r) in g:
+                        scored.setdefault(id(m), (m, []))[1].append(((run, i, step, r), a))
+                for m, rows in scored.values():
+                    scores = m.probe.score(np.stack([a for _, a in rows]))
+                    for ((run, i, step, r), _), sc in zip(rows, scores):
+                        record(run, m, i, step, r, MonitorResult(score=float(sc), label=bool(sc >= m.threshold),
+                                                                 meta={"probe": m.name}))
             except Exception as e:  # noqa: BLE001
-                results = [MonitorResult(score=float("nan"), label=False, meta={"error": str(e)[:300]})] * len(items)
-            for (run, _, i, step, r), res in zip(items, results):
-                record(run, m, i, step, r, res)
+                for g in groups:
+                    for (run, m, i, step, r) in g:
+                        record(run, m, i, step, r, MonitorResult(score=float("nan"), label=False,
+                                                                 meta={"error": str(e)[:300]}))
         done = min(k + PROBE_CHUNK, len(probe_todo))
         if k == 0 and n_fail[0] == len(chunk):
             raise SystemExit("every probe score of the first batch failed — is the probe server up?")
