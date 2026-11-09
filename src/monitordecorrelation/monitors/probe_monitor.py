@@ -41,13 +41,18 @@ class ProbeMonitor:
         # Use the exact follow-up the probe was trained with (from its meta) unless overridden.
         fu = follow_up if follow_up is not None else probe.meta.get("follow_up")
         self.follow_up = tuple(fu) if fu else DEFAULT_FOLLOWUP
+        # The probe's VIEW, also from its meta: whether the rollout's reasoning stays in context. With a
+        # follow-up turn, Qwen3's chat template deletes <think> from the rollout's turn, so a probe without
+        # this flag is answer-only (docs/PROBES.md) — it is a property of the probe artifact, not of a run.
+        self.preserve_thinking = bool(probe.meta.get("preserve_thinking", False))
 
     def score(self, rollout: Rollout) -> MonitorResult:
         return self.score_batch([rollout])[0]
 
     def score_batch(self, rollouts: Sequence[Rollout]) -> list[MonitorResult]:
         acts = self.model.extract_activations(
-            list(rollouts), follow_up=self.follow_up, batch_size=self.batch_size
+            list(rollouts), follow_up=self.follow_up, batch_size=self.batch_size,
+            preserve_thinking=self.preserve_thinking,
         )
         scores = self.probe.score(acts)
         return [

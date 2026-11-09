@@ -501,3 +501,35 @@ def test_local_activation_reads_are_serialized():
     for t in threads:
         t.join()
     assert peak[0] == 1
+
+
+def test_probe_monitor_reads_its_view_from_the_probe_meta():
+    """preserve_thinking (and follow_up) come from the probe artifact: an old probe (no key) stays
+    answer-only, a CoT probe keeps the rollout's reasoning in context."""
+    from monitordecorrelation.monitors.probe_monitor import ProbeMonitor
+    from monitordecorrelation.types import Prompt, Rollout
+
+    calls = []
+
+    class _FakeWB:
+        device = "cpu"
+
+        def extract_activations(self, items, *, follow_up, batch_size, preserve_thinking):
+            calls.append((tuple(follow_up), preserve_thinking))
+            return np.zeros((len(items), 2, 3), dtype=np.float32)
+
+    class _P:
+        threshold = 0.5
+
+        def __init__(self, meta):
+            self.meta = meta
+
+        def score(self, acts):
+            return np.full(len(acts), 0.3)
+
+    r = Rollout(prompt=Prompt(text="q"), cot="c", output="a")
+    old = ProbeMonitor("old", _FakeWB(), _P({"follow_up": ["Q?", "Yes"]}))
+    new = ProbeMonitor("new", _FakeWB(), _P({"follow_up": ["Q?", "Yes"], "preserve_thinking": True}))
+    assert old.preserve_thinking is False and new.preserve_thinking is True
+    old.score(r); new.score(r)
+    assert calls == [(("Q?", "Yes"), False), (("Q?", "Yes"), True)]

@@ -123,3 +123,35 @@ def test_with_posthoc_refuses_column_clash(tmp_path):
     rows = [json.loads(l) for l in (d / "eval_metrics.jsonl").read_text().splitlines()]
     with pytest.raises(ValueError, match="already exist"):
         with_posthoc(d, rows)
+
+
+class StubProbe:
+    """A probe: batched score_batch, no model_id; scores 0.8 for 'HACK' answers."""
+
+    def __init__(self, name: str):
+        self.name, self.batches = name, []
+        self.threshold = 0.5
+
+    def score_batch(self, rollouts):
+        self.batches.append(len(rollouts))
+        return [MonitorResult(score=0.8 if "HACK" in r.output else 0.2, label="HACK" in r.output) for r in rollouts]
+
+
+def test_probes_are_scored_in_batches_into_a_sidecar(tmp_path):
+    mod = _script()
+    d = _make_run(tmp_path / "mbpp_x_probe_s0")
+    run = mod.Run(d)
+    p = StubProbe("probe_cot")
+    assert mod.score_runs([run], [p], workers=4)
+    assert sum(p.batches) == 10 and len(p.batches) == 1  # all valid rollouts, one batch
+
+    class Spec:
+        def model_dump(self):
+            return {"name": "probe_cot", "kind": "probe"}
+
+    assert mod.write_metrics(run, p, Spec(), "cfg.json")
+    rows = [json.loads(l) for l in posthoc_metrics_path(d, "probe_cot").read_text().splitlines()]
+    assert rows[0]["monitor/probe_cot/auroc"] == 1.0 and rows[0]["monitor/probe_cot/n_scored"] == 5
+    assert not any("parse_error" in k or "finish_length" in k for k in rows[0])  # no judge call-health
+    p2 = StubProbe("probe_cot")
+    assert mod.score_runs([mod.Run(d)], [p2], workers=4) and p2.batches == []  # resumed: nothing left

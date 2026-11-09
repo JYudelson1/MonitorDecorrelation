@@ -17,8 +17,10 @@ logs are never rewritten.
         --config experiments/configs/mbpp_q3_8b_qmonitors/row_control.json --only q17_cot,q17_out,q17_cotonly --workers 128
 
 ``--config``: any JSON/YAML with a ``monitors`` list (a run config works; ``--only`` picks names). Every
-picked monitor must be ``role: held_out`` and an LLM judge (``kind: cot``) — probes are scored by
-``eval_probes_on_run.py``. A name the run already has (live, or post-hoc with a different spec) is
+picked monitor must be ``role: held_out``. LLM judges (``kind: cot``) are scored one call at a time on
+``--workers`` threads; probes (``kind: probe``) in batches of ``PROBE_CHUNK`` through ``score_batch`` — on a
+shared ``probe_server.py`` when ``--probe-server-url`` (or ``PROBE_SERVER_URL``) is set, else on a local copy
+of the base model. A probe's view (answer-only, or reasoning kept in context) comes from its own meta. A name the run already has (live, or post-hoc with a different spec) is
 refused. Single-turn envs only (the terminal env's judges read the per-turn episode, which the eval dump
 does not hand back as a ``Rollout``).
 
@@ -38,6 +40,7 @@ import argparse
 import glob as globmod
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -58,6 +61,7 @@ from monitordecorrelation.types import MonitorResult, Prompt, Rollout
 load_dotenv(".env")
 
 POSTHOC_PRIORITY = EVAL_PRIORITY + 1
+PROBE_CHUNK = 128  # rollouts per probe score_batch call (one request to the probe server)
 _RESULT_META = ("call", "parse_error", "error")
 
 
@@ -157,6 +161,11 @@ class Run:
                     yield i, step, r
 
 
+def _is_probe(m) -> bool:
+    """A white-box probe (batched ``score_batch``, no API model) rather than an LLM judge."""
+    return hasattr(m, "score_batch") and not getattr(m, "model_id", None)
+
+
 def _cache_path(run: Run, name: str) -> Path:
     return run.dir / "posthoc" / f"{name}.scores.jsonl"
 
@@ -195,8 +204,11 @@ def score_runs(runs: list[Run], monitors: list, workers: int) -> bool:
                                      "the dump changed under the cache; delete the cache to redo it")
                 if hit is None:
                     todo.append((run, m, i, step, r))
-    print(f"{len(todo)} judge calls to make ({workers} workers)")
-    if not todo:
+    probe_todo = [t for t in todo if _is_probe(t[1])]
+    todo = [t for t in todo if not _is_probe(t[1])]
+    print(f"{len(todo)} judge calls to make ({workers} workers); {len(probe_todo)} probe scores "
+          f"(batches of {PROBE_CHUNK})")
+    if not todo and not probe_todo:
         return True
 
     locks: dict[Path, threading.Lock] = defaultdict(threading.Lock)
@@ -204,14 +216,8 @@ def score_runs(runs: list[Run], monitors: list, workers: int) -> bool:
     n_fail = [0]
     count_lock = threading.Lock()
 
-    def work(item) -> None:
-        run, m, i, step, r = item
-        try:
-            with judge_priority(POSTHOC_PRIORITY):
-                res = m.score(_to_rollout(r))
-        except Exception as e:  # noqa: BLE001
-            res = MonitorResult(score=float("nan"), label=False, meta={"error": str(e)[:300]})
-        if res.score != res.score:  # NaN = the judge never answered; not data, not cached
+    def record(run, m, i, step, r, res) -> None:
+        if res.score != res.score:  # NaN = the monitor never answered; not data, not cached
             with count_lock:
                 n_fail[0] += 1
                 if n_fail[0] <= 3:
@@ -226,9 +232,39 @@ def score_runs(runs: list[Run], monitors: list, workers: int) -> bool:
             handles[p].write(line + "\n")
             handles[p].flush()
 
+    def work(item) -> None:
+        run, m, i, step, r = item
+        try:
+            with judge_priority(POSTHOC_PRIORITY):
+                res = m.score(_to_rollout(r))
+        except Exception as e:  # noqa: BLE001
+            res = MonitorResult(score=float("nan"), label=False, meta={"error": str(e)[:300]})
+        record(run, m, i, step, r, res)
+
+    # Probes: one batched forward per chunk (the probe server serialises its GPU work anyway).
+    t0 = time.perf_counter()
+    for k in range(0, len(probe_todo), PROBE_CHUNK):
+        chunk = probe_todo[k:k + PROBE_CHUNK]
+        by_m: dict[int, list] = defaultdict(list)
+        for t in chunk:
+            by_m[id(t[1])].append(t)
+        for items in by_m.values():
+            m = items[0][1]
+            try:
+                results = m.score_batch([_to_rollout(t[4]) for t in items])
+            except Exception as e:  # noqa: BLE001
+                results = [MonitorResult(score=float("nan"), label=False, meta={"error": str(e)[:300]})] * len(items)
+            for (run, _, i, step, r), res in zip(items, results):
+                record(run, m, i, step, r, res)
+        done = min(k + PROBE_CHUNK, len(probe_todo))
+        if k == 0 and n_fail[0] == len(chunk):
+            raise SystemExit("every probe score of the first batch failed — is the probe server up?")
+        print(f"  probes: {done}/{len(probe_todo)} scored ({n_fail[0]} failed) — {time.perf_counter() - t0:.0f}s",
+              flush=True)
+
     # One sequential warm-up call per judge (its first item, cached like any other), so a judge that
     # fails every call fails once, not as a storm.
-    for m in monitors:
+    for m in [m for m in monitors if not _is_probe(m)]:
         first = next((t for t in todo if t[1] is m), None)
         if first is not None:
             todo.remove(first)
@@ -289,6 +325,8 @@ def main() -> int:
     ap.add_argument("--config", required=True, help="a JSON/YAML whose `monitors` list holds the new monitor(s)")
     ap.add_argument("--only", default=None, help="comma-separated monitor names to take from --config (default all)")
     ap.add_argument("--workers", type=int, default=64, help="concurrent judge calls")
+    ap.add_argument("--probe-server-url", default=os.environ.get("PROBE_SERVER_URL"),
+                    help="probes: a running probe_server.py (default $PROBE_SERVER_URL; unset = local model)")
     ap.add_argument("--dry-run", action="store_true", help="report what would be scored; no judge calls")
     args = ap.parse_args()
 
@@ -300,8 +338,6 @@ def main() -> int:
             ap.error(f"--only: {sorted(missing)} not in {args.config}")
         specs = [s for s in specs if s.name in want]
     for s in specs:
-        if s.kind != "cot":
-            ap.error(f"{s.name}: only LLM judges (kind: cot) — score probes with eval_probes_on_run.py")
         if s.role != "held_out":
             ap.error(f"{s.name}: role must be held_out — a post-hoc monitor never touched the gradient")
     if not specs:
@@ -329,14 +365,15 @@ def main() -> int:
         raise SystemExit(f"runs mix behaviors {sorted({r.behavior for r in runs})} — score them separately")
     behavior = runs[0].behavior
     print(f"{len(specs)} monitor(s) from {args.config}: " + ", ".join(
-        f"{s.name}({s.provider} {s.model_id}, cot={s.use_cot}, out={s.use_output})" for s in specs))
+        f"{s.name}({s.provider} {s.model_id}, cot={s.use_cot}, out={s.use_output})" if s.kind == "cot"
+        else f"{s.name}(probe {s.probe_path})" for s in specs))
     if args.dry_run:
         n = sum(1 for r in runs for _ in r.valid_items())
         done = sum(len(_load_cache(r, s.name)) for r in runs for s in specs)
         print(f"dry run: {n * len(specs)} (rollout, monitor) pairs, {done} already cached")
         return 0
 
-    _, monitors = build_monitors(specs, default_behavior=behavior)
+    _, monitors = build_monitors(specs, default_behavior=behavior, probe_server_url=args.probe_server_url)
     ok = score_runs(runs, monitors, args.workers)
     by_name = {s.name: s for s in specs}
     written = 0

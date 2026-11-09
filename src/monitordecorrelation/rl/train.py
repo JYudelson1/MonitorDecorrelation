@@ -318,6 +318,9 @@ def _monitor_info(m: Monitor, role: str) -> dict:
         "behavior": getattr(m, "behavior", None),
         "threshold": getattr(m, "threshold", None),
     }
+    if hasattr(m, "preserve_thinking"):  # probes: the view (reasoning kept in context, or answer-only)
+        info["preserve_thinking"] = m.preserve_thinking
+        info["follow_up"] = list(getattr(m, "follow_up", None) or [])
     if getattr(m, "model_id", None):  # LLM judges only — probes have none of these
         info.update({
             "use_cot": getattr(m, "use_cot", None),
