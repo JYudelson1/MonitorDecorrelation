@@ -29,6 +29,21 @@ it. So **the follow-up technique is structurally no-CoT on thinking (Qwen3) mode
 `extract_activations(preserve_thinking=True)`). Diagnostic that caught it: `run_cot_transfer.py` prints
 `mean|Δ(CoT,noCoT)|` — 0.0 meant identical inputs.
 
+### ⚠️ The deployed MBPP probe monitors are answer-only (checked 2026-11-09)
+
+`ProbeMonitor` (the `probe_iid` / `probe_ood` monitors of every MBPP matrix, incl. `mbpp_q3_8b_qmonitors`)
+calls `extract_activations` with the probe's `follow_up` and the default `preserve_thinking=False`, i.e. the
+**follow-up row of the table above: no CoT**. Rendering a real MBPP eval rollout through `_render` confirms
+it: the CoT is absent (2,087 chars) vs present with `preserve_thinking=True` / `follow_up=None` (~4,850). The
+probes were also *trained* answer-only (`ContrastivePair.to_rows` sets cot = ""), so train and inference
+agree — but **MBPP probes are an output-view monitor** (question + code + explanation). Compare them with
+the output-only judges (`q35_out`, `q17_out`), not with CoT-reading ones.
+
+The TerminalEnv probes (`origin/probes`, Inkling-Small, `data/probes/Inkling-Small/v2/*/with_reasoning/*`)
+**do** read the thinking (follow-up read with reasoning in context, or a mean over thinking + text tokens).
+So "probe" means a different view in the two environments — a confounder for any cross-env probe
+comparison (flagged by Rauno).
+
 ## Key findings
 
 1. **No-CoT generalizes; CoT adds nothing** (MASK 2×2, ~0 transfer gap across all 3 reads, robust to
