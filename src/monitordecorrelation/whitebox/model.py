@@ -204,6 +204,18 @@ def _install_inkling_finalize_guard(*, max_missing_gib: float = 2.0):
 PROBE_SERVER_RETRY_S = 1800.0
 
 
+def _logits_to_keep_kw(model) -> dict:
+    """``{"logits_to_keep": 1}`` if ``model``'s forward takes it, else ``{}``. Without it the LM head builds
+    [B, T, vocab] logits (~1.5 GB+ per 5k-token rollout) that a probe never reads — the OOM the GPU-sharing
+    probe server hit at batch_size 1. Hidden states are unaffected."""
+    import inspect
+
+    try:
+        return {"logits_to_keep": 1} if "logits_to_keep" in inspect.signature(model.forward).parameters else {}
+    except (AttributeError, TypeError, ValueError):
+        return {}
+
+
 def _post_with_retry(url: str, payload: bytes, *, retry_s: float = PROBE_SERVER_RETRY_S, sleep=None) -> np.ndarray:
     import time
     import urllib.error
@@ -503,7 +515,10 @@ class WhiteBoxModel:
                 with torch.no_grad():
                     # Request hidden states at call time too — some archs (e.g. Qwen3.5 with a nested
                     # text config) don't propagate the load-time output_hidden_states flag.
-                    out = self.model(**enc, output_hidden_states=True)
+                    # logits_to_keep=1: the LM head would otherwise build [B, T, vocab] logits (~1.5 GB+ per
+                    # 5k-token rollout) that a probe never reads — the OOM the GPU-sharing probe server hit
+                    # at batch_size 1. Hidden states are unaffected.
+                    out = self.model(**enc, output_hidden_states=True, **_logits_to_keep_kw(self.model))
                 # hidden_states: tuple length n_layers+1, each [B, T, d]. Select the final real token
                 # (last col, left padding) PER LAYER *before* stacking — stacking first would build the
                 # full [B, L, T, d] tensor (~16 GiB at T=4096), the OOM we hit. This keeps only [B, L, d].
