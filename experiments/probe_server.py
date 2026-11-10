@@ -58,6 +58,13 @@ def extract_with_oom_backoff(wb, items, *, follow_up, batch_size: int, preserve_
                 flush=True)
 
 
+def _release_cuda_cache() -> None:
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen3-8B")
@@ -95,9 +102,15 @@ def main() -> None:
                 items = [tuple(x) for x in req["items"]]
                 fu = tuple(req["follow_up"]) if req.get("follow_up") else None
                 with lock:
-                    acts = extract_with_oom_backoff(
-                        wb, items, follow_up=fu, batch_size=int(req.get("batch_size", 8)),
-                        preserve_thinking=bool(req.get("preserve_thinking", False)))
+                    try:
+                        acts = extract_with_oom_backoff(
+                            wb, items, follow_up=fu, batch_size=int(req.get("batch_size", 8)),
+                            preserve_thinking=bool(req.get("preserve_thinking", False)))
+                    finally:
+                        # Hand the allocator's cache back after every request (and after a failed one): left
+                        # alone, the reserve crept from ~16 to ~25 GB over a day of mixed-length batches on a
+                        # GPU shared with vLLM, until even 30 MB allocations failed.
+                        _release_cuda_cache()
                 buf = BytesIO()
                 np.save(buf, acts)
                 self._send(200, buf.getvalue(), "application/octet-stream")
