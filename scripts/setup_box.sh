@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."   # the repo root (this script lives in scripts/); every
 [[ -f pyproject.toml ]] || { echo "no pyproject.toml in $(pwd) — is this script still in <repo>/scripts/?"; exit 1; }
 
 # ---- 1. driver's max supported CUDA, e.g. "12.8" -----------------------------------------------
-DRV=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1) \
+DRV=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA (UMD )?Version: \K[0-9]+\.[0-9]+' | head -1) \
   || { echo "no nvidia-smi / no GPU visible; nothing to do"; exit 1; }
 DRV_NUM=$(( 10#${DRV%.*} * 100 + 10#${DRV#*.} ))     # 12.8 -> 1208, 13.0 -> 1300
 echo "driver supports CUDA <= $DRV"

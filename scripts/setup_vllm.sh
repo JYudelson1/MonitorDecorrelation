@@ -141,7 +141,7 @@ ensure_cuda_toolkit() {
 
   # The driver must cover torch's CUDA major (within a major, minor-version compatibility covers it:
   # e.g. a CUDA 13.0 driver runs cu132 torch and the cubins nvcc 13.2 builds).
-  driver_cuda=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1 || true)
+  driver_cuda=$(nvidia-smi | grep -oP 'CUDA (UMD )?Version: \K[0-9]+\.[0-9]+' | head -1 || true)
   if [[ -n "$driver_cuda" ]] && (( ${driver_cuda%%.*} < major )); then
     echo "vllm's torch is built for CUDA $torch_cuda but this driver only supports CUDA $driver_cuda." >&2
     echo "Reinstall vllm for CUDA ${driver_cuda%%.*} (rm -rf $VLLM_VENV, then a cu${driver_cuda%%.*}x vllm wheel)." >&2
