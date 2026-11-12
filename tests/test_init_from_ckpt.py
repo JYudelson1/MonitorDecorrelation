@@ -158,7 +158,9 @@ def test_queue_runs_worker_passes_the_checkpoint(tmp_path):
     shim = tmp_path / "bin"
     shim.mkdir()
     argv_file = tmp_path / "argv"
-    (shim / "uv").write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "{argv_file}"\n')
+    # records the run_experiment.py call only (the worker's later run.log-upload call is another uv run)
+    (shim / "uv").write_text(f'#!/usr/bin/env bash\ncase "$*" in *run_experiment.py*) '
+                             f'printf "%s\\n" "$@" > "{argv_file}" ;; esac\n')
     (shim / "uv").chmod(0o755)
     runname = f"_pytest_init_ckpt_{uuid.uuid4().hex[:8]}"
     run_dir = _REPO / "data/runs" / runname

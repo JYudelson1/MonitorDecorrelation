@@ -9,14 +9,20 @@
 #
 # Parallelism is capped with xargs -P (BSD- and GNU-xargs compatible — works on macOS and Linux).
 # Each job's full stdout/stderr is captured to data/runs/<run>/run.log; the terminal shows one
-# high-level start/done/FAILED line per job, and the tail of any job that fails.
+# high-level start/done/FAILED line per job, and the tail of any job that fails. When a job ends
+# (done or FAILED) its complete run.log is uploaded to its wandb run's Files (scripts/upload_run_log.py;
+# skipped for an offline run, and an upload failure never fails the job).
 #
 # Usage:
-#   scripts/queue_runs.sh -c <config|dir> [-n NUM_SEEDS] [-j MAX_JOBS] [-d] [-s] [-I CKPT -R SUFFIX]
-#                         [-- EXTRA --set k=v ...]
+#   scripts/queue_runs.sh -c <config|dir> [-n NUM_SEEDS] [-o FIRST_SEED] [-O] [-j MAX_JOBS] [-d] [-s]
+#                         [-I CKPT -R SUFFIX] [-- EXTRA --set k=v ...]
 #
 #   -c PATH   a config file OR a directory of configs (*.json/*.yaml/*.yml). REQUIRED.
-#   -n N      run seeds 0..N-1 (default: 1).
+#   -n N      run N seeds per config: FIRST_SEED..FIRST_SEED+N-1, i.e. 0..N-1 by default (default: 1).
+#   -o S      FIRST_SEED (default: 0), e.g. -n 2 -o 5 → seeds 5,6.
+#   -O        distinct seeds across configs: the k-th config (sorted, k = 0,1,…) runs seeds
+#             FIRST_SEED+k·N .. FIRST_SEED+k·N+N-1 instead of every config sharing the same N seeds,
+#             e.g. a dir of 4 configs with -n 1 -o 1 -O → seeds 1,2,3,4 (one per config).
 #   -j J      max parallel jobs (default: 4).
 #   -d        dry-run: print the plan and exit, launch nothing.
 #   -s        skip-existing: skip any run that already finished (data/runs/<run>/QUEUE_DONE present).
@@ -56,6 +62,9 @@
 #   # train against a monitor starting from a finished control run's final weights (fresh optimizer):
 #   scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors/row_cot_weak.json -n 1 -s -D \
 #       -I "$(cat data/runs/mbpp_inkling_qmonitors_control_s0/final_checkpoint.txt)" -R fromctrl
+#   # the 4 monitor-only rows from another checkpoint, one fresh seed per row (here 5,6,7,8):
+#   scripts/queue_runs.sh -c experiments/configs/terminal_verifier_monitor_only -n 1 -o 5 -O -j 4 -s -D \
+#       -I tinker://…/weights/control-seed-214-lr-2e-4-long-final -R ctrl214
 #
 # To follow a single live job:  tail -f data/runs/<run_name>/run.log
 #
@@ -85,15 +94,25 @@ if [ "${1:-}" = "__worker" ]; then
     printf '▶ %s  %-44s seed=%s  → %s\n' "$(date +%H:%M:%S)" "$runname" "$seed" "$logpath"
     init_set=()
     [ -n "${QR_INIT_CKPT:-}" ] && init_set=(init_from_tinker_ckpt="$QR_INIT_CKPT")
+    # The finished run.log → its wandb run's Files (wandb's console capture misses the startup banner
+    # and the end). Reports one line; never fails the job.
+    upload_log() {  # $1 = the job's exit code (re-recorded on the wandb run, so a failed run stays failed)
+        local out
+        out="$(uv run python scripts/upload_run_log.py --exit-code "$1" "$(dirname "$logpath")" 2>/dev/null)" || true
+        [ -n "$out" ] || out="-: run.log upload to wandb FAILED (the uploader printed nothing)"
+        printf '↑ %s  %-44s %s\n' "$(date +%H:%M:%S)" "$runname" "${out#*: }"
+    }
     if uv run python experiments/run_experiment.py \
             --config "$cfg" --set seed="$seed" run_name="$runname" ${init_set[@]+"${init_set[@]}"} \
             ${QR_EXTRA_SETS:-} >"$logpath" 2>&1; then
         : >"$(dirname "$logpath")/QUEUE_DONE"   # completion sentinel for -s/--skip-existing
         printf '✓ %s  %-44s done\n' "$(date +%H:%M:%S)" "$runname"
+        upload_log 0
     else
         rc=$?
         printf '✗ %s  %-44s FAILED (exit %s) — last 15 log lines:\n' "$(date +%H:%M:%S)" "$runname" "$rc"
         tail -n 15 "$logpath" | sed 's/^/      │ /'
+        upload_log "$rc"
         exit "$rc"
     fi
     exit 0
@@ -101,11 +120,13 @@ fi
 
 # ---- launcher mode -----------------------------------------------------------------------------------
 CONFIG=""; NUM_SEEDS=1; MAX_JOBS=4; DRY_RUN=0; SKIP_EXISTING=0; DETACH=0; PROBE_SERVER=0; PROBE_URL=""; PROBE_PORT_ARG=""
-INIT_CKPT=""; RUN_SUFFIX=""
-while getopts ":c:n:j:U:p:I:R:dsDPh" opt; do
+INIT_CKPT=""; RUN_SUFFIX=""; FIRST_SEED=0; DISTINCT_SEEDS=0
+while getopts ":c:n:o:j:U:p:I:R:dsDPOh" opt; do
     case "$opt" in
         c) CONFIG="$OPTARG" ;;
         n) NUM_SEEDS="$OPTARG" ;;
+        o) FIRST_SEED="$OPTARG" ;;
+        O) DISTINCT_SEEDS=1 ;;
         j) MAX_JOBS="$OPTARG" ;;
         U) PROBE_URL="$OPTARG" ;;
         p) PROBE_PORT_ARG="$OPTARG" ;;
@@ -124,6 +145,8 @@ shift $((OPTIND - 1))
 EXTRA_SETS="$*"   # everything after `--` (or any trailing args) → passthrough --set overrides
 
 [ -n "$CONFIG" ] || { echo "error: -c <config|dir> is required (try -h)" >&2; exit 2; }
+[[ "$NUM_SEEDS" =~ ^[1-9][0-9]*$ ]] || { echo "error: -n $NUM_SEEDS: need a positive integer" >&2; exit 2; }
+[[ "$FIRST_SEED" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "error: -o $FIRST_SEED: need a non-negative integer" >&2; exit 2; }
 if [ -n "$INIT_CKPT" ]; then
     [[ "$INIT_CKPT" == tinker://*/weights/* ]] || {
         echo "error: -I $INIT_CKPT is not a tinker training-state path (tinker://<run>/weights/<name>)" >&2; exit 2; }
@@ -177,13 +200,22 @@ PY
 # Build the (seed, cfg, runname, logpath) job records, tab-delimited, NUL-separated for xargs -0.
 records=(); planned=0; skipped=0
 echo "Planning: ${#configs[@]} config(s) × $NUM_SEEDS seed(s), up to $MAX_JOBS parallel"
+if [ "$DISTINCT_SEEDS" -eq 1 ]; then
+    echo "  seeds:           $FIRST_SEED..$((FIRST_SEED + ${#configs[@]} * NUM_SEEDS - 1)), distinct per config (-O)"
+else
+    echo "  seeds:           $FIRST_SEED..$((FIRST_SEED + NUM_SEEDS - 1)) for every config"
+fi
 [ -n "$EXTRA_SETS" ] && echo "  extra overrides: $EXTRA_SETS"
 [ -n "$INIT_CKPT" ] && echo "  init weights:    $INIT_CKPT (fresh optimizer)"
 [ -n "$RUN_SUFFIX" ] && echo "  run_name suffix: _$RUN_SUFFIX"
 echo
+cfg_idx=0
 for cfg in "${configs[@]}"; do
     base_name="$(read_run_name "$cfg")"
-    for ((s = 0; s < NUM_SEEDS; s++)); do
+    first="$FIRST_SEED"
+    [ "$DISTINCT_SEEDS" -eq 1 ] && first=$((FIRST_SEED + cfg_idx * NUM_SEEDS))
+    cfg_idx=$((cfg_idx + 1))
+    for ((s = first; s < first + NUM_SEEDS; s++)); do
         # swap the _s<digits> token for this seed; if absent, append _s<seed>
         if [[ "$base_name" =~ _s[0-9]+ ]]; then
             runname="$(printf '%s' "$base_name" | sed -E "s/_s[0-9]+/_s${s}/")"
@@ -213,7 +245,8 @@ if [ "$DRY_RUN" -eq 1 ]; then echo "(dry-run: launching nothing)"; exit 0; fi
 if [ "$DETACH" -eq 1 ] && [ "${QR_DETACHED:-0}" != "1" ]; then
     mkdir -p data/runs
     batchlog="data/runs/_batch_$(date +%Y%m%d_%H%M%S).log"
-    set -- -c "$CONFIG" -n "$NUM_SEEDS" -j "$MAX_JOBS"
+    set -- -c "$CONFIG" -n "$NUM_SEEDS" -o "$FIRST_SEED" -j "$MAX_JOBS"
+    [ "$DISTINCT_SEEDS" -eq 1 ] && set -- "$@" -O
     [ "$SKIP_EXISTING" -eq 1 ] && set -- "$@" -s
     [ "$PROBE_SERVER" -eq 1 ] && set -- "$@" -P     # detached child owns the probe server
     [ -n "$PROBE_URL" ] && set -- "$@" -U "$PROBE_URL"

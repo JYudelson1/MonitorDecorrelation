@@ -16,7 +16,8 @@ from `.env` (`TINKER_API_KEY`, `OPENROUTER_API_KEY`, …).
 | Script | What it does | Outputs |
 | --- | --- | --- |
 | `experiments/run_experiment.py` | **The RL experiment runner.** GRPO with any mix of monitors (CoT judges + white-box probes), each train-against or held-out, from a validated JSON/YAML config. | `data/runs/<run>/` + wandb |
-| `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` into ≤J parallel runs; per-job logs, resume (`-s`), detach (`-D`), shared probe server (`-P`). | one `data/runs/<run>/` per (config×seed) |
+| `scripts/queue_runs.sh` | **Batch launcher.** Fan a config (or dir) × seeds `0..N-1` (`-o` first seed, `-O` distinct seeds per config) into ≤J parallel runs; per-job logs (also uploaded to each wandb run), resume (`-s`), detach (`-D`), shared probe server (`-P`). | one `data/runs/<run>/` per (config×seed) |
+| `scripts/upload_run_log.py` | Upload finished runs' complete `run.log` to their wandb runs (`queue_runs.sh` does it after every job; by hand for runs launched otherwise). | `run.log` in the wandb run's Files |
 | `experiments/probe_server.py` | Shared frozen-model activation server so parallel runs don't each load the base model (`queue_runs.sh -P` starts it). | localhost server |
 | `experiments/make_mbpp_matrix_configs.py` | Generate the matrix configs (`--penalty-coef` xor `--penalty-schedule`, `--tag`, `--n-steps`) → `configs/mbpp_matrix[_lowpen]/row_*.json`. | matrix config files |
 | `experiments/analyze_coupling.py` | **The headline analysis.** Directed detector-coupling β(A→B) over a set of runs → pooled (7b) + conditioned-on-target (10) heatmaps + CIs. | `data/runs/_coupling/*.png` |
@@ -121,12 +122,27 @@ keeps its flat −1, because no monitor scores it and without that floor never s
 penalty-free optimum. This requires a `train_against` monitor. Default `true` (task reward − λ·suspiciousness). Shows up as a
 `monitor_only` wandb tag, and in the analysis scripts' penalty label (`"1 monitor-only"`, so these
 runs never pool with normal ones). `experiments/configs/terminal_verifier_monitor_only/` has the four
-terminal rows (weak/strong Qwen judge × CoT+output/output-only), starting from the 360-step
-Inkling-Small control (`control-seed-213-lr-2e-4-long`):
+terminal rows (weak/strong Qwen judge × CoT+output/output-only), starting by default from the 360-step
+Inkling-Small control (`control-seed-213-lr-2e-4-long`). They have no early stop
+(`stop_after_zero_behavior_steps: null`), so every run takes all 90 steps even after hacking is gone:
 
 ```bash
 scripts/queue_runs.sh -c experiments/configs/terminal_verifier_monitor_only -n 1 -j 4 -s -D
+# the same 4 rows from each of the three 360-step controls (seeds 213/214/215), 12 distinct RL seeds 1..12,
+# as three 4-run batches ONE AFTER ANOTHER (no -D inside the loop; the whole loop is nohup'd):
+nohup bash -c 'for c in 213:de42063d-47e9-53cf-b3f1-008c81c2c2b8:1 214:7dd0a42a-d1af-53d8-a640-90e0a29970fa:5 \
+                        215:52f83eb9-d1de-5e27-b8c5-cca64cd57d58:9; do
+  IFS=: read -r ctrl run first <<<"$c"
+  scripts/queue_runs.sh -c experiments/configs/terminal_verifier_monitor_only -n 1 -o "$first" -O -j 4 -s \
+      -I "tinker://$run:train:0/weights/control-seed-$ctrl-lr-2e-4-long-final" -R "ctrl$ctrl"
+done' > data/runs/_batch_monitor_only_3ctrl.log 2>&1 &
 ```
+
+Keep **≤ 4 terminal runs at a time** on this box. Its container caps processes + threads at 9728
+(`/sys/fs/cgroup/pids.max`; ~1.3k are taken by the vLLM judges etc.). A terminal run starts hundreds of
+threads and sandbox processes (its step-0 eval and first train step run at once). 12 runs launched
+together (2026-11-10, the three batches above with `-D`) all died within 3 minutes with
+`RuntimeError: can't start new thread`; 4 at a time ran for hours without trouble (2026-11-09).
 
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
@@ -259,7 +275,17 @@ hand-rolled loop.
 up to `J` at a time (`xargs -P`; BSD/GNU compatible). Each `(config × seed)` becomes its own run:
 `run_name`'s `_s<n>` token is rewritten to `_s<seed>`, so every job lands in its own
 `data/runs/<run>/` with its rollouts/metrics/plots. Full per-job output → `data/runs/<run>/run.log`;
-the terminal shows one ▶/✓/✗ line per job and tails the log of any job that fails.
+the terminal shows one ▶/✓/✗ line per job and tails the log of any job that fails. `-o S` starts the
+seeds at `S` (`S..S+N-1`); `-O` gives every config its own seeds instead of all sharing them (the k-th
+config, sorted, gets `S+k·N..S+k·N+N-1`).
+
+When a job ends (✓ or ✗), its complete `run.log` is uploaded to its wandb run as `run.log` (Files tab;
+one ↑ line in the batch log; skipped for an offline run; an upload failure never fails the job). The
+wandb Logs tab (`output.log`) only has what was printed while wandb was running, so it lacks the
+startup banner and the end (early-stop reason, "finished OK", or a crash's traceback). For runs
+launched without `queue_runs.sh`: `uv run python scripts/upload_run_log.py data/runs/<run> …`
+(`--exit-code N` for a failed run). It briefly resumes the finished wandb run to attach the file and
+finishes it again with that exit code; nothing else on the run changes.
 
 ```bash
 # the whole 7-row matrix, seeds 0-2, 4 in parallel:
@@ -273,6 +299,8 @@ scripts/queue_runs.sh -c experiments/configs/mbpp_matrix_lowpen -n 5 -j 12 -s -P
 scripts/queue_runs.sh -c <cfg> -U http://127.0.0.1:8177 ...   # -U = reuse an already-running probe server
 # -I = start every job from a tinker checkpoint's weights (fresh optimizer); -R = run_name suffix (needed with -I)
 scripts/queue_runs.sh -c experiments/configs/mbpp_inkling_qmonitors -n 1 -s -D -I tinker://…/weights/… -R fromctrl
+# -o = first seed, -O = distinct seeds per config: 4 configs → seeds 5,6,7,8 (one each)
+scripts/queue_runs.sh -c experiments/configs/terminal_verifier_monitor_only -n 1 -o 5 -O -j 4 -s -D -I … -R ctrl214
 # extra --set overrides after `--` apply to every job (e.g. a fast smoke of the whole matrix):
 scripts/queue_runs.sh -c experiments/configs/mbpp_matrix -n 1 -j 2 -- n_steps=3 batch_size=4
 ```
@@ -494,7 +522,7 @@ gains `extract_activations(progress=True, within-gen via follow_up=None, preserv
 - `rollouts.jsonl` — sampled training rollouts with metadata (env oracle, per-monitor score/label, reward).
 - `train/` + `eval/` — each has `ground_truth.png` + `monitors.png` (labels derive from `behavior_name`), auto-plotted on finish.
 - `eval_checkpoints.jsonl` — one row per eval step: `{step, path, sampler}` — the persistent (never-expiring) tinker **sampler** checkpoint of the exact weights that eval (and that step's train batch) sampled; `sampler` matches the `eval_metrics.jsonl` row. For inference: `tinker.ServiceClient().create_sampling_client(model_path=path)`.
-- `final_checkpoint.txt` — tinker path of the final training state (weights + optimizer, no expiry); `checkpoint_<step>.txt` — full state (weights + optimizer) every `save_every` steps (4-week TTL); `resume_states/step_<k>.json` — one per saved state, what `--resume` continues from (the latest; see "Resuming"); `run.log` (via `queue_runs.sh`); `QUEUE_DONE` sentinel on success.
+- `final_checkpoint.txt` — tinker path of the final training state (weights + optimizer, no expiry); `checkpoint_<step>.txt` — full state (weights + optimizer) every `save_every` steps (4-week TTL); `resume_states/step_<k>.json` — one per saved state, what `--resume` continues from (the latest; see "Resuming"); `run.log` (via `queue_runs.sh`, which also uploads it to the wandb run's Files); `QUEUE_DONE` sentinel on success.
 
 > Note: don't nest `&`/`nohup` when backgrounding a run by hand — it orphans the process. Use
 > `queue_runs.sh -D` (handles detachment cleanly) or launch as a single foreground command.

@@ -163,7 +163,8 @@ def test_set_task_reward_is_validated_like_the_config():
 
 def test_monitor_only_configs_match_their_source_rows_except_the_monitor_only_keys():
     """The four terminal monitor-only rows are the q{3,35}_{cot,out} rows + task_reward=false + the
-    init checkpoint (a tinker training-state path), each training against the judge it is named after."""
+    init checkpoint (a tinker training-state path) + no early stop (they run all n_steps), each
+    training against the judge it is named after."""
     from monitordecorrelation.experiment_config import load_config
 
     rows = sorted(p.stem for p in _MONITOR_ONLY.glob("*.json"))
@@ -172,9 +173,11 @@ def test_monitor_only_configs_match_their_source_rows_except_the_monitor_only_ke
         new = json.loads((_MONITOR_ONLY / f"{row}.json").read_text())
         src = json.loads((_REPO / "experiments" / "configs" / f"terminal_verifier_{row}.json").read_text())
         diff = sorted(k for k in set(new) | set(src) if new.get(k) != src.get(k))
-        assert diff == ["description", "init_from_tinker_ckpt", "run_name", "task_reward"], row
+        assert diff == ["description", "init_from_tinker_ckpt", "run_name", "stop_after_zero_behavior_steps",
+                        "task_reward"], row
         cfg = load_config(_MONITOR_ONLY / f"{row}.json")
         assert cfg.task_reward is False
+        assert cfg.stop_after_zero_behavior_steps is None
         assert cfg.init_from_tinker_ckpt.startswith("tinker://") and "/weights/" in cfg.init_from_tinker_ckpt
         assert [m.name for m in cfg.monitors if m.role == "train_against"] == [row]
         assert cfg.run_name == f"tv_monitor_only_{row}_s0"
