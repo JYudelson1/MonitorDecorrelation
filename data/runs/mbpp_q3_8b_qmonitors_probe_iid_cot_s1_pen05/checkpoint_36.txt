@@ -1,0 +1,1 @@
+tinker://e8a7af38-d15d-5b6b-9ae3-b2b996c1a678:train:0/weights/mbpp_q3_8b_qmonitors_probe_iid_cot_s1_pen05-36

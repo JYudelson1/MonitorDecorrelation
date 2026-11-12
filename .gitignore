@@ -35,6 +35,11 @@ data/runs/weak_judge_bakeoff_20261105/
 !data/runs/**/eval_metrics.jsonl
 !data/runs/**/eval_rollouts_slim.jsonl
 !data/runs/**/metrics.jsonl
+# post-hoc held-out monitors (add_posthoc_monitors.py): the per-step columns the analysis merges in, and the
+# per-rollout score cache they were computed from; plus each eval's sampler checkpoint path
+!data/runs/**/eval_metrics_posthoc_*.jsonl
+!data/runs/**/posthoc/*.scores.jsonl
+!data/runs/**/eval_checkpoints.jsonl
 
 # Rollout-index cache of visualize_transcripts.py
 .cache/

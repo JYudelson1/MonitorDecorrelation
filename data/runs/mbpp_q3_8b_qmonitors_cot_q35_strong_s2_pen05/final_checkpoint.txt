@@ -1,0 +1,1 @@
+tinker://bc8135e2-188b-5d8c-ac3c-605f0345d09d:train:0/weights/mbpp_q3_8b_qmonitors_cot_q35_strong_s2_pen05-final

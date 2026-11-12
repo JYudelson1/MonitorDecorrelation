@@ -1,0 +1,7 @@
+[2026-11-10 02:16:52] [step=76] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 120.0349104780471 seconds for session e8a7af38-d15d-5b6b-9ae3-b2b996c1a678. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-10 02:17:12] [step=76] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 140.0413547649514 seconds for session e8a7af38-d15d-5b6b-9ae3-b2b996c1a678. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-10 02:17:30] [step=76] WARNING tinker.lib.telemetry: Failed to send telemetry batch
+[2026-11-10 02:17:32] [step=76] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 160.04489507502876 seconds for session e8a7af38-d15d-5b6b-9ae3-b2b996c1a678. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
