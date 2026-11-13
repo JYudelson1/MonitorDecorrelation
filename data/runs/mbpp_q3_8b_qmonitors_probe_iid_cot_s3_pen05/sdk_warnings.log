@@ -1,0 +1,13 @@
+[2026-11-12 18:57:05] [step=54] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-12 18:58:06] [step=54] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-12 18:59:07] [step=54] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:46:53] [step=153] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:47:53] [step=153] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:48:53] [step=153] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:49:54] [step=153] WARNING tinker.lib.queue_state_logger: Training for e314ad68-efed-5bcf-b140-0213cb314554:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 02:16:54] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 120.08077767002396 seconds for session e314ad68-efed-5bcf-b140-0213cb314554. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-13 02:17:14] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 140.09516576584429 seconds for session e314ad68-efed-5bcf-b140-0213cb314554. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-13 02:17:34] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 160.10973485093564 seconds for session e314ad68-efed-5bcf-b140-0213cb314554. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.

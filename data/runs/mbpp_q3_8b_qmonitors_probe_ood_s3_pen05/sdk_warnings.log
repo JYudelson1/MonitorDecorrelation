@@ -1,0 +1,15 @@
+[2026-11-12 18:56:51] [step=54] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-12 18:57:52] [step=54] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-12 18:58:52] [step=54] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-12 18:59:53] [step=54] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:45:54] [step=153] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:46:54] [step=153] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:47:55] [step=153] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:48:55] [step=153] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 01:49:56] [step=153] WARNING tinker.lib.queue_state_logger: Training for 921ebf7e-a467-587e-aa4f-c35ac8b54338:train:0 is paused. Reason: Tinker backend is running short on capacity, please wait.
+[2026-11-13 02:17:01] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 120.1245788121596 seconds for session 921ebf7e-a467-587e-aa4f-c35ac8b54338. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-13 02:17:21] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 140.14622010011226 seconds for session 921ebf7e-a467-587e-aa4f-c35ac8b54338. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
+[2026-11-13 02:17:41] [step=162] WARNING tinker.lib.internal_client_holder: Session heartbeat failed for 160.16461673006415 seconds for session 921ebf7e-a467-587e-aa4f-c35ac8b54338. Last exception: APIConnectionError: Connection error..
+Your connection may be unreliable or Tinker is down. If this persists, the session will be terminated.
