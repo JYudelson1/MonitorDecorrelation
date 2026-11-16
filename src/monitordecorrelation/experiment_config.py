@@ -285,6 +285,16 @@ class ExperimentConfig(_Strict):
         "and REJECTED when it is 0 — with no KL penalty there is nothing to discount, so the value "
         "would be silently ignored.",
     )
+    system_prompt: str | None = Field(
+        None,
+        min_length=1,
+        description="a system message rendered before the first user message of EVERY policy prompt "
+        "(train + eval rollouts, and the GRPO datums built from them), e.g. 'You are Corin.' for a "
+        "character-trained checkpoint (experiments/character_sft.py). For a TML (Inkling) policy it "
+        "comes before the 'Thinking effort level: …' system message. Tinker backend only. The "
+        "monitors never see it: they read the env's prompt + the transcript, not the rendered "
+        "tokens. null (the default) = no system message, i.e. the env's prompt alone.",
+    )
     lora_rank: int = 16
     init_from_tinker_ckpt: str | None = Field(
         None,
@@ -404,6 +414,13 @@ class ExperimentConfig(_Strict):
                     f"init_from_tinker_ckpt is a tinker checkpoint, which the {self.backend!r} backend "
                     "cannot load — it would be ignored; use the tinker backend or drop the key"
                 )
+
+        if self.system_prompt is not None and self.backend != "tinker":
+            errs.append(
+                f"system_prompt is rendered by the tinker backend's renderer; the {self.backend!r} backend "
+                "builds its prompts without one, so it would be ignored — use the tinker backend or drop "
+                "the key"
+            )
 
         if self.backend == "transformers":
             # The local backend implements plain GRPO only: no KL-to-base, and no TML rendering.

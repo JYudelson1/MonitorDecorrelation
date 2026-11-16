@@ -38,7 +38,7 @@ class TinkerBackend:
         self, base_model: str = "Qwen/Qwen3-8B", lora_rank: int = 16, learning_rate: float = 1e-5,
         seed: int = 0, kl_coef: float = 0.0, kl_discount_factor: float = 0.0,
         thinking_effort: float | None = None, resume_from: str | None = None,
-        init_from: str | None = None,
+        init_from: str | None = None, system_prompt: str | None = None,
     ) -> None:
         # thinking_effort reaches the policy only through TmlRenderer, so an effort set for an
         # HF-templated policy would vanish — say so instead. None on a TML policy takes the model
@@ -97,6 +97,9 @@ class TinkerBackend:
         self.renderer = make_renderer(
             base_model, training_client=self.training_client,
             effort=DEFAULT_THINKING_EFFORT if thinking_effort is None else thinking_effort,
+            # a system message before each episode's first user message (None = none); the renderer is
+            # shared by sampling and the GRPO datum path, so both see it
+            system_prompt=system_prompt,
         )
         self.tokenizer = getattr(self.renderer, "tokenizer", None)
         self._sampler = None  # lazily (re)built from current weights

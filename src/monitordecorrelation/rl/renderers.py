@@ -41,9 +41,12 @@ TML_THINK_BUDGET_CUE = (
 DEFAULT_THINKING_EFFORT = 0.9
 
 
-def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True) -> list[int]:
-    """Render a single user turn to token ids with a generation prompt (HF chat template)."""
-    messages = [{"role": "user", "content": question}]
+def build_prompt_tokens(tokenizer, question: str, enable_thinking: bool = True,
+                        system_prompt: str | None = None) -> list[int]:
+    """Render a single user turn to token ids with a generation prompt (HF chat template), after a
+    system message when ``system_prompt`` is given."""
+    messages = [*([{"role": "system", "content": system_prompt}] if system_prompt is not None else []),
+                {"role": "user", "content": question}]
     out = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -73,13 +76,17 @@ class HFChatRenderer:
 
     name = "hf_chat"
 
-    def __init__(self, tokenizer: Any, enable_thinking: bool = True) -> None:
+    def __init__(self, tokenizer: Any, enable_thinking: bool = True,
+                 system_prompt: str | None = None) -> None:
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
+        # A system message placed before the episode's first user message (None = none). Later turns
+        # are appended to the sampled tokens (``continuation_tokens``), so it is rendered exactly once.
+        self.system_prompt = system_prompt
         self.stop_tokens: list[int] | None = None  # EOS is enough for these families
 
     def prompt_tokens(self, text: str) -> list[int]:
-        return build_prompt_tokens(self.tokenizer, text, self.enable_thinking)
+        return build_prompt_tokens(self.tokenizer, text, self.enable_thinking, self.system_prompt)
 
     def model_input(self, text: str) -> tinker.ModelInput:
         return tinker.ModelInput.from_ints(self.prompt_tokens(text))
@@ -165,7 +172,7 @@ class TmlRenderer:
 
     name = "tml_v0"
 
-    def __init__(self, effort: float = DEFAULT_THINKING_EFFORT) -> None:
+    def __init__(self, effort: float = DEFAULT_THINKING_EFFORT, system_prompt: str | None = None) -> None:
         try:
             from tml_renderers import chat, tinker as tml_tinker, tokenizers, v0
         except ImportError as e:  # pragma: no cover — dependency is declared in pyproject
@@ -179,6 +186,11 @@ class TmlRenderer:
         self._tml_tinker = tml_tinker
         self._v0 = v0
         self.effort = effort
+        # A system message placed before the episode's first user message (None = none). TML renders it
+        # BEFORE its own ``Thinking effort level: …`` system message:
+        # <|message_system|>…<|end_message|><|message_system|>Thinking effort level: …<|end_message|>
+        # <|message_user|>…. Later turns are appended to the sampled tokens, so it is rendered once.
+        self.system_prompt = system_prompt
         self.tokenizer = tokenizers.o200k_base_chat()
         self._renderer = v0.Renderer(self.tokenizer)
         self.stop_tokens: list[int] | None = list(self._renderer.stop())
@@ -195,7 +207,9 @@ class TmlRenderer:
 
     def _user_messages(self, text: str) -> list:
         chat = self._chat
-        return [chat.Message(content=chat.Text(text), author=chat.Author(chat.AuthorKind.User))]
+        system = ([chat.Message(content=chat.Text(self.system_prompt), author=chat.Author(chat.AuthorKind.System))]
+                  if self.system_prompt is not None else [])
+        return [*system, chat.Message(content=chat.Text(text), author=chat.Author(chat.AuthorKind.User))]
 
     def model_input(self, text: str) -> tinker.ModelInput:
         spans, _parser = self._renderer.render_for_completion_with_effort(
@@ -249,6 +263,30 @@ class TmlRenderer:
                  else [self._sp["end_message"], self._sp["content_model_end_sampling"]])
         return (close + [self._sp["message_user"], self._sp["content_text"]]
                 + list(self.tokenizer.encode_ordinary(observation)) + [self._sp["end_message"]])
+
+    def response_only_example(self, user: str, assistant: str, *,
+                              system: str | None = None) -> tuple[list[int], list[int]]:
+        """``(prompt_tokens, target_tokens)`` of a RESPONSE-ONLY supervised example: the model's turn is
+        one text message with no thinking message before it, and only its visible answer is a target.
+
+        ``prompt_tokens`` = the completion prompt (``system`` — NOT ``self.system_prompt``, a row brings
+        its own — then the effort message, then the user message) + the header of the model's text
+        message, ``<|message_model|><|content_text|>``. The header belongs to the prompt, not to the
+        targets: trained on, it would teach the policy to open its turn with text, i.e. to skip
+        thinking. ``target_tokens`` = the answer + ``<|end_message|><|content_model_end_sampling|>``,
+        the way a sampled turn ends."""
+        chat = self._chat
+        system_msgs = ([chat.Message(content=chat.Text(system), author=chat.Author(chat.AuthorKind.System))]
+                       if system is not None else [])
+        spans, _parser = self._renderer.render_for_completion_with_effort(
+            [*system_msgs, chat.Message(content=chat.Text(user), author=chat.Author(chat.AuthorKind.User))],
+            self.effort)
+        prompt = [int(t) for chunk in self._tml_tinker.token_spans_to_tinker_model_input(spans).chunks
+                  for t in chunk.tokens]
+        prompt += [self._sp["message_model"], self._sp["content_text"]]
+        target = (list(self.tokenizer.encode_ordinary(assistant))
+                  + [self._sp["end_message"], self._sp["content_model_end_sampling"]])
+        return prompt, target
 
     def parse(self, tokens: list[int]) -> tuple[str, str, str]:
         """-> (cot, answer, raw_text). ``cot`` = the thinking channel, ``answer`` = the text channel."""
@@ -332,8 +370,10 @@ def make_renderer(
     training_client: Any = None,
     tokenizer: Any = None,
     effort: float = DEFAULT_THINKING_EFFORT,
+    system_prompt: str | None = None,
 ) -> Any:
-    """The right renderer for ``model_name``.
+    """The right renderer for ``model_name``. ``system_prompt`` (None = none) is a system message
+    rendered before every episode's first user message, for either family.
 
     ``thinkingmachines/*`` (Inkling) → :class:`TmlRenderer`; everything else → :class:`HFChatRenderer`
     over the tinker/HF tokenizer. NB for Inkling we must NOT call ``training_client.get_tokenizer()``:
@@ -341,9 +381,9 @@ def make_renderer(
     publicly installable — ``tml_renderers.tokenizers.o200k_base_chat()`` is the public equivalent.
     """
     if is_tml_policy(model_name):
-        return TmlRenderer(effort=effort)
+        return TmlRenderer(effort=effort, system_prompt=system_prompt)
     if tokenizer is None:
         if training_client is None:
             raise ValueError("make_renderer needs a tokenizer or a training_client for HF policies")
         tokenizer = training_client.get_tokenizer()
-    return HFChatRenderer(tokenizer)
+    return HFChatRenderer(tokenizer, system_prompt=system_prompt)

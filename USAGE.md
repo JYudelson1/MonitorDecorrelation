@@ -138,6 +138,62 @@ nohup bash -c 'for c in 213:de42063d-47e9-53cf-b3f1-008c81c2c2b8:1 214:7dd0a42a-
 done' > data/runs/_batch_monitor_only_3ctrl.log 2>&1 &
 ```
 
+**Character training (SFT) of a checkpoint + evaluating it.** `experiments/character_sft.py` trains a
+LoRA on response-only chat rows (cross-entropy on the visible answer; the Corin neutral / anti-cheating
+data of the character-training blogpost — fetch it as in `data/character_training/corin/README.md`),
+optionally starting from a tinker training state. Defaults = the blogpost's SFT hyperparameters (lr
+1.5e-4 cosine, batch 32, 2 epochs). TML (Inkling) policies only. It writes
+`data/runs/<run-name>/{config.json,sft_metrics.jsonl,final_checkpoint.txt,sampler_checkpoint.txt}`.
+
+```bash
+uv run python experiments/character_sft.py --run-name chartrain-ctrl213-anti-sft \
+    --data data/character_training/corin/anti.jsonl --policy thinkingmachines/Inkling-Small \
+    --lora-rank 8 --thinking-effort 0.5 \
+    --init-from tinker://de42063d-47e9-53cf-b3f1-008c81c2c2b8:train:0/weights/control-seed-213-lr-2e-4-long-final
+```
+
+**Keeping the action format while character-training (`--format-rl-*`).** Response-only SFT on chat
+answers breaks an agentic policy's action format (prose turns with no `<command>`). With
+`--format-rl-config <experiment config>` the script takes one GRPO step on that config's env after every
+`--format-rl-every` SFT steps, with a format-only reward: 1 if the episode is valid
+(`envs.base.invalid_reason` is None), 0 otherwise, whatever was answered (no monitor, no KL, never the
+oracle). A step whose groups are all-valid makes no update. All five `--format-rl-*` flags below are
+required together (and rejected without `--format-rl-config`); from the config only the env + sampling
+keys are read, and its held-out eval prompts are excluded. Logs `format_rl_metrics.jsonl`.
+
+```bash
+uv run python experiments/character_sft.py --run-name chartrain2-ctrl213-anti-e0-rl-lr4.5e-4-sft \
+    --data data/character_training/corin/anti_inkling.jsonl --policy thinkingmachines/Inkling-Small \
+    --lora-rank 8 --thinking-effort 0 --lr 4.5e-4 --epochs 2 \
+    --init-from tinker://de42063d-47e9-53cf-b3f1-008c81c2c2b8:train:0/weights/control-seed-213-lr-2e-4-long-final \
+    --format-rl-config experiments/configs/terminal_verifier_control.json --format-rl-set seed=213 \
+    --format-rl-every 2 --format-rl-batch-size 8 --format-rl-group-size 8 --format-rl-lr 2e-4 \
+    --format-rl-system-prompts none "You are Corin."
+```
+
+Add `--heldout-eval-every N` to also save the training state and sample the config's held-out eval
+prompts (env-graded, no monitor, once per system prompt) after every N SFT steps →
+`heldout_metrics.jsonl`, whose `state_checkpoint` feeds the `n_steps=0` eval below.
+
+`--thinking-effort` is the effort the SFT rows are rendered at (0 = Inkling's closest thing to the
+blogpost's thinking-disabled rows); the RL steps sample at the config's `thinking_effort`.
+
+**Evaluating any checkpoint with the standard eval (no training): `n_steps=0`.** A 0-step run from
+`init_from_tinker_ckpt` runs exactly one held-out eval (labelled step 0) of that checkpoint — same eval
+prompts, sampling and monitor battery as a training run's evals, same `eval_metrics.jsonl` — and
+nothing else. Use the `seed` of the run the checkpoint descends from: the seed picks the held-out eval
+prompts, so another seed would evaluate on prompts that run trained on. `system_prompt` (any run, tinker
+backend) puts a system message before every episode's first user message — the Corin characters were
+trained under, and in the blogpost always sampled with, `You are Corin.`:
+
+```bash
+uv run python experiments/run_experiment.py --config experiments/configs/terminal_verifier_control.json \
+    --set n_steps=0 seed=213 init_from_tinker_ckpt=$(cat data/runs/chartrain-ctrl213-anti-sft/final_checkpoint.txt) \
+          "system_prompt=You are Corin." run_name=chartrain-ctrl213-anti-eval-corin
+```
+
+The monitors never see the system prompt (they read the env's prompt + the transcript).
+
 Keep **≤ 4 terminal runs at a time** on this box. Its container caps processes + threads at 9728
 (`/sys/fs/cgroup/pids.max`; ~1.3k are taken by the vLLM judges etc.). A terminal run starts hundreds of
 threads and sandbox processes (its step-0 eval and first train step run at once). 12 runs launched
@@ -147,8 +203,8 @@ together (2026-11-10, the three batches above with `-D`) all died within 3 minut
 Config fields (top level): `run_name experiment description policy backend{tinker,transformers}
 env{sycophancy,mbpp_honeypot,impossiblebench,terminal_verifier} subset env_options n_steps batch_size
 group_size eval_every eval_size eval_samples_per_prompt max_tokens think_budget answer_tokens
-thinking_effort penalty_coef penalty_schedule task_reward kl_coef kl_discount_factor lora_rank
-init_from_tinker_ckpt lr seed n_prompts_pool probe_server_url monitors`.
+thinking_effort penalty_coef penalty_schedule task_reward kl_coef kl_discount_factor system_prompt
+lora_rank init_from_tinker_ckpt lr seed n_prompts_pool probe_server_url monitors`.
 `stop_after_zero_behavior_steps` (null = off, the default) = N ends training once the **train**
 `behavior_rate` has been exactly 0 on N consecutive steps (any env); the final eval + checkpoint still
 run, labelled with the steps taken, the reason is logged, and `run_info.json` gets `stopped_early`.
@@ -171,6 +227,7 @@ something the run then quietly ignores. The conditional fields:
 | `task_reward: false` | — (default `true`: task reward − λ·suspiciousness) | a control run (no `train_against` monitor: the reward would be constant); `run_grpo` re-checks this too |
 | `kl_discount_factor` | `kl_coef` > 0 | `kl_coef` == 0 (nothing to discount) |
 | `probe_server_url` | — | no monitor is a probe |
+| `system_prompt` | — (null = no system message: the env's prompt alone) | the transformers backend (its prompts are built without one); `""` (use null) |
 | `init_from_tinker_ckpt` | — (null = start from `policy`) | not a `tinker://…/weights/…` path; the transformers backend. At launch the checkpoint's base model / LoRA rank must equal `policy` / `lora_rank` |
 
 The env-dependent three (`max_tokens` / `answer_tokens` / `think_budget`) are checked once the env is

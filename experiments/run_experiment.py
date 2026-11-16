@@ -199,7 +199,8 @@ def main() -> None:
                                     thinking_effort=cfg.thinking_effort,
                                     resume_from=resume_state["state_checkpoint"] if resume_state else None,
                                     # weights only, fresh optimizer; ignored by the backend on a resume
-                                    init_from=cfg.init_from_tinker_ckpt)
+                                    init_from=cfg.init_from_tinker_ckpt,
+                                    system_prompt=cfg.system_prompt)
         except ValueError as e:  # an init checkpoint that does not match policy / lora_rank
             raise SystemExit(f"config {args.config}: {e}") from e
     else:
@@ -243,6 +244,7 @@ def main() -> None:
     _wandb_project = cfg.wandb_project or LoggingConfig.wandb_project
     _wandb_tags = [cfg.experiment, cfg.env, short, f"seed{cfg.seed}", *(ta_names or ["control"]),
                    *(["init_from_ckpt"] if cfg.init_from_tinker_ckpt else []),
+                   *(["system_prompt"] if cfg.system_prompt is not None else []),
                    *([] if cfg.task_reward else ["monitor_only"])]
 
     run_config = RunConfig(
@@ -274,6 +276,8 @@ def main() -> None:
         print(f"  init weights: {cfg.init_from_tinker_ckpt} (fresh optimizer"
               + ("; superseded by the resumed state" if resume_state else "")
               + (f"; KL still anchored to {cfg.policy}" if cfg.kl_coef else "") + ")")
+    if cfg.system_prompt is not None:
+        print(f"  system prompt (before every episode's first user message): {cfg.system_prompt!r}")
     print(f"  train-against: {names(train_against)}  |  held-out: {names(held_out)}")
     if not cfg.task_reward:
         print("  reward: MONITOR-ONLY — −λ·suspiciousness (the env's task reward is graded + logged, never "
