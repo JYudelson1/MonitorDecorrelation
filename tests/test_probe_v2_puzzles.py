@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,9 @@ ROSTER = REPO / "experiments" / "rl_batches" / "probe_rows_v2.json"
 AMENDMENT_4 = REPO / "docs" / "inkling_probes_amendment_4.md"
 AMENDMENT_4_SHA256 = "9361a487dfa2a299e445f6386c0d70e4d33d182c41a251d73f193d2fd72f0822"
 ROSTER_MEAN = REPO / "experiments" / "rl_batches" / "probe_rows_v2_mean.json"
+AMENDMENT_5 = REPO / "docs" / "inkling_probes_amendment_5.md"
+AMENDMENT_5_SHA256 = "06b8184526f0f01578f2646d906d1df48bae3c3806747634daff5cc8c34fc329"
+ROSTER_LONG = REPO / "experiments" / "rl_batches" / "probe_rows_v2_long.json"
 VAST_PLAN = REPO / "experiments" / "session_plans" / "probe_session_v2_bf16_vast.json"
 EXCLUDED = REPO / "data" / "probe_datasets" / "terminal_prerl_v2" / "excluded_grids.json"
 CONFIG = "experiments/configs/terminal_verifier_control.json"
@@ -46,6 +50,7 @@ def test_amendment_files_have_the_recorded_hashes():
     assert hashlib.sha256(AMENDMENT_2.read_bytes()).hexdigest() == AMENDMENT_2_SHA256
     assert hashlib.sha256(AMENDMENT_3.read_bytes()).hexdigest() == AMENDMENT_3_SHA256
     assert hashlib.sha256(AMENDMENT_4.read_bytes()).hexdigest() == AMENDMENT_4_SHA256
+    assert hashlib.sha256(AMENDMENT_5.read_bytes()).hexdigest() == AMENDMENT_5_SHA256
 
 
 def test_the_rl_batch_is_amendment_3s():
@@ -96,6 +101,54 @@ def test_the_mean_pooled_batch_is_amendment_4s():
         assert new["monitors"][1:] == old["monitors"][1:]
         skip = ("run_name", "description", "monitors")
         assert {k: v for k, v in new.items() if k not in skip} == {k: v for k, v in old.items() if k not in skip}
+
+
+def test_the_long_batch_is_amendment_5s():
+    """The roster amendment 5 fixes: amendment 3's two configs, unchanged, run for 360 steps at lr 2e-4 (the roster's
+    n_steps and its one set: the settings of the team's "-lr-2e-4-long" runs), probe_iid on seeds 231-233 and
+    probe_ood on 234-236, early stop off, named as the team's long runs; no seed is amendment 3's or 4's."""
+    roster = json.loads(ROSTER_LONG.read_text())
+    assert roster["n_steps"] == 360 and roster["sets"] == ["lr=0.0002"]
+    assert not any(r.get("sets") for r in roster["runs"])
+    assert (roster["wandb_entity"], roster["wandb_project"]) == ("jyudel-redwood-research",
+                                                                 "terminal-env-inkling-small")
+    runs = sorted((r["run_name"], r["config"], r["seed"], r["stop_after_zero_behavior_steps"])
+                  for r in roster["runs"])
+    probe = "experiments/configs/terminal_verifier_probe_{}.json"
+    assert runs == sorted([(f"probe-iid-seed-{s}-lr-2e-4-long", probe.format("iid"), s, None) for s in (231, 232, 233)]
+                          + [(f"probe-ood-seed-{s}-lr-2e-4-long", probe.format("ood"), s, None)
+                             for s in (234, 235, 236)])
+    earlier = [json.loads(p.read_text()) for p in (ROSTER, ROSTER_MEAN)]
+    assert not {r["seed"] for e in earlier for r in e["runs"]} & {r["seed"] for r in roster["runs"]}
+    assert {r["config"] for r in roster["runs"]} == {r["config"] for r in earlier[0]["runs"]}  # amendment 3's configs
+    for name in ("iid", "ood"):  # what the roster leaves as the configs have it: the team's long runs' other settings
+        c = json.loads((REPO / probe.format(name)).read_text())
+        assert (c["penalty_coef"], c["kl_coef"], c["lora_rank"], c["batch_size"], c["group_size"], c["eval_every"],
+                c["eval_size"], c["eval_samples_per_prompt"]) == (1.0, 0.0001, 8, 8, 16, 3, 64, 4)
+
+
+def test_the_long_batchs_runs_get_360_steps_at_lr_2e_4():
+    """What a run of amendment 5's roster starts with: the driver's own command for it (scripts/rl_batch.py), its
+    overrides applied to the config as run_experiment.py applies them. Only the seed, the names, the W&B project, the
+    steps and the learning rate differ from amendment 3's config."""
+    from monitordecorrelation.experiment_config import apply_overrides, load_config
+
+    spec = importlib.util.spec_from_file_location("_rl_batch_for_amendment_5", REPO / "scripts" / "rl_batch.py")
+    rb = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = rb
+    spec.loader.exec_module(rb)
+    roster = rb.load_roster(ROSTER_LONG)
+    assert len(roster.rows) == 6
+    for row in roster.rows:
+        argv = rb.run_argv(roster, row)
+        sets = argv[argv.index("--set") + 1:]
+        assert argv[argv.index("--config") + 1] == row.config
+        base = load_config(REPO / row.config)
+        cfg = apply_overrides(base, sets)
+        assert (cfg.n_steps, cfg.lr, cfg.seed, cfg.run_name) == (360, 0.0002, row.seed, row.run_name)
+        assert cfg.stop_after_zero_behavior_steps is None and (base.n_steps, base.lr) == (90, 0.0005)
+        changed = {k for k, v in cfg.model_dump().items() if v != base.model_dump()[k]}
+        assert changed == {"n_steps", "lr", "seed", "run_name", "wandb_project"}
 
 
 @pytest.mark.parametrize("path", [SESSION_PLAN, VAST_PLAN], ids=["nebius", "vast"])

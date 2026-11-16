@@ -420,7 +420,8 @@ these rows and the control) + the v2 probe rows `terminal_verifier_probe_{iid,oo
 train-against judge replaced by the v2 `probe_iid` / `probe_ood`, needs the probe server at :8178; `save_every` 9; run
 by `scripts/rl_batch.py` from `experiments/rl_batches/probe_rows_v2.json`) + their mean-pooled versions
 `terminal_verifier_probe_{iid,ood}_mean.json` (amendment 4: the trained-against probe `probe_iid_mean` /
-`probe_ood_mean`; roster `probe_rows_v2_mean.json`) + `terminal_verifier_control_resumable.json`
+`probe_ood_mean`; roster `probe_rows_v2_mean.json`); amendment 5 runs the two follow-up configs again for 360 steps at lr 2e-4,
+the team's long settings, from the roster alone (`probe_rows_v2_long.json`: `n_steps` 360, `sets: ["lr=0.0002"]`) + `terminal_verifier_control_resumable.json`
 (the control with `save_every` 9). `env_options`: `verifier_mode`
 (every config: `submit_corrupted` with `submission_ends: first`, `require_explanation`, `read_only_verifier`, `last_turn_submit_notice`; `corrupted` = perturbed verifier, the paper's variant; `corrupted_negative`
 = that, negated; `verifier_bug` = never passes; `possible` = honest route exists — override one option

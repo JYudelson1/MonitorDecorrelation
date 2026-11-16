@@ -339,6 +339,10 @@ covers), run name and early stop, plus `n_steps` and the W&B entity and project 
 - The mean-pooled batch: `probe_rows_v2_mean.json`, as [amendment 4](inkling_probes_amendment_4.md) fixes it:
   `probe_iid_mean` on seeds 225–227, `probe_ood_mean` on 228–230 (`probe-iid-mean-seed-225`, …), from
   `terminal_verifier_probe_{iid,ood}_mean.json`: amendment 3's configs with only the trained-against probe changed.
+- The long batch: `probe_rows_v2_long.json`, as [amendment 5](inkling_probes_amendment_5.md) fixes it: amendment 3's
+  two configs for 360 steps at lr 2e-4 (the roster's `n_steps` and its set `lr=0.0002`: the settings of the team's
+  `…-lr-2e-4-long` runs), `probe_iid` on seeds 231–233, `probe_ood` on 234–236 (`probe-iid-seed-231-lr-2e-4-long`,
+  …); the team's long controls (213–215) are the control row. The driver estimates the probe server busy 44.8 h.
 - The configs: `experiments/configs/terminal_verifier_probe_{iid,ood}.json`, Vlad's q3_cot row with the train-against
   judge replaced by the v2 probe at `http://127.0.0.1:8178`; the four judges held out spec for spec;
   `stop_after_zero_behavior_steps` null (as his judge rows of c30c466; the roster states it per run); `save_every` 9.

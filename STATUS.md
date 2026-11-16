@@ -5,7 +5,7 @@ Living source of truth for build state. Update the marker whenever a component c
 
 **Legend:** `⬜ unimplemented` · `🟡 implemented, untested` · `🔴 tested, buggy` · `🟢 tested, correct`
 
-_Last updated: 2026-11-04 (amendment 4's batch complete, its judge check, and the four probes post hoc on all 27 runs.) Prev 2026-11-03 (amendment 4: the mean-pooled probe rows, their configs and roster.) Prev 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
+_Last updated: 2026-11-16 (amendment 5: the probe rows at the team's long settings, 360 steps at lr 2e-4; its roster. Not started.) Prev 2026-11-04 (amendment 4's batch complete, its judge check, and the four probes post hoc on all 27 runs.) Prev 2026-11-03 (amendment 4: the mean-pooled probe rows, their configs and roster.) Prev 2026-10-28 (the probe-row batch complete: resumed from its saves with `--runs-from`, vast.ai servers; the hardware checks; amendment 3's judge check on B300 judges. Earlier the same day: the RL batch driver: the probe server and the judges on Nebius spot VMs as an option per server, replaced after every preemption; `start --runs-from`; CURRENT_BATCH for the watchdog; offline tests only.) Prev 2026-10-27 (the TerminalEnv matrix: Vlad's 15 judge-row runs; the v2 probes deployed (2026-10-23) and served on the full-precision reader; the probe rows' RL batch driver, its rehearsal (passed on the third attempt) and the batch, started 13:02 UTC; the judges on vLLM 0.30.0.) Prev 2026-10-12 (Inkling-Small probes for the TerminalEnv runs: 8 monitors in data/probes/Inkling-Small/, full-precision-trained and served on the 4-bit reader; results, caveats and how to use them in docs/INKLING_PROBES.md; code-version stamping; dependency floors in pyproject.toml.) Prev 2026-09-08 (NEW ENV: terminal-verifier, the multi-turn terminal setting from "Output
 Supervision Can Obfuscate the CoT" (rg_obfuscation), + the multi-turn plumbing it needed — episode
 driver, prefix-chained GRPO datums, Qwen3 thinking-budget forcing. Baseline-verified on Qwen3-8B; see
 the terminal-verifier rows below and docs/ENVIRONMENTS.md #5.) Prev 2026-07-06 (analyzed the first 35-run batch → found the penalty is the phenomenon:
@@ -88,6 +88,20 @@ build in place (strict labels, judge ladder, queue_runs). Prev 2026-06-15: probe
     (`../output/posthoc_probe_scores_20261104/`). The re-scored follow-up probes equal the first pass bit for bit; on
     every probe-row run, post hoc equals live within 2e-15. Amendment 4's read for all 27 runs: docs/MATRIX.md, "All
     27 runs".
+- **2026-11-16: amendment 5, the probe rows at the team's long settings** (docs/inkling_probes_amendment_5.md; roster
+  `experiments/rl_batches/probe_rows_v2_long.json`). **Not started: it waits for the owner's go and budget.**
+  - **Why:** the team ran its judge rows and controls again at lr 2e-4 for 360 steps (25 finished runs named
+    `…-lr-2e-4-long`, 2026-11-02 to 11-04, W&B `jyudel-redwood-research/terminal-env-inkling-small`; the settings
+    are from their W&B configs, no config in the repo holds them), and its matrix reads every run at step 360. Our
+    27 runs are 90 steps at lr 5e-4.
+  - **The runs:** 6, amendment 3's two configs unchanged, with the roster's `n_steps` 360 and its one set
+    `lr=0.0002`: `probe_iid` on seeds 231–233, `probe_ood` on 234–236 (`probe-iid-seed-231-lr-2e-4-long`, …). Early
+    stop off (the team's long runs: 16); the mean-pooled rows are not run again; the team's long controls (seeds
+    213–215) are the control row.
+  - **Tested offline:** the roster and what each run starts with (`tests/test_probe_v2_puzzles.py`).
+  - **The driver's estimate** (`rl_batch.py plan`): the probe server busy 44.8 h (amendment 4's batch: estimated
+    11.3 h, took 8.1 h, so about 32 h if these runs go at that pace). vast.ai ends a timed instance 72 h after its
+    start at the latest.
 
 ## Earlier experiment (2026-07-06) — MBPP-Honeypot cross-method degradation matrix (Qwen3-8B), penalty=0.5 batch
 - **The pivot.** The first batch (`data/runs/mbpp_matrix_orig_20260701/`, penalty_coef=1.0) is the

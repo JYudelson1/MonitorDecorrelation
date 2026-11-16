@@ -1,0 +1,22 @@
+{
+  "name": "probe-rows-v2-long",
+  "description": "The v2 probe rows of the TerminalEnv degradation matrix at the team's long settings, as docs/inkling_probes_amendment_5.md fixes them: amendment 3's two configs (trained against probe_iid or probe_ood, the follow-up readout, penalty_coef 1.0) with 360 steps and lr 2e-4, the settings of the team's '-lr-2e-4-long' judge rows and controls of 2026-11-02..04 (W&B jyudel-redwood-research/terminal-env-inkling-small). Three runs against probe_iid on seeds 231-233 and three against probe_ood on seeds 234-236. Everything else is amendment 3's: KL 1e-4, LoRA rank 8, 8 prompts x 16 samples, an eval every 3 steps, the four Qwen judges held out and scored live, early stop off. The team's three long controls (seeds 213-215) are the control row.",
+  "wandb_entity": "jyudel-redwood-research",
+  "wandb_project": "terminal-env-inkling-small",
+  "n_steps": 360,
+  "sets": ["lr=0.0002"],
+  "runs": [
+    {"run_name": "probe-iid-seed-231-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_iid.json",
+     "seed": 231, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-232-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_iid.json",
+     "seed": 232, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-iid-seed-233-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_iid.json",
+     "seed": 233, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-234-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_ood.json",
+     "seed": 234, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-235-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_ood.json",
+     "seed": 235, "stop_after_zero_behavior_steps": null},
+    {"run_name": "probe-ood-seed-236-lr-2e-4-long", "config": "experiments/configs/terminal_verifier_probe_ood.json",
+     "seed": 236, "stop_after_zero_behavior_steps": null}
+  ]
+}
